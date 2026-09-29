@@ -64,28 +64,30 @@ capabilities:
       - tool-version: node>=20
 
   test.focused:
-    command: make test
+    command: node scripts/test-report.mjs --changed
     lifecycle: active
     description: >-
-      Per-member gate suite. Deliberately the FULL suite, not a diff-scoped
-      one, and deliberately NOT a bespoke shell script.
-    # Why not diff-scoped: imboard-monorepo's `scripts/cap-test-focused.sh`
-    # is the single defect that killed every batch member across pilot
-    # attempts 2-4 (five members for five). Its `tee /dev/stderr` under
-    # `set -o pipefail` fabricated exit 1 out of a green run AND emptied the
-    # buffer its own no-projects-matched retry greps (imboard-monorepo#3996,
-    # fixed 2026-09-03 in imboard#4009). The scope-narrowing machinery — a
-    # pnpm --filter over a merge-base diff — is what needed the script in
-    # the first place. This repo's suite is small enough that scoping buys
-    # seconds and costs a class of bug that has already cost four pilot
-    # attempts, so the honest full suite runs instead: a slower gate that
-    # cannot lie about its own exit status.
-    # Budget: the suite's own worst case here is the worktree-pool CLI tests
-    # (~50 s, they create real worktrees), inside a total well under 5 min;
-    # 10 min matches test.full above rather than inventing a second number.
+      Per-member gate suite: only the workspaces the member's diff touches
+      (plus their dependents), emitting the same one-document JSON report as
+      `test.full` so a red run is attributable (#919).
+    # The gate calls this with (worktree, id) only — no changed-paths reach a
+    # capability — so `--changed` derives them from `git diff` against the
+    # merge-base with $TEST_REPORT_BASE / origin/main (plus uncommitted and
+    # untracked files) and maps path -> workspace. A workspace also pulls in
+    # every workspace that depends on it (a core change runs cli/sched/...);
+    # scripts/, docs/ and root markdown run just the repo-script tests; ANY
+    # path that maps to nothing (root package.json/lockfile, test-support/,
+    # Makefile, .dossier/...) or an unusable git diff falls back to the FULL run,
+    # so the failure mode of the mapping is a slow gate, never a lenient one.
+    # Suites run sequentially (registry tests are load-sensitive, #893).
+    #
+    # History: this was `make test` (#594) because imboard's diff-scoped
+    # `scripts/cap-test-focused.sh` (`tee /dev/stderr` under `set -o pipefail`)
+    # fabricated exit 1 from green runs (imboard-monorepo#3996). The scoping here
+    # is plain node with no pipes, and the exit code is the report's `success`.
     timeout_ms: 600000
     assumptions:
-      - file-exists: Makefile
+      - file-exists: scripts/test-report.mjs
       - tool-version: node>=20
 
   # --- Lint, exactly as CI runs it (#859) ---------------------------------
