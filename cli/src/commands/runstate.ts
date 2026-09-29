@@ -157,6 +157,8 @@ interface StatsOptions {
   issues?: string;
   repo?: string;
   json?: boolean;
+  /** #932: include milestones from ANY author (default: trusted authors only). */
+  all?: boolean;
 }
 
 /** Characters kept in a `verify` warning, which is one line among several. */
@@ -577,7 +579,7 @@ export const FENCED_EXIT_CODE = 3;
  * the same reason, and `gh issue view --json comments` already returns the field.
  *
  * `verify` is filtered too (#932): its `resume_from` decides which phases a resumed run
- * skips. Reporting reads (`last`/`list --all`, `stats`) deliberately stay unfiltered — they
+ * skips. Reporting reads that opt out with `--all` (`last`/`list`/`stats`) stay unfiltered — they
  * describe the trail rather than act on it, and hiding comments there would make an
  * operator's picture disagree with the issue they are looking at.
  */
@@ -1424,7 +1426,8 @@ function printStatsHuman(report: StatsReport, multiIssue: boolean): void {
  */
 function readTrails(
   issues: number[],
-  repo: string | undefined
+  repo: string | undefined,
+  all = false
 ): { trails: IssueTrail[]; failed: FailedIssue[] } {
   const trails: IssueTrail[] = [];
   const failed: FailedIssue[] = [];
@@ -1439,7 +1442,9 @@ function readTrails(
     if (showProgress) {
       process.stderr.write(`\rstats: reading issue #${issue} (${i + 1}/${issues.length})…`);
     }
-    const result = tryFetchMilestones(String(issue), repo);
+    const result = all
+      ? tryFetchMilestones(String(issue), repo)
+      : tryFetchTrustedMilestones(String(issue), repo);
     if (result.ok) trails.push({ issue, milestones: result.milestones });
     else failed.push({ issue, error: result.error });
   });
@@ -1463,9 +1468,13 @@ function registerStatsSubcommand(cmd: Command): void {
     .option('--issues <list>', 'Issue list or range to aggregate, e.g. 1,2,5..8')
     .option('--repo <owner/name>', 'Target repository (defaults to the current one)')
     .option('--json', 'Output the report as JSON')
+    .option(
+      '--all',
+      'Include milestones from ANY author (default: repo owner / org member / collaborator only)'
+    )
     .action((options: StatsOptions) => {
       const issues = resolveStatsIssues(options);
-      const { trails, failed } = readTrails(issues, options.repo);
+      const { trails, failed } = readTrails(issues, options.repo, options.all === true);
 
       // Every issue unreadable is a genuine failure, not a degraded read — there is no
       // report to hand back, so say why rather than printing an empty one and exiting 0.

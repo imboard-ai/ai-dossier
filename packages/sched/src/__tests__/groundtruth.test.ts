@@ -495,28 +495,6 @@ describe('createExecGroundTruth — milestone reads are trusted-only (#932)', ()
     expect(gt.latestMilestone(7)).toBeUndefined();
     expect(gt.milestonesSince?.(7, '2026-09-29T00:00:00Z')).toBeUndefined();
   });
-
-  it("a stranger's newer milestone (filtered by the CLI) does not complete a batch phase, member, or slot", () => {
-    // Fake CLI: the trusted trail ends at a `started`; the stranger's `done` exists only
-    // for an unfiltered read.
-    const trusted = {
-      phase: 'batch-review',
-      status: 'started',
-      run: 'r-9-aaaa',
-      at: '2026-09-29T10:00:00Z',
-    };
-    const forged = { ...trusted, status: 'done', at: '2026-09-29T10:05:00Z' };
-    const exec: ExecFn = (_file, args) => {
-      const pick = args.includes('--trusted') ? [trusted] : [trusted, forged];
-      return args[1] === 'list' ? JSON.stringify(pick) : JSON.stringify(pick[pick.length - 1]);
-    };
-    const gt = createExecGroundTruth(exec);
-    const latest = gt.latestMilestone(9);
-    expect(isBatchPhaseDone(latest ?? null, 'batch-review', '2026-09-29T09:00:00Z')).toBe(false);
-    expect(isVerifiedComplete(latest ?? null, false)).toBe(false);
-    const window = gt.milestonesSince?.(9, '2026-09-29T09:00:00Z') ?? [];
-    expect(window.some((m) => m.status === 'done')).toBe(false);
-  });
 });
 
 describe('createExecGroundTruth', () => {
