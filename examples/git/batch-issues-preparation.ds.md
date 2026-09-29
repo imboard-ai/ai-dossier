@@ -3,11 +3,11 @@
   "dossier_schema_version": "1.0.0",
   "name": "batch-issues-preparation",
   "title": "Batch Issues Preparation — classify, DAG, compose batches, enqueue",
-  "version": "3.2.0",
+  "version": "3.3.0",
   "protocol_version": "1.0",
   "status": "Draft",
-  "last_updated": "2026-09-24",
-  "objective": "Turn an issue list/range into admitted, classified, batched scheduler queue entries: free batch compose over the whole set first, body-readiness screen + backfill to min_members, decision-grade classify only admitted members, risk-floor, deploy-pipeline and >8-file issues as review=full members (at most 2 per batch), no batch under 2 members, then anchor, audit, claim and enqueue with a per-member review level",
+  "last_updated": "2026-09-29",
+  "objective": "Turn an issue list/range into admitted, classified, batched scheduler queue entries: free batch compose over the whole set first, body-readiness screen + backfill to min_members, decision-grade classify only admitted members, risk-floor, deploy-pipeline, >8-file and >400-line issues as review=full members (at most 2 per batch), no batch under 2 members, then anchor, audit, claim and enqueue with a per-member review level",
   "category": [
     "development"
   ],
@@ -76,13 +76,13 @@
   "content_scope": "references-external",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "a1f16f9315a443fa6689bb393c7202dd63eadb3825df5760311e3533beb619e4"
+    "hash": "a6d58ab2a9ef4931d18145a64d280ae1dbee951dfae43960e29cb999b9b65e0d"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "9EmBs9+OBgG1Gs9OMazfcS1IiDcxWsGUUq6TTSeWDeHw/C3XoT7OjBUtF1BgaD7ANBEZaky9x49DO+RkHn9YCw==",
+    "signature": "YsRF/KC7zbHLNIJti4p+Q7ncTfEoef5/THJfX96g4wHrIZSc9gZ5Vec+kylAojg79QbJM8JzL4/Y4phg2zX6AA==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-24T16:01:50.314Z",
+    "signed_at": "2026-09-29T14:59:29.451Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -102,7 +102,7 @@ The judgment-heavy front door of Batch Cycles (RFC-0001 C.3): turn a raw issue l
 
 - `ai-dossier` CLI >= 0.61.0 (`batch compose` #773, `classify prescreen` schema `prescreen:v4` #772/#805/#818, `sched enqueue` manifest `review` field + the per-batch `review=full` cap #771, `plan post|get`, `runstate mint|post|last`). Beware shadow copies: a repo-local `node_modules/.bin/ai-dossier` can shadow the global install — when a documented command reports `unknown command`, call the newer binary by absolute path.
 - GitHub CLI (`gh`) installed and authenticated
-- `imboard-ai/git/issue-cycle-classifier` >= 1.4.0 available in the registry (it reads prescreen:v4, treats E.2 rules 1/4/5 as review floors and records `review`, #783/#805/#818)
+- `imboard-ai/git/issue-cycle-classifier` >= 1.5.0 available in the registry (it reads prescreen:v4, treats E.2 rules 1/4/5/6 as review floors and records `review`, #783/#805/#818/#927)
 - Run from the repository that owns the issues — dependency resolution, path grounding, and `sched enqueue`'s project detection run against it
 
 If `dispatch_profile` is supplied, first read `ai-dossier sched status --json` and
@@ -217,7 +217,7 @@ This screen is cheap by design — reading a body, not probing the repo. The dec
 3. Collect each verdict from `ai-dossier runstate last --issue <n> --json`: `mode`, `risk`, `est_files`, `est_diff`, `areas`, `test_scope`, `deps`, `confidence`, `review`.
 4. **Reconcile with the admission**:
    - `review` is the MAX of compose's and the classifier's — the classifier may raise `light` → `full`, never lower a compose `full` (uncertainty raises review, never lowers it).
-   - `mode=full` from the classifier (a MODE floor rule — rules 2, 3, 6–10: e.g. hard rollback, visual/browser review, confidence < 0.6 after escalation; rules 1, 4 and 5 only raise `review`) → the member **leaves the batch**; report it `classifier-full (<rules>)` and hand it to full-cycle (Step 5). Then backfill ONE replacement per Step 3b and classify only that replacement.
+   - `mode=full` from the classifier (a MODE floor rule — rules 2, 3, 7–10: e.g. hard rollback, visual/browser review, confidence < 0.6 after escalation; rules 1, 4, 5 and 6 only raise `review`) → the member **leaves the batch**; report it `classifier-full (<rules>)` and hand it to full-cycle (Step 5). Then backfill ONE replacement per Step 3b and classify only that replacement.
    - If raised `review` values push the batch above 2 `review=full`, keep the picks, drop the lowest-ranked `review=full` backfill, and backfill a `review=light` candidate per Step 3b.
 5. A classifier `blocked` record (e.g. `unreadable-issue`) drops the issue — reported as skipped. One failed dispatch is retried once; a persistent failure skips that issue, never the whole run.
 
@@ -234,16 +234,16 @@ This screen is cheap by design — reading a body, not probing the repo. The dec
 
 ### Step 5: Compose Batches (RFC-0001 E.4)
 
-**Review depth is not batch eligibility (#770 P1, operator decision Option A).** `mode` answers "how much process does this issue need?"; sharing one CI run needs only a shared base, independent revert granularity (per-issue commits, rebase-merge, never squash — already guaranteed) and no data mutation. A risk-floor issue — auth, billing/payments, security, migrations-by-keyword — a deploy-pipeline change (E.2 rule 4) and a change predicting > 8 files (E.2 rule 5, #818) need *deeper review*, not *their own CI run*. So:
+**Review depth is not batch eligibility (#770 P1, operator decision Option A).** `mode` answers "how much process does this issue need?"; sharing one CI run needs only a shared base, independent revert granularity (per-issue commits, rebase-merge, never squash — already guaranteed) and no data mutation. A risk-floor issue — auth, billing/payments, security, migrations-by-keyword — a deploy-pipeline change (E.2 rule 4) and a change predicting > 8 files (E.2 rule 5, #818) or a predicted diff > 400 lines (E.2 rule 6, #927) need *deeper review*, not *their own CI run*. So:
 
-- **A risk-floor, deploy-pipeline or > 8-file issue (E.2 rules 1, 4, 5) is a `review=full` slot member, not an exclusion.** It dispatches at `strong` tier minimum (sched enforces it at dispatch), runs full-cycle-grade review in member-cycle (all review agents, security included), and batch-integrate runs the risk-floor review over its commits.
+- **A risk-floor, deploy-pipeline, > 8-file or > 400-line issue (E.2 rules 1, 4, 5, 6) is a `review=full` slot member, not an exclusion.** It dispatches at `strong` tier minimum (sched enforces it at dispatch), runs full-cycle-grade review in member-cycle (all review agents, security included), and batch-integrate runs the risk-floor review over its commits.
 - **At most 2 `review=full` members per batch** — bounds deploy blast radius (one deploy carries several risky changes). `sched enqueue` rejects a manifest that exceeds `max_full_review_members`.
 - **Hard exclusions** — the only things that genuinely cannot share a PR:
   1. production data mutation or production ops (data migrations/backfills, prod DB writes, secret/SSM writes, DNS, third-party console configuration);
   2. a slice of a designed sequence (PR1/PR2/PR3 of one feature) — never two in one batch;
   3. decisions, epics, trackers (and research/parked items);
   4. a different base branch.
-  Excluded issues are reported with the reason and **not** enqueued. Separately, a classifier `mode=full` (a MODE floor — rules 2, 3, 6–10, visual/browser review among them: the batch gate has no browser stage) hands the issue to full-cycle (below). Rules 4 (deploy pipeline) and 5 (> 8 files) are NOT on either list since #818 — they raise `review`.
+  Excluded issues are reported with the reason and **not** enqueued. Separately, a classifier `mode=full` (a MODE floor — rules 2, 3, 7–10, visual/browser review among them: the batch gate has no browser stage) hands the issue to full-cycle (below). Rules 4 (deploy pipeline) and 5 (> 8 files) are NOT on either list since #818, nor rule 6 (predicted diff > 400 lines) since #927 — they raise `review`.
 
 Split the admitted, classified set:
 
@@ -288,7 +288,10 @@ missing dependency costs an agent run and a share of the batch's verification cy
 4. **Combined predicted diff is a REVIEW bound, not a cost bound.** Diff size predicts neither
    cost nor conflict: measured members have run 92 turns for a net −29 lines and 59 turns for
    +193, and a 6,289-line combined batch merged cleanly. Cap it only so the aggregate review
-   stays tractable, and say that is what the cap is for.
+   stays tractable, and say that is what the cap is for. It never excludes a member on its
+   own: a member predicting > 400 lines is a `review=full` member (E.2 rule 6, #927), counted
+   against the ≤ 2 `review=full` cap like any other. When the combined figure is too large to
+   review, split the set across batches — do not hand a slot member to full-cycle for its size.
 5. **≤ 1 eviction group.** Members do NOT share a worktree — each works in its own worktree off
    the integration branch and sees no one else's changes until the parent merges (RFC-0001
    §J.3). Overlapping members are therefore permitted but will conflict at integration, which
@@ -460,7 +463,7 @@ Example:
 | Open dep outside the submitted set | Classify and plan it, but defer enqueue — out-of-graph deps stay permanently unsatisfied in the queue. |
 | One overlap cluster would become two | Refuse the candidate — ≤ 1 eviction group per batch, hard. |
 | Slot issue depends on an issue this run handed to full-cycle | Defer it (`deferred-external-dep`) — the dep is not in the queue. A dep on a full-mode entry ALREADY in the queue is allowed; the scheduler gates on it. |
-| Risk-floor or deploy-pipeline keyword, or a > 8-file plan, on an otherwise-ready issue | `review=full` member, not an exclusion (Option A, #818). Only the four hard exclusions (and a classifier mode floor) keep an issue out. |
+| Risk-floor or deploy-pipeline keyword, a > 8-file plan, or a classifier `est_diff` > 400, on an otherwise-ready issue | `review=full` member, not an exclusion (Option A, #818, #927). Only the four hard exclusions (and a classifier mode floor) keep an issue out. |
 | A third `review=full` candidate | Hold it for the next batch; backfill a `review=light` one instead. Never exceed 2 per batch. |
 | Fewer than 2 survivors after backfill | No batch: no anchor, no manifest entries, no claims. Report `hand #N to full-cycle`. |
 | Backfill candidate is a feature/tracker with no AC | Drop it at Step 3b (`not-ready:<signal>`, ai-dossier#802) and take the next ranked candidate. |
@@ -474,7 +477,7 @@ Example:
 - [ ] Issue set resolved from list/range; `ai-dossier batch compose --json` ran over the WHOLE set before any model dispatch; its `excluded[]` reported as skipped with codes
 - [ ] Step 3b body-readiness screen applied to every admitted member (mandatory for backfill); drops reported with their signal; backfill walked `backfill[]` in rank order within the ≤ 2 `review=full` cap
 - [ ] Decision-grade classifiers dispatched ONLY for admitted members — zero for excluded or readiness-dropped issues
-- [ ] Risk-floor, deploy-pipeline and > 8-file issues (text-floor keyword, plan:v1 risk-floor path or file count — E.2 rules 1, 4, 5) admitted as `review=full` members, not excluded; hard exclusions limited to prod data mutation/ops, designed-sequence slices, decisions/epics/trackers, different base
+- [ ] Risk-floor, deploy-pipeline, > 8-file and > 400-line issues (text-floor keyword, plan:v1 risk-floor path, file count or classifier `est_diff` — E.2 rules 1, 4, 5, 6) admitted as `review=full` members, not excluded; hard exclusions limited to prod data mutation/ops, designed-sequence slices, decisions/epics/trackers, different base
 - [ ] No batch below 2 members formed; a batch below `min_members` formed only after backfill ran dry, and says so
 - [ ] DAG built per fleet-cycle Phase 2 rules (explicit authoritative, serialize-when-unsure); cycles surfaced and stopped the run
 - [ ] Every admitted member has a classify record (reused or freshly dispatched) and a plan:v1 artifact (existing or light)
