@@ -54,14 +54,28 @@ export interface EngineLeaseHolder {
 
 export interface EngineLease extends EngineLeaseHolder {
   id: string;
+  /**
+   * Heartbeat (#945): rewritten by the engine every tick (`touchEngineLease`).
+   * Absent on a lease written by an older engine.
+   */
+  updated_at?: string;
+}
+
+/** A dead engine's lease that this acquisition displaced — proof the previous engine exited without releasing it (crash / SIGKILL / unhandled signal). */
+export interface ReclaimedEngineLease extends EngineLeaseHolder {
+  updated_at: string | null;
 }
 
 export type EngineLeaseAcquisition =
-  | { acquired: true; lease: EngineLease }
+  | { acquired: true; lease: EngineLease; reclaimed?: ReclaimedEngineLease }
   | { acquired: false; holder: EngineLeaseHolder | null };
 
 export interface EngineLeaseStatus extends EngineLeaseHolder {
   alive: boolean;
+  /** Last heartbeat (ISO), null when the lease predates heartbeats (#945). */
+  updated_at?: string | null;
+  /** Lease id, so a watcher can tell one stale episode from the next (#945). */
+  id?: string;
 }
 
 /** Thrown when the cross-process lock cannot be acquired in time. */
@@ -226,6 +240,8 @@ export function isEngineLeaseRace(err: unknown): boolean {
  */
 export class SchedStore {
   readonly dir: string;
+  /** The lease this store instance acquired (heartbeat target). */
+  private heldLease: EngineLease | null = null;
 
   constructor(
     dir: string,
@@ -255,17 +271,55 @@ export class SchedStore {
     const holder = readEngineLeaseHolder(path.join(this.dir, ENGINE_LEASE_DIR));
     return holder === null
       ? null
-      : { pid: holder.pid, pid_start: holder.pid_start, alive: engineLeaseIsAlive(holder) };
+      : {
+          pid: holder.pid,
+          pid_start: holder.pid_start,
+          alive: engineLeaseIsAlive(holder),
+          updated_at: holder.updated_at ?? null,
+          id: holder.id,
+        };
+  }
+
+  /**
+   * Heartbeat (#945): stamp the held lease's `updated_at`. Atomic (tmp file +
+   * rename inside the lease dir) so a reader never sees a torn holder.json.
+   * Best-effort — a failed heartbeat must never fail a tick; only the lease
+   * this store acquired is touched.
+   */
+  touchEngineLease(now: Date = new Date()): void {
+    const held = this.heldLease;
+    if (held === null) return;
+    const leasePath = path.join(this.dir, ENGINE_LEASE_DIR);
+    const tmp = path.join(leasePath, `${ENGINE_LEASE_HOLDER_FILE}.tmp-${process.pid}`);
+    try {
+      if (readEngineLeaseHolder(leasePath)?.id !== held.id) return;
+      const next: EngineLease = { ...held, updated_at: now.toISOString() };
+      fs.writeFileSync(tmp, `${JSON.stringify(next)}\n`, { mode: 0o600 });
+      // Compare-and-swap on the lease id, as late as the filesystem allows: a
+      // reclaim between the first check and here must not be overwritten by a
+      // stale heartbeat (rename has no CAS; this narrows the window to the
+      // gap between this read and the rename).
+      if (readEngineLeaseHolder(leasePath)?.id !== held.id) {
+        fs.rmSync(tmp, { force: true });
+        return;
+      }
+      fs.renameSync(tmp, path.join(leasePath, ENGINE_LEASE_HOLDER_FILE));
+    } catch {
+      fs.rmSync(tmp, { force: true });
+      // Heartbeat is advisory; the pid-liveness check remains the source of truth.
+    }
   }
 
   /** Acquire the engine lifecycle lease, separate from short-lived state mutation locks. */
   acquireEngineLease(): EngineLeaseAcquisition {
     fs.mkdirSync(this.dir, { recursive: true, mode: 0o700 });
+    let reclaimed: ReclaimedEngineLease | undefined;
     const leasePath = path.join(this.dir, ENGINE_LEASE_DIR);
     const lease: EngineLease = {
       pid: process.pid,
       pid_start: procStartTime(process.pid),
       id: `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      updated_at: new Date().toISOString(),
     };
     while (true) {
       const pending = `${leasePath}.pending-${lease.id}`;
@@ -282,7 +336,8 @@ export class SchedStore {
           }
         );
         fs.renameSync(pending, leasePath);
-        return { acquired: true, lease };
+        this.heldLease = lease;
+        return { acquired: true, lease, ...(reclaimed ? { reclaimed } : {}) };
       } catch (err) {
         fs.rmSync(pending, { recursive: true, force: true });
         if (!isEngineLeaseRace(err)) throw err;
@@ -295,6 +350,13 @@ export class SchedStore {
         const stale = `${leasePath}.stale-${lease.id}`;
         try {
           fs.renameSync(leasePath, stale);
+          if (holder !== null) {
+            reclaimed = {
+              pid: holder.pid,
+              pid_start: holder.pid_start,
+              updated_at: holder.updated_at ?? null,
+            };
+          }
           fs.rmSync(stale, { recursive: true, force: true });
         } catch (reclaimErr) {
           if (!isEngineLeaseRace(reclaimErr)) throw reclaimErr;
@@ -310,6 +372,7 @@ export class SchedStore {
     if (readEngineLeaseHolder(leasePath)?.id === lease.id) {
       fs.rmSync(leasePath, { recursive: true, force: true });
     }
+    if (this.heldLease?.id === lease.id) this.heldLease = null;
   }
 
   load(): SchedState {

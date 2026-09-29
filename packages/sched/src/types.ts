@@ -1903,6 +1903,16 @@ export type JournalEventName =
   // unit-scoped). Appended once per distinct (installed, latest) pair, not
   // every tick — see `installed_version`/`latest_version` on `JournalEvent`.
   | 'engine-stale'
+  // #945: engine lifecycle — `engine-started` on every `sched start`;
+  // `engine-exit` (reason + stack) on EVERY termination path the process can
+  // observe (signal, uncaught exception, unhandled rejection, normal stop, bare
+  // process.exit); `engine-restarted-after-crash` when a start reclaims a lease
+  // whose holder died without releasing it (SIGKILL/OOM/unlogged crash);
+  // `stale-engine-lease-alert` once per stale episode with unfinished work.
+  | 'engine-started'
+  | 'engine-exit'
+  | 'engine-restarted-after-crash'
+  | 'stale-engine-lease-alert'
   // #537: `--auto-upgrade`'s `npm i -g @ai-dossier/cli@latest` outcome —
   // journaled so an operator whose stderr isn't captured (systemd unit
   // without journald wiring, redirected to /dev/null) can still answer "was
