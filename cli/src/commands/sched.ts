@@ -131,7 +131,12 @@ import {
 import { pickHardBlockLabel } from '../hard-block-labels';
 import { detectLlm, fail } from '../helpers';
 import { MAX_ISSUE_SELECTION, parseIssueSelection } from '../issue-selection';
-import { findLatestTrustedPlan, toAuthoredComments, trustedCommentBodies } from '../plan-artifact';
+import {
+  findLatestTrustedPlan,
+  ignoredPlanWarning,
+  toAuthoredComments,
+  trustedCommentBodies,
+} from '../plan-artifact';
 import { LOG_FILE as RUNS_LOG_FILE, readRunLog } from '../run-log';
 import { hasSlotModeLatestMilestone } from '../runstate';
 import { renderValue } from '../runstate-stats';
@@ -965,8 +970,12 @@ function screenSlotPreconditions(inputs: EnqueueInput[], repo?: string): void {
           );
           checked.set(input.issue, { plan: true, classify: true });
         } else {
+          const plan = findLatestTrustedPlan(toAuthoredComments(result.comments));
+          if (plan.ignored.length > 0) {
+            console.error(`⚠ #${input.issue}: ${ignoredPlanWarning(plan.ignored)}`);
+          }
           checked.set(input.issue, {
-            plan: findLatestTrustedPlan(toAuthoredComments(result.comments)).latest !== null,
+            plan: plan.latest !== null,
             classify: hasSlotModeLatestMilestone(trustedCommentBodies(result.comments)),
           });
         }

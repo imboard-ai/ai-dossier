@@ -29,7 +29,11 @@ import {
   tryFetchComments,
 } from '../gh';
 import { parseIssueSelection } from '../issue-selection';
-import { trustedCommentBodies } from '../plan-artifact';
+import {
+  ignoredMilestoneWarning,
+  readTrustedMilestones,
+  trustedCommentBodies,
+} from '../plan-artifact';
 import {
   activeFence,
   BATCH_PHASES,
@@ -128,6 +132,8 @@ interface ReadOptions {
   issue: string;
   repo?: string;
   json?: boolean;
+  /** #932: only milestones from a repo owner / org member / collaborator. */
+  trusted?: boolean;
 }
 
 /** `runstate list` — every milestone, optionally bounded to one dispatch (#622). */
@@ -243,6 +249,23 @@ function tryFetchMilestones(issue: string, repo?: string): TrailResult {
   if (!result.ok) return { ok: false, error: result.error };
   const bodies = result.comments.map((c) => (typeof c?.body === 'string' ? c.body : ''));
   return { ok: true, milestones: parseMilestones(bodies) };
+}
+
+/**
+ * The trusted-only trail (#932) — what a scheduler that ACTS on a milestone must read.
+ * Same rule as {@link tryFetchTrustedMilestones} (fails closed on a missing association),
+ * plus a stderr note when a NEWER milestone from an untrusted author was passed over, so
+ * the operator can see a forged `batch-review done` was ignored rather than wonder why
+ * nothing advanced.
+ */
+function fetchTrustedMilestones(issue: string, repo?: string): ParsedMilestone[] {
+  const result = tryFetchComments(issue, repo);
+  if (!result.ok) fail([result.error]);
+  const { milestones, ignored } = readTrustedMilestones(result.comments);
+  if (ignored.length > 0) {
+    console.error(`⚠ Issue #${issue}: ${ignoredMilestoneWarning(ignored)}`);
+  }
+  return milestones;
 }
 
 /** Fetch every runstate milestone on an issue, oldest first, or exit 1 explaining why. */
@@ -550,7 +573,8 @@ export const FENCED_EXIT_CODE = 3;
  * the issue. `groundtruth.ts`'s `parseSetupInfo` already applies exactly this rule for
  * the same reason, and `gh issue view --json comments` already returns the field.
  *
- * Reporting reads (`last`, `verify`, `stats`) deliberately stay unfiltered — they
+ * `verify` is filtered too (#932): its `resume_from` decides which phases a resumed run
+ * skips. Reporting reads (`last`/`list` without `--trusted`, `stats`) deliberately stay unfiltered — they
  * describe the trail rather than act on it, and hiding comments there would make an
  * operator's picture disagree with the issue they are looking at.
  */
@@ -940,9 +964,15 @@ function registerReadSubcommands(cmd: Command): void {
       "Only milestones at or after this ISO-8601 timestamp — e.g. a dispatch's spawned_at"
     )
     .option('--json', 'Output the parsed milestones as a JSON array')
+    .option(
+      '--trusted',
+      'Only count milestones from a repo owner / org member / collaborator (#932) — what a supervisor that acts on the result must pass'
+    )
     .action((options: ListOptions) => {
       requireIssueTarget(options);
-      let milestones = fetchMilestones(options.issue, options.repo);
+      let milestones = options.trusted
+        ? fetchTrustedMilestones(options.issue, options.repo)
+        : fetchMilestones(options.issue, options.repo);
 
       // #622: `last` is not enough for a consumer that must decide what a
       // DISPATCH produced. A member posting `review done` and then a
@@ -995,9 +1025,15 @@ function registerReadSubcommands(cmd: Command): void {
     .requiredOption('--issue <number>', 'GitHub issue number')
     .option('--repo <owner/name>', 'Target repository (defaults to the current one)')
     .option('--json', 'Output the parsed milestone as JSON')
+    .option(
+      '--trusted',
+      'Only count milestones from a repo owner / org member / collaborator (#932) — what a supervisor that acts on the result must pass'
+    )
     .action((options: ReadOptions) => {
       requireIssueTarget(options);
-      const milestones = fetchMilestones(options.issue, options.repo);
+      const milestones = options.trusted
+        ? fetchTrustedMilestones(options.issue, options.repo)
+        : fetchMilestones(options.issue, options.repo);
 
       if (milestones.length === 0) {
         if (options.json) {
@@ -1041,7 +1077,7 @@ function registerVerifySubcommand(cmd: Command): void {
     .action((options: VerifyOptions) => {
       requireIssueTarget(options);
       const dispatchedAt = requireDispatchedAt(options.dispatchedAt);
-      const milestones = fetchMilestones(options.issue, options.repo);
+      const milestones = fetchTrustedMilestones(options.issue, options.repo);
       const warnings: string[] = [];
       const result = computeResume(
         milestones,
