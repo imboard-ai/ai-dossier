@@ -89,10 +89,10 @@ test-coverage:
 	npm run test:scripts
 	@echo "✓ Tests with coverage completed"
 
-## lint: Check code for linting issues (no changes)
+## lint: Check code for linting issues, warnings included, same as CI (no changes)
 lint:
 	@echo "Checking code with Biome..."
-	npx biome check .
+	npm run lint
 
 ## format: Format code with Biome
 format:

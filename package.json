@@ -16,7 +16,7 @@
     "rebuild": "make rebuild",
     "test": "make test",
     "test:scripts": "vitest run --config vitest.scripts.config.mjs",
-    "lint": "biome check .",
+    "lint": "biome ci --error-on-warnings .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
     "fleet:cli-audit": "bash scripts/fleet-cli-audit.sh",

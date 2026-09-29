@@ -94,13 +94,13 @@ After running `npm install`, a Git pre-commit hook is automatically set up via [
 
 **Manual commands:**
 ```bash
-npm run lint          # Check for lint & format errors (read-only)
+npm run lint          # Check for lint & format errors and lint warnings (read-only)
 npm run lint:fix      # Auto-fix lint & format errors
 npm run format        # Auto-format all files
 ```
 
 **CI enforcement:**
-Pull requests are checked by a dedicated `lint` job in CI. Merging is blocked until the codebase passes `npm run lint`.
+Pull requests are checked by a dedicated `lint` job in CI. Merging is blocked until the codebase passes `npm run lint`, which runs `biome ci --error-on-warnings`, so a Biome warning fails the job just like an error. Fix the warning, or, where the rule is wrong for that site, suppress it with a justification: `// biome-ignore lint/<group>/<rule>: <why>`.
 
 ## Adding an Example Dossier
 

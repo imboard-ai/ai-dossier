@@ -79,7 +79,7 @@ function handleListRegistries(options: ConfigOptions): void {
   process.exit(0);
 }
 
-function handleAddRegistry(options: ConfigOptions): void {
+function handleAddRegistry(name: string, options: ConfigOptions): void {
   if (!options.url) {
     console.error('\n❌ --url is required when adding a registry\n');
     console.error(
@@ -110,14 +110,14 @@ function handleAddRegistry(options: ConfigOptions): void {
   if (options.default) entry.default = true;
   if (options.readonly) entry.readonly = true;
 
-  currentConfig.registries[options.addRegistry!] = entry;
+  currentConfig.registries[name] = entry;
 
   if (options.default) {
-    currentConfig.defaultRegistry = options.addRegistry;
+    currentConfig.defaultRegistry = name;
   }
 
   const details = [
-    `\n✅ Added registry '${options.addRegistry}': ${options.url}`,
+    `\n✅ Added registry '${name}': ${options.url}`,
     ...(options.default ? ['   Set as default registry'] : []),
     ...(options.readonly ? ['   Marked as read-only'] : []),
     '',
@@ -126,19 +126,19 @@ function handleAddRegistry(options: ConfigOptions): void {
   process.exit(0);
 }
 
-function handleRemoveRegistry(options: ConfigOptions): void {
+function handleRemoveRegistry(name: string): void {
   const currentConfig = config.loadConfig();
-  if (!currentConfig.registries || !(options.removeRegistry! in currentConfig.registries)) {
-    console.error(`\n❌ Registry '${options.removeRegistry}' not found\n`);
+  if (!currentConfig.registries || !(name in currentConfig.registries)) {
+    console.error(`\n❌ Registry '${name}' not found\n`);
     process.exit(1);
   }
 
-  delete currentConfig.registries[options.removeRegistry!];
-  if (currentConfig.defaultRegistry === options.removeRegistry) {
+  delete currentConfig.registries[name];
+  if (currentConfig.defaultRegistry === name) {
     delete currentConfig.defaultRegistry;
   }
 
-  saveConfigOrExit(currentConfig, `\n✅ Removed registry '${options.removeRegistry}'\n`);
+  saveConfigOrExit(currentConfig, `\n✅ Removed registry '${name}'\n`);
   process.exit(0);
 }
 
@@ -277,8 +277,8 @@ Environment variables:
     .action((key: string | undefined, value: string | undefined, options: ConfigOptions) => {
       // --- Registry management ---
       if (options.listRegistries) return handleListRegistries(options);
-      if (options.addRegistry) return handleAddRegistry(options);
-      if (options.removeRegistry) return handleRemoveRegistry(options);
+      if (options.addRegistry) return handleAddRegistry(options.addRegistry, options);
+      if (options.removeRegistry) return handleRemoveRegistry(options.removeRegistry);
       if (options.setDefaultRegistry) return handleSetDefaultRegistry(options);
 
       // --- General config management ---

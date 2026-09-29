@@ -223,7 +223,13 @@ export function buildExecutionPlan(graph: DependencyGraph, entryDossier: string)
   // Build execution phases
   const phases: ExecutionPhase[] = sortedPhases.map((phaseNodes, index) => {
     const dossiers: PhaseEntry[] = phaseNodes.map((name) => {
-      const node = graph.nodes.get(name)!;
+      const node = graph.nodes.get(name);
+      if (!node) {
+        // Only reachable through an edge whose target is not a node; buildGraph never creates one.
+        throw new Error(
+          `Dossier "${name}" is referenced by a graph edge but missing from the graph`
+        );
+      }
 
       // Determine condition: entry dossier is always 'required',
       // others inherit from edges pointing to them
