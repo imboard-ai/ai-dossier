@@ -203,13 +203,12 @@ describe('detectMergeMechanism (#887)', () => {
     expect(seen.every((f) => f === 'gh')).toBe(true);
     expect(calls.some((a) => a[1] === 'repos/o/r/git/trees/HEAD?recursive=1')).toBe(true);
   });
-  it('#921: needs no checkout at all (repoDir undefined still detects)', () => {
-    const m = detectMergeMechanism(
-      fakeExec({ files: WATCHER, settings: settings(false) }),
-      undefined,
-      null
+  it('#921: a verified repo needs no checkout (repoDir undefined still detects); placeholders with no cwd => unknown', () => {
+    const exec = fakeExec({ files: WATCHER, settings: settings(false) });
+    expect(detectMergeMechanism(exec, undefined, { owner: 'o', name: 'r' }).watcherWorkflow).toBe(
+      true
     );
-    expect(m.watcherWorkflow).toBe(true);
+    expect(detectMergeMechanism(exec, undefined, null).watcherWorkflow).toBeNull();
   });
   it('pins the api read to the verified repo and caches it until the TTL passes', () => {
     const calls: string[][] = [];

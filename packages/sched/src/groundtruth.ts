@@ -397,6 +397,9 @@ function scanWatcherWorkflow(
   slug: string,
   repoDir: string | undefined
 ): boolean | null {
+  // No verified repo and no checkout: gh's `{owner}/{repo}` placeholders would resolve from an
+  // arbitrary cwd, so refuse to scan rather than read the wrong repo's workflows.
+  if (slug.includes('{') && repoDir === undefined) return null;
   const tree = exec(
     'gh',
     ['api', `repos/${slug}/git/trees/HEAD?recursive=1`, '--jq', WATCHER_TREE_JQ],

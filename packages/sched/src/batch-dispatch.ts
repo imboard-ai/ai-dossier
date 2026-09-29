@@ -4741,6 +4741,10 @@ function reconcilePrWatch(
         result: undefined,
       }));
 
+      // A conflicting/blocked PR is a different condition: end any no-merge-mechanism onset so a
+      // re-ship starts a fresh grace window.
+      clearNoMergeMechanism(deps, batch, now);
+
       // An awaiting-merge record without its integration checkout is an
       // incomplete/corrupt batch, not safe to rebase. Keep its durable watch
       // evidence for an operator rather than running recovery in repoDir.
