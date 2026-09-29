@@ -17,7 +17,8 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { LimitEvent, UsageRow } from './types';
+import { checkoutRootOf, inferSubagentOrigin, issueFromText } from './subagent-origin';
+import type { IssueSource, LimitEvent, UsageRow } from './types';
 import {
   count,
   forEachLine,
@@ -132,6 +133,9 @@ export function collectClaude(opts: ClaudeCollectOptions): ClaudeCollectResult {
 
   for (const transcript of files) {
     const fileSession = path.basename(transcript.file, '.jsonl');
+    // #803: a subagent's records repeat its spawner's cwd/branch; its own
+    // transcript says where it really worked. Scanned lazily, once per file.
+    const origin = transcript.parentSession !== null ? inferSubagentOrigin(transcript.file) : null;
     forEachLine(transcript.file, (line) => {
       // Cheap prefilter: only assistant records carry usage or API errors.
       if (!line.includes('"assistant"')) return;
@@ -202,10 +206,20 @@ export function collectClaude(opts: ClaudeCollectOptions): ClaudeCollectResult {
         return;
       }
 
-      const cwd = typeof record.cwd === 'string' ? record.cwd : null;
-      const branch =
+      let cwd = typeof record.cwd === 'string' ? record.cwd : null;
+      let branch =
         typeof record.gitBranch === 'string' && record.gitBranch ? record.gitBranch : null;
-      const issue = issueFromRef(branch) ?? issueFromRef(cwd ? path.basename(cwd) : null);
+      if (origin?.cwd && origin.cwd !== (cwd ? checkoutRootOf(cwd) : null)) {
+        // Worked elsewhere than the spawner: the inherited branch is not its own.
+        cwd = origin.cwd;
+        branch = null;
+      }
+      let issue = issueFromRef(branch) ?? issueFromRef(cwd ? path.basename(cwd) : null);
+      let issue_source: IssueSource | null = issue === null ? null : 'branch';
+      if (issue === null && origin) {
+        issue = issueFromText(transcript.title) ?? origin.promptIssue;
+        issue_source = issue === null ? null : 'prompt';
+      }
       const row: UsageRow = {
         ts,
         host: opts.host,
@@ -225,7 +239,7 @@ export function collectClaude(opts: ClaudeCollectOptions): ClaudeCollectResult {
         project: projectOf(cwd),
         branch,
         issue,
-        issue_source: issue === null ? null : 'branch',
+        issue_source,
         batch: null,
         unit: null,
       };

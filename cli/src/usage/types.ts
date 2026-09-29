@@ -11,7 +11,7 @@
 export type UsageSource = 'claude-code' | 'opencode';
 
 /** How a row's `issue` was attributed — a sched dispatch log is authoritative; a branch/dir name is a heuristic. */
-export type IssueSource = 'dispatch' | 'branch';
+export type IssueSource = 'dispatch' | 'branch' | 'prompt';
 
 export interface UsageRow {
   /** ISO-8601 time the message completed (or was created, when no completion time is recorded). */

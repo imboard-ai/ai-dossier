@@ -276,6 +276,110 @@ describe('collectClaude', () => {
     });
   });
 
+  it('attributes a subagent to the checkout and issue it worked on, not its spawner (#803)', () => {
+    const root = tmpDir();
+    const projectsDir = path.join(root, 'claude', 'projects');
+    const slugDir = path.join(projectsDir, '-home-u-projects-imboard-imboard-monorepo-main');
+    const parentCwd = '/home/u/projects/imboard/imboard-monorepo/worktrees/fix-4114-thing';
+    const repoB = '/home/u/projects/ai-dossier/worktrees/fix-803-usage';
+    write(path.join(slugDir, `${SESSION}.jsonl`), [
+      assistant({
+        ts: iso(60 * MIN),
+        id: 'p1',
+        session: SESSION,
+        cwd: parentCwd,
+        branch: 'fix/4114-thing',
+      }),
+    ]);
+    const subDir = path.join(slugDir, SESSION, 'subagents');
+    // every record repeats the spawner's cwd/branch; the first tool call shows the real checkout
+    write(path.join(subDir, 'agent-b1.jsonl'), [
+      {
+        type: 'user',
+        timestamp: iso(59 * MIN),
+        message: { role: 'user', content: 'Take issue 803 through a full cycle.' },
+      },
+      {
+        type: 'assistant',
+        timestamp: iso(58 * MIN),
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'tool_use', name: 'Bash', input: { command: `cd ${repoB} && git status` } },
+          ],
+        },
+      },
+      assistant({
+        ts: iso(57 * MIN),
+        id: 's1',
+        session: SESSION,
+        agentId: 'b1',
+        cwd: parentCwd,
+        branch: 'fix/4114-thing',
+      }),
+    ]);
+    // a subagent that never left its spawner's checkout keeps the inherited attribution
+    write(path.join(subDir, 'agent-b2.jsonl'), [
+      assistant({
+        ts: iso(56 * MIN),
+        id: 's2',
+        session: SESSION,
+        agentId: 'b2',
+        cwd: parentCwd,
+        branch: 'fix/4114-thing',
+      }),
+    ]);
+    const { rows } = collectClaude({
+      projectsDir,
+      sinceMs: NOW - 5 * HOUR,
+      untilMs: NOW,
+      host: 'h1',
+    });
+    const moved = rows.find((r) => r.session_id === `${SESSION}/b1`);
+    expect(moved).toMatchObject({
+      parent_session_id: SESSION,
+      cwd: repoB,
+      project: 'ai-dossier',
+      branch: null,
+      issue: 803,
+      issue_source: 'branch',
+    });
+    const stayed = rows.find((r) => r.session_id === `${SESSION}/b2`);
+    expect(stayed).toMatchObject({ project: 'imboard-monorepo', issue: 4114 });
+    expect(rows.find((r) => r.session_id === SESSION)).toMatchObject({ issue: 4114 });
+  });
+
+  it('falls back to the prompt for the issue when the checkout name carries none (#803)', () => {
+    const root = tmpDir();
+    const projectsDir = path.join(root, 'claude', 'projects');
+    const slugDir = path.join(projectsDir, '-home-u-projects-imboard-imboard-monorepo-main');
+    write(path.join(slugDir, SESSION, 'subagents', 'agent-c1.jsonl'), [
+      {
+        type: 'user',
+        timestamp: iso(59 * MIN),
+        message: {
+          role: 'user',
+          content: 'Work in /home/u/projects/ai-dossier/main on issue #803.',
+        },
+      },
+      assistant({
+        ts: iso(57 * MIN),
+        id: 's3',
+        session: SESSION,
+        agentId: 'c1',
+        cwd: '/home/u/projects/imboard/imboard-monorepo/main',
+        branch: 'main',
+      }),
+    ]);
+    const { rows } = collectClaude({
+      projectsDir,
+      sinceMs: NOW - 5 * HOUR,
+      untilMs: NOW,
+      host: 'h1',
+    });
+    expect(rows[0]).toMatchObject({ project: 'ai-dossier', issue: 803, issue_source: 'prompt' });
+  });
+
   it('skips transcripts last modified before the window without reading them', () => {
     const projectsDir = claudeFixture(tmpDir());
     const { rows, files } = collectClaude({
