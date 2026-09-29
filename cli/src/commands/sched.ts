@@ -2411,6 +2411,12 @@ function registerStartSubcommand(cmd: Command): void {
         }
         return;
       }
+      // #779: fail()/handleKnownError call process.exit inside the try, which
+      // skips the `finally` below — release on the synchronous 'exit' event too
+      // so no failed start/tick leaves a dead holder.json (false
+      // stale-engine-lease warning). Release is idempotent (id-checked).
+      const releaseLease = () => store.releaseEngineLease(acquisition.lease);
+      process.once('exit', releaseLease);
       try {
         let config: SchedConfig;
         try {
@@ -2642,7 +2648,8 @@ function registerStartSubcommand(cmd: Command): void {
         );
         console.log('⏹ Engine stopped');
       } finally {
-        store.releaseEngineLease(acquisition.lease);
+        process.removeListener('exit', releaseLease);
+        releaseLease();
       }
     });
 }

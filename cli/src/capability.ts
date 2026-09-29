@@ -21,6 +21,7 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { findDossierRoot } from '@ai-dossier/sched';
 import { parse as parseYaml } from 'yaml';
 import { compareVersions } from './version';
 
@@ -174,13 +175,15 @@ const CAPABILITY_ID_RE = /^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)*$/;
 // ============================================================================
 
 /**
- * Load the capability manifest for a directory. Absent `.dossier/automation/`
+ * Load the capability manifest for a directory (searching upward for `.dossier/`). Absent `.dossier/automation/`
  * is the normal portable state: returns an empty manifest with `path: null`.
  * A present-but-invalid manifest throws {@link CapManifestError} whose message
  * names the file.
  */
 export function loadCapabilityManifest(cwd: string): CapabilityManifest {
-  const manifestPath = path.resolve(cwd, AUTOMATION_DIR, MANIFEST_FILE);
+  // #759: walk up to the `.dossier/` root so a nested checkout (`main/` under
+  // the project root) finds the manifest; fall back to `cwd` when none exists.
+  const manifestPath = path.resolve(findDossierRoot(cwd) ?? cwd, AUTOMATION_DIR, MANIFEST_FILE);
   if (!fs.existsSync(manifestPath)) {
     return { path: null, capabilities: {} };
   }
