@@ -53,7 +53,8 @@ export function registerRemoveCommand(program: Command): void {
         await client.removeDossier(dossierName, version || null);
 
         const verifyCommand = `dossier info ${target}`;
-        const cdnDelaySeconds = 30;
+        // list/search read index.json via raw.githubusercontent.com, cached ~5 min.
+        const cdnDelaySeconds = 300;
 
         if (options.json) {
           console.log(
@@ -74,7 +75,7 @@ export function registerRemoveCommand(program: Command): void {
         } else {
           console.log(`\n✅ Removed: ${target} [${targetRegistry.name}]`);
           console.log(
-            `\n   ⏳ CDN propagation may take up to ${cdnDelaySeconds}s. Verify with:\n   $ ${verifyCommand}\n`
+            `\n   ⏳ CDN propagation: list, search and install-skill --all may lag up to ${cdnDelaySeconds / 60} min. Verify with:\n   $ ${verifyCommand}\n`
           );
         }
       } catch (err: unknown) {

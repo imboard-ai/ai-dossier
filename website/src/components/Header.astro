@@ -1,0 +1,27 @@
+---
+const path = Astro.url.pathname;
+const links = [
+  { href: '/docs/', label: 'Docs' },
+  { href: '/registry/', label: 'Registry' },
+  { href: '/case-study/', label: 'Case study' },
+];
+---
+<header>
+  <div class="bar">
+    <a class="brand" href="/">AI Dossier</a>
+    <nav aria-label="Primary">
+      {links.map((l) => (
+        <a href={l.href} aria-current={path.startsWith(l.href) ? 'page' : undefined}>{l.label}</a>
+      ))}
+      <a href="https://github.com/imboard-ai/ai-dossier">GitHub</a>
+    </nav>
+  </div>
+</header>
+<style>
+  header { border-bottom: 1px solid var(--line); background: var(--bg); position: sticky; top: 0; z-index: 5; }
+  .bar { max-width: 1180px; margin: 0 auto; padding: 12px 20px; display: flex; gap: 16px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+  .brand { font-weight: 700; font-size: 1.1rem; color: var(--fg); text-decoration: none; }
+  nav { display: flex; gap: 18px; flex-wrap: wrap; }
+  nav a { color: var(--muted); text-decoration: none; font-weight: 500; padding: 2px 0; }
+  nav a:hover, nav a[aria-current='page'] { color: var(--fg); text-decoration: underline; }
+</style>
