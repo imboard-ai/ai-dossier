@@ -38,6 +38,7 @@ future agent should search for first.
 | `mcp-server/` | MCP server — tools/resources/prompts for LLM integration |
 | `registry/` | Vercel-deployed registry API |
 | `packages/worktree-pool/` | Pre-warmed git worktree management |
+| `packages/vscode/` | VS Code extension (private, not on npm) — bundles core; `.vsix` released via `vscode-release.yml` |
 
 ```bash
 make build-all    # build core → worktree-pool → sched → mcp-server + cli (skip lint)

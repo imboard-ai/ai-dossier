@@ -1,0 +1,125 @@
+{
+  "name": "ai-dossier-vscode",
+  "displayName": "AI Dossier",
+  "description": "Diagnostics, completion, hover docs, verify and dry-run preview for AI Dossier (*.ds.md) files.",
+  "version": "0.1.0",
+  "private": true,
+  "publisher": "imboard-ai",
+  "license": "AGPL-3.0-only",
+  "author": "Yuval Dimnik <yuval.dimnik@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/imboard-ai/ai-dossier.git",
+    "directory": "packages/vscode"
+  },
+  "homepage": "https://github.com/imboard-ai/ai-dossier#readme",
+  "bugs": {
+    "url": "https://github.com/imboard-ai/ai-dossier/issues"
+  },
+  "engines": {
+    "vscode": "^1.85.0",
+    "node": ">=20.0.0"
+  },
+  "categories": [
+    "Linters",
+    "Snippets",
+    "Other"
+  ],
+  "keywords": [
+    "dossier",
+    "ai-dossier",
+    "agent",
+    "skill",
+    "frontmatter"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onLanguage:markdown",
+    "workspaceContains:**/*.ds.md"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "aiDossier.verify",
+        "title": "Verify",
+        "category": "Dossier"
+      },
+      {
+        "command": "aiDossier.dryRun",
+        "title": "Dry-run preview",
+        "category": "Dossier"
+      },
+      {
+        "command": "aiDossier.newFromTemplate",
+        "title": "New from template",
+        "category": "Dossier"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "aiDossier.verify",
+          "when": "resourceFilename =~ /\\.ds\\.md$/"
+        },
+        {
+          "command": "aiDossier.dryRun",
+          "when": "resourceFilename =~ /\\.ds\\.md$/"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "aiDossier.verify",
+          "when": "resourceFilename =~ /\\.ds\\.md$/",
+          "group": "aiDossier@1"
+        },
+        {
+          "command": "aiDossier.dryRun",
+          "when": "resourceFilename =~ /\\.ds\\.md$/",
+          "group": "aiDossier@2"
+        }
+      ]
+    },
+    "snippets": [
+      {
+        "language": "markdown",
+        "path": "./snippets/dossier.code-snippets"
+      }
+    ],
+    "configuration": {
+      "title": "AI Dossier",
+      "properties": {
+        "aiDossier.validate.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show frontmatter validation and lint diagnostics in *.ds.md files."
+        },
+        "aiDossier.validate.debounceMs": {
+          "type": "number",
+          "default": 300,
+          "minimum": 0,
+          "description": "Delay in milliseconds between the last edit and re-running diagnostics."
+        },
+        "aiDossier.lint.rules": {
+          "type": "object",
+          "default": {},
+          "description": "Lint rule severity overrides, e.g. { \"objective-quality\": \"off\" }. Values: error, warning, info, off."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "package": "node scripts/build.mjs && vsce package --no-dependencies --out dist/ai-dossier-vscode.vsix"
+  },
+  "devDependencies": {
+    "@ai-dossier/core": "^1.12.0",
+    "@types/node": "^24.10.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.6.0",
+    "esbuild": "^0.27.7",
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.9"
+  }
+}

@@ -1,0 +1,70 @@
+{
+  "Dossier: frontmatter": {
+    "scope": "markdown",
+    "prefix": "dossier",
+    "description": "Dossier JSON frontmatter (replace the checksum with `ai-dossier checksum`)",
+    "body": [
+      "---dossier",
+      "{",
+      "  \"dossier_schema_version\": \"1.0.0\",",
+      "  \"title\": \"${1:Title}\",",
+      "  \"version\": \"${2:0.1.0}\",",
+      "  \"protocol_version\": \"1.0\",",
+      "  \"status\": \"${3|Draft,Stable,Deprecated,Experimental|}\",",
+      "  \"objective\": \"${4:One clear sentence describing what this dossier accomplishes.}\",",
+      "  \"risk_level\": \"${5|low,medium,high,critical|}\",",
+      "  \"requires_approval\": ${6|false,true|},",
+      "  \"checksum\": { \"algorithm\": \"sha256\", \"hash\": \"${7:pending}\" }",
+      "}",
+      "---",
+      "$0"
+    ]
+  },
+  "Dossier: Objective": {
+    "scope": "markdown",
+    "prefix": "ds-objective",
+    "body": ["## Objective", "", "${1:Describe the single outcome this dossier achieves.}", ""]
+  },
+  "Dossier: Prerequisites": {
+    "scope": "markdown",
+    "prefix": "ds-prerequisites",
+    "body": ["## Prerequisites", "", "- ${1:Tool, access, or state required before starting.}", ""]
+  },
+  "Dossier: Context to Gather": {
+    "scope": "markdown",
+    "prefix": "ds-context",
+    "body": ["## Context to Gather", "", "1. ${1:What the agent must inspect before acting.}", ""]
+  },
+  "Dossier: Decision Points": {
+    "scope": "markdown",
+    "prefix": "ds-decisions",
+    "body": ["## Decision Points", "", "- ${1:Where the agent must choose, and how to choose.}", ""]
+  },
+  "Dossier: Constraints": {
+    "scope": "markdown",
+    "prefix": "ds-constraints",
+    "body": ["## Constraints", "", "- ${1:Things the agent must not do.}", ""]
+  },
+  "Dossier: Known Pitfalls": {
+    "scope": "markdown",
+    "prefix": "ds-pitfalls",
+    "body": ["## Known Pitfalls", "", "- ${1:Failure mode and how to avoid it.}", ""]
+  },
+  "Dossier: Validation": {
+    "scope": "markdown",
+    "prefix": "ds-validation",
+    "body": [
+      "## Validation",
+      "",
+      "```bash",
+      "${1:# commands that prove the work succeeded}",
+      "```",
+      ""
+    ]
+  },
+  "Dossier: Troubleshooting": {
+    "scope": "markdown",
+    "prefix": "ds-troubleshooting",
+    "body": ["## Troubleshooting", "", "- ${1:Symptom}: ${2:cause and fix.}", ""]
+  }
+}

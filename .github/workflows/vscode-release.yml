@@ -1,0 +1,78 @@
+name: Release VS Code Extension
+
+# Packages packages/vscode into a .vsix and attaches it to a GitHub Release tagged
+# vscode-v<version> when main carries a version with no release yet. Bumping
+# packages/vscode/package.json "version" is the release action. Idempotent: an existing
+# release is left untouched, so re-runs and unrelated pushes are no-ops.
+#
+# Deliberately NOT published to the VS Code Marketplace or Open VSX: that needs owner-held
+# publisher tokens (VSCE_PAT / OVSX_PAT). Until then, install the .vsix from the release
+# ("Extensions: Install from VSIX...").
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/vscode/**'
+      - 'packages/core/src/**'
+      - 'dossier-schema.json'
+      - '.github/workflows/vscode-release.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: vscode-release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Decide whether a release is needed
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./packages/vscode/package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if gh release view "vscode-v$version" >/dev/null 2>&1; then
+            echo "vscode-v$version already released; nothing to do."
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install and build core
+        if: steps.plan.outputs.needed == 'true'
+        run: |
+          npm ci --ignore-scripts
+          make build-core
+
+      - name: Package .vsix
+        if: steps.plan.outputs.needed == 'true'
+        run: npm run package --workspace=ai-dossier-vscode
+
+      - name: Create release
+        if: steps.plan.outputs.needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          vsix=packages/vscode/dist/ai-dossier-vscode.vsix
+          cp "$vsix" "ai-dossier-vscode-$VERSION.vsix"
+          gh release create "vscode-v$VERSION" "ai-dossier-vscode-$VERSION.vsix" \
+            --target "$GITHUB_SHA" --title "AI Dossier VS Code extension $VERSION" \
+            --notes "VS Code extension for AI Dossier (*.ds.md): diagnostics, completion, hover, verify, dry-run preview. Install via Extensions: Install from VSIX. Marketplace publishing is pending."
