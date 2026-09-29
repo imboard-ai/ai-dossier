@@ -40,7 +40,8 @@ const listDossiersEndpoint = {
   description: 'List all dossiers',
   authentication: false,
   response: {
-    dossiers: 'array - List of dossier metadata',
+    dossiers:
+      'array - List of dossier metadata (each with published_by/published_at, null when not recorded)',
     pagination: paginationDoc,
   },
 };
@@ -57,6 +58,9 @@ const getDossierEndpoint = {
     version: 'string',
     category: 'string',
     content_url: 'string - CDN URL to fetch content',
+    published_by:
+      'string | null - GitHub login that published this version; null for versions published before publisher recording',
+    published_at: 'string | null - ISO timestamp of the publish; null for older versions',
   },
 };
 
@@ -69,7 +73,8 @@ const searchEndpoint = {
     per_page: 'number - Results per page (default: 20, max: 100)',
   },
   response: {
-    dossiers: 'array - List of matching dossier metadata',
+    dossiers:
+      'array - List of matching dossier metadata (each with published_by/published_at, null when not recorded)',
     pagination: paginationDoc,
   },
   errors: {
@@ -140,6 +145,8 @@ const publishDossierEndpoint = {
     title: 'string',
     content_url: 'string - CDN URL',
     published_at: 'string - ISO timestamp',
+    published_by:
+      'string | null - GitHub login of the authenticated publisher (from the verified token); null only if the token subject is empty after sanitizing',
     evidence_url: 'string - CDN URL to the evidence sidecar (present only when evidence was sent)',
   },
   errors: {

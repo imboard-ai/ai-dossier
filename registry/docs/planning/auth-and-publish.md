@@ -249,9 +249,12 @@ Content-Type: application/json
   "version": "1.0.0",
   "title": "Do I Wanna Know",
   "content_url": "https://cdn.jsdelivr.net/gh/imboard-ai/dossier-content/arctic-monkeys/songs/do-i-wanna-know.ds.md",
-  "published_at": "2025-12-04T10:00:00Z"
+  "published_at": "2025-12-04T10:00:00Z",
+  "published_by": "arctic-monkeys-bot"
 }
 ```
+
+`published_by` is the GitHub login from the verified JWT (`sub`), never request input. The same login is written as a `Published-By: <login>` trailer on the dossier-content commits and as `published_by`/`published_at` on the `index.json` entry. Versions published before this was recorded return `published_by: null` from the GET endpoints (the CLI shows `N/A`); nothing is backfilled.
 
 **Response (401 Unauthorized):**
 
@@ -308,6 +311,8 @@ Returned when the content store write fails. Includes `request_id` for log corre
 ```
 
 ### DELETE /api/v1/dossiers/{name}
+
+The removal commits in `dossier-content` carry a `Removed-By: <login>` trailer naming the authenticated user.
 
 All responses include the `X-Request-Id` header for request tracing (see [Request Tracing](#request-tracing)).
 
