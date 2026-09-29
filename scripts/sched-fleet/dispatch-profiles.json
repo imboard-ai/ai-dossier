@@ -25,9 +25,9 @@
           "--model",
           "{model}",
           "--effort",
-          "low"
+          "medium"
         ],
-        "model": "opus"
+        "model": "sonnet"
       },
       "strong": {
         "command": [
