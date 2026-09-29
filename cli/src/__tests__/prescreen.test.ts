@@ -12,6 +12,7 @@ import {
   TEXT_FLOOR_PATTERNS,
 } from '../prescreen';
 import regressionFixtures from './fixtures/prescreen-regression-issues.json';
+import classFixtures from './fixtures/prescreen-text-floor-classes.json';
 
 const baseInput = { title: 'A small fix', body: 'Nothing special here.', labels: [] as string[] };
 
@@ -730,5 +731,107 @@ describe('prescreenIssue — adversarial bodies stay linear (#772 security revie
     expect(
       prescreenIssue({ ...baseInput, body: 'org/repo#12, foo-bar/baz.qux#3' }).reasons
     ).toHaveLength(0);
+  });
+});
+
+/**
+ * #784: text-floor false-positive classes (negation, unquoted file/spec/workflow names, other word
+ * senses) — precision up with zero lost true positives. The fixture is synthetic but modelled on the
+ * hand-labelled #772 hits (the real issues are private); `incidental` stays a known-unreachable class.
+ */
+describe('prescreenIssue — text-floor false-positive classes (#784)', () => {
+  interface ClassFixture {
+    id: string;
+    klass: 'tp' | 'negation' | 'filename' | 'sense' | 'incidental';
+    truth: 'tp' | 'fp';
+    title: string;
+    body: string;
+    labels: string[];
+  }
+  const fixtures = classFixtures as ClassFixture[];
+  const flagged = (f: ClassFixture) =>
+    prescreenIssue({ title: f.title, body: f.body, labels: f.labels }).reasons.some(
+      (r) => r.check === 'text-floor'
+    );
+
+  it('keeps every true positive flagged (recall 1.0)', () => {
+    const missed = fixtures.filter((f) => f.truth === 'tp' && !flagged(f)).map((f) => f.id);
+    expect(missed).toEqual([]);
+  });
+
+  it('clears every reachable false-positive class; only incidental mentions still fire', () => {
+    const stillFlagged = fixtures.filter((f) => f.truth === 'fp' && flagged(f));
+    expect(stillFlagged.map((f) => f.id).sort()).toEqual([
+      'fp-incidental-context',
+      'fp-incidental-example',
+    ]);
+    expect(stillFlagged.every((f) => f.klass === 'incidental')).toBe(true);
+  });
+
+  it('precision on the fixture set is at least 0.88 (was 0.52 before #784)', () => {
+    const tp = fixtures.filter((f) => f.truth === 'tp' && flagged(f)).length;
+    const fp = fixtures.filter((f) => f.truth === 'fp' && flagged(f)).length;
+    expect(tp / (tp + fp)).toBeGreaterThanOrEqual(0.88);
+  });
+
+  it('a masked mention never hides a genuine one elsewhere in the same issue', () => {
+    const text = floorScanText(
+      'Fix export',
+      'No migration needed. Also harden the authentication check in legacy-billing.routes.ts.',
+      []
+    );
+    expect(text).toMatch(/authentication/);
+    expect(text).not.toMatch(/migration/);
+    expect(text).not.toMatch(/billing/);
+  });
+
+  it.each([
+    ['no security check on write access', /security/],
+    ['Login not working after payment', /payment/],
+    ['invoices no longer generated', /invoices/],
+    ['without breaking billing state', /billing/],
+    ['We must enforce the authorization check on board access', /authorization/],
+    // #926 review: absence-of-control phrasings are how security bugs are written.
+    ['reachable without authentication.', /authentication/],
+    ['has no authentication, anyone can call it', /authentication/],
+    ['There is no validation on payment.', /payment/],
+    ['No CSRF protection on checkout.', /checkout/],
+    ['Authentication is not required for DELETE /api/users', /Authentication/],
+    ['the Stripe customer id is not affected by the refund path', /Stripe/],
+    ['We need zero-downtime deployment.', /deployment/],
+    ['Ship it as a non-breaking migration.', /migration/],
+    ['Every checkout charges the card twice.', /checkout/],
+    ['The Authorization header is logged in plaintext', /Authorization/],
+    ['Switch session tokens to crypto.randomBytes', /crypto/],
+    ['Rotate the key in secrets.yml and config/credentials.yml.enc', /secrets/],
+    ['Upgrade Stripe.js to v3', /Stripe/],
+    ['Changes under server/db/migrations', /migrations/],
+    ['Touches user-profile, admin-panel, billing, migrations', /billing/],
+    ['login, signup, oauth-callback, sso-redirect broken', /oauth/],
+  ])('does not treat "%s" as a negated/sense mention', (body, kept) => {
+    expect(floorScanText('t', body, [])).toMatch(kept);
+  });
+
+  it.each([
+    'no migration, no backfill',
+    'this is not a migration',
+    'no schema, billing or auth changes',
+    'the OAuth approach was explicitly dropped',
+    "we're not doing per-provider OAuth (#12)",
+    'Minutes, not a migration.',
+    'run git checkout main',
+    'tests run on any checkout',
+    'all security types (common, preferred)',
+    'Headers: Authorization',
+    'id via crypto.randomUUID()',
+    'see legacy-billing.routes.ts',
+    'see packages/frontend/src/billing/usePlan',
+    'workflows: cost-audit, deploy, docker-image-build, demo-reseed',
+  ])('masks the keyword in "%s"', (body) => {
+    expect(TEXT_FLOOR_PATTERNS.map((p) => p.match(floorScanText('t', body, [])))).toEqual([
+      null,
+      null,
+      null,
+    ]);
   });
 });

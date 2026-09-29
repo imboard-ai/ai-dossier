@@ -31,7 +31,7 @@ function ghIssue(i: FakeIssue): Record<string, unknown> {
   return {
     number: i.number,
     title: i.title ?? `fix: issue ${i.number}`,
-    body: i.body ?? 'Edit `packages/sched/src/status.ts`.',
+    body: i.body ?? 'Edit `packages/sched/src/status.ts` so the status column is right.',
     labels: (i.labels ?? []).map((name) => ({ name })),
     assignees: (i.assignees ?? []).map((login) => ({ login })),
     state: i.state ?? 'OPEN',
@@ -43,10 +43,20 @@ function ghIssue(i: FakeIssue): Record<string, unknown> {
   };
 }
 
-/** A fake `gh` over a fixed issue universe: `issue view`, `issue list`, and nothing else. */
-function fakeGh(picks: FakeIssue[], backlog: FakeIssue[] = []): void {
+/** Remote workspace files served by the fake `gh api repos/<r>/contents/…` (`--repo` runs). */
+interface FakeRepoFiles {
+  files: Record<string, string>;
+  dirs: string[];
+}
+
+/**
+ * A fake `gh` over a fixed issue universe: `issue view`, `issue list`, `api …/contents`, and — for
+ * the local workspace-config read — `git rev-parse --show-toplevel` (the temp checkout `home`).
+ */
+function fakeGh(picks: FakeIssue[], backlog: FakeIssue[] = [], remote?: FakeRepoFiles): void {
   const all = new Map([...picks, ...backlog].map((i) => [i.number, i]));
   execHandles((file, args) => {
+    if (file === 'git' && args[0] === 'rev-parse') return `${checkout}\n`;
     if (file !== 'gh') throw new Error(`unexpected exec: ${file} ${args.join(' ')}`);
     if (args[0] === 'issue' && args[1] === 'view') {
       const issue = all.get(Number(args[2]));
@@ -56,6 +66,16 @@ function fakeGh(picks: FakeIssue[], backlog: FakeIssue[] = []): void {
     }
     if (args[0] === 'issue' && args[1] === 'list') {
       return JSON.stringify(backlog.map(ghIssue));
+    }
+    if (args[0] === 'api') {
+      const target = (args.find((a) => a.startsWith('repos/')) ?? '').replace(
+        /^repos\/[^/]+\/[^/]+\/contents\/?/,
+        ''
+      );
+      if (target === '') return (remote?.dirs ?? []).join('\n');
+      const text = remote?.files[decodeURIComponent(target)];
+      if (text === undefined) throw new Error('HTTP 404: Not Found');
+      return text;
     }
     throw new Error(`unexpected gh call: ${args.join(' ')}`);
   });
@@ -74,16 +94,21 @@ function ghCalls(sub: string): string[][] {
 }
 
 let home: string;
+/** A temp "local checkout" declaring `packages/*` workspaces — what the local workspace read sees. */
+let checkout: string;
 
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'batch-compose-home-'));
   vi.stubEnv('HOME', home);
+  checkout = fs.mkdtempSync(path.join(os.tmpdir(), 'batch-compose-checkout-'));
+  fs.writeFileSync(path.join(checkout, 'package.json'), '{"workspaces":["packages/*"]}');
   vi.clearAllMocks();
 });
 
 afterEach(() => {
   vi.unstubAllEnvs();
   fs.rmSync(home, { recursive: true, force: true });
+  fs.rmSync(checkout, { recursive: true, force: true });
 });
 
 const compose = (...args: string[]) =>
@@ -156,7 +181,7 @@ describe('batch compose', () => {
     ]);
   });
 
-  it('composes three clean picks with zero model calls — every subprocess is gh (#773 AC2)', async () => {
+  it('composes three clean picks with zero model calls — every subprocess is gh or git (#773 AC2)', async () => {
     fakeGh([{ number: 1 }, { number: 2 }, { number: 3 }]);
 
     const code = await compose('--issues', '1,2,3');
@@ -175,7 +200,7 @@ describe('batch compose', () => {
     // No LLM spawn: every child process the command started was `gh`, and nothing was spawned.
     const files = vi.mocked(childProcess.execFileSync).mock.calls.map((c) => c[0]);
     expect(files.length).toBeGreaterThan(0);
-    expect(new Set(files)).toEqual(new Set(['gh']));
+    expect(new Set(files)).toEqual(new Set(['gh', 'git'])); // git: the local workspace-config read (#801)
     const { spawn, spawnSync, exec, execSync, execFile, fork } = childProcess;
     for (const fn of [spawn, spawnSync, exec, execSync, execFile, fork]) {
       expect(vi.mocked(fn)).not.toHaveBeenCalled();
@@ -206,9 +231,13 @@ describe('batch compose', () => {
     fakeGh(
       [{ number: 10 }, { number: 11, assignees: ['busy'] }],
       [
-        { number: 20, body: 'Edit `registry/api/x.ts`.' },
-        { number: 21, body: 'Edit `packages/sched/src/engine.ts`.' },
-        { number: 22, body: 'Edit `packages/sched/src/x.ts`.', labels: ['in-progress'] },
+        { number: 20, body: 'Edit `registry/api/x.ts` so the behaviour is correct.' },
+        { number: 21, body: 'Edit `packages/sched/src/engine.ts` so the behaviour is correct.' },
+        {
+          number: 22,
+          body: 'Edit `packages/sched/src/x.ts` so the behaviour is correct.',
+          labels: ['in-progress'],
+        },
       ]
     );
 
@@ -318,6 +347,119 @@ describe('batch compose', () => {
     expect(r.members.map((m: { issue: number }) => m.issue)).toEqual([1, 2, 20]);
   });
 
+  it('reads the workspace layout from the target repo via gh api when --repo is given (#801)', async () => {
+    const body = 'Touches `main/packages/frontend/src/a.tsx` and `main/scripts/ci.sh` for the fix.';
+    fakeGh(
+      [
+        { number: 1, body },
+        { number: 2, body },
+        { number: 3, body },
+      ],
+      [],
+      {
+        files: { 'main/pnpm-workspace.yaml': 'packages:\n  - packages/*\n' },
+        dirs: ['main', 'docs'],
+      }
+    );
+
+    await compose('--issues', '1,2,3', '--repo', 'acme/mono');
+
+    const r = report();
+    expect(r.workspace).toMatchObject({
+      source: 'workspace-config',
+      roots: [{ prefix: 'main', file: 'pnpm-workspace.yaml', globs: ['packages/*'] }],
+    });
+    expect(r.members.map((m: { packages: string[] }) => m.packages)).toEqual([
+      ['packages/frontend'],
+      ['packages/frontend'],
+      ['packages/frontend'],
+    ]);
+    expect(r.shared_packages).toEqual(['packages/frontend']);
+    expect(r.degraded).toBe(false);
+  });
+
+  it('falls back to the path heuristic and says so when the repo declares no workspaces (#801)', async () => {
+    const body = 'Touches `main/scripts/ci.sh` and `main/docs/x.md` for the fix.';
+    fakeGh(
+      [
+        { number: 1, body },
+        { number: 2, body },
+        { number: 3, body },
+      ],
+      [],
+      {
+        files: {},
+        dirs: ['main'],
+      }
+    );
+
+    await compose('--issues', '1,2,3', '--repo', 'acme/mono');
+
+    const r = report();
+    expect(r.workspace).toEqual({ source: 'heuristic', roots: [] });
+    expect(r.degraded).toBe(false);
+    expect(r.notices.join(' ')).toMatch(/path heuristics: no workspace config/);
+    expect(r.members[0].packages).toEqual(['main']);
+  });
+
+  it('screens unready BACKLOG candidates with a stated reason and keeps explicit picks (#802)', async () => {
+    const ready = {
+      title: 'fix: crash',
+      labels: ['bug'],
+      body: 'The `packages/sched/src/a.ts` crash. Steps: save twice.',
+    };
+    fakeGh(
+      [{ number: 1, ...ready }],
+      [
+        { number: 20, ...ready },
+        { number: 21, ...ready },
+        {
+          number: 30,
+          title: 'feat: portfolio mode',
+          labels: ['enhancement'],
+          body: 'Search across all boards for everyone, whatever that means.',
+        },
+        {
+          number: 31,
+          title: 'fix(mobile): layout punch list',
+          labels: ['bug'],
+          body: 'A long list of findings follows below in this body.',
+        },
+      ]
+    );
+
+    await compose('--issues', '1', '--backlog');
+
+    const r = report();
+    expect(r.members.map((m: { issue: number }) => m.issue)).toEqual([1, 20, 21]);
+    const notReady = r.excluded.filter((e: { reasons: Array<{ code: string }> }) =>
+      e.reasons.some((x) => x.code === 'not-ready')
+    );
+    expect(notReady.map((e: { issue: number }) => e.issue)).toEqual([30, 31]);
+    expect(notReady[0].reasons[0].message).toMatch(/feature with no acceptance-criteria section/);
+    expect(notReady[1].reasons[0].message).toMatch(/punch list/);
+  });
+
+  it('an explicit pick that is not ready is kept, with a note that does not degrade the report (#802)', async () => {
+    fakeGh([
+      {
+        number: 1,
+        title: 'feat: portfolio mode',
+        labels: ['enhancement'],
+        body: 'Search across all boards for everyone, whatever that means.',
+      },
+      { number: 2 },
+      { number: 3 },
+    ]);
+
+    await compose('--issues', '1,2,3');
+
+    const r = report();
+    expect(r.members.map((m: { issue: number }) => m.issue)).toContain(1);
+    expect(r.notices.join(' ')).toMatch(/#1 \(pick\) does not look batch-ready/);
+    expect(r.degraded).toBe(false);
+  });
+
   it('an unreadable pick is excluded and degrades the report instead of failing it', async () => {
     fakeGh([{ number: 1 }, { number: 2 }]);
 
@@ -348,7 +490,7 @@ describe('batch compose', () => {
 
     const out = logged().join('\n');
     expect(out).toContain('status: ok');
-    expect(out).toContain('#1  review=light  (pick)');
+    expect(out).toContain('#1  review=light  ready=');
   });
 
   it('text mode strips terminal escapes from untrusted issue titles', async () => {
