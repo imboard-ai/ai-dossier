@@ -125,6 +125,13 @@ describe('assessReadiness (#802)', () => {
     ).toBe(false);
   });
 
+  it('is linear on adversarial bodies (untrusted text; the unbounded path regex was quadratic on `a.a.a.…`)', () => {
+    const t = Date.now();
+    assessReadiness('fix: x', 'a.'.repeat(100_000), ['bug']);
+    assessReadiness('fix: x', `${'x'.repeat(39)}/`.repeat(5_000), ['bug']);
+    expect(Date.now() - t).toBeLessThan(3_000);
+  });
+
   it('an empty body is blocked', () => {
     expect(assessReadiness('fix: x', '', ['bug']).blockers.join(' ')).toMatch(/empty or too short/);
   });

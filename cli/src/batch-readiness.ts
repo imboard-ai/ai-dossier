@@ -34,6 +34,9 @@ export const INITIATIVE_HEADINGS_MIN = 2;
 /** `Phase 1` / `Part 2` / `Milestone 3` headings: this many ⇒ a multi-stage initiative. */
 export const INITIATIVE_PHASE_HEADINGS_MIN = 3;
 
+/** GitHub caps an issue body at 65,536 characters; scanning stops there whatever the source (untrusted text, bounded work). */
+const MAX_BODY_SCAN = 70_000;
+
 /** Bodies shorter than this (trimmed) carry no spec at all. */
 export const MIN_BODY_LENGTH = 40;
 
@@ -93,7 +96,8 @@ const INITIATIVE_HEADING_RE =
 const DECLARED_SUBISSUES_RE = /\b\d+[ \t]+sub-?issues\b|^[ \t]{0,3}#{1,6}[ \t]*sub-?issues\b/im;
 const PHASE_HEADING_RE = /^[ \t]{0,3}#{1,6}[ \t]*(?:phase|part|milestone|stage|wave)[ \t]*\d+/gim;
 const LIST_ITEM_RE = /^[ \t]*(?:[-*+]|\d+[.)])[ \t]+\S/gm;
-const CODE_PATH_RE = /(?:[\w.-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,6}\b/;
+// Every quantifier bounded: the body is untrusted and an unbounded `(?:[\w.-]+\/)+` is quadratic on `a.a.a.…`.
+const CODE_PATH_RE = /(?:[\w.-]{1,60}\/){1,10}[\w.-]{1,60}\.[A-Za-z0-9]{1,6}\b/;
 
 export interface ReadinessAssessment {
   /** Soft score: higher = better specified. Ranks backfill; compared to {@link READINESS_FLOOR}. */
@@ -111,9 +115,10 @@ const countMatches = (re: RegExp, text: string): number => [...text.matchAll(re)
 /** Readiness of one issue, from its labels, title and body alone. */
 export function assessReadiness(
   title: string,
-  body: string,
+  rawBody: string,
   labels: readonly string[]
 ): ReadinessAssessment {
+  const body = rawBody.slice(0, MAX_BODY_SCAN);
   const lower = labels.map((l) => l.toLowerCase());
   const blockers: string[] = [];
   const signals: string[] = [];
