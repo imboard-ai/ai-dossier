@@ -719,6 +719,21 @@ export function mintRunId(issue: number | string): string {
   return `r-${issue}-${randomBytes(RUN_ID_RANDOM_BYTES).toString('hex')}`;
 }
 
+/**
+ * Mint a run id for a fresh attempt that supersedes `prior`. The 4-hex suffix collides
+ * with the prior run's 1 time in 65536; a "fresh" run that reuses the prior id would be
+ * indistinguishable from resuming it, so re-mint until it differs (#889).
+ */
+export function mintSuccessorRunId(
+  issue: number | string,
+  prior: string,
+  mint: (issue: number | string) => string = mintRunId
+): string {
+  let run = mint(issue);
+  while (run === prior) run = mint(issue);
+  return run;
+}
+
 // --- Fencing (#504) ---
 
 /**
@@ -1273,7 +1288,11 @@ function reportTrailVerdict(
       note: `report/done milestone carries an unusable run id ('${last.run}') — cannot mint a successor; resuming at report`,
     };
   }
-  return { run_id: mintRunId(runMatch[1]), prior_run: last.run, note: 'stale-report-trail' };
+  return {
+    run_id: mintSuccessorRunId(runMatch[1], last.run),
+    prior_run: last.run,
+    note: 'stale-report-trail',
+  };
 }
 
 /**

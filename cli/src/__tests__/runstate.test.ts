@@ -23,6 +23,7 @@ import {
   MAX_GENERATION,
   MAX_VALUE_LENGTH,
   mintRunId,
+  mintSuccessorRunId,
   NEXT_VALUES,
   nextFenceGeneration,
   nowStamp,
@@ -623,6 +624,19 @@ describe('mintRunId', () => {
     expect(
       validateMilestone({ phase: 'gate', status: 'blocked', run, keys: [['reason', 'x']] })
     ).toEqual([]);
+  });
+});
+
+describe('mintSuccessorRunId (#889)', () => {
+  it('re-mints when the random suffix collides with the prior run', () => {
+    const minted = ['r-440-ab56', 'r-440-ab56', 'r-440-cd78'];
+    const mint = () => minted.shift() as string;
+    expect(mintSuccessorRunId(440, 'r-440-ab56', mint)).toBe('r-440-cd78');
+    expect(minted).toEqual([]);
+  });
+
+  it('returns the first mint when it already differs', () => {
+    expect(mintSuccessorRunId(440, 'r-440-ab56', () => 'r-440-0001')).toBe('r-440-0001');
   });
 });
 

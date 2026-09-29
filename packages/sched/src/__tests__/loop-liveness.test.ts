@@ -100,13 +100,22 @@ describe('runLoop liveness (#679)', () => {
       await vi.waitUntil(() => out.includes('ready'), { timeout: 5_000 });
 
       // The #679 bug: the process was already gone by now — it exited on its
-      // own right after the first tick. Alive-with-no-exit-event past two
-      // full intervals is the regression assertion.
-      await new Promise((resolve) => setTimeout(resolve, INTERVAL_MS * 2 + INTERVAL_MS / 2));
+      // own right after the first tick. Wait on the tick events themselves
+      // (not a wall-clock sleep, which raced slow CI): the second tick only
+      // arrives if the process stayed alive across a full interval. If the
+      // child dies early the wait fails fast with its output.
+      const tickCount = () => (out.match(/^tick /gm) ?? []).length;
+      await vi.waitUntil(
+        () => {
+          if (child.exitCode !== null || child.signalCode !== null) {
+            throw new Error(`child exited before its second tick: stdout=${out} stderr=${stderr}`);
+          }
+          return tickCount() >= 2;
+        },
+        { timeout: 10_000, interval: 10 }
+      );
       expect(child.exitCode, `still running: stdout=${out} stderr=${stderr}`).toBeNull();
       expect(child.signalCode).toBeNull();
-      const ticksSeen = (out.match(/^tick /gm) ?? []).length;
-      expect(ticksSeen).toBeGreaterThanOrEqual(2);
 
       child.kill('SIGINT');
       const result = await Promise.race([
