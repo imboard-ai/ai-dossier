@@ -1499,7 +1499,7 @@ after-the-fact recovery, not a missing-data bug.
   queue data.
 - **Schema**: state/config files from #460 (schema 1.0.0), #464 (1.1.0), #468 (1.2.0),
   #472 (1.3.0), #500 (1.4.0), #505 (1.5.0), #504 (1.6.0), #523 (1.7.0) and #524 (1.8.0)
-  load and migrate to the current schema (1.29.0 — 1.24.0 was #810: no backfill,
+  load and migrate to the current schema (1.30.0 — 1.24.0 was #810: no backfill,
   `kind`/`branch` optional, absent = an `evicted` record with no branch) automatically
   (slot `branch`/`last_head`/`pid_start`, slot `role` (inferred from the
   unit's queue entry, with the persisted `phase` as a fallback — #500), entry
@@ -1529,6 +1529,9 @@ after-the-fact recovery, not a missing-data bug.
   Schema 1.29.0 (#844): `SlotEntry` gains `kill_sent_at`/`kill_escalated_at` (the
   SIGTERM → SIGKILL escalation anchor and its journal dedup marker; `null`/`null`
   backfilled, cleared when the slot goes idle).
+  Schema 1.30.0 (#637): `QueueEntry` gains `ground_truth_unreachable_condition` (the
+  `ground-truth-unreachable` streak's stable per-site key — a changed key starts a new
+  streak; `null` backfilled, cleared with the other entry dedup markers).
 - **`max_slots`** bounds live units (`assigned | running | recovering`); dependency
   edges gate readiness — an issue with an unmerged dependency, and a batch behind an
   unmerged batch, are never runnable.

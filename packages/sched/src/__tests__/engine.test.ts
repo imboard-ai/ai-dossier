@@ -28,6 +28,7 @@ import {
   transitionIssue,
   transitionSlot,
 } from '../index';
+import { advanceStreak } from '../state';
 import {
   writeAnnouncedWaitLog,
   writeApiErrorLog,
@@ -4384,5 +4385,176 @@ describe('#776: recovery never re-dispatches a unit whose issue is closed', () =
     h.store.withLock((state) => ({ state: setPaused(state, false), result: null }));
     h.tick();
     expect(h.spawnCalls).toHaveLength(1);
+  });
+});
+
+describe('#637: ground-truth-unreachable streak identity is the condition, not just presence', () => {
+  const gtEvents = (h: ReturnType<typeof harness>) =>
+    h.journal.read().filter((e) => e.event === 'ground-truth-unreachable' && e.issue === 101);
+
+  function seedMarker(h: ReturnType<typeof harness>, condition: string | null): void {
+    h.store.withLock((state) => ({
+      state: {
+        ...state,
+        entries: state.entries.map((e) =>
+          e.issue === 101
+            ? {
+                ...e,
+                ground_truth_unreachable_since: h.clock().toISOString(),
+                ground_truth_unreachable_ticks: 3,
+                ground_truth_unreachable_condition: condition,
+              }
+            : e
+        ),
+      },
+      result: undefined,
+    }));
+  }
+
+  it('AC1/AC4/AC6: a different condition key on the same unit starts a new streak and journals at once, carrying the key', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    parkUnit(h, 101, 55);
+    // A streak of ANOTHER flavour is live for this unit (three ticks in).
+    seedMarker(h, 'poll-unreachable');
+
+    h.prUnreachable.add(55);
+    h.advance(200_000);
+    h.tick();
+
+    const events = gtEvents(h);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.condition).toBe('pr-watch-paused');
+    expect(events[0]?.ticks_persisted).toBe(1);
+    const entry = h.state().entries.find((e) => e.issue === 101);
+    expect(entry?.ground_truth_unreachable_condition).toBe('pr-watch-paused');
+    expect(entry?.ground_truth_unreachable_ticks).toBe(1);
+  });
+
+  it('AC2/AC3: an unchanged condition key still dedups; the key is stable, not the interpolated detail', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    parkUnit(h, 101, 55);
+    seedMarker(h, 'pr-watch-paused');
+
+    h.prUnreachable.add(55);
+    for (let i = 0; i < 3; i++) {
+      h.advance(200_000);
+      h.tick();
+    }
+
+    // Marker was already mid-streak (ticks=3) on the SAME key: silent, counting on.
+    expect(gtEvents(h)).toHaveLength(0);
+    expect(h.state().entries.find((e) => e.issue === 101)?.ground_truth_unreachable_ticks).toBe(6);
+  });
+
+  it('AC5: the condition key is cleared with the other markers when truth answers', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    parkUnit(h, 101, 55);
+    h.prUnreachable.add(55);
+    h.advance(200_000);
+    h.tick();
+    expect(h.state().entries.find((e) => e.issue === 101)?.ground_truth_unreachable_condition).toBe(
+      'pr-watch-paused'
+    );
+
+    h.prUnreachable.delete(55);
+    h.setPr(55, { state: 'OPEN' });
+    h.advance(200_000);
+    h.tick();
+    const entry = h.state().entries.find((e) => e.issue === 101);
+    expect(entry?.ground_truth_unreachable_condition).toBeNull();
+    expect(entry?.ground_truth_unreachable_since).toBeNull();
+  });
+});
+
+describe('#636: runTeardownFor dedups its ground-truth-unreachable journal', () => {
+  function mergedAwaitingTeardown(h: ReturnType<typeof harness>, issue: number, pr: number): void {
+    parkUnit(h, issue, pr);
+    h.setPr(pr, { state: 'MERGED', mergedAt: '2026-08-29T12:30:00Z' });
+    h.closedIssues.add(issue);
+    h.setupUnreachable.add(issue);
+    h.advance(200_000);
+  }
+  const events = (h: ReturnType<typeof harness>) =>
+    h.journal.read().filter((e) => e.event === 'ground-truth-unreachable' && e.issue === 101);
+
+  it('AC1/AC4: three ticks against one unreachable setupInfo produce exactly one entry; recovery clears the marker and a new failure would report afresh', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    mergedAwaitingTeardown(h, 101, 55);
+
+    h.tick();
+    h.advance(1000);
+    h.tick();
+    h.advance(1000);
+    h.tick();
+
+    expect(events(h)).toHaveLength(1);
+    expect(events(h)[0]?.condition).toBe('teardown-paused');
+    expect(events(h)[0]?.ticks_persisted).toBe(1);
+    const mid = h.state().entries.find((e) => e.issue === 101);
+    expect(mid?.cleanup).toBeNull();
+    expect(mid?.ground_truth_unreachable_ticks).toBe(3);
+
+    // AC3: the marker write never bumped updated_at.
+    const before = mid?.updated_at;
+    h.advance(1000);
+    h.tick();
+    expect(h.state().entries.find((e) => e.issue === 101)?.updated_at).toBe(before);
+
+    // Recovery: setupInfo answers, teardown runs, the marker is cleared.
+    h.setupUnreachable.delete(101);
+    h.setupInfos.set(101, { worktree: h.wt('wt-101'), poolClaimed: false, branch: 'f/101' });
+    h.setTeardownScript(removingTeardown(h.wt('wt-101')));
+    h.advance(1000);
+    h.tick();
+    const after = h.state().entries.find((e) => e.issue === 101);
+    expect(after?.cleanup).toBe('done');
+    expect(after?.ground_truth_unreachable_since).toBeNull();
+    expect(after?.ground_truth_unreachable_ticks).toBe(0);
+    expect(after?.ground_truth_unreachable_condition).toBeNull();
+  });
+
+  it('AC1: re-announces every JOURNAL_DEDUP_REANNOUNCE_TICKS ticks while the outage persists', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    mergedAwaitingTeardown(h, 101, 55);
+    for (let i = 0; i < JOURNAL_DEDUP_REANNOUNCE_TICKS; i++) {
+      h.tick();
+      h.advance(1000);
+    }
+    expect(events(h)).toHaveLength(2);
+    expect(events(h)[1]?.ticks_persisted).toBe(JOURNAL_DEDUP_REANNOUNCE_TICKS);
+  });
+});
+
+describe('#638: advanceStreak is the one streak step', () => {
+  const now = new Date('2026-09-29T10:00:00.000Z');
+  it('starts a streak on null since or a changed identity, counts otherwise, announces on the window', () => {
+    expect(advanceStreak({ since: null, ticks: 0 }, false, now)).toEqual({
+      since: now.toISOString(),
+      ticks: 1,
+      announce: true,
+    });
+    const prior = { since: '2026-09-29T09:00:00.000Z', ticks: 4 };
+    expect(advanceStreak(prior, false, now)).toEqual({
+      since: prior.since,
+      ticks: 5,
+      announce: false,
+    });
+    expect(advanceStreak(prior, true, now)).toEqual({
+      since: now.toISOString(),
+      ticks: 1,
+      announce: true,
+    });
+    const atWindow = advanceStreak(
+      { since: prior.since, ticks: JOURNAL_DEDUP_REANNOUNCE_TICKS - 1 },
+      false,
+      now
+    );
+    expect(atWindow.announce).toBe(true);
+    expect(atWindow.since).toBe(prior.since);
   });
 });
