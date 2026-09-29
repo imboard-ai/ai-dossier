@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { RunLogEntry } from '@ai-dossier/core';
-import { patchBatch, SchedStore } from '@ai-dossier/sched';
+import { CorruptStateError, patchBatch, SchedStore } from '@ai-dossier/sched';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { withBlockedBatch } from '../../../../packages/sched/src/__tests__/helpers/blocked-batch';
 import { graphqlIssueResponse } from '../../../../packages/sched/src/__tests__/helpers/graphql-fixtures';
@@ -554,6 +554,38 @@ describe('ai-dossier sched start (#537: engine-stale detection)', () => {
     logs.length = 0;
     await runSched(['sched', 'status', '--project', 'test-proj']);
     expect(logs.join('\n')).toContain(`Engine lease: pid ${process.pid} (live)`);
+  });
+
+  it('#779: a failed --once tick releases the engine lease before the process exits', async () => {
+    const leaseDir = path.join(home, '.dossier', 'sched', 'test-proj', '.sched-engine-lease');
+    // The lease is taken before the tick runs, so a throw from the tick's first
+    // state read is a genuine failed tick (not a pre-lease failure).
+    const realLoad = SchedStore.prototype.load;
+    let failed = false;
+    vi.spyOn(SchedStore.prototype, 'load').mockImplementation(function (this: SchedStore) {
+      if (!fs.existsSync(leaseDir) || failed) return realLoad.call(this);
+      failed = true;
+      throw new CorruptStateError(statePath(), new Error('boom'));
+    });
+    // process.exit(1) skips `finally` in production; the shared test setup's
+    // throwing exit hides that by unwinding. Emit the real 'exit' event first
+    // (what node does) and observe the lease right then.
+    const testExit = process.exit;
+    let leasePresentAtExit: boolean | null = null;
+    process.exit = ((code?: number) => {
+      process.emit('exit', code ?? 0);
+      leasePresentAtExit ??= fs.existsSync(leaseDir);
+      return testExit(code);
+    }) as typeof process.exit;
+    try {
+      await expect(
+        runSched(['sched', 'start', '--once', '--project', 'test-proj'])
+      ).rejects.toThrow('process.exit(1)');
+    } finally {
+      process.exit = testExit;
+    }
+    expect(leasePresentAtExit).toBe(false);
+    expect(fs.existsSync(leaseDir)).toBe(false);
   });
 
   it('runs a tick cleanly and journals nothing when the engine is not stale', async () => {

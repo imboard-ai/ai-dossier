@@ -128,6 +128,7 @@ export {
   WRONG_PROCEDURE_MARKER,
   wrongProcedureDirective,
 } from './dispatch';
+export { findDossierRoot, projectRootFor, worktreesDirFor } from './dossier-root';
 export { type EngineDeps, recordTickFailure, runLoop, type TickResult, tick } from './engine';
 export {
   assertNoDependencyCycle,

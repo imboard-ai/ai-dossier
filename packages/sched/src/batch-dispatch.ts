@@ -111,6 +111,7 @@ import {
   wrongProcedureDirective,
 } from './dispatch';
 import { recordDispatchApiError, resetDispatchApiErrorStreak } from './dispatch-health';
+import { projectRootFor, worktreesDirFor } from './dossier-root';
 import {
   batchPhaseBlockedReason,
   GIT_OID_RE,
@@ -842,7 +843,7 @@ function runBatchSetup(
   if (batch.anchor === null) return { ok: false, reason: 'no-anchor' };
   const date = now.toISOString().slice(0, 10).replaceAll('-', '');
   const branch = `batch/${batch.id}-${date}`;
-  const worktree = path.join(deps.repoDir, 'worktrees', `batch-${batch.id}-${date}`);
+  const worktree = path.join(worktreesDirFor(deps.repoDir), `batch-${batch.id}-${date}`);
   if (!SAFE_REF_RE.test(branch) || !SAFE_REF_RE.test(batch.base_branch)) {
     return { ok: false, reason: 'invalid-branch-name' };
   }
@@ -851,7 +852,7 @@ function runBatchSetup(
   // this is the actual point where it becomes a filesystem path — the same
   // containment check teardown applies on the way OUT must hold on the way IN.
   const root = deps.exec('git', ['rev-parse', '--show-toplevel'], deps.repoDir) ?? deps.repoDir;
-  if (!isSafeWorktree(path.resolve(root), worktree)) {
+  if (!isSafeBatchWorktree(deps, root, worktree)) {
     return { ok: false, reason: 'invalid-worktree-path' };
   }
 
@@ -945,6 +946,19 @@ export function memberBranchFor(batchId: string, memberIndex: number, issue: num
   return `batch/${batchId}-m${memberIndex}-${issue}`;
 }
 
+/**
+ * Containment for a batch/member worktree: under the git toplevel's worktree
+ * roots (`isSafeWorktree`) OR under the `.dossier/` project root's — the root
+ * `worktreesDirFor` builds paths from (#759), which in a nested layout
+ * (`.dossier/` above the checkout) is not the git toplevel.
+ */
+function isSafeBatchWorktree(deps: BatchDispatchDeps, gitRoot: string, worktree: string): boolean {
+  return (
+    isSafeWorktree(path.resolve(gitRoot), worktree) ||
+    isSafeWorktree(projectRootFor(deps.repoDir), worktree)
+  );
+}
+
 /** The worktree path a cold member-worktree prep creates for one member. */
 function memberWorktreePathFor(
   deps: BatchDispatchDeps,
@@ -952,7 +966,7 @@ function memberWorktreePathFor(
   memberIndex: number,
   issue: number
 ): string {
-  return path.join(deps.repoDir, 'worktrees', `batch-${batchId}-m${memberIndex}-${issue}`);
+  return path.join(worktreesDirFor(deps.repoDir), `batch-${batchId}-m${memberIndex}-${issue}`);
 }
 
 /** What {@link prepareMemberWorktree} hands the spawn site. */
@@ -1017,7 +1031,7 @@ function prepareMemberWorktree(
   if (!SAFE_REF_RE.test(branch)) return { ok: false, reason: 'invalid-member-branch-name' };
   const fsExists = deps.fsExists ?? ((p: string) => fs.existsSync(p));
   const root = deps.exec('git', ['rev-parse', '--show-toplevel'], deps.repoDir) ?? deps.repoDir;
-  if (!isSafeWorktree(path.resolve(root), worktree)) {
+  if (!isSafeBatchWorktree(deps, root, worktree)) {
     return { ok: false, reason: 'invalid-member-worktree-path' };
   }
 
@@ -5498,7 +5512,7 @@ function teardownBatch(deps: BatchDispatchDeps, batchId: string): void {
   // accepts paths in pool state) and can legitimately live outside either
   // `isSafeWorktree` root when `.worktree-pool.json` configures a custom
   // `pool_dir` — mirrors `runTeardown`'s own internal skip for `poolClaimed`.
-  if (batch.pool_claimed !== true && !isSafeWorktree(path.resolve(root), batch.worktree)) {
+  if (batch.pool_claimed !== true && !isSafeBatchWorktree(deps, root, batch.worktree)) {
     journalEvent(deps, 'teardown-failed', unit(batchId), {
       reason: 'unsafe-worktree-path',
       detail: batch.worktree,
@@ -5769,10 +5783,9 @@ function spawnParallelMembers(
       next.run !== undefined &&
       fsExists(next.run.worktree) &&
       (next.run.pool_claimed ||
-        isSafeWorktree(
-          path.resolve(
-            deps.exec('git', ['rev-parse', '--show-toplevel'], deps.repoDir) ?? deps.repoDir
-          ),
+        isSafeBatchWorktree(
+          deps,
+          deps.exec('git', ['rev-parse', '--show-toplevel'], deps.repoDir) ?? deps.repoDir,
           next.run.worktree
         ));
     if (next.run !== undefined && reusable) {
@@ -6092,7 +6105,7 @@ function landParallelRun(
   }
   if (!run.pool_claimed) {
     const root = deps.exec('git', ['rev-parse', '--show-toplevel'], deps.repoDir) ?? deps.repoDir;
-    if (!isSafeWorktree(path.resolve(root), run.worktree)) {
+    if (!isSafeBatchWorktree(deps, root, run.worktree)) {
       return fail(
         'unsafe-member-worktree',
         `member worktree ${run.worktree} is outside the repo's worktree roots`
