@@ -223,6 +223,21 @@ base64 string as written in the trust file.
 
 ---
 
+## Dry-run analysis
+
+```typescript
+import { analyzeDryRun } from '@ai-dossier/core';
+
+const plan = analyzeDryRun(fs.readFileSync('x.ds.md', 'utf8')); // or { frontmatter, body }
+plan.risk_score; // 0-100
+plan.level;      // 'low' | 'medium' | 'high' | 'critical'
+plan.files; plan.commands; plan.network; plan.env;
+```
+
+`analyzeDryRun` is a **static preview**: it reads declared frontmatter and pattern-matches shell/script code fences.
+Dossiers are executed by an LLM, so the result is not a guarantee of what will happen and the score is not a
+safety verdict. See the `--dry-run` section of the CLI README for the score formula and JSON shape.
+
 ## Linting
 
 ### `lintDossier(content: string, config?: LintConfig): LintResult`

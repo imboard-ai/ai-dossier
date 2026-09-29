@@ -188,6 +188,64 @@ Unsupported flag combinations print a clear per-flag warning; they are never sil
 - **Headless** (`--headless`): `claude -p --output-format json` or `opencode run --format json`, dossier content piped via stdin. Usage (tokens/cost) is mined from the captured output and recorded in the run log.
 - **Interactive**: `claude <file>` or `opencode run -i -- <prompt>` (a seeded session; the `--` separator keeps the `---` frontmatter from being parsed as flags). Prefer `--headless` for large dossiers — interactive opencode passes the prompt as one argv element (~128KB OS limit).
 
+### Dry-run preview (`--dry-run`, `--plan-out`)
+
+`ai-dossier run <dossier> --dry-run` verifies the dossier, then prints a **static preview** instead of executing it:
+the files, commands, remote calls and environment variables it declares or contains, a 0-100 risk score, and the
+LLM command that *would* run.
+
+> **This is a static preview, not a guarantee.** Dossiers are executed by an LLM. The preview is derived from the
+> dossier's declared metadata (`risk_level`, `risk_factors`, `destructive_operations`, `tools_required`) and a
+> pattern match over its shell / script code blocks. The executing agent may take other actions, and the risk
+> score is a triage heuristic, not a safety guarantee. Unlabeled code blocks are only analysed for lines that
+> start with a well-known tool (`git`, `gh`, `curl`, ...), and executables the analyzer does not recognise are
+> reported as local writes with an `(unrecognized executable)` note.
+
+Output is grouped and color-coded (colors follow `NO_COLOR` / `FORCE_COLOR`):
+
+| Color | Group | Examples |
+|---|---|---|
+| green | read-only | `ls`, `grep`, `git status`, `echo` |
+| yellow | local writes | `> file`, `tee`, `mv`, `cp`, `git commit`, `npm run build`, unrecognised executables |
+| red | remote / destructive | `gh pr create`, `git push`, `curl`, `aws`, `kubectl`, `rm`, `git push --force`, `curl ... \| sh` |
+
+**Risk score.** The sum of the components below, capped at 100 (the `--dry-run` output prints the breakdown):
+
+| Component | Points |
+|---|---|
+| declared `risk_level` | low 5, medium 25, high 50, critical 75 |
+| each declared `risk_factors` entry | 4 each, max 20 |
+| each declared `destructive_operations` entry | 3 each, max 15 |
+| detected local-write commands | 1 each, max 5 |
+| detected remote commands | 2 each, max 15 |
+| detected destructive commands | 5 each, max 15 |
+
+Level bands: `low` 0-24, `medium` 25-49, `high` 50-74, `critical` 75-100.
+
+`--plan-out <file>` (requires `--dry-run`) also writes the plan as JSON (`schema_version: 1`):
+
+```jsonc
+{
+  "schema_version": 1,
+  "static_preview": true,                 // always true - never a record of what actually ran
+  "disclaimer": "Static preview - ...",
+  "dossier": { "title": "...", "version": "...", "declared_risk_level": "low|medium|high|critical|null" },
+  "declared": { "risk_factors": [], "destructive_operations": [], "tools_required": [], "requires_approval": false },
+  "files":    [{ "path": "out.txt", "operation": "write|delete|move", "command": "...", "line": 12 }],
+  "commands": [{ "command": "gh pr create ...", "kind": "read|local_write|remote|destructive", "recognized": true, "line": 30 }],
+  "network":  [{ "tool": "gh", "target": "pr create", "mutates": true, "command": "...", "line": 30 }],
+  "env":      [{ "name": "GITHUB_TOKEN", "line": 8 }],
+  "risk_score": 23,                       // 0-100 heuristic
+  "level": "low|medium|high|critical",
+  "score_breakdown": [{ "component": "declared risk_level: low", "points": 5 }],
+  "execution": { "file": "...", "llm": "claude", "command": "claude <file> | null" }
+}
+```
+
+`line` is the 1-based line within the dossier body (after the frontmatter). Only variables the dossier does not
+assign itself count as `env` reads. The same analysis is exposed to library users as `analyzeDryRun()` in
+`@ai-dossier/core` and to MCP clients via `dry_run` on `start_journey` / `read_dossier`.
+
 ---
 
 ## Registry Commands

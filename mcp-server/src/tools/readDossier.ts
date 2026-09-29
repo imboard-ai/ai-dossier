@@ -5,8 +5,10 @@
 
 import { readFileSync } from 'node:fs';
 import {
+  analyzeDryRun,
   collectDeclaredUrls,
   type DossierFrontmatter,
+  type DryRunPlan,
   findUndeclaredUrls,
   parseDossierContent,
   scanBodyForUrls,
@@ -17,12 +19,16 @@ import { validatePathWithinCwd } from '../utils/paths';
 
 export interface ReadDossierInput {
   path: string;
+  /** Also return a static dry-run preview (files, commands, network, env, risk score). */
+  dry_run?: boolean;
 }
 
 export interface ReadDossierOutput {
   metadata: Record<string, unknown>;
   body: string;
   security_notices?: string[];
+  /** Present when dry_run was requested. A static preview, not a guarantee of agent behaviour. */
+  dry_run_plan?: DryRunPlan;
 }
 
 /**
@@ -72,9 +78,15 @@ export async function readDossier(input: ReadDossierInput): Promise<ReadDossierO
       });
     }
 
+    let dryRunPlan: DryRunPlan | undefined;
+    if (input.dry_run) {
+      dryRunPlan = analyzeDryRun(fileContent);
+    }
+
     return {
       metadata,
       body,
+      ...(dryRunPlan ? { dry_run_plan: dryRunPlan } : {}),
       ...(securityNotices.length > 0 ? { security_notices: securityNotices } : {}),
     };
   } catch (error) {
