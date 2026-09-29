@@ -42,6 +42,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   type BatchSuiteContext,
+  type FailingTest,
   isReadableVitestReport,
   parseVitestJson,
   type SchedConfig,
@@ -112,6 +113,37 @@ function stderrTail(stderr: string | null | undefined): string {
   return ` — stderr: ${trimmed.slice(-STDERR_TAIL_CHARS)}`;
 }
 
+/**
+ * #893: a red capability run with NO parseable report is the `suite-unreadable`
+ * block — and the operator's only evidence is this `detail` (journaled as
+ * `suite-failed`). The envelope's `output_tail` (combined stdout+stderr, what
+ * the failing command last printed) is the best evidence, so it leads; the
+ * captured stderr is the fallback when the envelope carries none.
+ */
+const OUTPUT_TAIL_CHARS = 1500;
+
+function failureTail(outputTail: string | null, stderr: string | null | undefined): string {
+  const tail = (outputTail ?? '').trim();
+  if (tail.length === 0) return stderrTail(stderr);
+  return ` — output tail: ${tail.slice(-OUTPUT_TAIL_CHARS)}`;
+}
+
+/**
+ * Vitest's JSON reporter names test files by ABSOLUTE path; attribution
+ * compares them with the members' repo-relative changed paths, so an absolute
+ * path never overlaps and every failure would be "unattributed". Re-root any
+ * path under `root` (a repo-relative path from a report that already
+ * relativized, like `scripts/test-report.mjs`'s, is left as is).
+ */
+function relativizeFailing(failing: FailingTest[], root: string): FailingTest[] {
+  const prefix = root.endsWith(path.sep) ? root : root + path.sep;
+  return failing.map((t) => {
+    if (!t.file.startsWith(prefix)) return t;
+    const file = t.file.slice(prefix.length).split(path.sep).join('/');
+    return { file, name: t.name, id: `${file}::${t.name}` };
+  });
+}
+
 interface RunOutcome {
   source: string;
   result: SuiteResult;
@@ -157,7 +189,7 @@ function runCommand(
   const stdout = spawned.stdout ?? '';
   const ok = spawned.status === 0;
   const readable = isReadableVitestReport(stdout);
-  const failing = readable ? parseVitestJson(stdout) : [];
+  const failing = readable ? relativizeFailing(parseVitestJson(stdout), worktree) : [];
   return {
     ok,
     failing,
@@ -220,7 +252,7 @@ function runCapabilitySuite(
   if (fields?.outcome === 'capability-unavailable') return 'unavailable';
   const ok = fields?.outcome === 'ok' && spawned.status === 0;
   const readable = isReadableVitestReport(stdout);
-  const failing = readable ? parseVitestJson(stdout) : [];
+  const failing = readable ? relativizeFailing(parseVitestJson(stdout), worktree) : [];
   const timedOut = fields?.reason === timeoutReasonSpent(capabilityTimeoutMs);
   return {
     source,
@@ -236,7 +268,7 @@ function runCapabilitySuite(
             (fields.durationMs !== null ? ` elapsed ${fields.durationMs}ms` : '') +
             (!ok && readable ? ` (${failing.length} failing)` : '') +
             ` [${run.diagnostics}]` +
-            (!ok && !readable ? stderrTail(spawned.stderr) : '')
+            (!ok && !readable ? failureTail(fields.outputTail, spawned.stderr) : '')
           : `${source}: task-failed (exit ${spawned.status ?? 'unknown'}), harness produced no envelope [${run.diagnostics}]${stderrTail(spawned.stderr)}`,
     },
   };
@@ -330,11 +362,14 @@ function capabilityTimeout(
  * command's environment.
  */
 export function createBatchSuiteRunner(
-  config: SchedConfig,
+  configSource: SchedConfig | (() => SchedConfig),
   opts: { timeoutMs?: number } = {}
 ): (worktree: string, ctx?: BatchSuiteContext) => SuiteResult {
   const defaultTimeoutMs = opts.timeoutMs ?? BATCH_SUITE_TIMEOUT_MS;
   return (worktree, ctx) => {
+    // #883: a function source is read per run, so a `dispatch.suite_command`
+    // edit reaches a running engine like every other config edit.
+    const config = typeof configSource === 'function' ? configSource() : configSource;
     const manifest = tryLoadManifest(worktree);
     const env = suiteEnv(ctx);
     let primary: RunOutcome;

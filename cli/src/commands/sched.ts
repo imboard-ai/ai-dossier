@@ -35,6 +35,7 @@ import {
   buildStatusReport,
   type CommitInBase,
   CorruptStateError,
+  createConfigReloader,
   createExecFn,
   createExecGroundTruth,
   createExecResumeSeeder,
@@ -2536,6 +2537,46 @@ function registerStartSubcommand(cmd: Command): void {
           ? { ...config, dispatch: { ...config.dispatch, command: dispatchCommand } }
           : config;
 
+        // #883: the engine re-reads config.json (and the user-level profiles)
+        // whenever its mtime/size moves — a profile edit applies from the next
+        // tick instead of silently waiting for a restart while `sched status`
+        // (which reads the file) shows the new values. The startup-only
+        // overrides above are re-applied to every reloaded config; an INVALID
+        // edit keeps the last good config and journals `config-reload-failed`.
+        const deriveEngineConfig = (cfg: SchedConfig): SchedConfig => {
+          const withInterval =
+            opts.interval !== undefined
+              ? { ...cfg, reconcile_interval_ms: opts.interval * 1000 }
+              : cfg;
+          const command =
+            withInterval.dispatch?.tiers !== undefined
+              ? undefined
+              : (withInterval.dispatch?.command ??
+                (detectLlm('auto', true) === 'opencode'
+                  ? [...OPENCODE_DISPATCH_COMMAND]
+                  : undefined));
+          return command
+            ? { ...withInterval, dispatch: { ...withInterval.dispatch, command } }
+            : withInterval;
+        };
+        const engineJournal = new Journal(store.dir);
+        const configReloader = createConfigReloader({
+          initial: engineConfig,
+          load: () => store.loadConfigStrict(),
+          fingerprint: () => store.configFingerprint(),
+          derive: deriveEngineConfig,
+          onReload: (_next, changes) => {
+            const detail = changes.length > 0 ? changes.join('; ') : 'no dispatch change';
+            engineJournal.append({ event: 'config-reloaded', detail }, new Date());
+            if (!(opts.once && opts.json)) console.log(`▶ sched config reloaded: ${detail}`);
+          },
+          onInvalid: (err) => {
+            const detail = `${err.message} — keeping the last good config`;
+            engineJournal.append({ event: 'config-reload-failed', detail }, new Date());
+            process.stderr.write(`⚠ sched config reload failed: ${detail}\n`);
+          },
+        });
+
         // #680: log the executor the engine will actually use — agent + model
         // per tier, resolved AFTER the auto-detect above so the banner matches
         // real spawns. Once per start (both --once and the continuous loop):
@@ -2566,7 +2607,7 @@ function registerStartSubcommand(cmd: Command): void {
         }
         const deps: EngineDeps = {
           store,
-          journal: new Journal(store.dir),
+          journal: engineJournal,
           groundTruth: createExecGroundTruth(undefined, {
             repoDir: process.cwd(),
             ...(anchorRepo !== undefined ? { repo: anchorRepo } : {}),
@@ -2629,7 +2670,7 @@ function registerStartSubcommand(cmd: Command): void {
                 `⚠ sched batch warm-up: '${file} ${args.join(' ')}' failed: ${err.message}\n`
               ),
           }),
-          runBatchSuite: createBatchSuiteRunner(config),
+          runBatchSuite: createBatchSuiteRunner(() => configReloader.current()),
           runBatchCapability: createBatchCapabilityRunner(),
         };
 
@@ -2702,7 +2743,7 @@ function registerStartSubcommand(cmd: Command): void {
         });
         await runLoop(
           deps,
-          engineConfig,
+          () => configReloader.current(),
           () => stopping,
           (result) => {
             if (!opts.json) console.log(`✓ [${new Date().toISOString()}] ${describe(result)}`);

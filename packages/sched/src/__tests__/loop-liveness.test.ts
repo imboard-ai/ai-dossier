@@ -79,6 +79,25 @@ describe('runLoop liveness (#679)', () => {
     expect(tickCount).toBe(3);
   });
 
+  it('#883: a function config source is consulted on every tick (a config edit applies next tick)', async () => {
+    const deps = makeLoopDeps();
+    let tickCount = 0;
+    let consulted = 0;
+    await runLoop(
+      deps,
+      () => {
+        consulted += 1;
+        return { reconcile_interval_ms: 30 };
+      },
+      () => tickCount >= 3,
+      () => {
+        tickCount += 1;
+      }
+    );
+    // once for the sleep interval at start, then once per tick
+    expect(consulted).toBe(1 + 3);
+  });
+
   describe.skipIf(!fs.existsSync(DIST_INDEX))('child process (built dist)', () => {
     it('is still alive after two tick intervals, then exits cleanly on SIGINT', async () => {
       const INTERVAL_MS = 150;

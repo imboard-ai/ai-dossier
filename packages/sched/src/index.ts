@@ -74,6 +74,12 @@ export {
 } from './batch-stats';
 export { type BisectOptions, type BisectOutcome, runAttributionBisect } from './bisect';
 export {
+  type ConfigReloader,
+  type ConfigReloaderOptions,
+  createConfigReloader,
+  dispatchDiff,
+} from './config-reload';
+export {
   buildAgentCommand,
   buildBatchReportPrompt,
   buildBatchTailPrompt,

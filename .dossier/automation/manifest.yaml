@@ -2,17 +2,23 @@
 #
 # `test.full` exists so the batch scheduler's aggregate-suite runner
 # (cli/src/batch-suite-runner.ts, #562) has a trustworthy tier-1 command for
-# this repo: the root `test` script delegates to `make test`, which aborts on
-# an unrecognized `--reporter=json` flag — declaring the real command here,
-# with no flags appended, is what lets `cap run test.full` report the suite's
-# TRUE exit status instead of a wrapper's flag-parsing error.
+# this repo. Its command is `scripts/test-report.mjs` (#893), NOT `make test`:
+# the runner attributes a red suite to batch members by parsing ONE vitest JSON
+# document out of the capability's stdout, and `make test` prints only human
+# text — so every red run read as `suite-unreadable` and stranded the batch.
+# test-report.mjs runs the same suites (every workspace with a `test` script,
+# then the repo-script tests) one at a time, and prints a merged
+# `{ testResults: [...] }` report on stdout (human output goes to stderr).
+# It takes no flags, so nothing is forwarded through a wrapper (#562).
 version: 1
 
 capabilities:
   test.full:
-    command: make test
+    command: node scripts/test-report.mjs
     lifecycle: active
-    description: Full workspace test suite (all workspaces + repo scripts)
+    description: >-
+      Full workspace test suite (all workspaces + repo scripts), emitting one
+      merged vitest-JSON report on stdout so a red run is attributable
     # This is the active capability command's own budget. The aggregate runner
     # gives its outer cap-run watchdog bounded setup grace, then treats this
     # timeout as terminal rather than guessing with a fallback command.
