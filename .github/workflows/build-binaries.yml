@@ -2,14 +2,18 @@ name: Build Standalone Binaries
 
 # Builds Node SEA executables (no Node needed to run) for the current cli version and
 # attaches them to a GitHub Release tagged cli-v<version>, alongside SHA256SUMS.
-# Runs after a successful "Publish Packages to npm" run on main, or by hand. Safe to
-# re-run: a release that already carries every asset is left untouched.
+# Runs after a successful "Publish Packages to npm" run on main, hourly as a safety net
+# (npm lists a fresh version minutes after the publish run ends, so the workflow_run
+# trigger can race it), or by hand. Safe to re-run: a release that already carries
+# every asset is left untouched.
 
 on:
   workflow_run:
     workflows: ['Publish Packages to npm']
     types: [completed]
     branches: [main]
+  schedule:
+    - cron: '41 * * * *'
   workflow_dispatch:
     inputs:
       version:
@@ -23,7 +27,7 @@ on:
         type: string
 
 concurrency:
-  group: build-binaries-${{ github.event.workflow_run.head_sha || inputs.version }}
+  group: build-binaries-${{ github.event.workflow_run.head_sha || inputs.version || 'schedule' }}
   cancel-in-progress: false
 
 permissions:
@@ -31,7 +35,7 @@ permissions:
 
 jobs:
   plan:
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     outputs:
       build: ${{ steps.plan.outputs.build }}
@@ -60,9 +64,21 @@ jobs:
             exit 1
           fi
 
-          if [ "$EVENT" = workflow_run ]; then
-            # Only a cli version that actually reached npm gets binaries.
-            if ! npm view "@ai-dossier/cli@$version" version >/dev/null 2>&1; then
+          if [ "$EVENT" != workflow_dispatch ]; then
+            # Only a cli version that actually reached npm gets binaries. npm lists a
+            # fresh publish several minutes after the publish run ends, so right after
+            # a publish (workflow_run) poll for up to ~12 min; the hourly schedule
+            # checks once and catches anything this missed.
+            tries=1
+            if [ "$EVENT" = workflow_run ]; then tries=24; fi
+            listed=false
+            for i in $(seq 1 "$tries"); do
+              if npm view "@ai-dossier/cli@$version" version --prefer-online >/dev/null 2>&1; then
+                listed=true; break
+              fi
+              if [ "$i" -lt "$tries" ]; then sleep 30; fi
+            done
+            if [ "$listed" != true ]; then
               echo "@ai-dossier/cli@$version is not on npm; nothing to build."
               echo "build=false" >> "$GITHUB_OUTPUT"
               exit 0
