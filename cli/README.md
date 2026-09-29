@@ -1236,7 +1236,7 @@ ai-dossier batch compose --backlog [--label backend]... [--search "no:assignee"]
 |---|---|---|
 | `--issues <selection>` | — | Operator picks (fleet grammar: `1,2,5..8`, ≤ 200) |
 | `--backlog` | off | Draw candidates from the open backlog (`gh issue list`, one call) |
-| `--no-backfill` | backfill on | With `--issues`: never query the backlog, even when picks fall below `--min-members` |
+| `--no-backfill` | backfill on | With `--issues`: never query the backlog, even when picks fall below the target (below) or a held pick's slot is empty |
 | `--label <name>` (repeatable), `--search <q>`, `--limit <n>` | —, —, 100 (max 500) | Backlog filters, passed to `gh issue list` |
 | `--base <branch>` | `main` | The base branch every member shares |
 | `--min-members <n>` / `--max-members <n>` | 3 / 6 | Minimum viable batch / member ceiling (≤ 6) |
@@ -1245,8 +1245,12 @@ ai-dossier batch compose --backlog [--label backend]... [--search "no:assignee"]
 | `--repo`, `--project` | cwd repo, `owner-name` | Target repo; sched project whose queue/config is read |
 
 At least one of `--issues` / `--backlog` is required. With `--issues` alone, the backlog is
-read **only** when the picks by themselves compose fewer than `--min-members` members — counted
-after the caps, so five admissible `review=full` picks (cap 2) still trigger backfill.
+read **only** when the picks by themselves compose fewer members than the target —
+`--min-members`, raised to the number of admissible picks (never past `--max-members`) so a pick
+held over the `review=full` cap gets its slot refilled (#951). Counted after the caps, so five
+admissible `review=full` picks (cap 2) still trigger backfill.
+
+**Workspace packages (#801).** "Shares a package" ranking uses the target repo's own workspace config — `pnpm-workspace.yaml`, `package.json` `workspaces`, or `lerna.json`, at the repo root or (imboard's `main/`) in a top-level directory — read via `gh api repos/<r>/contents/…` with `--repo`, or from the local checkout without it. Paths outside every declared workspace belong to no package. Only when no config is found does compose fall back to the path heuristic (`…/packages/<x>/…`, else the first path segment) and say so in a warning; `--json` reports `workspace.source` (`workspace-config` | `heuristic`).
 
 **Admission.** An issue is excluded — with every reason recorded, not just the first — on:
 
@@ -1259,6 +1263,7 @@ after the caps, so five admissible `review=full` picks (cap 2) still trigger bac
 | `hard-block-label` | `decision-pending`, `needs-clarification`, `epic`, `decomposed` |
 | `batch-anchor` | Carries `batch-epic` |
 | `not-a-unit` | Tracker / decision / research / parked: labels `tracker` `decision` `question` `discussion` `research` `parked` `on-hold` `wontfix` `duplicate`; titles like `[PARKED] …`, `research: …`, `epic(x): …`; a `## Decision needed` section |
+| `not-ready` | **Backlog candidates only** (#802; an explicit `--issues` pick only gets a warning; not under `--rules legacy`). No model call — labels, title and body: a tracker/initiative shape (`initiative`/`umbrella`/`roadmap`/`punch-list` labels, a punch-list/umbrella/roadmap title, an `audit`/`triage` title with a findings list, a checklist of ≥ 10 task items, ≥ 3 task items linking sub-issues, ≥ 3 `Phase N` headings, ≥ 2 strategy/metrics/kill-criteria headings, declared sub-issues), a feature (`enhancement`/`feature` label or `feat:` title) with no acceptance-criteria section, an empty body, or a readiness score below the floor (2: AC section +3, checklist of 1–9 items +2, bounded type `bug`/`chore`/`refactor`/`engineering-ready`/`ready:*`/`fix:` title +2, named code path +1). The message names every signal; survivors are ranked by score (`ready=` in the output) |
 | `in-flight` | Latest runstate milestone is any phase other than `classify` |
 | `sched-active` | A non-terminal, not-yet-merged sched queue entry exists |
 | `open-dependency` | `Depends on #N` with N open and not among the picks; N a pick that is itself excluded; or N whose state could not be read (fails closed) |
@@ -1278,8 +1283,10 @@ provenance clauses and quoted spans removed).
 
 **Composition** (deterministic): every admissible pick joins, bounded by `--max-members` and
 the `review=full` cap; the overflow is listed under `held` (`review-full-cap` / `max-members`).
-Then, while the set is below its target — `--min-members` with picks, `--max-members` with
-`--backlog` alone — admissible backlog issues are added greedily, ranked: shares a workspace
+Then, while the set is below its target — with picks, `--min-members` raised to the number of
+admissible picks (never past `--max-members`), so a pick held over the `review=full` cap has its
+slot refilled, `light` while the cap is full (#951 — the held pick waits for the next batch-prep
+run; no extra small batch is opened for it); `--max-members` with `--backlog` alone — admissible backlog issues are added greedily, ranked: shares a workspace
 package with the current members → `light` before `full` → more shared packages → lower issue
 number. Packages come from a plan:v1 artifact's predicted files when present, else from paths
 named in the issue body (`…/packages/<x>/…` → `packages/<x>`, else the first path segment).
@@ -1338,7 +1345,11 @@ branch on `status`, take `manifest_entries`, and report `excluded`:
   `jq '{entries: [.manifest_entries[] | . + {batch: $b, anchor: $a}]}' --arg b b-20260924-02 --argjson a 4410`.
 - `backfill` is present only with `--issues`: every admissible backlog candidate, ranked
   against the admitted picks, `selected: true` on the ones the composition took.
-- `held` lists admissible issues left out (`review-full-cap`, `max-members`).
+- `held` lists admissible issues left out: `reason` (`review-full-cap`, `max-members`),
+  `review_reasons` (as on `members`), and a `note` saying where the issue goes next (a pick:
+  submit it again in the next batch-prep run; a backlog issue: stays in the backlog). The
+  `recommendation` names held picks (#951), e.g.
+  `{ "issue": 3549, "title": "…", "review": "full", "source": "pick", "packages": [], "readiness": 2, "reason": "review-full-cap", "review_reasons": ["Title/body/labels match 'rule4-deploy-pipeline' (keyword: 'cicd')."], "note": "Held for the next batch-prep run — the ≤ 2 review=full cap is taken by higher-ranked members; submit #3549 again then (no extra small batch is opened for it)." }`.
 - `degraded`/`warnings` name any lookup that did not complete (an unreadable pick, the backlog
   list, a dependency's state, the sched queue/config); the result reflects what did complete.
 - `model_calls` is always `0`.

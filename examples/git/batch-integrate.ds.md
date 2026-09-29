@@ -3,7 +3,7 @@
   "dossier_schema_version": "1.0.0",
   "name": "batch-integrate",
   "title": "Batch Integrate — Verify N Members Once, Repair What Is Yours, Escalate What Is Not",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "protocol_version": "1.0",
   "status": "Draft",
   "last_updated": "2026-09-29",
@@ -65,13 +65,13 @@
   "content_scope": "self-contained",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "a107d79949dca5e232401cf9e11f7e247ea465ba83510d8850d190295bff2c0b"
+    "hash": "fda5311c6c63c208b1ee806c62777e97219a936e9ffd886485720576bb809f5a"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "dW0eIYZTDLhpBHYCq+sMp80NhwccqrEDuym41U4OWCO4XUv/YR3NuV4v+yT2cgN8kcKAdCOidjRKbUDyGdSrAg==",
+    "signature": "h6OJ+WzF3aXJ8+9zWH69zYwa+JUC1IAnEnQs/W3r6Y6x5C0ndNq4zCzEIggoDmobOxWz3rv3qd7xhUlxeK4hBQ==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-29T15:06:14.728Z",
+    "signed_at": "2026-09-29T19:06:47.699Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -99,7 +99,7 @@ For every member, read its `phase=review` milestone. It is **missing review** wh
 
 - there is no `phase=review` milestone for this batch's run, or it is `blocked` / `partial` with a required agent pending;
 - `agents_done` is `0`, `none`, or empty — imboard#4178's member (run `r-4178-928b`) posted exactly this, `status=done agents_done=0`, and nothing had looked at the diff;
-- the member is `review=full` and `agents_done` lacks `security` or `conformance`, or the milestone's `tier` is not `full` — a light-grade review on a risk-floor member is not the review it was admitted on;
+- the member is `review=full` and `agents_done` lacks `security` or `conformance`, or the milestone's `tier` is not `full` — a light-grade review on a `review=full` member is not the review it was admitted on;
 - the member is `review=light` and `agents_done` lacks `conformance` (the correctness reviewer floor).
 
 **Refuse to ship a member with missing review.** Two remedies, in this order:
@@ -228,7 +228,7 @@ With `full`:
 
 **Aggregate review — every member.** Review the combined diff for **cross-member interaction** — seams, duplicated helpers, conflicting assumptions between members. Per-issue acceptance criteria were already verified by each member's own conformance verdict; re-reviewing them here dilutes the pass over a large diff and finds less.
 
-**Risk-floor review — `review=full` members only (#770 P1, Option A; at most 2 per batch).** A risk-floor issue (auth, billing/payments, security, migrations, deploy) rides the batch on the promise that it gets the review full-cycle would have given it. Its member ran a full-tier review of its own change; you review **its commits as they landed on the integration branch** — after your merges, conflict resolutions and repairs, which the member never saw:
+**Risk-floor review — `review=full` members only (#770 P1, Option A; at most 2 per batch).** A `review=full` member (E.2 rules 1, 4, 5, 6 or a broad/unknown test scope: risk-floor area, deploy pipeline, > 8 files, > 400 lines, `test_scope=broad`/`unknown`) rides the batch on the promise that it gets the review full-cycle would have given it. Its member ran a full-tier review of its own change; you review **its commits as they landed on the integration branch** — after your merges, conflict resolutions and repairs, which the member never saw:
 
 ```bash
 # the member's own commits carry the (#<n>) subject trailer (member-cycle Step 4)

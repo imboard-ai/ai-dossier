@@ -8,8 +8,9 @@
  * text-keyword approximation of the risk-floor/new-package/deploy-pipeline rules, rule-9 open
  * dependencies, and — when a plan:v1 artifact is already on the issue — the path-based risk
  * floor and the >8-files rule). Everything it does not catch (rule 2 beyond the `migration`
- * keyword, rule 7 hard rollback, rule 8 visual/browser review, rules 5/6 diff/file size without
- * a plan artifact, rule 10 confidence) falls through to the classifier's own bounded
+ * keyword, rule 5 file count without a plan artifact, rule 6 predicted diff (no diff signal at
+ * all: a plan:v1 artifact carries predicted files only), rule 7 hard rollback, rule 8
+ * visual/browser review, rule 10 confidence) falls through to the classifier's own bounded
  * mechanical-tier pass, which is the intended safety net — not a gap this module needs to close.
  *
  * v2 (#772): two outputs. `verdict: full` only for the EXCLUDING checks;
@@ -23,6 +24,10 @@
  * review-depth questions, not can-share-a-PR questions. `verdict: full` is now left to the
  * hard-block label and a rule-9 open dependency. Rule 8 (visual/browser) stays excluding, but
  * this module never detected it — the classifier's model pass does.
+ *
+ * v5-in-behaviour (#784, contract still `prescreen:v4`): the text floor also masks negated mentions,
+ * unquoted file/path/workflow names and other word senses (`maskFloorFalsePositives`), so a
+ * false-positive class no longer spends a scarce review=full slot.
  *
  * Pure and dependency-free (no `gh`, network, or fs), same discipline as `plan-artifact.ts` and
  * `runstate.ts` — unit-testable directly. Subprocess access (fetching the issue, resolving
@@ -62,6 +67,38 @@ function wordMatch(text: string, keywords: readonly string[]): string | null {
   return null;
 }
 
+const RULE1_KEYWORDS = [
+  'authentication',
+  'authorization',
+  'oauth',
+  'sso',
+  'payment',
+  'payments',
+  'billing',
+  'invoice',
+  'invoices',
+  'checkout',
+  'stripe',
+  'migration',
+  'migrations',
+  'security',
+  'crypto',
+  'secret',
+  'secrets',
+  'credential',
+  'credentials',
+  'terraform',
+] as const;
+const RULE3_KEYWORDS = ['new package', 'new workspace', 'monorepo package'] as const;
+const RULE4_KEYWORDS = [
+  'deploy',
+  'deployment',
+  'ci/cd',
+  'cicd',
+  'release pipeline',
+  'rollback pipeline',
+] as const;
+
 export const TEXT_FLOOR_PATTERNS: readonly TextFloorPattern[] = [
   {
     // Deliberately NOT the bare words "auth"/"login"/"logout"/"schema"/"infra"/"infrastructure":
@@ -73,47 +110,32 @@ export const TEXT_FLOOR_PATTERNS: readonly TextFloorPattern[] = [
     // RFC-0001 rule 1 "infra/terraform" area names. Also approximates rule 2 (schema/data
     // migration) via "migration"/"migrations" — a rough approximation, not full rule-2 coverage.
     name: 'rule1-risk-floor-area',
-    match: (t) =>
-      wordMatch(t, [
-        'authentication',
-        'authorization',
-        'oauth',
-        'sso',
-        'payment',
-        'payments',
-        'billing',
-        'invoice',
-        'invoices',
-        'checkout',
-        'stripe',
-        'migration',
-        'migrations',
-        'security',
-        'crypto',
-        'secret',
-        'secrets',
-        'credential',
-        'credentials',
-        'terraform',
-      ]),
+    match: (t) => wordMatch(t, RULE1_KEYWORDS),
   },
   {
     name: 'rule3-new-package-workspace',
-    match: (t) => wordMatch(t, ['new package', 'new workspace', 'monorepo package']),
+    match: (t) => wordMatch(t, RULE3_KEYWORDS),
   },
   {
     name: 'rule4-deploy-pipeline',
-    match: (t) =>
-      wordMatch(t, [
-        'deploy',
-        'deployment',
-        'ci/cd',
-        'cicd',
-        'release pipeline',
-        'rollback pipeline',
-      ]),
+    match: (t) => wordMatch(t, RULE4_KEYWORDS),
   },
 ];
+
+/** A whole string that is exactly one floor keyword. */
+const FLOOR_KEYWORD_EXACT_RE = new RegExp(
+  `^(?:${[...RULE1_KEYWORDS, ...RULE3_KEYWORDS, ...RULE4_KEYWORDS].map(phrase).join('|')})$`,
+  'i'
+);
+
+/** Every text-floor keyword, longest first so a phrase wins over a word it contains. */
+const FLOOR_KEYWORD_RE = new RegExp(
+  `\\b(?:${[...RULE1_KEYWORDS, ...RULE3_KEYWORDS, ...RULE4_KEYWORDS]
+    .sort((a, b) => b.length - a.length)
+    .map(phrase)
+    .join('|')})\\b`,
+  'gi'
+);
 
 /**
  * Longest quoted span stripped before keyword matching — a bound so a body full
@@ -327,12 +349,180 @@ export function stripReferenceMaterial(body: string): string {
 }
 
 /**
+ * #784: text-floor false-positive classes a deterministic scan CAN separate from the change
+ * surface. Measured on 57 hand-labelled text-floor hits (#772): 24 false positives — 5 negated
+ * mentions, 4 unquoted file/spec/workflow names, 3 other word senses (the other 12 are incidental
+ * mentions, out of reach here). Each mask blanks (same length) only the offending span, never the
+ * whole issue: an issue that ALSO names a floor keyword outside any masked span still fires.
+ *
+ * Every mask is deliberately narrower than its FP class, because the cost is asymmetric: a lost
+ * true positive lets a risky change into a `review=light` slot. "Is missing / not required" is how
+ * security bugs are WRITTEN ("reachable without authentication", "no CSRF protection on
+ * checkout"), so a risk-area keyword is only ever masked by an explicit SCOPE disclaimer
+ * ("no billing changes", "we're not doing OAuth", "explicitly dropped"), never by a bare `no`/`without`.
+ * A file or directory whose name IS the keyword (`secrets.yml`, `db/migrations/`) names the surface
+ * and stays scanned.
+ */
+
+/** Filename with a code/config/doc extension, unquoted: `legacy-billing.routes.ts`, `deploy.yml`. */
+const FILE_TOKEN_RE =
+  /[\w@~./-]{1,80}\.(?:tsx?|jsx?|mjs|cjs|json|ya?ml|md|mdx|sh|py|toml|sql|css|html|tf|go|rs)\b/gi;
+
+/** Path with two or more `/` (`packages/frontend/src/x`); a single slash is not enough — `ci/cd` is a keyword. */
+const PATH_TOKEN_RE = /[\w@~.-]{0,40}(?:\/[\w@~.-]{1,40}){2,}\/?/g;
+
+/** Directory names that ARE a risk surface: a path through one keeps being scanned. */
+const SURFACE_SEGMENTS: ReadonlySet<string> = new Set([
+  'migration',
+  'migrations',
+  'secret',
+  'secrets',
+  'credential',
+  'credentials',
+  'terraform',
+]);
+
+/** A test/spec file is never the risk surface even when its stem names one (`billing-banners.spec.ts`). */
+const TEST_FILE_RE = /\.(?:spec|test)\.[a-z]+$/i;
+
+/** True when a masked-candidate file token still names a floor surface: a whole dot-segment of its basename is a keyword (`secrets.yml`, `Stripe.js`, `credentials.yml.enc`). */
+function fileTokenNamesSurface(token: string): boolean {
+  const base = token.slice(token.lastIndexOf('/') + 1);
+  if (TEST_FILE_RE.test(base)) return false;
+  return base.split('.').some((seg) => FLOOR_KEYWORD_EXACT_RE.test(seg));
+}
+
+function maskFileToken(token: string): string {
+  return fileTokenNamesSurface(token) ? token : blank(token);
+}
+
+function maskPathToken(token: string): string {
+  const segments = token.toLowerCase().split('/');
+  return segments.some((seg) => SURFACE_SEGMENTS.has(seg)) ? token : blank(token);
+}
+
+/** A comma list of 3+ short items. */
+const NAME_LIST_RE = /[\w-]{1,40}(?:[ \t]*,[ \t]*[\w-]{1,40}){2,}/g;
+const KEBAB_ITEM_RE = /^[a-z0-9]+(?:-[a-z0-9]+)+$/i;
+
+/**
+ * A list of workflow/job/route names (`cost-audit, deploy, docker-image-build`): blanked only when
+ * at least three items, and at least half, are kebab-case names. A mixed list ("user-profile,
+ * admin-panel, billing, migrations") is a scope enumeration and stays scanned.
+ */
+function maskNameList(list: string): string {
+  const items = list.split(',');
+  const kebab = items.filter((i) => KEBAB_ITEM_RE.test(i.trim())).length;
+  return kebab >= 3 && kebab * 2 >= items.length ? blank(list) : list;
+}
+
+/**
+ * Other senses of a floor word: git's checkout, a repo checkout, financial security types, the
+ * `Authorization:` header line, `crypto.randomUUID()`. Narrow on purpose — "the Authorization
+ * header is logged in plaintext", "crypto.randomBytes for session tokens" and "every checkout
+ * charges the card twice" are real findings and stay scanned.
+ */
+const WORD_SENSE_RES: readonly RegExp[] = [
+  /\b(?:git|gh(?:\s+pr)?|actions\/)\s*checkout\b/gi,
+  /\b(?:fresh|clean|shallow)\s+checkout\b/gi,
+  /\b(?:on|in|from)\s+(?:any|every|each)\s+(?:git\s+)?checkout\b/gi,
+  /\bsecurity\s+(?:types?|classes|prices?|symbols?|master)\b/gi,
+  /\bcrypto\.randomUUID\b/gi,
+  /\bAuthorization\s*:/gi,
+  /\bheaders?\s*:\s*Authorization\b/gi,
+];
+
+const blank = (m: string) => ' '.repeat(m.length);
+
+/**
+ * Keywords that are CHANGE TYPES an issue routinely disclaims ("no migration needed", "not a
+ * deploy change"): full negation rules apply. Every other floor keyword is a RISK AREA, masked
+ * only by an explicit scope disclaimer (see {@link SCOPE_DISCLAIMER_BEFORE_RES}, {@link NEGATED_AFTER_RE}).
+ */
+const CHANGE_TYPE_KEYWORD_RE = new RegExp(
+  `^(?:${[...RULE3_KEYWORDS, ...RULE4_KEYWORDS, 'migration', 'migrations'].map(phrase).join('|')})$`,
+  'i'
+);
+
+/**
+ * Negators in front of a CHANGE-TYPE keyword: `no`, `zero`, `without`, `not a/an/the/any` as
+ * standalone words (a hyphen never counts: "zero-downtime deployment", "non-breaking migration"
+ * are real work), up to two words between ("no data migration", "no schema, data migration").
+ * Bare `not` ("not working after deploy") and `no longer` do not qualify.
+ */
+const NEGATED_BEFORE_RES: readonly RegExp[] = [
+  /(?:^|[^\w-])(?:no(?!\s+(?:longer|more)\b)|zero|without|not\s+(?:a|an|the|any))\s+(?:[\w-]+(?:,|\s+(?:or|and|nor))?\s+){0,2}$/i,
+  /,\s*not\s+$/i,
+];
+
+/** A change-type negation only counts when the keyword ENDS its noun phrase: a list separator, `or`/`and`, `(`, or a scope noun. */
+const NEGATOR_TARGET_END_RE =
+  /^(?:\s*(?:[,.;!?()\n]|$)|\s+(?:or|and|nor)\b|\s+(?:needed|required|changes?|risks?|impacts?|work|concerns?|steps?|involved|implications?|effects?)\b)/i;
+
+/**
+ * Explicit scope disclaimers before ANY floor keyword: "we're not doing OAuth", "this PR is not
+ * adding auth", and — for risk areas — a bare `no`/`without` only when a SCOPE noun follows the
+ * keyword ("no billing changes", "no schema, billing or auth changes", "no security impact").
+ */
+const SCOPE_DISCLAIMER_BEFORE_RES: readonly RegExp[] = [
+  /(?:^|[^\w-])(?:we(?:'re|\s+are)?\s+not|we\s+won'?t|this\s+(?:issue|pr|change)\s+(?:does\s+not|doesn'?t|is\s+not))\s+(?:doing|building|adding|using|supporting|touching|changing|do|build|add|use|support|touch|change)\s+(?:[\w-]+\s+){0,2}$/i,
+];
+const RISK_NEGATOR_BEFORE_RE =
+  /(?:^|[^\w-])(?:no(?!\s+(?:longer|more)\b)|zero|without)\s+(?:[\w-]+(?:,|\s+(?:or|and|nor))?\s+){0,2}$/i;
+const SCOPE_NOUN_AFTER_RE =
+  /^(?:\s*(?:,|\s(?:or|and|nor))\s*[\w-]+){0,3}\s+(?:changes?|risks?|impacts?|work|concerns?|implications?|effects?|needed|required)\b/i;
+
+/** A scope disclaimer AFTER the keyword within two words: "OAuth approach explicitly dropped", "billing is out of scope". */
+const NEGATED_AFTER_RE =
+  /^(?:\s+[\w/-]+){0,2}\s+(?:(?:is|are|was|were)\s+)?(?:explicitly\s+)?(?:dropped|descoped|out\s+of\s+scope|ruled\s+out)\b/i;
+/** "not needed / not required" after a CHANGE-TYPE keyword only ("migration not required"); after a risk area it is a bug report. */
+const CHANGE_TYPE_NOT_NEEDED_AFTER_RE =
+  /^(?:\s+[\w/-]+){0,1}\s+(?:is\s+)?not\s+(?:needed|required|in\s+scope|applicable)\b/i;
+
+/** Longest text scanned either side of a keyword when looking for a negation. */
+const NEGATION_WINDOW = 60;
+
+/** Blank every floor keyword occurrence that carries an explicit scope disclaimer. */
+function maskNegatedMentions(text: string): string {
+  return text.replace(FLOOR_KEYWORD_RE, (match, offset: number, whole: string) => {
+    const before = whole.slice(Math.max(0, offset - NEGATION_WINDOW), offset);
+    const clauseBefore = before.slice(
+      Math.max(...['.', ';', '!', '?', '\n'].map((c) => before.lastIndexOf(c))) + 1
+    );
+    const after = whole.slice(offset + match.length, offset + match.length + NEGATION_WINDOW);
+    const changeType = CHANGE_TYPE_KEYWORD_RE.test(match);
+    const negated =
+      SCOPE_DISCLAIMER_BEFORE_RES.some((re) => re.test(clauseBefore)) ||
+      NEGATED_AFTER_RE.test(after) ||
+      (changeType &&
+        ((NEGATED_BEFORE_RES.some((re) => re.test(clauseBefore)) &&
+          NEGATOR_TARGET_END_RE.test(after)) ||
+          CHANGE_TYPE_NOT_NEEDED_AFTER_RE.test(after))) ||
+      (!changeType && RISK_NEGATOR_BEFORE_RE.test(clauseBefore) && SCOPE_NOUN_AFTER_RE.test(after));
+    return negated ? blank(match) : match;
+  });
+}
+
+/**
+ * #784: blank the false-positive spans of {@link stripQuotedSpans}' unquoted cousins — file/spec/
+ * workflow names, other word senses, and scope-disclaimed mentions — before the text floor runs.
+ */
+export function maskFloorFalsePositives(text: string): string {
+  let out = text.replace(FILE_TOKEN_RE, maskFileToken).replace(PATH_TOKEN_RE, maskPathToken);
+  out = out.replace(NAME_LIST_RE, maskNameList);
+  for (const re of WORD_SENSE_RES) out = out.replace(re, blank);
+  return maskNegatedMentions(out);
+}
+
+/**
  * The exact text the text floor scans (#772): title + section/provenance-filtered body + label
  * names, with quoted spans blanked (#627). Exported so measurement tooling
  * (`scripts/prescreen-backlog-measure.mjs`) and tests see precisely what the rule sees.
  */
 export function floorScanText(title: string, body: string, labels: readonly string[]): string {
-  return stripQuotedSpans(`${title}\n${stripReferenceMaterial(body)}\n${labels.join(' ')}`);
+  return maskFloorFalsePositives(
+    stripQuotedSpans(`${title}\n${stripReferenceMaterial(body)}\n${labels.join(' ')}`)
+  );
 }
 
 /** `Depends on #N` references resolved per issue; each costs a `gh` call downstream (command layer), same rationale as `MAX_ISSUE_SELECTION` (`issue-selection.ts`). */
