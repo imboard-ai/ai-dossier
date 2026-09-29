@@ -65,6 +65,14 @@ the outcome is `automation-broken` and the command never runs.**
 | `file-exists` | `- file-exists: package.json` | Path (file or dir, relative to the run directory) exists |
 | `tool-version` | `- tool-version: node>=20` | `<tool> --version` output satisfies `<op><version>` (ops: `>= > <= < = ==`; `==` is an alias of `=`) |
 
+## `cap init [--print]` (#645)
+
+Scaffolds `.dossier/automation/manifest.yaml` from `detectProjectEnv` (package manager,
+install/build commands) and the `package.json` scripts. Idempotent: an existing manifest
+is never modified. Undetectable gates become commented `TODO` stubs. `sched enqueue`
+warns (never blocks — #625) when a created batch's manifest lacks `typecheck.run` /
+`test.focused`; opt out with `--skip-gate-check` or `DOSSIER_SKIP_GATE_CHECK=1`.
+
 ## `cap list [--json]`
 
 Shows capabilities, lifecycle, command, and description. Absent

@@ -1,6 +1,7 @@
 /**
  * `ai-dossier cap` — capability manifest operations (RFC-0001, issue #463).
  *
+ *   cap init [--print]       scaffold a manifest from the detected project (#645)
  *   cap list [--json]        inspect .dossier/automation/manifest.yaml
  *   cap run <id> [-- args]   execute one capability
  *
@@ -12,8 +13,10 @@
  * read (#811), immune to anything else that lands on stdout.
  */
 
+import { findDossierRoot } from '@ai-dossier/sched';
 import type { Command } from 'commander';
 import { CAP_ENVELOPE_FILE_ENV, CAP_ENVELOPE_MARKER, writeCapEnvelopeFile } from '../cap-envelope';
+import { initManifest, missingGateCapabilities, scaffoldManifest } from '../cap-init';
 import { appendCapLog } from '../cap-log';
 import {
   AUTOMATION_DIR,
@@ -31,6 +34,10 @@ import { renderTable } from '../table';
 
 interface ListOptions {
   json?: boolean;
+}
+
+interface InitOptions {
+  print?: boolean;
 }
 
 interface RunOptions {
@@ -93,6 +100,36 @@ export function registerCapCommand(program: Command): void {
     .description(
       `Capability manifest operations — deterministic execution of recurring repo operations (${AUTOMATION_DIR}/${MANIFEST_FILE})`
     );
+
+  cap
+    .command('init')
+    .description(
+      `Scaffold ${AUTOMATION_DIR}/${MANIFEST_FILE} from the detected project (package manager, install/build/test scripts). Idempotent: an existing manifest is never touched`
+    )
+    .option('--print', 'Print the scaffold to stdout instead of writing it')
+    .action((opts: InitOptions) => {
+      const cwd = process.cwd();
+      if (opts.print) {
+        process.stdout.write(scaffoldManifest(cwd));
+        return;
+      }
+      const root = findDossierRoot(cwd) ?? cwd;
+      const result = initManifest(root, cwd);
+      if (result.status === 'created') {
+        console.log(
+          `Wrote ${result.path} — review and edit it; commented TODO stubs need a command.`
+        );
+        console.log('Verify with: ai-dossier cap list');
+        return;
+      }
+      console.log(`${result.path} already exists — left untouched.`);
+      const missing = missingGateCapabilities(loadOrFail());
+      if (missing.length > 0) {
+        console.log(
+          `It does not declare the batch member gate capabilities: ${missing.join(', ')}. Add them by hand (see docs/reference/capabilities.md).`
+        );
+      }
+    });
 
   cap
     .command('list')

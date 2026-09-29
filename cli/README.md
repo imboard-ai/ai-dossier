@@ -1668,12 +1668,26 @@ Library consumers: see [`@ai-dossier/sched`](../packages/sched/README.md).
 ## Capabilities (`cap`)
 
 ```bash
+ai-dossier cap init [--print]      # scaffold .dossier/automation/manifest.yaml from the detected project (idempotent)
 ai-dossier cap list [--json]       # inspect .dossier/automation/manifest.yaml
 ai-dossier cap run test.focused    # execute one capability
 ai-dossier cap run test.focused -- --grep auth   # extra args are shell-quoted and appended
 ai-dossier cap run test.focused --tail-bytes 4096   # bytes of output captured on a non-ok outcome (default 8192)
 ai-dossier cap run test.focused --envelope-file /tmp/env.json   # also write the envelope atomically to a file (or set $DOSSIER_CAP_ENVELOPE_FILE)
 ```
+
+`cap init` (#645) writes a commented starter manifest from the detected package manager and
+`package.json` scripts (`typecheck.run` ← `typecheck`/build script, `test.focused` and
+`test.full` ← `test`, plus `dependencies.install` and `lint.run`). Nothing detectable becomes
+a commented `TODO` stub, not a guessed command. It never overwrites: an existing manifest is
+left untouched (it only reports which member-gate ids are undeclared). `--print` emits the
+scaffold to stdout.
+
+`sched enqueue` **warns** (stderr, never blocks) when it creates a batch in a repo whose
+manifest does not declare `typecheck.run` and `test.focused` — otherwise every member lands
+with the gate silently skipped. The warning names the missing ids and points at `cap init`.
+Repos that deliberately declare nothing opt out with `--skip-gate-check` or
+`DOSSIER_SKIP_GATE_CHECK=1`.
 
 A repo declares its deterministic, recurring operations — tests, lint, build, deps
 install, worktree prep — in `.dossier/automation/manifest.yaml` so agents execute them
