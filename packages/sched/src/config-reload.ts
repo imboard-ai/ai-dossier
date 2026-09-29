@@ -25,6 +25,8 @@ export interface ConfigReloaderOptions {
   load: () => SchedConfig;
   /** Cheap change detector (`SchedStore.configFingerprint`). */
   fingerprint: () => string;
+  /** Fingerprint taken BEFORE `initial` was loaded, so an edit in between is not marked seen. */
+  initialFingerprint?: string;
   /** Startup-time overrides re-applied to every reloaded config (CLI flags, command auto-detect). */
   derive?: (config: SchedConfig) => SchedConfig;
   /** A changed config was adopted; `changes` is a human-readable dispatch diff (may be empty). */
@@ -63,7 +65,7 @@ export function dispatchDiff(before: SchedConfig, after: SchedConfig): string[] 
 export function createConfigReloader(opts: ConfigReloaderOptions): ConfigReloader {
   const derive = opts.derive ?? ((config: SchedConfig) => config);
   let active = opts.initial;
-  let seen = safeFingerprint(opts.fingerprint);
+  let seen = opts.initialFingerprint ?? safeFingerprint(opts.fingerprint);
   return {
     current(): SchedConfig {
       const fingerprint = safeFingerprint(opts.fingerprint);
@@ -71,13 +73,21 @@ export function createConfigReloader(opts: ConfigReloaderOptions): ConfigReloade
       // Mark seen BEFORE loading: an invalid edit reports once, then stays
       // quiet until the file changes again.
       seen = fingerprint;
+      let next: SchedConfig;
+      let changes: string[];
       try {
-        const next = derive(opts.load());
-        const changes = dispatchDiff(active, next);
-        active = next;
-        opts.onReload?.(next, changes);
+        next = derive(opts.load());
+        changes = dispatchDiff(active, next);
       } catch (err) {
         opts.onInvalid?.(err as Error);
+        return active;
+      }
+      active = next;
+      // Outside the try: a throwing observer must not read as "invalid config".
+      try {
+        opts.onReload?.(next, changes);
+      } catch {
+        // observers are best-effort
       }
       return active;
     },

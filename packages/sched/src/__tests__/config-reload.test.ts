@@ -109,6 +109,43 @@ describe('createConfigReloader (#883)', () => {
     expect(midModel(next)).toBe('sonnet');
   });
 
+  it('a broken user config does not block a valid project reload, and is reported by file', () => {
+    const messages: string[] = [];
+    const { reloader, onInvalid } = make({
+      load: () => store.loadConfigStrict((m) => messages.push(m)),
+    });
+    fs.writeFileSync(path.join(dir, 'user.json'), '{ nope');
+    writeConfig('sonnet');
+    expect(midModel(reloader.current())).toBe('sonnet');
+    expect(onInvalid).not.toHaveBeenCalled();
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain(path.join(dir, 'user.json'));
+  });
+
+  it('a throwing onReload observer does not read as an invalid config', () => {
+    const { reloader, onInvalid } = make({
+      onReload: () => {
+        throw new Error('journal full');
+      },
+    });
+    writeConfig('sonnet');
+    expect(midModel(reloader.current())).toBe('sonnet');
+    expect(onInvalid).not.toHaveBeenCalled();
+  });
+
+  it('an edit made between the initial load and the reloader is not marked seen', () => {
+    const before = store.configFingerprint();
+    const initial = store.loadConfigStrict();
+    writeConfig('sonnet');
+    const reloader = createConfigReloader({
+      initial,
+      initialFingerprint: before,
+      load: () => store.loadConfigStrict(),
+      fingerprint: () => store.configFingerprint(),
+    });
+    expect(midModel(reloader.current())).toBe('sonnet');
+  });
+
   it('a user-level profile edit reloads too', () => {
     const { reloader } = make();
     fs.writeFileSync(
@@ -132,12 +169,11 @@ describe('SchedStore.loadConfigStrict (#883)', () => {
     expect(() => store.loadConfigStrict()).toThrow();
   });
 
-  it('throws on unreadable user profiles', () => {
+  it('tolerates unreadable user profiles, reporting through the callback', () => {
     fs.writeFileSync(path.join(dir, 'user.json'), '{ nope');
-    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
-    expect(() => store.loadConfigStrict()).toThrow();
-    store.loadConfig();
-    err.mockRestore();
+    const seen: string[] = [];
+    expect(store.loadConfigStrict((m) => seen.push(m)).max_slots).toBe(2);
+    expect(seen).toHaveLength(1);
   });
 });
 

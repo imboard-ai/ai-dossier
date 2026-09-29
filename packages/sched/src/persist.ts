@@ -471,8 +471,11 @@ export class SchedStore {
    * engine's hot reload uses it so a bad edit keeps the last good config
    * instead of silently reverting every setting to built-in defaults.
    */
-  loadConfigStrict(): SchedConfig {
-    const userProfiles = this.loadUserProfiles(true);
+  loadConfigStrict(onUserConfigError?: (message: string) => void): SchedConfig {
+    // A broken USER config is tolerated exactly as at startup (its profiles
+    // are ignored) so it can never block a valid project-config reload; the
+    // caller is told, naming the file.
+    const userProfiles = this.loadUserProfiles(onUserConfigError);
     if (!fs.existsSync(this.configPath)) {
       return mergeDispatchProfiles({ max_slots: DEFAULT_MAX_SLOTS }, userProfiles);
     }
@@ -546,7 +549,7 @@ export class SchedStore {
     writeAtomic(this.configPath, `${JSON.stringify(file, null, 2)}\n`);
   }
 
-  private loadUserProfiles(strict = false): Record<string, DispatchProfile> {
+  private loadUserProfiles(onError?: (message: string) => void): Record<string, DispatchProfile> {
     if (!fs.existsSync(this.userConfigPath)) return {};
     try {
       const raw: unknown = JSON.parse(fs.readFileSync(this.userConfigPath, 'utf-8'));
@@ -554,7 +557,12 @@ export class SchedStore {
       if (userConfig.dispatch_profiles === undefined) return {};
       return validateDispatchProfiles('dispatch_profiles', userConfig.dispatch_profiles);
     } catch (err) {
-      if (strict) throw err;
+      if (onError) {
+        onError(
+          `user config ${this.userConfigPath} has unreadable dispatch_profiles (${(err as Error).message}) — ignoring user profiles`
+        );
+        return {};
+      }
       console.error(
         `⚠ User config ${this.userConfigPath} has unreadable dispatch_profiles (${(err as Error).message}) — ignoring user profiles; fix the file and re-run`
       );

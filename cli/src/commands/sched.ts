@@ -2456,7 +2456,8 @@ function registerStartSubcommand(cmd: Command): void {
   cmd
     .command('start')
     .description(
-      'Run the dispatch engine: spawn agents, verify completion, escalate stalls, watch parked PRs, tear down merged worktrees, dispatch report agents (Ctrl-C stops the engine; agents keep running)'
+      'Run the dispatch engine: spawn agents, verify completion, escalate stalls, watch parked PRs, tear down merged worktrees, dispatch report agents (Ctrl-C stops the engine; agents keep running). ' +
+        'Config edits (config.json, user dispatch_profiles) are re-read every tick (#883); ONLY these are startup-only: the tick interval, --auto-upgrade / auto_upgrade, and the dispatch.tiers auto-detect warning'
     )
     .option(
       '--interval <seconds>',
@@ -2492,6 +2493,7 @@ function registerStartSubcommand(cmd: Command): void {
       process.once('exit', releaseLease);
       try {
         let config: SchedConfig;
+        const startFingerprint = store.configFingerprint();
         try {
           config = store.loadConfig();
         } catch (err) {
@@ -2560,9 +2562,15 @@ function registerStartSubcommand(cmd: Command): void {
             : withInterval;
         };
         const engineJournal = new Journal(store.dir);
+        let tickConfig: SchedConfig = engineConfig;
         const configReloader = createConfigReloader({
           initial: engineConfig,
-          load: () => store.loadConfigStrict(),
+          initialFingerprint: startFingerprint,
+          load: () =>
+            store.loadConfigStrict((message) => {
+              engineJournal.append({ event: 'config-reload-failed', detail: message }, new Date());
+              process.stderr.write(`⚠ sched config reload: ${message}\n`);
+            }),
           fingerprint: () => store.configFingerprint(),
           derive: deriveEngineConfig,
           onReload: (_next, changes) => {
@@ -2670,7 +2678,8 @@ function registerStartSubcommand(cmd: Command): void {
                 `⚠ sched batch warm-up: '${file} ${args.join(' ')}' failed: ${err.message}\n`
               ),
           }),
-          runBatchSuite: createBatchSuiteRunner(() => configReloader.current()),
+          // One config per tick: the suite runner reads the snapshot the tick started with.
+          runBatchSuite: createBatchSuiteRunner(() => tickConfig),
           runBatchCapability: createBatchCapabilityRunner(),
         };
 
@@ -2743,7 +2752,10 @@ function registerStartSubcommand(cmd: Command): void {
         });
         await runLoop(
           deps,
-          () => configReloader.current(),
+          () => {
+            tickConfig = configReloader.current();
+            return tickConfig;
+          },
           () => stopping,
           (result) => {
             if (!opts.json) console.log(`✓ [${new Date().toISOString()}] ${describe(result)}`);

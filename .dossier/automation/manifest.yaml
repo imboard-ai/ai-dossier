@@ -24,7 +24,7 @@ capabilities:
     # timeout as terminal rather than guessing with a fallback command.
     timeout_ms: 600000
     assumptions:
-      - file-exists: Makefile
+      - file-exists: scripts/test-report.mjs
       - tool-version: node>=20
 
   # --- The batch incremental member gate (#594 dogfood) ------------------

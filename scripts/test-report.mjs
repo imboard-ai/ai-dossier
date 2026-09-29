@@ -191,7 +191,8 @@ function runSuite({ label, dir, args }, root, tmp, index) {
 }
 
 async function main() {
-  const root = fileURLToPath(new URL('..', import.meta.url));
+  // vitest reports realpaths; a symlinked checkout would otherwise relativize to `../…`.
+  const root = realpathSync(fileURLToPath(new URL('..', import.meta.url)));
   const tmp = mkdtempSync(join(tmpdir(), 'test-report-'));
   try {
     const onlyArg = process.argv.find((a) => a.startsWith('--only='));
