@@ -29,6 +29,7 @@
 import * as path from 'node:path';
 import { appendJsonl, readJsonl } from '@ai-dossier/sched';
 import { collectLedger, defaultLedgerPaths, type LedgerPaths, rowTotal } from './ledger';
+import { rowKey } from './store';
 import type { PrepBasis, UsageRow } from './types';
 import { forEachLine, safeReaddir } from './util';
 
@@ -148,14 +149,21 @@ export function prepWindows(
       const otherMs = Date.parse(other.ts);
       if (other.session_id === r.session_id && otherMs < toMs) prevMs = Math.max(prevMs, otherMs);
     }
-    // Earliest prep run after the previous enqueue (and not after this one).
+    // Earliest prep run after the previous enqueue (and not after this one). A marker older than
+    // the lookback cap is treated as no marker: a prep run days ago in the same long-lived
+    // session is not evidence this batch's prep started then.
+    const capMs = toMs - MAX_PREP_LOOKBACK_MS;
     let markerMs = Number.POSITIVE_INFINITY;
     for (const m of markers) {
-      if (m.session_id === r.session_id && m.startMs > prevMs && m.startMs <= toMs) {
+      if (
+        m.session_id === r.session_id &&
+        m.startMs > prevMs &&
+        m.startMs >= capMs &&
+        m.startMs <= toMs
+      ) {
         markerMs = Math.min(markerMs, m.startMs);
       }
     }
-    const capMs = toMs - MAX_PREP_LOOKBACK_MS;
     let fromMs: number;
     let basis: PrepBasis;
     if (Number.isFinite(markerMs)) {
@@ -183,8 +191,8 @@ export function prepWindows(
  * Stamp `batch:<id>` onto rows of a prep session (or its subagents) inside a
  * window. Rows already attributed to a dispatch keep that attribution. Batches
  * created by one enqueue share an identical window; its rows are dealt across
- * them in proportion to their weights (member counts), largest deficit first —
- * each row goes whole to one batch, so per-batch sums equal the window total.
+ * them in proportion to their weights (member counts) by a hash of the row's stable
+ * key — each row goes whole to one batch, so per-batch sums equal the window total.
  */
 export function applyPrepWindows(rows: UsageRow[], windows: readonly PrepWindow[]): void {
   if (windows.length === 0) return;
@@ -195,43 +203,39 @@ export function applyPrepWindows(rows: UsageRow[], windows: readonly PrepWindow[
     if (list) list.push(w);
     else groups.set(key, [w]);
   }
-  // Time order makes the deal deterministic whatever order the collectors emitted.
-  const candidates = rows.filter((r) => r.unit === null);
-  candidates.sort((a, b) => a.ts.localeCompare(b.ts));
-  const dealt = new Map<string, { total: number; per: Map<string, number> }>();
   const byWindow = [...groups.values()];
-  for (const row of candidates) {
+  for (const row of rows) {
+    if (row.unit !== null) continue;
     const root = row.session_id.split('/')[0];
     const ts = Date.parse(row.ts);
     const hit = byWindow.find(
       (g) => g[0].session_id === root && ts > g[0].fromMs && ts <= g[0].toMs
     );
     if (!hit) continue;
-    let winner = hit[0];
-    if (hit.length > 1) {
-      const key = `${hit[0].session_id}\u0000${hit[0].fromMs}\u0000${hit[0].toMs}`;
-      const state = dealt.get(key) ?? { total: 0, per: new Map<string, number>() };
-      dealt.set(key, state);
-      const size = Math.max(rowTotal(row), 1);
-      const weightSum = hit.reduce((n, w) => n + w.weight, 0);
-      let best = Number.NEGATIVE_INFINITY;
-      for (const w of [...hit].sort((a, b) => a.batch.localeCompare(b.batch))) {
-        const deficit =
-          ((state.total + size) * w.weight) / weightSum - (state.per.get(w.batch) ?? 0);
-        if (deficit > best) {
-          best = deficit;
-          winner = w;
-        }
-      }
-      state.total += size;
-      state.per.set(winner.batch, (state.per.get(winner.batch) ?? 0) + size);
-      row.prep_split = hit.length;
-    }
+    const winner = hit.length > 1 ? pickWeighted(hit, rowKey(row)) : hit[0];
+    if (hit.length > 1) row.prep_split = hit.length;
     row.unit = `batch:${winner.batch}`;
     row.batch = winner.batch;
     row.role = 'prep';
     row.prep_basis = winner.basis;
   }
+}
+
+/**
+ * Pick a window by weight from a hash of the row's stable key — the same row goes to
+ * the same batch in every view (`usage`, `sched stats`, a partial collection), and the
+ * shares converge on the weights. Batch order is fixed so the pick is reproducible.
+ */
+function pickWeighted(windows: readonly PrepWindow[], key: string): PrepWindow {
+  const ordered = [...windows].sort((a, b) => a.batch.localeCompare(b.batch));
+  const total = ordered.reduce((n, w) => n + w.weight, 0);
+  const point = (Number.parseInt(key.slice(0, 8), 16) / 0x1_0000_0000) * total;
+  let acc = 0;
+  for (const w of ordered) {
+    acc += w.weight;
+    if (point < acc) return w;
+  }
+  return ordered[ordered.length - 1];
 }
 
 /** Every project's records under `schedRoot`, as windows (markers read from `runsLog`). */
@@ -292,9 +296,12 @@ export function batchPrepTokens(
   for (const [batch, set] of bases) {
     (out.get(batch) as BatchPrepTokens).basis = set.size === 1 ? [...set][0] : 'mixed';
   }
+  // Only the wanted batches' windows (siblings share theirs) bound the scan — not every
+  // prep record ever written, which would read the whole transcript history.
+  const wantedWindows = windows.filter((w) => !wanted || wanted.has(w.batch));
   const { rows } = collectLedger({
-    sinceMs: Math.min(...windows.map((w) => w.fromMs)),
-    untilMs: Math.max(...windows.map((w) => w.toMs)) + 1,
+    sinceMs: Math.min(...wantedWindows.map((w) => w.fromMs)),
+    untilMs: Math.max(...wantedWindows.map((w) => w.toMs)) + 1,
     paths,
   });
   for (const row of rows) {

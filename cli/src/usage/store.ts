@@ -73,15 +73,21 @@ export function limitKey(l: LimitEvent): string {
 export interface HostData {
   rows: Map<string, UsageRow>;
   limits: Map<string, LimitEvent>;
+  /**
+   * key → when the owning host last wrote that record (ISO). A merge keeps the
+   * newer copy, so a stale relay of a host's rows can never overwrite the host's
+   * own fresher attribution. Legacy lines without one read as the oldest.
+   */
+  at: Map<string, string>;
 }
 
 export function emptyHostData(): HostData {
-  return { rows: new Map(), limits: new Map() };
+  return { rows: new Map(), limits: new Map(), at: new Map() };
 }
 
 type Line =
-  | { k: 'row'; key: string; row: UsageRow }
-  | { k: 'limit'; key: string; limit: LimitEvent }
+  | { k: 'row'; key: string; row: UsageRow; at?: string }
+  | { k: 'limit'; key: string; limit: LimitEvent; at?: string }
   | { k: 'header'; version: number; host: string; exported_at: string };
 
 function isRow(v: unknown): v is UsageRow {
@@ -127,14 +133,24 @@ export class Parser {
       this.skipped++;
       return;
     }
+    if (!rec || typeof rec !== 'object') {
+      this.skipped++;
+      return;
+    }
     if (rec.k === 'header') {
       this.header = { version: rec.version, host: rec.host };
       return;
     }
     if (rec.k === 'row' && isRow(rec.row)) {
-      this.data(rec.row.host).rows.set(rowKey(rec.row), rec.row);
+      const d = this.data(rec.row.host);
+      const key = rowKey(rec.row);
+      d.rows.set(key, rec.row);
+      if (typeof rec.at === 'string') d.at.set(key, rec.at);
     } else if (rec.k === 'limit' && isLimit(rec.limit)) {
-      this.data(rec.limit.host).limits.set(limitKey(rec.limit), rec.limit);
+      const d = this.data(rec.limit.host);
+      const key = limitKey(rec.limit);
+      d.limits.set(key, rec.limit);
+      if (typeof rec.at === 'string') d.at.set(key, rec.at);
     } else {
       this.skipped++;
     }
@@ -179,17 +195,61 @@ function serialize(data: HostData): string {
     (a, b) => a[1].ts.localeCompare(b[1].ts) || a[0].localeCompare(b[0])
   );
   const out: string[] = [];
-  for (const [key, row] of rows) out.push(JSON.stringify({ k: 'row', key, row }));
-  for (const [key, limit] of limits) out.push(JSON.stringify({ k: 'limit', key, limit }));
+  for (const [key, row] of rows)
+    out.push(JSON.stringify({ k: 'row', key, row, at: data.at.get(key) }));
+  for (const [key, limit] of limits) {
+    out.push(JSON.stringify({ k: 'limit', key, limit, at: data.at.get(key) }));
+  }
   return out.length ? `${out.join('\n')}\n` : '';
 }
 
-/** Atomic rewrite (tmp + rename) so a concurrent reader never sees a torn file. */
+/** Atomic rewrite (tmp + fsync + rename) so a concurrent reader never sees a torn file. */
 export function writeHostFile(file: string, data: HostData): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmp, serialize(data), { mode: 0o600 });
+  const fd = fs.openSync(tmp, 'w', 0o600);
+  try {
+    fs.writeSync(fd, serialize(data));
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
   fs.renameSync(tmp, file);
+}
+
+const LOCK_WAIT_MS = 10_000;
+const LOCK_STALE_MS = 60_000;
+
+/**
+ * Serialize read-merge-write cycles on one host file across processes (a cron
+ * `usage sync` racing an interactive one, or a sync racing an `import`): the
+ * rename keeps readers safe, the lock keeps two writers from losing each other's rows.
+ */
+export function withHostLock<T>(file: string, fn: () => T): T {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const lock = `${file}.lock`;
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  for (;;) {
+    try {
+      fs.closeSync(fs.openSync(lock, 'wx'));
+      break;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      try {
+        if (Date.now() - fs.statSync(lock).mtimeMs > LOCK_STALE_MS)
+          fs.rmSync(lock, { force: true });
+      } catch {
+        // released between the two calls
+      }
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${lock}`);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    fs.rmSync(lock, { force: true });
+  }
 }
 
 export interface MergeStats {
@@ -198,18 +258,27 @@ export interface MergeStats {
   unchanged: number;
 }
 
-/** Upsert `incoming` into `target` (incoming wins). */
+/** Upsert `incoming` into `target`: the copy with the newer `at` wins; equal content is unchanged. */
 export function mergeHostData(target: HostData, incoming: HostData): MergeStats {
   const stats: MergeStats = { added: 0, updated: 0, unchanged: 0 };
   const upsert = <T>(into: Map<string, T>, from: Map<string, T>) => {
     for (const [key, value] of from) {
       const prior = into.get(key);
-      if (prior === undefined) stats.added++;
-      else if (JSON.stringify(prior) === JSON.stringify(value)) stats.unchanged++;
-      else stats.updated++;
-      if (prior === undefined || JSON.stringify(prior) !== JSON.stringify(value)) {
-        into.set(key, value);
+      const inAt = incoming.at.get(key) ?? '';
+      if (prior === undefined) {
+        stats.added++;
+      } else if (JSON.stringify(prior) === JSON.stringify(value)) {
+        stats.unchanged++;
+        if (inAt > (target.at.get(key) ?? '')) target.at.set(key, inAt);
+        continue;
+      } else if (inAt > (target.at.get(key) ?? '')) {
+        stats.updated++;
+      } else {
+        stats.unchanged++; // a stale relay of a record we already hold newer
+        continue;
       }
+      into.set(key, value);
+      target.at.set(key, inAt);
     }
   };
   upsert(target.rows, incoming.rows);
@@ -225,13 +294,26 @@ export function persistLocal(
   limits: readonly LimitEvent[]
 ): MergeStats & { total: number } {
   const file = hostFile(dir, host);
-  const data = readHostFile(file);
-  const fresh = emptyHostData();
-  for (const r of rows) if (r.host === host) fresh.rows.set(rowKey(r), r);
-  for (const l of limits) if (l.host === host) fresh.limits.set(limitKey(l), l);
-  const stats = mergeHostData(data, fresh);
-  if (stats.added > 0 || stats.updated > 0 || !fs.existsSync(file)) writeHostFile(file, data);
-  return { ...stats, total: data.rows.size };
+  return withHostLock(file, () => {
+    const data = readHostFile(file);
+    const at = new Date().toISOString();
+    const fresh = emptyHostData();
+    for (const r of rows) {
+      if (r.host !== host) continue;
+      const key = rowKey(r);
+      fresh.rows.set(key, r);
+      fresh.at.set(key, at);
+    }
+    for (const l of limits) {
+      if (l.host !== host) continue;
+      const key = limitKey(l);
+      fresh.limits.set(key, l);
+      fresh.at.set(key, at);
+    }
+    const stats = mergeHostData(data, fresh);
+    if (stats.added > 0 || stats.updated > 0 || !fs.existsSync(file)) writeHostFile(file, data);
+    return { ...stats, total: data.rows.size };
+  });
 }
 
 /** Newest persisted row time for a host, or null — the incremental-sync cursor. */
@@ -267,12 +349,12 @@ export function buildBundle(
     const data = readHostFile(hostFile(dir, host));
     for (const [key, row] of data.rows) {
       if (Date.parse(row.ts) < sinceMs) continue;
-      out.push(JSON.stringify({ k: 'row', key, row }));
+      out.push(JSON.stringify({ k: 'row', key, row, at: data.at.get(key) }));
       rows++;
     }
     for (const [key, limit] of data.limits) {
       if (Date.parse(limit.ts) < sinceMs) continue;
-      out.push(JSON.stringify({ k: 'limit', key, limit }));
+      out.push(JSON.stringify({ k: 'limit', key, limit, at: data.at.get(key) }));
     }
   }
   return { text: `${out.join('\n')}\n`, rows };
@@ -312,9 +394,12 @@ export function importBundle(dir: string, text: string, localHost: string): Impo
       continue;
     }
     const file = hostFile(dir, host);
-    const data = readHostFile(file);
-    const stats = mergeHostData(data, incoming);
-    if (stats.added > 0 || stats.updated > 0) writeHostFile(file, data);
+    const stats = withHostLock(file, () => {
+      const data = readHostFile(file);
+      const merged = mergeHostData(data, incoming);
+      if (merged.added > 0 || merged.updated > 0) writeHostFile(file, data);
+      return merged;
+    });
     result.added += stats.added;
     result.updated += stats.updated;
     result.unchanged += stats.unchanged;

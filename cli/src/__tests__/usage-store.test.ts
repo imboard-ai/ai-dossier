@@ -149,6 +149,33 @@ describe('bundle export / import', () => {
     ).toThrow(/newer/);
   });
 
+  it('one null / scalar line neither throws nor poisons the file', () => {
+    const dir = tmpDir();
+    const good = JSON.stringify({ k: 'row', key: 'k', row: row({ host: 'wls' }) });
+    const r = importBundle(dir, `null\n42\n"x"\n${good}\n`, 'hcc');
+    expect(r).toMatchObject({ added: 1, skipped: 3 });
+    fs.appendFileSync(hostFile(dir, 'wls'), 'null\n');
+    expect(readHostFile(hostFile(dir, 'wls')).rows.size).toBe(1);
+  });
+
+  it('a stale relay never overwrites the owner-fresher record', () => {
+    const owner = tmpDir();
+    const relay = tmpDir();
+    persistLocal(owner, 'wls', [row({ host: 'wls' })], []);
+    const stale = buildBundle(owner, 'wls', null, 0).text;
+    importBundle(relay, stale, 'hcc');
+    // wls refines its attribution later...
+    persistLocal(owner, 'wls', [row({ host: 'wls', issue: 9, unit: 'issue:9' })], []);
+    const fresh = buildBundle(owner, 'wls', null, 0).text;
+    const consumer = tmpDir();
+    importBundle(consumer, fresh, 'hcc2');
+    // ...then the consumer also receives the STALE copy via a relay: it must not win.
+    expect(importBundle(consumer, stale, 'hcc2')).toMatchObject({ updated: 0 });
+    expect([...readHostFile(hostFile(consumer, 'wls')).rows.values()][0].issue).toBe(9);
+    // And the fresher copy does replace an older one.
+    expect(importBundle(relay, fresh, 'hcc')).toMatchObject({ updated: 1 });
+  });
+
   it('--since limits the exported rows', () => {
     const dir = tmpDir();
     persistLocal(dir, 'hcc', [row({}), row({ ts: '2026-09-29T11:00:00.000Z' })], []);
@@ -191,13 +218,54 @@ describe('syncWithRemotes (fake ssh between simulated hosts)', () => {
     }
   });
 
+  const fleet = () => {
+    const dirs: Record<string, string> = { wls: tmpDir(), hcc: tmpDir(), hcc2: tmpDir() };
+    for (const h of Object.keys(dirs)) {
+      persistLocal(dirs[h], h, [row({ host: h, session_id: `sess-${h}` })], []);
+    }
+    const down = new Set<string>();
+    const ssh: SshRunner = (host, script, input) => {
+      if (down.has(host)) return { status: 255, stdout: '', stderr: 'down' };
+      if (script.includes('usage export --all')) {
+        return { status: 0, stdout: buildBundle(dirs[host], host, null, 0).text, stderr: '' };
+      }
+      const res = importBundle(dirs[host], input ?? '', host);
+      return { status: 0, stdout: `${JSON.stringify(res)}\n`, stderr: '' };
+    };
+    return { dirs, down, ssh };
+  };
+  const countRows = (dir: string) =>
+    listHosts(dir).reduce((n, x) => n + readHostFile(hostFile(dir, x)).rows.size, 0);
+
+  it('a host that was down in run 1 still reaches every host in run 2 (push reaches back to the pull window)', () => {
+    const { dirs, down, ssh } = fleet();
+    down.add('hcc2');
+    const deps = { dir: dirs.wls, host: 'wls', nowMs: NOW, ssh };
+    syncWithRemotes({ hosts: ['hcc', 'hcc2'] }, deps); // cursors: hcc advances, hcc2 fails
+    down.clear();
+    // later run: hcc's cursor is recent, but hcc2's rows (older than it) must still get to hcc
+    syncWithRemotes({ hosts: ['hcc', 'hcc2'] }, { ...deps, nowMs: NOW + 3 * 86_400_000 });
+    for (const h of Object.keys(dirs)) expect(countRows(dirs[h])).toBe(3);
+  });
+
+  it('--no-pull does not advance the pull cursor', () => {
+    const { dirs, ssh } = fleet();
+    const deps = { dir: dirs.wls, host: 'wls', nowMs: NOW, ssh };
+    syncWithRemotes({ hosts: ['hcc'], pull: false }, deps);
+    expect(countRows(dirs.wls)).toBe(1); // nothing pulled
+    syncWithRemotes({ hosts: ['hcc'] }, { ...deps, nowMs: NOW + 86_400_000 });
+    expect(listHosts(dirs.wls)).toEqual(['hcc', 'wls']);
+    const state = JSON.parse(fs.readFileSync(path.join(dirs.wls, 'sync-state.json'), 'utf-8'));
+    expect(state.remotes.hcc.pull).toBeTruthy();
+  });
+
   it('reports an unreachable host without throwing and does not advance its cursor', () => {
     const dir = tmpDir();
     const ssh: SshRunner = () => ({ status: 255, stdout: '', stderr: 'ssh: connect timed out' });
     const [r] = syncWithRemotes({ hosts: ['hcc2'] }, { dir, host: 'wls', nowMs: NOW, ssh });
     expect(r.ok).toBe(false);
     expect(r.error).toContain('timed out');
-    expect(fs.readFileSync(path.join(dir, 'sync-state.json'), 'utf-8')).not.toContain('hcc2');
+    expect(fs.readFileSync(path.join(dir, 'sync-state.json'), 'utf-8')).not.toContain('"hcc2"');
     expect(syncWithRemotes({ hosts: ['bad host;rm'] }, { dir, host: 'wls', ssh })[0].error).toBe(
       'invalid host name'
     );

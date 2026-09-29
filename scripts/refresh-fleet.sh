@@ -570,6 +570,10 @@ if [ "$USAGE_SYNC" -eq 1 ]; then
     echo "    skip no remote hosts selected"
   else
     OTHERS_CSV=$(IFS=,; echo "${OTHERS[*]}")
+    # HOSTS was validated above; the CSV is interpolated into a shell command, so hold the line here too.
+    if [[ ! "$OTHERS_CSV" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}(,[A-Za-z0-9][A-Za-z0-9._-]{0,62})*$ ]]; then
+      echo "    FAIL invalid host list for usage sync: $OTHERS_CSV"; exit 2
+    fi
     out=$(bash -lc "$REMOTE_PRELUDE
 \"\$AD\" usage sync --hosts '$OTHERS_CSV'" 2>&1); rc=$?
     printf '%s\n' "$out" | sed 's/^/    /'

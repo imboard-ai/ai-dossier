@@ -243,6 +243,15 @@ describe('prep-start marker (#899)', () => {
     expect(late.fromMs).toBe(Date.parse('2026-09-29T10:30:00Z'));
   });
 
+  it('ignores a marker older than the lookback cap (a prep run days ago is not this batch)', () => {
+    const [w] = prepWindows(
+      [rec('2026-09-29T10:30:00Z', 'b-1')],
+      [{ session_id: SESSION, startMs: Date.parse('2026-09-27T09:00:00Z') }]
+    );
+    expect(w.basis).toBe('lookback-cap');
+    expect(w.fromMs).toBe(Date.parse('2026-09-29T10:30:00Z') - MAX_PREP_LOOKBACK_MS);
+  });
+
   it('excludes unrelated work before the prep started; labels the fallback when there is no marker', () => {
     const home = tmpDir();
     const schedRoot = path.join(home, 'sched');
@@ -311,11 +320,13 @@ describe('prep-start marker (#899)', () => {
     const a = out.get('b-1');
     const b = out.get('b-2');
     expect((a?.billable_tokens ?? 0) + (b?.billable_tokens ?? 0)).toBe(12 * 135);
-    expect(a?.messages).toBe(9);
-    expect(b?.messages).toBe(3);
+    expect((a?.messages ?? 0) + (b?.messages ?? 0)).toBe(12);
+    expect(a?.messages).toBeGreaterThan(b?.messages ?? 99); // 3:1 weights
     expect(a?.split && b?.split).toBe(true);
     // Asking for one batch must not hand it its sibling's share.
-    expect(batchPrepTokens(schedDir, ['b-2'], paths).get('b-2')?.billable_tokens).toBe(3 * 135);
+    expect(batchPrepTokens(schedDir, ['b-2'], paths).get('b-2')?.billable_tokens).toBe(
+      (b?.messages ?? 0) * 135
+    );
   });
 
   it('applyPrepWindows deals a shared window by weight and leaves single-batch rows whole', () => {
@@ -327,10 +338,16 @@ describe('prep-start marker (#899)', () => {
     applyPrepWindows(rows, windows);
     const per = new Map<string, number>();
     for (const r of rows) per.set(r.batch ?? '-', (per.get(r.batch ?? '-') ?? 0) + 1);
-    expect([...per.entries()].sort()).toEqual([
-      ['b-1', 3],
-      ['b-2', 3],
-    ]);
+    expect([...per.values()].reduce((n, v) => n + v, 0)).toBe(6);
+    expect([...per.keys()].every((k) => k === 'b-1' || k === 'b-2')).toBe(true);
+    // Deterministic and order-independent: the same rows split the same way in any order.
+    const again = [...rows]
+      .reverse()
+      .map((r) => ({ ...r, unit: null, batch: null, role: undefined }));
+    applyPrepWindows(again, windows);
+    expect(new Map(again.map((r) => [r.ts, r.batch]))).toEqual(
+      new Map(rows.map((r) => [r.ts, r.batch]))
+    );
     expect(rows.every((r) => r.prep_split === 2 && r.role === 'prep')).toBe(true);
   });
 });

@@ -98,11 +98,14 @@ export interface SshResult {
 }
 export type SshRunner = (host: string, script: string, input?: string) => SshResult;
 
+/** A remote that hangs mid-transfer must not wedge a fleet sync (ConnectTimeout only covers connecting). */
+const SSH_TIMEOUT_MS = 10 * 60 * 1000;
+
 export const defaultSsh: SshRunner = (host, script, input) => {
   const r = spawnSync(
     'ssh',
     ['-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', host, `${REMOTE_PRELUDE}\n${script}`],
-    { input, encoding: 'utf-8', maxBuffer: 1024 * 1024 * 1024 }
+    { input, encoding: 'utf-8', maxBuffer: 1024 * 1024 * 1024, timeout: SSH_TIMEOUT_MS }
   );
   return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? r.error?.message ?? '' };
 };
@@ -116,14 +119,19 @@ export interface RemoteSyncResult {
   push?: ImportResult | null;
 }
 
+/** Per remote: the last successful pull and push, tracked apart so one direction never skips the other's backlog. */
 interface SyncState {
-  remotes: Record<string, string>;
+  remotes: Record<string, { pull?: string; push?: string }>;
 }
 
 function readState(dir: string): SyncState {
   try {
     const s = JSON.parse(fs.readFileSync(path.join(dir, 'sync-state.json'), 'utf-8')) as SyncState;
-    return s && typeof s.remotes === 'object' && s.remotes ? s : { remotes: {} };
+    if (!s || typeof s.remotes !== 'object' || !s.remotes) return { remotes: {} };
+    // Legacy/garbled entries reset to a full initial window rather than being trusted.
+    for (const [h, v] of Object.entries(s.remotes))
+      if (!v || typeof v !== 'object') delete s.remotes[h];
+    return s;
   } catch {
     return { remotes: {} };
   }
@@ -131,7 +139,10 @@ function readState(dir: string): SyncState {
 
 function writeState(dir: string, state: SyncState): void {
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, 'sync-state.json'), `${JSON.stringify(state, null, 2)}\n`);
+  const file = path.join(dir, 'sync-state.json');
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`);
+  fs.renameSync(tmp, file);
 }
 
 export interface SyncOptions {
@@ -153,32 +164,29 @@ export function syncWithRemotes(
   const ssh = deps.ssh ?? defaultSsh;
   const state = readState(dir);
   const results = new Map<string, RemoteSyncResult>();
-  const sinceOf = new Map<string, number>();
+  const initial = nowMs - DEFAULT_INITIAL_SYNC_MS;
+  const cursorOf = (host: string, dir_: 'pull' | 'push'): number => {
+    if (opts.sinceMs !== undefined) return opts.sinceMs;
+    const iso = state.remotes[host]?.[dir_];
+    const t = iso ? Date.parse(iso) : Number.NaN;
+    return Number.isNaN(t) ? initial : t - CURSOR_OVERLAP_MS;
+  };
   const tail = (t: string) => t.trim().split('\n').slice(-2).join(' | ');
   const valid: string[] = [];
   for (const host of opts.hosts) {
-    if (!isValidHostId(host)) {
-      results.set(host, { host, ok: false, error: 'invalid host name' });
-      continue;
-    }
-    const last = state.remotes[host] ? Date.parse(state.remotes[host]) : Number.NaN;
-    sinceOf.set(
-      host,
-      opts.sinceMs ??
-        (Number.isNaN(last) ? nowMs - DEFAULT_INITIAL_SYNC_MS : last - CURSOR_OVERLAP_MS)
-    );
-    valid.push(host);
+    if (isValidHostId(host)) valid.push(host);
+    else results.set(host, { host, ok: false, error: 'invalid host name' });
   }
 
   // Pass 1 — pull from EVERY host first, so pass 2 pushes each host what all the others hold.
+  const pulledSince: number[] = [];
+  const pullOk = new Set<string>();
   for (const host of valid) {
     const res: RemoteSyncResult = { host, ok: true };
     results.set(host, res);
     if (opts.pull === false) continue;
-    const out = ssh(
-      host,
-      `"$AD" usage export --all --since '${new Date(sinceOf.get(host) as number).toISOString()}'`
-    );
+    const since = cursorOf(host, 'pull');
+    const out = ssh(host, `"$AD" usage export --all --since '${new Date(since).toISOString()}'`);
     if (out.status !== 0) {
       Object.assign(res, {
         ok: false,
@@ -188,20 +196,26 @@ export function syncWithRemotes(
     }
     try {
       res.pulled = importBundle(dir, out.stdout, local);
+      pulledSince.push(since);
+      pullOk.add(host);
     } catch (err) {
       Object.assign(res, { ok: false, error: `pull import failed: ${(err as Error).message}` });
     }
   }
 
-  // Pass 2 — push everything except the target's own rows.
+  // Pass 2 — push everything except the target's own rows. Rows pulled this run may be OLDER
+  // than the target's push cursor (a host that was down, or a first pull), so reach back to the
+  // earliest pull window as well — otherwise those rows would never reach the other hosts.
+  const pushOk = new Set<string>();
   for (const host of valid) {
     const res = results.get(host) as RemoteSyncResult;
     if (!res.ok || opts.push === false) continue;
+    const since = Math.min(cursorOf(host, 'push'), ...pulledSince);
     const bundle = buildBundle(
       dir,
       local,
       listHosts(dir).filter((h) => h !== host),
-      sinceOf.get(host) as number
+      since
     );
     res.pushed_rows = bundle.rows;
     const out = ssh(host, '"$AD" usage import - --json', bundle.text);
@@ -212,6 +226,7 @@ export function syncWithRemotes(
       });
       continue;
     }
+    pushOk.add(host);
     try {
       res.push = JSON.parse(out.stdout.trim().split('\n').pop() ?? 'null') as ImportResult;
     } catch {
@@ -219,8 +234,13 @@ export function syncWithRemotes(
     }
   }
 
+  // Advance only the direction that actually ran and succeeded.
+  const stamp = new Date(nowMs).toISOString();
   for (const host of valid) {
-    if (results.get(host)?.ok) state.remotes[host] = new Date(nowMs).toISOString();
+    const entry = state.remotes[host] ?? {};
+    if (pullOk.has(host)) entry.pull = stamp;
+    if (pushOk.has(host)) entry.push = stamp;
+    if (entry.pull || entry.push) state.remotes[host] = entry;
   }
   writeState(dir, state);
   return opts.hosts.map((h) => results.get(h) as RemoteSyncResult);
