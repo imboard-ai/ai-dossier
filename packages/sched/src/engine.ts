@@ -3523,6 +3523,9 @@ export async function runLoop(
   const resolveConfig = typeof configSource === 'function' ? configSource : () => configSource;
   const interval = resolveDispatch(resolveConfig()).reconcileIntervalMs;
   while (!shouldStop()) {
+    // #945: heartbeat every tick, before the work — a wedged tick then shows as
+    // a stale `updated_at` on a live pid, and an idle one as a fresh one.
+    deps.store.touchEngineLease?.(deps.now());
     try {
       const result = tick(deps, resolveConfig());
       onTick?.(result);

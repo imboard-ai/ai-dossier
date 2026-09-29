@@ -349,6 +349,15 @@ function stopRemedy(unit: string): string {
     : `sched stop --issue ${unit.slice('issue:'.length)}`;
 }
 
+/** Queue entries not yet terminal/satisfied, and slots mid-work — "is anything waiting on an engine?" (#776, #945). */
+export function countUnfinishedWork(state: SchedState): { unfinished: number; liveSlots: number } {
+  const unfinished = state.entries.filter(
+    (e) => !TERMINAL_ISSUE_STATUSES.has(e.status) && !SATISFIED_ISSUE_STATUSES.has(e.status)
+  ).length;
+  const liveSlots = state.slots.filter((s) => LIVE_SLOT_STATUSES.has(s.status)).length;
+  return { unfinished, liveSlots };
+}
+
 /**
  * #776: the health warnings — pure over state + lease + clock, so every
  * warning is unit-testable without a live engine.
@@ -380,10 +389,7 @@ export function buildStatusWarnings(
     }
   }
 
-  const unfinished = state.entries.filter(
-    (e) => !TERMINAL_ISSUE_STATUSES.has(e.status) && !SATISFIED_ISSUE_STATUSES.has(e.status)
-  ).length;
-  const liveSlots = state.slots.filter((s) => LIVE_SLOT_STATUSES.has(s.status)).length;
+  const { unfinished, liveSlots } = countUnfinishedWork(state);
   if (engineLease !== null && !engineLease.alive && (unfinished > 0 || liveSlots > 0)) {
     warnings.push({
       kind: 'stale-engine-lease',

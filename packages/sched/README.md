@@ -423,6 +423,34 @@ when a tick does nothing (`nothing to do`) — a log that stops growing while
 the failure mode #679 fixed: the engine exited cleanly after its first tick because its
 inter-tick sleep handles were unref'd.
 
+### Engine exit logging, heartbeat and crash alerts (#945)
+
+The engine must never die silently. Every exit the process can observe writes a final
+`engine-exit` journal line with its `reason`:
+
+| reason | cause | lease |
+|---|---|---|
+| `signal:SIGTERM` / `SIGHUP` / `SIGINT` | graceful stop: finish the tick, agents keep running (a second signal exits at once) | released |
+| `normal` | the loop returned after a stop request | released |
+| `uncaught-exception` / `unhandled-rejection` | crash, stack in `detail`, exit code 70 | **kept** as the crash marker |
+| `process-exit` | a bare `process.exit()` nothing else logged | released |
+| *(no line)* | SIGKILL / OOM killer — unobservable | left stale |
+
+The lease's `updated_at` is a heartbeat rewritten every tick (`sched status` shows it). Two
+visible alerts, both journaled and printed to stderr, and posted as a comment when a
+tracking issue is given (`--alert-issue <n>` or `$DOSSIER_SCHED_ALERT_ISSUE`):
+
+- `engine-restarted-after-crash`: a `sched start` reclaimed a lease whose holder died without
+  releasing it (crash, SIGKILL, OOM).
+- `stale-engine-lease-alert`: the lease holder is dead while work is unfinished. Once per
+  stale episode; raised by a watcher — `sched status --alert` (cron-able) today.
+
+**#920's silent exit:** the log ended in `nothing to do`, which is just an idle tick's line.
+Only SIGINT had a handler, so a SIGTERM/SIGHUP (another session's restart, a closing
+terminal) killed the engine with no line and no lease release. That is now logged; if the
+2026-09-29 cause was SIGKILL/OOM, the missing `engine-exit` plus the stale lease is now the
+documented signature (`journalctl -k` for the OOM window).
+
 ### Zombie-run fencing (#504)
 
 The ladder redispatches the SAME run, so a takeover inherits the run id and its milestone

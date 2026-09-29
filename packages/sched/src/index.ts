@@ -139,6 +139,18 @@ export {
 export { findDossierRoot, projectRootFor, worktreesDirFor } from './dossier-root';
 export { type EngineDeps, recordTickFailure, runLoop, type TickResult, tick } from './engine';
 export {
+  type AlertNotifier,
+  checkStaleLeaseAlert,
+  type EngineAlert,
+  reportCrashRestart,
+  type StaleLeaseAlertOutcome,
+} from './engine-alert';
+export {
+  type EngineExitLogger,
+  type ExitProcess,
+  installEngineExitLogging,
+} from './engine-exit';
+export {
   assertNoDependencyCycle,
   EnqueueError,
   type EnqueueInput,
@@ -358,6 +370,7 @@ export {
   buildKeptWorktreeWarnings,
   buildStatusReport,
   buildStatusWarnings,
+  countUnfinishedWork,
   defaultKeptWorktreeReader,
   KEPT_WORKTREE_PROBE_LIMIT,
   type KeptWorktreeCandidate,
