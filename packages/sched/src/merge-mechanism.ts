@@ -158,3 +158,52 @@ export function shipModeClause(
     '`no-merge-mechanism` instead of parking. Record the chosen ship mode and evidence in the ship milestone.'
   );
 }
+
+/**
+ * The `blocked_reason` / `QueueEntry.reason` written when a PR is parked on `auto-merge` in a
+ * repo where nothing can merge it — shared by the issue-unit watch (engine.ts) and the batch
+ * PR watch (batch-dispatch.ts, #921) so the two backstops cannot drift.
+ */
+export const NO_MERGE_MECHANISM_REASON = 'no-merge-mechanism';
+
+/**
+ * How long a parked PR may sit with no auto-merge request and no confirmed watcher before the
+ * watch blocks. The agent requests auto-merge moments after parking, so the condition must
+ * PERSIST across polls — the first sighting only arms the marker.
+ */
+export const NO_MERGE_MECHANISM_GRACE_MS = 10 * 60 * 1000;
+
+/**
+ * Keyed on the PR, not on the repo's `allow_auto_merge` — ai-dossier allows native auto-merge
+ * and #878 still parked forever, because nothing ever REQUESTED it. A parked, still-OPEN PR
+ * that GitHub holds no auto-merge request for is unmergeable-by-itself unless a watcher acts
+ * on the label; only a POSITIVELY read absence of one (`false`; unknown/`null`/undefined never)
+ * lets this fire. Pure: callers read `truth` and `mechanism` OUTSIDE the store lock.
+ */
+export function parkedWithoutMerger(
+  truth: { state: string; autoMergeRequested?: boolean },
+  mechanism: MergeMechanism | undefined
+): boolean {
+  return (
+    truth.state === 'OPEN' &&
+    truth.autoMergeRequested === false &&
+    mechanism !== undefined &&
+    mechanism.watcherWorkflow === false
+  );
+}
+
+/**
+ * Advance the persisted `<pr>@<ISO time>` onset marker for {@link parkedWithoutMerger}: `due`
+ * once the onset is at least the grace window old; `arm` is the marker to write when none is
+ * recorded for THIS pr (a re-park on another PR starts fresh), else `null`.
+ */
+export function advanceNoMergeMechanism(
+  mark: string | null | undefined,
+  pr: number,
+  now: Date
+): { due: boolean; arm: string | null } {
+  const prefix = `${pr}@`;
+  const armedAt = mark?.startsWith(prefix) ? Date.parse(mark.slice(prefix.length)) : Number.NaN;
+  if (Number.isNaN(armedAt)) return { due: false, arm: `${prefix}${now.toISOString()}` };
+  return { due: now.getTime() - armedAt >= NO_MERGE_MECHANISM_GRACE_MS, arm: null };
+}

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createExecGroundTruth, detectMergeMechanism } from '../groundtruth';
 import {
+  advanceNoMergeMechanism,
   classifyWorkflowText,
   type MergeMechanism,
   mergeMechanismVerdict,
@@ -8,24 +9,47 @@ import {
   shipModeClause,
 } from '../merge-mechanism';
 
-/** A fake exec over a remote tree: `files` maps a repo path to its text. */
+/** Deterministic 40-hex blob id for a path, as the git trees API would return. */
+const blobSha = (path: string) => Buffer.from(path).toString('hex').padEnd(40, '0').slice(0, 40);
+
+/**
+ * A fake `gh` over the repo's DEFAULT-branch tree (the API, never a local ref): `files` maps a
+ * repo path to its text; `settings` answers `repos/<r>`. `truncated`/`treeFails` shape the
+ * `git/trees/HEAD` read, `blobFails` an individual blob read; `calls` records every gh argv.
+ */
 function fakeExec(opts: {
   files?: Record<string, string>;
   settings?: string | null;
-  noRef?: boolean;
+  treeFails?: boolean;
+  truncated?: boolean;
+  blobFails?: boolean;
+  calls?: string[][];
 }) {
   const files = opts.files ?? {};
   return (file: string, args: string[]): string | null => {
-    if (file === 'gh') return opts.settings === undefined ? null : opts.settings;
-    if (opts.noRef) return null;
-    if (args[0] === 'ls-tree') {
-      const paths = args.slice(args.indexOf('--') + 1).filter(() => args.includes('--'));
-      if (args.includes('--')) return paths.filter((p) => p in files).join('\n');
-      return Object.keys(files)
-        .filter((f) => f.startsWith('.github/workflows/'))
-        .join('\n');
+    if (file !== 'gh') return null; // no git call may be needed to detect the mechanism
+    opts.calls?.push(args);
+    const endpoint =
+      args[args.indexOf('api') + 1] === '-H' ? args[args.indexOf('api') + 3] : args[1];
+    if (/^repos\/[^/]+\/[^/]+$/.test(endpoint)) {
+      return opts.settings === undefined ? null : opts.settings;
     }
-    if (args[0] === 'show') return files[args[1].split(':')[1]] ?? null;
+    if (endpoint.includes('/git/trees/HEAD')) {
+      if (opts.treeFails) return null;
+      const watched =
+        /^(\.github\/workflows\/[^/]+\.ya?ml|\.mergify\.yml|\.github\/mergify\.yml|\.kodiak\.toml|\.github\/\.kodiak\.toml)$/;
+      return JSON.stringify({
+        truncated: opts.truncated === true,
+        blobs: Object.keys(files)
+          .filter((f) => watched.test(f))
+          .map((f) => ({ path: f, sha: blobSha(f) })),
+      });
+    }
+    const m = /\/git\/blobs\/([0-9a-f]{40})$/.exec(endpoint);
+    if (m && !opts.blobFails) {
+      const path = Object.keys(files).find((f) => blobSha(f) === m[1]);
+      return path === undefined ? null : files[path];
+    }
     return null;
   };
 }
@@ -132,10 +156,17 @@ describe('detectMergeMechanism (#887)', () => {
     const m = detectMergeMechanism(fakeExec({ files: CI, settings: null }), '/r', null);
     expect(mergeMechanismVerdict(m)).toBe('unknown');
   });
-  it('no readable remote ref, a Mergify config, or an unreadable file => watcher unknown', () => {
+  it('an unreadable tree, a truncated tree, a Mergify config, or an unreadable file => watcher unknown', () => {
     expect(
-      detectMergeMechanism(fakeExec({ noRef: true, settings: settings(false) }), '/r', null)
+      detectMergeMechanism(fakeExec({ treeFails: true, settings: settings(false) }), '/r', null)
         .watcherWorkflow
+    ).toBeNull();
+    expect(
+      detectMergeMechanism(
+        fakeExec({ files: CI, truncated: true, settings: settings(false) }),
+        '/r',
+        null
+      ).watcherWorkflow
     ).toBeNull();
     expect(
       detectMergeMechanism(
@@ -147,30 +178,56 @@ describe('detectMergeMechanism (#887)', () => {
         null
       ).watcherWorkflow
     ).toBeNull();
-    const unreadable = (file: string, args: string[]) =>
-      file === 'git' && args[0] === 'show'
-        ? null
-        : fakeExec({ files: CI, settings: settings(false) })(file, args);
-    expect(detectMergeMechanism(unreadable, '/r', null).watcherWorkflow).toBeNull();
+    expect(
+      detectMergeMechanism(
+        fakeExec({ files: CI, blobFails: true, settings: settings(false) }),
+        '/r',
+        null
+      ).watcherWorkflow
+    ).toBeNull();
+  });
+  it('#921: reads the default branch through the API, never a local (possibly stale) origin ref', () => {
+    const calls: string[][] = [];
+    const seen: string[] = [];
+    const exec = fakeExec({ files: WATCHER, settings: settings(false), calls });
+    // A checkout whose `origin/main` predates the watcher: any git call would see NO workflow.
+    const m = detectMergeMechanism(
+      (f, args, cwd) => {
+        seen.push(f);
+        return f === 'git' ? '' : exec(f, args, cwd);
+      },
+      '/stale-checkout',
+      { owner: 'o', name: 'r' }
+    );
+    expect(m.watcherWorkflow).toBe(true);
+    expect(seen.every((f) => f === 'gh')).toBe(true);
+    expect(calls.some((a) => a[1] === 'repos/o/r/git/trees/HEAD?recursive=1')).toBe(true);
+  });
+  it('#921: needs no checkout at all (repoDir undefined still detects)', () => {
+    const m = detectMergeMechanism(
+      fakeExec({ files: WATCHER, settings: settings(false) }),
+      undefined,
+      null
+    );
+    expect(m.watcherWorkflow).toBe(true);
   });
   it('pins the api read to the verified repo and caches it until the TTL passes', () => {
     const calls: string[][] = [];
-    const gt = createExecGroundTruth(
-      (f, args, cwd) => {
-        if (f === 'gh') calls.push(args);
-        return fakeExec({ files: CI, settings: settings(false) })(f, args, cwd);
-      },
-      { repoDir: '/r', repo: 'o/r' }
-    );
+    const gt = createExecGroundTruth(fakeExec({ files: CI, settings: settings(false), calls }), {
+      repoDir: '/r',
+      repo: 'o/r',
+    });
     gt.mergeMechanism?.();
+    const firstRead = calls.length;
     gt.mergeMechanism?.();
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(firstRead); // cached inside the TTL: no second read of anything
     expect(calls[0][1]).toBe('repos/o/r');
+    expect(calls.every((a) => a.some((x) => x.startsWith('repos/o/r')))).toBe(true);
     vi.useFakeTimers();
     vi.setSystemTime(Date.now() + 11 * 60 * 1000);
     gt.mergeMechanism?.();
     vi.useRealTimers();
-    expect(calls).toHaveLength(2);
+    expect(calls).toHaveLength(firstRead * 2); // TTL passed: the whole detection is re-read
   });
 });
 
@@ -205,5 +262,27 @@ describe('shipModeClause (#887)', () => {
     );
     // the same facts DO confirm a per-issue detached ship
     expect(shipModeClause(native, 'issue')).toContain('ship_mode=detached');
+  });
+});
+
+describe('advanceNoMergeMechanism (#921)', () => {
+  const t0 = new Date('2026-09-29T10:00:00.000Z');
+  const at = (ms: number) => new Date(t0.getTime() + ms);
+  it('arms on first sight, is not due inside the grace window, and is due after it', () => {
+    const armed = advanceNoMergeMechanism(null, 7, t0);
+    expect(armed).toEqual({ due: false, arm: '7@2026-09-29T10:00:00.000Z' });
+    expect(advanceNoMergeMechanism(armed.arm, 7, at(5 * 60_000))).toEqual({
+      due: false,
+      arm: null,
+    });
+    expect(advanceNoMergeMechanism(armed.arm, 7, at(10 * 60_000)).due).toBe(true);
+  });
+  it('a marker for another PR (or garbage) re-arms instead of firing', () => {
+    const old = '6@2026-09-29T09:00:00.000Z';
+    expect(advanceNoMergeMechanism(old, 7, t0)).toEqual({
+      due: false,
+      arm: '7@2026-09-29T10:00:00.000Z',
+    });
+    expect(advanceNoMergeMechanism('7@nonsense', 7, t0).due).toBe(false);
   });
 });

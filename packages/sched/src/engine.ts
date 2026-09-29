@@ -119,7 +119,12 @@ import {
 } from './groundtruth';
 import { issueOfUnit, type Journal, unitEvent } from './journal';
 import { labelBlockReason, labelOfBlockReason, pickHardBlockLabel } from './labels';
-import type { MergeMechanism } from './merge-mechanism';
+import {
+  advanceNoMergeMechanism,
+  type MergeMechanism,
+  NO_MERGE_MECHANISM_REASON,
+  parkedWithoutMerger,
+} from './merge-mechanism';
 import type { SchedStore } from './persist';
 import type { ExecFn } from './project';
 import { DISPATCHABLE_ISSUE_STATUSES, runnableUnits } from './readiness';
@@ -540,37 +545,6 @@ function pollUnits(deps: EngineDeps, state: SchedState): Map<string, UnitTruth> 
  * from (but happens to share the string with) the GitHub label name.
  */
 const AUTO_MERGE_BLOCKED_REASON = 'auto-merge-blocked';
-
-/**
- * #887: the `QueueEntry.reason` for a PR parked on `auto-merge` in a repo where
- * nothing can merge it (no native auto-merge, no watcher workflow, no auto-merge
- * request on the PR). The unit blocks loudly instead of waiting forever.
- */
-const NO_MERGE_MECHANISM_REASON = 'no-merge-mechanism';
-
-/**
- * #887: how long a parked PR may sit with no auto-merge request and no confirmed
- * watcher before the unit blocks. The agent requests auto-merge moments after
- * parking, so the condition must PERSIST across polls — the first sighting only
- * arms the marker.
- */
-const NO_MERGE_MECHANISM_GRACE_MS = 10 * 60 * 1000;
-
-/**
- * #887: keyed on the PR, not on the repo's `allow_auto_merge` — ai-dossier allows native
- * auto-merge and #878 still parked forever, because nothing ever REQUESTED it. A parked,
- * still-OPEN PR that GitHub holds no auto-merge request for is unmergeable-by-itself
- * unless a watcher acts on the label; only a POSITIVELY read absence of one (`false`;
- * unknown/`null` never) lets this fire.
- */
-function parkedWithoutMerger(ctx: TickCtx, truth: PrTruth): boolean {
-  return (
-    truth.state === 'OPEN' &&
-    truth.autoMergeRequested === false &&
-    ctx.mechanism !== undefined &&
-    ctx.mechanism.watcherWorkflow === false
-  );
-}
 
 /**
  * #501: how long after a unit fails `auto-merge-blocked` its PR stays
@@ -3038,25 +3012,16 @@ function reconcileParked(ctx: TickCtx, state: SchedState, prPoll: PrPoll): Sched
     }
     if (truth.state === 'CLOSED' && truth.mergedAt === null) {
       next = failWatch('pr-closed-unmerged');
-    } else if (parkedWithoutMerger(ctx, truth)) {
+    } else if (parkedWithoutMerger(truth, ctx.mechanism)) {
       // #887: parked on a label nothing acts on — GitHub holds no auto-merge request and no
       // watcher exists. sched's watch only waits, so once this has persisted past the grace
       // window (marker keyed by PR number, so a re-park on another PR starts fresh), block.
       const now = ctx.deps.now();
-      const mark = entry.no_merge_mechanism_since ?? null;
-      const armedAt = mark?.startsWith(`${entry.pr}@`)
-        ? Date.parse(mark.slice(`${entry.pr}@`.length))
-        : Number.NaN;
-      if (!Number.isNaN(armedAt) && now.getTime() - armedAt >= NO_MERGE_MECHANISM_GRACE_MS) {
+      const step = advanceNoMergeMechanism(entry.no_merge_mechanism_since, entry.pr, now);
+      if (step.due) {
         next = failWatch(NO_MERGE_MECHANISM_REASON);
-      } else if (Number.isNaN(armedAt)) {
-        next = patchEntry(
-          next,
-          issue,
-          { no_merge_mechanism_since: `${entry.pr}@${now.toISOString()}` },
-          now,
-          false
-        );
+      } else if (step.arm !== null) {
+        next = patchEntry(next, issue, { no_merge_mechanism_since: step.arm }, now, false);
       }
     } else {
       if (entry.no_merge_mechanism_since != null) {

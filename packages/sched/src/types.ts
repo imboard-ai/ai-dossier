@@ -755,6 +755,14 @@ export interface BatchEntry {
    */
   pr_watch_failed_ticks: number;
   /**
+   * #921: `<pr>@<ISO time>` — when the batch PR watch first saw this parked OPEN batch PR with
+   * no auto-merge request and no confirmed watcher workflow (the issue-unit
+   * `QueueEntry.no_merge_mechanism_since` backstop, for batch PRs). Optional (absent on older
+   * state); cleared the moment the condition stops holding or the batch leaves
+   * `awaiting-merge`.
+   */
+  no_merge_mechanism_since?: string | null;
+  /**
    * When the engine verified the batch's anchor issue CLOSED (#768) — either
    * it closed it itself (every member closed as completed, no failure trail)
    * or it found it already closed. `null` while the anchor is open or was

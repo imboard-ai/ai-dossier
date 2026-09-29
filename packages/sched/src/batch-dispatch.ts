@@ -132,6 +132,11 @@ import {
   wrongProcedureShippedPr,
 } from './groundtruth';
 import { type Journal, unitEvent } from './journal';
+import {
+  advanceNoMergeMechanism,
+  NO_MERGE_MECHANISM_REASON,
+  parkedWithoutMerger,
+} from './merge-mechanism';
 import type { SchedStore } from './persist';
 import type { ExecFn } from './project';
 import { batchRank, compareByPriority } from './readiness';
@@ -4629,6 +4634,16 @@ function advanceBatchDedupStreak(
  */
 function clearPrWatchFailed(deps: BatchDispatchDeps, batch: BatchEntry, now: Date): void {
   clearBatchDedupMarker(deps, batch, batch.pr_watch_failed_reason, CLEARED_PR_WATCH_FIELDS, now);
+  clearNoMergeMechanism(deps, batch, now);
+}
+
+/** Drop the #921 `no-merge-mechanism` onset marker (a no-op, no write, when none is recorded). */
+function clearNoMergeMechanism(deps: BatchDispatchDeps, batch: BatchEntry, now: Date): void {
+  if (batch.no_merge_mechanism_since == null) return;
+  deps.store.withLock((s) => ({
+    state: patchBatch(s, batch.id, { no_merge_mechanism_since: null }, now, false),
+    result: undefined,
+  }));
 }
 
 function reconcilePrWatch(
@@ -4796,6 +4811,47 @@ function reconcilePrWatch(
         result: undefined,
       }));
       if (recovered.action === 'blocked') {
+        stopAndReleaseBlocked(deps, batch.id, now);
+        result.failed.push(unit(batch.id));
+      }
+    } else if (
+      truth.state === 'OPEN' &&
+      truth.autoMergeRequested === false &&
+      parkedWithoutMerger(truth, deps.groundTruth.mergeMechanism?.())
+    ) {
+      // #921: the issue-unit backstop (#887) for a batch PR — parked OPEN with no auto-merge
+      // request and a POSITIVELY absent watcher. sched's watch only waits, so once this has
+      // persisted past the grace window the batch blocks loudly instead of waiting forever.
+      // `mergeMechanism()` is cached and, like `prState`, read outside the store lock.
+      clearBatchDedupMarker(
+        deps,
+        batch,
+        batch.pr_watch_failed_reason,
+        CLEARED_PR_WATCH_FIELDS,
+        now
+      );
+      const step = advanceNoMergeMechanism(batch.no_merge_mechanism_since, pr, now);
+      if (step.arm !== null) {
+        deps.store.withLock((s) => ({
+          state: patchBatch(s, batch.id, { no_merge_mechanism_since: step.arm }, now, false),
+          result: undefined,
+        }));
+      } else if (step.due) {
+        const blocked = blockBatch(
+          deps.store.load(),
+          batch.id,
+          { reason: NO_MERGE_MECHANISM_REASON, milestonePhase: 'batch-ship' },
+          recoveryDeps(deps, config, batch, now)
+        );
+        journalEvent(deps, 'pr-watch-failed', unit(batch.id), {
+          reason: NO_MERGE_MECHANISM_REASON,
+          pr,
+          at: now.toISOString(),
+        });
+        deps.store.withLock((s) => ({
+          state: applyBatchAndIssues(s, blocked.state, batch.id, [], batch.members),
+          result: undefined,
+        }));
         stopAndReleaseBlocked(deps, batch.id, now);
         result.failed.push(unit(batch.id));
       }

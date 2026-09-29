@@ -357,6 +357,28 @@ function enumRule(values: readonly string[]): KeyValueRule {
  */
 export const RISK_LEVELS = ['low', 'med', 'high'] as const;
 
+/** review-issue's live-UI verdicts (`live=`). */
+export const LIVE_VERDICTS = ['pass', 'fail', 'unverifiable', 'n/a'] as const;
+
+/** review-issue's closed `live_note=` reasons (why a live verdict is not `pass`). */
+export const LIVE_NOTES = [
+  'no-scratch-db',
+  'no-runtime',
+  'no-browser',
+  'stale-runtime',
+  'no-flows',
+  'no-second-view',
+  'no-plan-milestone',
+  'agent-incomplete',
+  'floor-violation',
+] as const;
+
+/** Who drives the merge (ship-issue Step 3c): a parked handoff or this run to the end. */
+export const SHIP_MODES = ['detached', 'attached'] as const;
+
+/** What will merge the PR (ship-issue Step 3c item 3b) — `unknown` mirrors sched's verdict. */
+export const MERGE_MECHANISMS = ['watcher', 'native', 'none', 'unknown'] as const;
+
 /** The classifier's closed mode set — which cycle shape the issue was routed to. */
 export const CLASSIFY_MODES = ['full', SLOT_MODE] as const;
 
@@ -404,6 +426,19 @@ export const KEY_VALUE_RULES: Record<string, KeyValueRule> = {
     expects:
       'expected a non-negative integer run generation, e.g. 1 (mint one with: runstate fence)',
   },
+  // The review phase's live-UI roll-up (review-issue >= 1.14.0). Sets pinned to what the
+  // registry dossiers write (#670): `live=n/a` + `live_flows=0` + `live_note=no-plan-milestone`
+  // are the values real runs post today.
+  live: enumRule(LIVE_VERDICTS),
+  live_flows: {
+    test: (v) => NON_NEGATIVE_INT_RE.test(v),
+    expects: 'expected a non-negative integer count of UI flows reported, e.g. 2',
+  },
+  live_note: enumRule(LIVE_NOTES),
+  // ship-issue's ship-mode record (#921). `merge_mechanism` also allows `unknown`: sched's
+  // detection verdict has it, and rejecting it would block a run from posting an honest value.
+  ship_mode: enumRule(SHIP_MODES),
+  merge_mechanism: enumRule(MERGE_MECHANISMS),
   takeover: {
     test: (v) => TAKEOVER_RE.test(v),
     expects: 'expected a single token naming what took the run over, e.g. slot-2 or r-504-fc02',
