@@ -81,3 +81,20 @@ capabilities:
     assumptions:
       - file-exists: Makefile
       - tool-version: node>=20
+
+  # --- Lint, exactly as CI runs it (#859) ---------------------------------
+  #
+  # NOT part of the member gate above (that pair is fixed in code). Declared for
+  # the member workflows' own lint step (`ai-dossier cap run lint.run`), whose
+  # fallback without it is a bare `biome check --write`, which exits 0 on the
+  # warnings CI's lint job fails on.
+  lint.run:
+    command: npm run lint
+    lifecycle: active
+    description: >-
+      Biome exactly as CI's lint job runs it (`biome ci --error-on-warnings .`):
+      format drift, lint errors and lint warnings fail. Repo-wide; the tree has
+      been warning-free since #859, so a failure belongs to the change under test.
+    assumptions:
+      - file-exists: biome.json
+      - tool-version: node>=20

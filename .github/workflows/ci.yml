@@ -37,8 +37,9 @@ jobs:
       - name: Install dependencies
         run: npm ci --ignore-scripts
 
-      # `npm run lint` is `biome ci --error-on-warnings .`: warnings fail this job
-      # too, so they cannot pile up the way #859's pre-existing ones did.
+      # `npm run lint` is `biome ci --error-on-warnings .`: lint warnings fail this
+      # job like errors, so they cannot pile up again (#859). Info-level diagnostics
+      # are reported but never fail it; Biome has no flag for that.
       - name: Lint & format check
         run: npm run lint
 

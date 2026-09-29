@@ -121,9 +121,7 @@ export class DossierResolver {
     const queue: ResolvedDossier[] = [entryDossier];
     const visited = new Set<string>();
 
-    while (queue.length > 0) {
-      const current = queue.shift();
-      if (!current) break;
+    for (let current = queue.shift(); current !== undefined; current = queue.shift()) {
       if (visited.has(current.name)) continue;
       visited.add(current.name);
 

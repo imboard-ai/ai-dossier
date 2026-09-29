@@ -6,6 +6,7 @@ import {
   generateInjectedContext,
   getJourneyOutputs,
   initJourneyOutputs,
+  MAX_JOURNEYS,
   resolveStepInputs,
   validateGraphMappings,
 } from '../outputMapper';
@@ -89,19 +90,18 @@ describe('journey output store', () => {
   });
 
   it('should evict only the oldest journey once the store is at capacity', () => {
-    // MAX_JOURNEYS in outputMapper.ts is 1000, so the 1001st journey evicts the first.
-    const ids = Array.from({ length: 1001 }, (_, i) => `capacity-journey-${i}`);
+    const ids = Array.from({ length: MAX_JOURNEYS + 1 }, (_, i) => `capacity-journey-${i}`);
     vi.mocked(logger.warn).mockClear();
     try {
       for (const id of ids) collectOutputs(id, 'step', { id });
 
       expect(getJourneyOutputs(ids[0]).size).toBe(0);
       expect(getJourneyOutputs(ids[1]).get('step')?.get('id')).toBe(ids[1]);
-      expect(getJourneyOutputs(ids[1000]).get('step')?.get('id')).toBe(ids[1000]);
+      expect(getJourneyOutputs(ids[MAX_JOURNEYS]).get('step')?.get('id')).toBe(ids[MAX_JOURNEYS]);
       expect(logger.warn).toHaveBeenCalledTimes(1);
       expect(logger.warn).toHaveBeenCalledWith(
         'Journey output store at capacity, evicted oldest entry',
-        { evicted: ids[0], maxJourneys: 1000 }
+        { evicted: ids[0], maxJourneys: MAX_JOURNEYS }
       );
     } finally {
       for (const id of ids) clearJourneyOutputs(id);

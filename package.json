@@ -17,13 +17,13 @@
     "test": "make test",
     "test:scripts": "vitest run --config vitest.scripts.config.mjs",
     "lint": "biome ci --error-on-warnings .",
-    "lint:fix": "biome check --write .",
+    "lint:fix": "npm run check",
     "format": "biome format --write .",
     "fleet:cli-audit": "bash scripts/fleet-cli-audit.sh",
     "fleet:tick": "bash scripts/sched-fleet/tick.sh",
     "fleet:probe-effort": "node scripts/sched-fleet/probe-effort.mjs",
     "scorecard": "node scripts/model-scorecard.mjs",
-    "check": "biome check --write .",
+    "check": "biome check --write --error-on-warnings .",
     "prepare": "husky",
     "publish:core": "cd packages/core && npm run build && npm publish",
     "publish:cli": "cd cli && npm run build && npm publish",
@@ -31,7 +31,7 @@
     "publish:all": "npm run publish:core && npm run publish:cli && npm run publish:mcp"
   },
   "lint-staged": {
-    "*.{ts,js,json}": "biome check --write --no-errors-on-unmatched"
+    "*.{ts,js,mjs,json}": "biome check --write --no-errors-on-unmatched --error-on-warnings"
   },
   "author": "Yuval Dimnik <yuval.dimnik@gmail.com>",
   "engines": {
