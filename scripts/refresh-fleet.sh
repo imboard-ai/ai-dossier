@@ -7,7 +7,7 @@
 #   bash scripts/refresh-fleet.sh --cli-only         # just bump the CLI everywhere
 #   bash scripts/refresh-fleet.sh --hosts wls,hcc    # subset of machines
 #   bash scripts/refresh-fleet.sh --profiles-file path # use a different profile source
-#   bash scripts/refresh-fleet.sh imboard-ai/git/ship-issue   # extra targets, appended
+#   bash scripts/refresh-fleet.sh imboard-ai/git/ship-issue   # extra dossiers to pull, appended
 #
 # WHY THIS EXISTS
 # `ai-dossier run <name> --pull` resolves the newest version at call time, but three things
@@ -15,6 +15,17 @@
 #   1. the globally installed CLI (an old CLI lints against an old schema and signs wrong)
 #   2. the local dossier cache
 #   3. installed Claude Code skills and their opencode wrappers
+#
+# SKILLS ARE NOT LISTED HERE
+# Skill refresh is `ai-dossier install-skill --all --owner imboard-ai --fresh` on each host
+# (CLI >= 0.82.0, #955/#956): it installs every registry skill the owner publishes (a
+# dossier named *-skill or tagged `skill`) and dual-writes the opencode wrappers, so a
+# newly published skill needs no edit to this script. Hosts with an older CLI fail that step
+# with a clear message. A skill-level failure fails the host; a collision (two registry
+# skills sharing a basename, or a skills dir holding a different dossier) is never
+# overwritten — it is printed as a WARN line and flagged in the summary, but does not fail
+# the run, because refreshing again cannot fix it. `--force` is deliberately NOT passed, so
+# a collision can never be silently overwritten by the refresh.
 #
 # TRAPS THIS AVOIDS (each one cost real time before)
 # - A repo-local `node_modules/.bin/ai-dossier` or stray `~/node_modules` SHADOWS the global
@@ -40,12 +51,13 @@ CRON_LIB_FILE="${SCHED_CRON_LIB_FILE:-$SCRIPT_DIR/sched-fleet/cron-lib.sh}"
 PROFILE_PROJECTS="${SCHED_PROFILE_PROJECTS:-}"
 PROFILE_FLEET_HOME="${SCHED_PROFILE_FLEET_HOME:-$HOME/.dossier/reset-fleet}"
 
-# The dossiers and skills worth force-refreshing everywhere. Skills are installed AND
-# wrapper-synced; plain dossiers are pulled into cache.
-SKILLS=(
-  "imboard-ai/skills/batch-cycle-skill"
-  "imboard-ai/skills/fleet-cycle-skill"
-)
+# Registry owner whose skills are installed via `install-skill --all`, and the first CLI
+# release that has --all / --owner / --json batch output.
+SKILL_OWNER="imboard-ai"
+MIN_SKILL_CLI="0.82.0"
+
+# The dossiers worth force-refreshing into the cache everywhere (skills come from
+# `install-skill --all`, not from a list).
 DOSSIERS=(
   "imboard-ai/git/member-cycle"
   "imboard-ai/git/batch-integrate"
@@ -356,21 +368,86 @@ NODE
   PROFILE_SYNC_CMD="mkdir -p \"\$HOME/.dossier\" && flock -x \"\$HOME/.dossier/.dispatch-profile-refresh.lock\" env SCHED_PROFILE_B64='$PROFILE_B64' SCHED_PROFILE_PROJECTS='$PROFILE_PROJECTS' SCHED_PROFILE_FLEET_HOME_B64='$PROFILE_FLEET_HOME_B64' SCHED_BOOTSTRAP_B64='$BOOTSTRAP_B64' SCHED_CRON_LIB_B64='$CRON_LIB_B64' node -e '$PROFILE_SYNC_SCRIPT'"
 fi
 
-run_on() {  # run_on <host> <label> <command>
-  local host="$1" label="$2" cmd="$3" out rc
+# host_exec <host> <command>: run on the host (local shell for wls), set OUT and RC.
+host_exec() {
+  local host="$1" cmd="$2"
   if [ "$host" = "wls" ] || [ "$host" = "$(hostname)" ]; then
-    out=$(bash -lc "$REMOTE_PRELUDE
-$cmd" 2>&1); rc=$?
+    OUT=$(bash -lc "$REMOTE_PRELUDE
+$cmd" 2>&1); RC=$?
   else
-    out=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" "$REMOTE_PRELUDE
-$cmd" 2>&1); rc=$?
+    OUT=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" "$REMOTE_PRELUDE
+$cmd" 2>&1); RC=$?
   fi
-  if [ $rc -eq 0 ]; then
+}
+
+run_on() {  # run_on <host> <label> <command>
+  local host="$1" label="$2" cmd="$3"
+  host_exec "$host" "$cmd"
+  if [ $RC -eq 0 ]; then
     echo "    ok   $label"
   else
-    echo "    FAIL $label (exit $rc)"
-    echo "$out" | tail -4 | sed 's/^/         /'
+    echo "    FAIL $label (exit $RC)"
+    echo "$OUT" | tail -4 | sed 's/^/         /'
     HOST_STATUS[$host]="fail"; FAILED=1
+  fi
+}
+
+# Parse `install-skill --all --json` output (stdin) into report lines. Prints
+# "SUMMARY ok=<n> skipped=<n> failed=<n> collisions=<n>" then one "FAIL|COLLISION <name> — <msg>"
+# line per problem row; exits 3 when no JSON document is found.
+SKILL_REPORT_JS='
+const raw = require("node:fs").readFileSync(0, "utf8");
+const at = raw.search(/^\{/m);
+let doc;
+try { doc = JSON.parse(at < 0 ? "" : raw.slice(at)); } catch { process.exit(3); }
+const s = doc.summary || {};
+if (!doc.summary) { console.log(`ERROR ${doc.error || "no summary in install-skill output"}`); process.exit(0); }
+console.log(`SUMMARY ok=${s.ok} skipped=${s.skipped} failed=${s.failed} collisions=${s.collisions}`);
+for (const r of doc.results || []) {
+  if (r.status === "failed") console.log(`FAIL ${r.name} — ${r.message || "install failed"}`);
+  if (r.status === "collision") console.log(`COLLISION ${r.name} — ${r.message || "collision"}`);
+}
+'
+
+# refresh_skills <host> <cli-version>: install every $SKILL_OWNER skill via --all.
+refresh_skills() {
+  local host="$1" inst="$2" label="install-skill --all --owner $SKILL_OWNER" report line
+  if ! ver_ge "$inst" "$MIN_SKILL_CLI"; then
+    echo "    FAIL $label — host CLI $inst is older than $MIN_SKILL_CLI (needs install-skill --all); upgrade the CLI on $host"
+    HOST_STATUS[$host]="fail"; FAILED=1; return
+  fi
+  host_exec "$host" "\"\$AD\" install-skill --all --owner '$SKILL_OWNER' --fresh --json"
+  report=$(printf '%s\n' "$OUT" | node -e "$SKILL_REPORT_JS" 2>/dev/null); local prc=$?
+  if [ $prc -ne 0 ] || [ -z "$report" ]; then
+    echo "    FAIL $label (exit $RC — no parseable JSON output)"
+    printf '%s\n' "$OUT" | tail -4 | sed 's/^/         /'
+    HOST_STATUS[$host]="fail"; FAILED=1; return
+  fi
+  local summary problems=0 collisions=0
+  summary=$(printf '%s\n' "$report" | sed -n 's/^SUMMARY //p')
+  if printf '%s\n' "$report" | grep -q '^ERROR '; then
+    echo "    FAIL $label — $(printf '%s\n' "$report" | sed -n 's/^ERROR //p' | head -1)"
+    HOST_STATUS[$host]="fail"; FAILED=1; return
+  fi
+  while IFS= read -r line; do
+    case "$line" in
+      FAIL\ *) echo "    FAIL skill ${line#FAIL }"; problems=1 ;;
+      COLLISION\ *) echo "    WARN skill collision ${line#COLLISION } (not overwritten)"; collisions=$((collisions + 1)) ;;
+    esac
+  done <<< "$report"
+  # The command exits non-zero on any failure OR collision; a non-zero exit with neither
+  # in the report means something else went wrong and must not read as ok.
+  if [ $problems -eq 0 ] && [ $RC -ne 0 ] && [ $collisions -eq 0 ]; then
+    echo "    FAIL $label (exit $RC, no failing rows reported)"; problems=1
+  fi
+  if [ $problems -ne 0 ]; then
+    echo "    FAIL $label ($summary)"
+    HOST_STATUS[$host]="fail"; FAILED=1
+  elif [ $collisions -gt 0 ]; then
+    echo "    ok   $label ($summary) — $collisions collision(s) need manual attention"
+    [ "${HOST_STATUS[$host]}" = "ok" ] && HOST_STATUS[$host]="ok (skill collisions)"
+  else
+    echo "    ok   $label ($summary)"
   fi
 }
 
@@ -425,10 +502,13 @@ for host in "${HOST_LIST[@]}"; do
       [ -z "$d" ] && continue
       run_on "$host" "pull $d" "\"\$AD\" pull '$d' --force"
     done
-    for s in "${SKILLS[@]}"; do
-      run_on "$host" "install-skill $s" "\"\$AD\" install-skill '$s' --force --fresh"
-    done
-    run_on "$host" "sync-skills (opencode wrappers)" '"$AD" sync-skills'
+    # install-skill --all also dual-writes the opencode wrappers, so no separate sync-skills.
+    if [ -n "${inst:-}" ] && printf '%s' "$inst" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]*)?$'; then
+      refresh_skills "$host" "${inst#v}"
+    else
+      echo "    FAIL install-skill --all --owner $SKILL_OWNER — skipped: host CLI version unknown"
+      HOST_STATUS[$host]="fail"; FAILED=1
+    fi
   fi
   echo
 done
