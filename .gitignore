@@ -164,3 +164,4 @@ worktrees/
 .worktree-pool.json
 .env*.local
 WARMUP-STATUS.md
+dist-binaries/
