@@ -4,7 +4,7 @@
  * tested); this file is only argument handling and process wiring.
  */
 
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import {
   defaultExec,
@@ -30,6 +30,7 @@ import {
   serviceStatus,
   systemdUserAvailable,
   uninstallService,
+  validateServicePaths,
 } from '../sched-service';
 
 interface ServiceOptions {
@@ -38,6 +39,7 @@ interface ServiceOptions {
   autoUpgrade?: boolean;
   alertIssue?: string;
   unitDir?: string;
+  repoDir?: string;
   activate?: boolean;
   print?: boolean;
   json?: boolean;
@@ -57,12 +59,25 @@ const run = (file: string, args: string[]): string | null => {
   }
 };
 
+/**
+ * `crontab -l`, strictly: `''` only for the verifiable "no crontab for <user>"
+ * case. A missing binary, a permission error or a timeout THROWS — an empty
+ * string there would make install overwrite the user's real crontab.
+ */
+export function readCrontabStrict(): string {
+  const res = spawnSync('crontab', ['-l'], { encoding: 'utf8', timeout: 30_000 });
+  if (res.error) throw new Error(`crontab -l failed: ${res.error.message}`);
+  if (res.status === 0) return res.stdout ?? '';
+  const stderr = (res.stderr ?? '').trim();
+  if (res.status === 1 && /^no crontab for /i.test(stderr)) return '';
+  throw new Error(`crontab -l exited ${res.status}: ${stderr || 'no output'}`);
+}
+
 function realIo(opts: ServiceOptions): ServiceIo {
   return {
     run,
     unitDir: opts.unitDir ?? defaultUnitDir(),
-    // `crontab -l` exits 1 with "no crontab for <user>" when there is none.
-    readCrontab: () => run('crontab', ['-l']) ?? '',
+    readCrontab: readCrontabStrict,
     writeCrontab: (text) => {
       try {
         execFileSync('crontab', ['-'], { input: text, stdio: ['pipe', 'ignore', 'ignore'] });
@@ -79,8 +94,25 @@ function projectOf(opts: ServiceOptions): string {
   return opts.project ?? resolveProjectSlug(defaultExec);
 }
 
+/**
+ * The project's MAIN checkout — from inside a linked worktree `--show-toplevel`
+ * is an ephemeral path; `git worktree list` names the main one first.
+ */
+function mainCheckout(cwd: string): string | null {
+  const list = run('git', ['worktree', 'list', '--porcelain']);
+  const first = list?.split('\n').find((l) => l.startsWith('worktree '));
+  if (first) return first.slice('worktree '.length);
+  return run('git', ['rev-parse', '--show-toplevel']) ?? cwd;
+}
+
 function buildSpec(opts: ServiceOptions, project: string): ServiceSpec {
-  const repoDir = run('git', ['rev-parse', '--show-toplevel']) ?? process.cwd();
+  const repoDir = opts.repoDir ?? mainCheckout(process.cwd()) ?? process.cwd();
+  const repoProject = resolveProjectSlug(defaultExec, repoDir);
+  if (repoProject !== project) {
+    fail([
+      `${repoDir} belongs to project '${repoProject}', not '${project}' — run from the right checkout or pass --repo-dir <path>`,
+    ]);
+  }
   const cliPath = process.argv[1];
   if (!cliPath) fail(['cannot determine the ai-dossier entry point (process.argv[1] is empty)']);
   let alertIssue: number | undefined;
@@ -89,7 +121,7 @@ function buildSpec(opts: ServiceOptions, project: string): ServiceSpec {
   } catch (err) {
     fail([(err as Error).message]);
   }
-  return {
+  const spec: ServiceSpec = {
     project,
     nodePath: process.execPath,
     cliPath,
@@ -99,6 +131,10 @@ function buildSpec(opts: ServiceOptions, project: string): ServiceSpec {
     autoUpgrade: opts.autoUpgrade !== false,
     ...(alertIssue !== undefined ? { alertIssue } : {}),
   };
+  const { errors, warnings } = validateServicePaths(spec);
+  if (errors.length > 0) fail(errors);
+  for (const w of warnings) process.stderr.write(`⚠ ${w}\n`);
+  return spec;
 }
 
 function chooseMode(raw: string | undefined, io: ServiceIo): ServiceMode {
@@ -133,6 +169,10 @@ export function registerSchedServiceCommands(sched: Command): void {
     )
     .option('--unit-dir <dir>', 'Where to write the systemd unit (default ~/.config/systemd/user)')
     .option(
+      '--repo-dir <path>',
+      "The project's main checkout (default: the main worktree of the current repository, never a linked worktree)"
+    )
+    .option(
       '--no-activate',
       'Only write the unit / render the cron block — never call systemctl or crontab'
     )
@@ -147,7 +187,18 @@ export function registerSchedServiceCommands(sched: Command): void {
         return;
       }
       const result = installService(spec, mode, io);
-      setEnsureDisabled(new SchedStore(schedStateDir(project)), false);
+      if (result.ok) setEnsureDisabled(new SchedStore(schedStateDir(project)), false);
+      if (!result.ok) {
+        console.error(`✗ [${project}] ${mode} supervisor NOT installed`);
+        for (const n of result.notes) console.error(`  ${n}`);
+        process.exit(1);
+      }
+      if (!result.activated) {
+        console.log(
+          `[${project}] ${mode} supervisor rendered only (--no-activate) — NOT installed or running${result.unitPath ? `; unit file written to ${result.unitPath} but not enabled` : '; print it with --print and install it yourself'}`
+        );
+        return;
+      }
       console.log(
         `✓ [${project}] ${mode} supervisor ${result.changed ? 'installed/updated' : 'already up to date'}${result.unitPath ? ` (${result.unitPath})` : ''}`
       );
@@ -164,7 +215,14 @@ export function registerSchedServiceCommands(sched: Command): void {
     .option('--no-activate', 'Only remove files — never call systemctl or crontab')
     .action((opts: ServiceOptions) => {
       const project = projectOf(opts);
-      const { removed } = uninstallService(project, realIo(opts));
+      const { removed, errors } = uninstallService(project, realIo(opts));
+      if (errors.length > 0) {
+        console.error(
+          `✗ [${project}] uninstall incomplete${removed.length ? ` (removed: ${removed.join(', ')})` : ''}`
+        );
+        for (const e of errors) console.error(`  ${e}`);
+        process.exit(1);
+      }
       console.log(
         removed.length > 0
           ? `✓ [${project}] removed: ${removed.join(', ')}`
@@ -190,7 +248,9 @@ export function registerSchedServiceCommands(sched: Command): void {
       console.log(
         `systemd unit: ${status.systemd.installed ? `installed (${status.systemd.enabled ?? '?'}, ${status.systemd.active ?? '?'})` : 'not installed'}`
       );
-      console.log(`cron watchdog: ${status.cron.installed ? 'installed' : 'not installed'}`);
+      console.log(
+        `cron watchdog: ${status.cron.error ? `unknown (${status.cron.error})` : status.cron.installed ? 'installed' : 'not installed'}`
+      );
       console.log(
         `engine: ${lease ? `pid ${lease.pid} ${lease.alive ? 'live' : 'STALE'}${lease.updated_at ? `, heartbeat ${lease.updated_at}` : ''}` : 'no lease (not running)'}`
       );
@@ -228,10 +288,12 @@ export function registerSchedServiceCommands(sched: Command): void {
       const outcome = ensureRunning({
         store,
         journal: new Journal(store.dir),
+        // Lazy repo: `gh repo view` only when an alert is actually raised, never on a healthy minute.
         notify: createAlertNotifier(
           project,
-          resolveProjectRepo(project, defaultExec) ?? undefined,
-          alertIssue
+          () => resolveProjectRepo(project, defaultExec) ?? undefined,
+          alertIssue,
+          { stateDir: store.dir }
         ),
         now: () => new Date(),
         spawnEngine: (logFile) => {

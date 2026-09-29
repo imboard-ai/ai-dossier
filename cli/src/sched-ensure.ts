@@ -16,9 +16,35 @@ import type { AlertNotifier } from '@ai-dossier/sched';
 import { checkStaleLeaseAlert, type Journal, type SchedStore } from '@ai-dossier/sched';
 
 export const ENSURE_DISABLED_MARKER = '.ensure-running-disabled';
-/** No respawn storm: a crash-looping engine is started at most this often. */
-export const ENSURE_MIN_INTERVAL_MS = 30_000;
+/**
+ * No respawn storm. The minimum gap between watchdog starts is
+ * `ENSURE_BASE_INTERVAL_MS * 2^streak` (capped), where `streak` counts starts
+ * that were NOT followed by a live engine at the next check. At a 60 s cron
+ * cadence: the first restart is immediate, the second waits 60 s, then 120 s,
+ * 240 s … up to {@link ENSURE_MAX_INTERVAL_MS}. Seeing a live engine resets it.
+ */
+export const ENSURE_BASE_INTERVAL_MS = 30_000;
+export const ENSURE_MAX_INTERVAL_MS = 30 * 60_000;
 const ENSURE_LAST_MARKER = '.ensure-running-last';
+
+interface EnsureRecord {
+  at: number;
+  streak: number;
+}
+
+function readRecord(file: string): EnsureRecord | null {
+  try {
+    const raw = fs.readFileSync(file, 'utf8').trim();
+    // Older format: a bare timestamp.
+    if (/^\d+$/.test(raw)) return { at: Number(raw), streak: 1 };
+    const rec = JSON.parse(raw) as Partial<EnsureRecord>;
+    return typeof rec.at === 'number' && typeof rec.streak === 'number'
+      ? { at: rec.at, streak: rec.streak }
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 export type EnsureOutcome = 'alive' | 'disabled' | 'throttled' | 'started' | 'start-failed';
 
@@ -45,7 +71,11 @@ export function ensureRunning(deps: EnsureDeps): EnsureOutcome {
   const { store, journal } = deps;
   if (fs.existsSync(path.join(store.dir, ENSURE_DISABLED_MARKER))) return 'disabled';
   const lease = store.engineLeaseStatus();
-  if (lease?.alive) return 'alive';
+  if (lease?.alive) {
+    // A healthy engine ends the crash-loop episode.
+    fs.rmSync(path.join(store.dir, ENSURE_LAST_MARKER), { force: true });
+    return 'alive';
+  }
   // Dead or absent: alert (deduped per episode), then bring the engine back.
   try {
     checkStaleLeaseAlert(store, journal, deps.notify, deps.now());
@@ -57,16 +87,18 @@ export function ensureRunning(deps: EnsureDeps): EnsureOutcome {
   }
 
   const lastFile = path.join(store.dir, ENSURE_LAST_MARKER);
-  try {
-    const last = Number(fs.readFileSync(lastFile, 'utf8').trim());
-    if (Number.isFinite(last) && deps.now().getTime() - last < ENSURE_MIN_INTERVAL_MS) {
-      return 'throttled';
-    }
-  } catch {
-    // never started by a watchdog
+  const last = readRecord(lastFile);
+  const streak = last === null ? 0 : last.streak;
+  if (last !== null) {
+    const gap = Math.min(ENSURE_BASE_INTERVAL_MS * 2 ** (streak - 1), ENSURE_MAX_INTERVAL_MS);
+    if (deps.now().getTime() - last.at < gap) return 'throttled';
   }
   fs.mkdirSync(store.dir, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(lastFile, `${deps.now().getTime()}\n`, { mode: 0o600 });
+  fs.writeFileSync(
+    lastFile,
+    `${JSON.stringify({ at: deps.now().getTime(), streak: streak + 1 })}\n`,
+    { mode: 0o600 }
+  );
   const pid = deps.spawnEngine(path.join(store.dir, 'engine.log'));
   journal.append(
     {

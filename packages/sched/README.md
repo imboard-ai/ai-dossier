@@ -387,22 +387,36 @@ ai-dossier sched service uninstall
 ```
 
 - **systemd** (default when a user manager is running): writes
-  `~/.config/systemd/user/dossier-sched-<project>.service` — `Restart=always` (a clean exit, such as a
-  self-upgrade, comes back too), `KillMode=process`, `WorkingDirectory` = the checkout, and the
-  node/nvm `PATH` at install time (absolute entries only). It runs `sched start --auto-upgrade`
-  (opt out with `--no-auto-upgrade`); output goes to the journal (`journalctl --user -u <unit>`) and
-  the durable trail is the project's `events.jsonl`. Run `loginctl enable-linger $USER` once so it
-  starts at boot without a login. Re-running `install` is idempotent; a changed unit is restarted
-  (agents keep running).
+  `~/.config/systemd/user/dossier-sched-<project>.service` — `Restart=always` (a clean exit, such as
+  a graceful stop, comes back too) with **crash-loop bounds**: exponential `RestartSec` backoff
+  (10 s up to 300 s, systemd >= 254; older versions keep 10 s) and `StartLimitBurst=10` per
+  `StartLimitIntervalSec=600` — past that the unit is left `failed` for an operator
+  (`systemctl --user reset-failed <unit>`); `KillMode=process`, `WorkingDirectory` = the project's
+  **main checkout** (never a linked worktree; validated against `--project`, override with
+  `--repo-dir`), and the node/nvm `PATH` at install time (absolute entries only). Install refuses
+  node / entry-point / repo paths that are missing, relative, or under a temp or `worktrees/`
+  directory, and warns that an nvm node path must be re-pinned (re-run `install`) after a node
+  upgrade. It runs `sched start --auto-upgrade` (opt out with `--no-auto-upgrade`); **note that in
+  the continuous loop `--auto-upgrade` only journals `engine-stale` — the running engine keeps the
+  code it started with until it restarts** (the actual `npm i -g` is the cron/`--once` path).
+  Output goes to the journal (`journalctl --user -u <unit>`) and the durable trail is the
+  project's `events.jsonl`. Run `loginctl enable-linger $USER` once so it starts at boot without a
+  login. Re-running `install` is idempotent; a changed unit is restarted (agents keep running).
 - **cron fallback** (no systemd): a tagged crontab block with `@reboot` and a per-minute
-  `sched ensure-running` watchdog. The watchdog starts a detached engine (output to
-  `<sched-dir>/engine.log`) when no live engine holds the lease, after raising the once-per-episode
-  stale-lease alert; starts are throttled to one per 30 s so a crash loop cannot storm. The engine
-  takes the lease atomically, so two watchdogs — or a watchdog plus the systemd unit — never run two
-  engines. To stop the engine on purpose under the watchdog: `sched ensure-running --disable`
-  (`--enable` to resume).
-- `--no-activate` renders the unit / cron block without calling `systemctl` or `crontab`; `--print`
-  prints it.
+  `sched ensure-running` watchdog (`%` is escaped for cron). The watchdog starts a detached engine
+  (output to `<sched-dir>/engine.log`) when no live engine holds the lease, after raising the
+  once-per-episode stale-lease alert; a healthy minute does nothing (no `gh` call). Restarts back
+  off exponentially while the engine keeps dying: at a 60 s cadence the first restarts are
+  immediate, then gaps of 2, 4, 8 … minutes up to 30, and a live engine resets it. The existing
+  crontab is read strictly — only "no crontab for <user>" counts as empty; any other `crontab -l`
+  failure aborts the install and changes nothing. The engine takes the lease atomically, so two
+  watchdogs — or a watchdog plus the systemd unit — never run two engines. To stop the engine on
+  purpose under the watchdog: `sched ensure-running --disable` (`--enable` to resume).
+- **Crash alerts are deduplicated:** repeats of the same alert kind within an hour are ONE tracking
+  comment on `--alert-issue`, edited with a repeat count, not a comment per restart.
+- `install` / `uninstall` exit non-zero and print `✗` when anything failed (systemctl, crontab).
+  `--no-activate` renders the unit / cron block without calling `systemctl` or `crontab` and says
+  plainly that nothing is installed; `--print` prints it.
 
 The manual shapes below remain valid, and explain the rules the service encodes.
 

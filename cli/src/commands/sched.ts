@@ -1549,8 +1549,9 @@ function registerStatusSubcommand(cmd: Command): void {
                 new Journal(store.dir),
                 createAlertNotifier(
                   project,
-                  resolveProjectRepo(project, defaultExec) ?? undefined,
-                  alertIssue
+                  () => resolveProjectRepo(project, defaultExec) ?? undefined,
+                  alertIssue,
+                  { stateDir: store.dir }
                 ),
                 new Date(),
                 {
@@ -2605,8 +2606,9 @@ function registerStartSubcommand(cmd: Command): void {
           acquisition.reclaimed,
           createAlertNotifier(
             project,
-            resolveProjectRepo(project, defaultExec) ?? undefined,
-            alertIssue
+            () => resolveProjectRepo(project, defaultExec) ?? undefined,
+            alertIssue,
+            { stateDir: store.dir }
           ),
           new Date(),
           previousStop !== null && previousStop.pid === acquisition.reclaimed.pid

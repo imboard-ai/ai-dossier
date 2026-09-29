@@ -3,6 +3,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { createEmptyState, enqueueEntries, Journal, SchedStore } from '@ai-dossier/sched';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { readCrontabStrict } from '../commands/sched-service';
+import { createAlertNotifier } from '../sched-alert';
 import { ensureRunning, setEnsureDisabled } from '../sched-ensure';
 import {
   hasCronBlock,
@@ -17,6 +19,7 @@ import {
   uninstallService,
   unitName,
   upsertCronBlock,
+  validateServicePaths,
 } from '../sched-service';
 
 const spec: ServiceSpec = {
@@ -37,6 +40,17 @@ describe('systemd unit rendering (#945 AC1)', () => {
     expect(unit).toContain('KillMode=process');
     expect(unit).toContain('Type=simple');
     expect(unit).toContain('WantedBy=default.target');
+  });
+
+  it('bounds a crash loop: start limits and exponential restart backoff', () => {
+    expect(unit).toMatch(/^StartLimitIntervalSec=600$/m);
+    expect(unit).toMatch(/^StartLimitBurst=10$/m);
+    expect(unit).toMatch(/^RestartSec=10$/m);
+    expect(unit).toMatch(/^RestartSteps=5$/m);
+    expect(unit).toMatch(/^RestartMaxDelaySec=300$/m);
+    expect(unit).not.toMatch(/^RestartSec=5$/m);
+    // StartLimit* belong to [Unit]
+    expect(unit.indexOf('StartLimitBurst')).toBeLessThan(unit.indexOf('[Service]'));
   });
 
   it('pins node, the CLI entry, the project checkout and the nvm PATH', () => {
@@ -88,6 +102,18 @@ describe('cron fallback block', () => {
     expect(block).toContain(
       "sched ensure-running --project 'imboard-ai-ai-dossier' --auto-upgrade --alert-issue 945"
     );
+  });
+
+  it('escapes % in the cron line (cron turns a bare % into a newline)', () => {
+    const block = renderCronBlock({ ...spec, repoDir: '/home/u/100%/proj' });
+    const lines = block
+      .split('\n')
+      .filter((l) => l.startsWith('* * * * *') || l.startsWith('@reboot'));
+    expect(lines).toHaveLength(2);
+    for (const l of lines) {
+      expect(l).toContain("'/home/u/100\\%/proj'");
+      expect(l).not.toMatch(/(^|[^\\])%/);
+    }
   });
 
   it('upsert is idempotent, preserves foreign lines, and strip removes only this project', () => {
@@ -159,12 +185,62 @@ describe('install / uninstall / status against temp dirs (never the real systemd
     expect(calls).toContain(`systemctl --user restart ${unitName(spec.project)}`);
   });
 
-  it('render mode writes files only — no systemctl, no crontab', () => {
+  it('render mode writes files only — no systemctl, no crontab — and never claims to be installed', () => {
     const r = installService(spec, 'systemd', { ...io, render: true });
     expect(fs.existsSync(r.unitPath as string)).toBe(true);
-    installService(spec, 'cron', { ...io, render: true });
+    expect(r).toMatchObject({ ok: true, activated: false });
+    const c = installService(spec, 'cron', {
+      ...io,
+      render: true,
+      readCrontab: () => {
+        throw new Error('render mode must not read the crontab');
+      },
+    });
+    expect(c).toMatchObject({ ok: true, activated: false, changed: false });
     expect(calls).toEqual([]);
     expect(crontab).toBe('');
+  });
+
+  it('cron: an unreadable crontab aborts the install and writes NOTHING (never overwrites a schedule we could not read)', () => {
+    crontab = '0 3 * * * important-backup\n';
+    const write = vi.fn(() => true);
+    const r = installService(spec, 'cron', {
+      ...io,
+      readCrontab: () => {
+        throw new Error('crontab -l exited 127: not found');
+      },
+      writeCrontab: write,
+    });
+    expect(r).toMatchObject({ ok: false, activated: false, changed: false });
+    expect(r.notes.join(' ')).toMatch(/nothing was changed/);
+    expect(write).not.toHaveBeenCalled();
+    expect(crontab).toBe('0 3 * * * important-backup\n');
+  });
+
+  it('reports failure (ok=false) when systemctl enable or the crontab write fails', () => {
+    const failing = installService(spec, 'systemd', {
+      ...io,
+      run: (file, args) => (args.includes('enable') ? null : ''),
+    });
+    expect(failing.ok).toBe(false);
+    expect(failing.notes.join(' ')).toMatch(/enable --now .* failed/);
+    const cronFail = installService(spec, 'cron', { ...io, writeCrontab: () => false });
+    expect(cronFail.ok).toBe(false);
+  });
+
+  it('uninstall reports errors instead of pretending: unreadable crontab, failed disable', () => {
+    installService(spec, 'systemd', io);
+    installService(spec, 'cron', io);
+    const r = uninstallService(spec.project, {
+      ...io,
+      run: (_f, args) => (args.includes('disable') ? null : ''),
+      readCrontab: () => {
+        throw new Error('boom');
+      },
+    });
+    expect(r.errors.join(' ')).toMatch(/disable --now/);
+    expect(r.errors.join(' ')).toMatch(/could not read the crontab/);
+    expect(crontab).toContain('BEGIN dossier-sched'); // untouched
   });
 
   it('cron: installs one block, idempotent; uninstall removes unit and block', () => {
@@ -243,7 +319,7 @@ describe('ensure-running watchdog', () => {
     });
   });
 
-  it('stale lease: alerts once per episode and starts; throttles a crash loop', () => {
+  it('stale lease: alerts once per episode; at a 60 s cron cadence the crash loop backs off exponentially (no clock tricks)', () => {
     writeDeadLease();
     store.withLock(() => ({
       state: enqueueEntries(createEmptyState(), [{ issue: 9, deps: [] }], new Date(clock)),
@@ -251,17 +327,46 @@ describe('ensure-running watchdog', () => {
     }));
     const notify = vi.fn();
     const spawn = vi.fn(() => 77);
-    expect(ensureRunning(deps(spawn, notify))).toBe('started');
-    expect(spawn).toHaveBeenCalledTimes(1);
-    expect(notify).toHaveBeenCalledTimes(1); // the stale-lease alert, once
-    // engine died again within the throttle window: no second spawn
-    clock += 5_000;
-    expect(ensureRunning(deps(spawn, notify))).toBe('throttled');
-    expect(spawn).toHaveBeenCalledTimes(1);
-    clock += 60_000;
-    expect(ensureRunning(deps(spawn, notify))).toBe('started');
-    expect(spawn).toHaveBeenCalledTimes(2);
+    const minute = () => {
+      const r = ensureRunning(deps(spawn, notify));
+      clock += 60_000;
+      return r;
+    };
+    // The engine dies after every start (the lease stays dead), watched once a minute.
+    const outcomes = Array.from({ length: 8 }, minute);
+    expect(outcomes).toEqual([
+      'started', // no history
+      'started', // gap 30 s < 60 s cadence
+      'started', // gap 60 s <= 60 s
+      'throttled', // gap 120 s
+      'started', // 120 s elapsed
+      'throttled', // gap 240 s ...
+      'throttled',
+      'throttled',
+    ]);
+    expect(spawn).toHaveBeenCalledTimes(4);
     expect(notify).toHaveBeenCalledTimes(1); // same episode: still one alert
+  });
+
+  it('a live engine ends the crash-loop episode (backoff resets)', () => {
+    writeDeadLease();
+    const spawn = vi.fn(() => 77);
+    ensureRunning(deps(spawn));
+    expect(fs.existsSync(path.join(dir, '.ensure-running-last'))).toBe(true);
+    fs.rmSync(path.join(dir, '.sched-engine-lease'), { recursive: true, force: true });
+    const acq = store.acquireEngineLease();
+    expect(ensureRunning(deps(spawn))).toBe('alive');
+    expect(fs.existsSync(path.join(dir, '.ensure-running-last'))).toBe(false);
+    if (acq.acquired) store.releaseEngineLease(acq.lease);
+  });
+
+  it('a healthy minute never resolves the alert repo (no gh call)', () => {
+    const acq = store.acquireEngineLease();
+    const repo = vi.fn(() => 'o/r');
+    const notify = createAlertNotifier('p', repo, 945, { stateDir: dir });
+    expect(ensureRunning({ ...deps(vi.fn(() => 1)), notify })).toBe('alive');
+    expect(repo).not.toHaveBeenCalled();
+    if (acq.acquired) store.releaseEngineLease(acq.lease);
   });
 
   it('a failed spawn is reported, not thrown', () => {
@@ -276,5 +381,68 @@ describe('ensure-running watchdog', () => {
     expect(spawn).not.toHaveBeenCalled();
     setEnsureDisabled(store, false);
     expect(ensureRunning(deps(spawn))).toBe('started');
+  });
+});
+
+describe('validateServicePaths', () => {
+  const real = fs.mkdtempSync(path.join(os.tmpdir(), 'svc-paths-'));
+  const ok = { ...spec };
+  it('accepts stable existing absolute paths (with an nvm warning)', () => {
+    const r = validateServicePaths(ok, () => true, '/tmp-elsewhere');
+    expect(r.errors).toEqual([]);
+    expect(r.warnings.join(' ')).toMatch(/nvm/);
+  });
+  it('rejects missing, relative, temp and worktree paths', () => {
+    const missing = validateServicePaths(ok, () => false, '/nonexistent-tmp');
+    expect(missing.errors.length).toBe(3);
+    expect(
+      validateServicePaths({ ...ok, cliPath: 'ai-dossier' }, () => true, '/x').errors[0]
+    ).toMatch(/not an absolute path/);
+    expect(
+      validateServicePaths(
+        { ...ok, repoDir: '/home/u/projects/p/worktrees/feat-x' },
+        () => true,
+        '/x'
+      ).errors[0]
+    ).toMatch(/temporary or worktree/);
+    expect(
+      validateServicePaths({ ...ok, cliPath: `${real}/bin/ai-dossier` }, () => true, os.tmpdir())
+        .errors[0]
+    ).toMatch(/temporary or worktree/);
+  });
+});
+
+describe('readCrontabStrict (fake crontab binary on PATH)', () => {
+  let bin: string;
+  let savedPath: string | undefined;
+  beforeEach(() => {
+    bin = fs.mkdtempSync(path.join(os.tmpdir(), 'fake-crontab-'));
+    savedPath = process.env.PATH;
+  });
+  afterEach(() => {
+    process.env.PATH = savedPath;
+    fs.rmSync(bin, { recursive: true, force: true });
+  });
+  const fake = (script: string) => {
+    fs.writeFileSync(path.join(bin, 'crontab'), `#!/bin/sh\n${script}\n`, { mode: 0o755 });
+    process.env.PATH = `${bin}${path.delimiter}${savedPath}`;
+  };
+
+  it('returns the text on success', () => {
+    fake('echo "0 3 * * * backup"');
+    expect(readCrontabStrict()).toBe('0 3 * * * backup\n');
+  });
+  it('treats ONLY the exact "no crontab for <user>" as empty', () => {
+    fake('echo "no crontab for alice" >&2; exit 1');
+    expect(readCrontabStrict()).toBe('');
+  });
+  it('throws on any other failure (permission, wrong exit, spawn failure)', () => {
+    fake('echo "crontab: must be privileged to use -l" >&2; exit 1');
+    expect(() => readCrontabStrict()).toThrow(/must be privileged/);
+    fake('echo "no crontab for alice" >&2; exit 2');
+    expect(() => readCrontabStrict()).toThrow();
+    fs.rmSync(path.join(bin, 'crontab'));
+    process.env.PATH = bin; // no crontab binary at all
+    expect(() => readCrontabStrict()).toThrow(/crontab -l failed/);
   });
 });
