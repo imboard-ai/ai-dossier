@@ -2,7 +2,7 @@
 
 This directory contains test fixtures used by the project's test suite, plus snapshots of published dossiers kept here as reference examples.
 
-For a full collection of example dossiers — covering DevOps, databases, data science, security, development workflows, and more — browse the **[Dossier Registry](https://registry.dossier.dev)**.
+For a full collection of example dossiers — covering DevOps, databases, data science, security, development workflows, and more — browse the **[Dossier Registry](https://dossier-registry.vercel.app)**.
 
 ## Contents
 
@@ -26,4 +26,4 @@ ai-dossier search deploy
 ai-dossier list
 ```
 
-Or browse the registry API directly at `https://registry.dossier.dev/api/dossiers`.
+Or browse the registry API directly at `https://dossier-registry.vercel.app/api/dossiers`.

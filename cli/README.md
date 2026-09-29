@@ -2049,6 +2049,22 @@ Project registries are merged with user registries. User-configured registries t
 - ❌ Invalid → Signature failed → **BLOCK**
 - ⚠️ No signature → Unsigned (warn for high-risk)
 
+#### When verification fails
+
+A checksum failure prints the `Expected` and `Actual` hashes, the likely causes and a
+`Fix` (re-fetch with `ai-dossier pull --force <name>` / `run --fresh`, or for your own
+dossier `ai-dossier checksum <file> --update` then `ai-dossier sign <file>`). A
+signature failure gets the same causes/fix block; an untrusted signer prints the
+`ai-dossier keys add ...` command to trust it. Output is colorized on a TTY and
+plain when piped or when `NO_COLOR` is set (`FORCE_COLOR=1` forces color).
+
+#### High-risk confirmation in `run`
+
+When a dossier declares `risk_level: high` or `critical`, `run` lists its
+`risk_factors` and asks `Continue? [y/N]` on an interactive terminal. It proceeds
+without asking (and says why) with `--force`, `--no-prompt`, `--headless`,
+`--dry-run`, or whenever stdin/stdout is not a TTY, so CI never hangs.
+
 #### Managing trusted keys
 
 Trust is a local decision: a valid signature from a key you have not added is
@@ -2059,7 +2075,18 @@ one `<public-key> <identifier>` per line.
 ai-dossier keys generate --name my-key   # new Ed25519 pair in ~/.dossier/
 ai-dossier keys list                     # what is trusted right now
 ai-dossier keys add <public-key> <identifier>
+ai-dossier keys export <key-id>          # print a PUBLIC key in the form `keys add` accepts
+ai-dossier keys revoke <key-id>          # stop trusting a key on this machine
 ```
+
+`keys export` looks the id up in your trusted keys, then among generated pairs
+(`~/.dossier/<name>.pub`), and prints only the raw base64 public key on stdout so
+it can be piped to a teammate's `keys add`. It only ever reads public material.
+
+`keys revoke` is **local**: it removes the entry from `~/.dossier/trusted-keys.txt`
+(keeping the previous file as `trusted-keys.txt.bak`), so `verify` and `run` on this
+machine then reject dossiers signed with that key. It does not contact the registry,
+does not affect other machines, and does not delete your private key.
 
 `keys add` accepts a raw 44-char base64 key, an SPKI PEM block, or a legacy
 minisign `RWT...` key, and stores the **canonical raw base64** form regardless —

@@ -409,4 +409,71 @@ describe('keys command', () => {
       expect(errors).toContain('dossier verify');
     });
   });
+
+  describe('keys revoke / export', () => {
+    const TRUSTED = `${SAMPLE_RAW_BASE64} team-key\nabc123key other-key\n`;
+
+    it('revoke removes the matching entry, keeps others, writes a backup', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockReturnValue(TRUSTED);
+      const program = createTestProgram();
+      registerKeysCommand(program);
+
+      await expect(
+        program.parseAsync(['node', 'dossier', 'keys', 'revoke', 'team-key'])
+      ).rejects.toThrow();
+
+      const writes = mockedFs.writeFileSync.mock.calls;
+      const bak = writes.find(([p]) => String(p).endsWith('.bak'));
+      const main = writes.find(([p]) => String(p).endsWith('trusted-keys.txt'));
+      expect(bak?.[1]).toBe(TRUSTED);
+      expect(String(main?.[1])).not.toContain('team-key');
+      expect(String(main?.[1])).toContain('other-key');
+      expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Revoked 1 key(s) locally'));
+    });
+
+    it('revoke fails for an unknown identifier and writes nothing', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockReturnValue(TRUSTED);
+      mockedFs.writeFileSync.mockClear();
+      const program = createTestProgram();
+      registerKeysCommand(program);
+
+      await expect(
+        program.parseAsync(['node', 'dossier', 'keys', 'revoke', 'nope'])
+      ).rejects.toThrow();
+
+      expect(mockedFs.writeFileSync).not.toHaveBeenCalled();
+      expect(console.error).toHaveBeenCalledWith(expect.stringContaining('nothing was revoked'));
+    });
+
+    it('export prints the raw base64 public key of a trusted entry', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockReturnValue(TRUSTED);
+      const program = createTestProgram();
+      registerKeysCommand(program);
+
+      await expect(
+        program.parseAsync(['node', 'dossier', 'keys', 'export', 'team-key'])
+      ).rejects.toThrow();
+
+      expect(console.log).toHaveBeenCalledWith(SAMPLE_RAW_BASE64);
+    });
+
+    it('export reads only the .pub of a generated pair, never the .pem', async () => {
+      mockedFs.existsSync.mockImplementation((p) => String(p).endsWith('mine.pub'));
+      mockedFs.readFileSync.mockImplementation((p) => {
+        if (String(p).endsWith('.pem')) throw new Error('private key must not be read');
+        return SAMPLE_PEM;
+      });
+      const program = createTestProgram();
+      registerKeysCommand(program);
+
+      await expect(
+        program.parseAsync(['node', 'dossier', 'keys', 'export', 'mine'])
+      ).rejects.toThrow();
+
+      expect(console.log).toHaveBeenCalledWith(SAMPLE_RAW_BASE64);
+    });
+  });
 });
