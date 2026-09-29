@@ -50,6 +50,9 @@ interface DossierInfo {
   checksum?: { algorithm?: string; hash?: string };
   signature?: { signed_by?: string; key_id?: string };
   content_url?: string;
+  /** GitHub login that published this version; null/absent for versions published before #971. */
+  published_by?: string | null;
+  published_at?: string | null;
 }
 
 interface DossierListItem {
@@ -60,6 +63,8 @@ interface DossierListItem {
   version?: string;
   category?: string | string[];
   tags?: string[];
+  published_by?: string | null;
+  published_at?: string | null;
 }
 
 interface ListTracesOptions {
@@ -102,6 +107,7 @@ interface ListDossiersResult {
 interface PublishResult {
   name?: string;
   content_url?: string;
+  published_by?: string | null;
   evidence_url?: string;
 }
 

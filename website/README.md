@@ -44,3 +44,7 @@ defaults to Vercel's production URL, else `https://ai-dossier.vercel.app`).
 | Include files outside Root Directory | enabled (the default): the build reads `../docs` |
 
 No analytics, cookies or third-party requests.
+
+## Design system
+
+Tokens (colors, type scale, radii) live in `src/styles/global.css`: dark-first, light via `prefers-color-scheme`, one accent. Fonts are self-hosted in `public/fonts/` (Inter and JetBrains Mono variable, latin subset from `@fontsource-variable/*`, SIL OFL, licenses alongside); the site loads nothing from third-party origins.
