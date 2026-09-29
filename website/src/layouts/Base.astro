@@ -6,11 +6,13 @@ interface Props {
   title: string;
   description?: string;
   wide?: boolean;
+  noindex?: boolean;
 }
 const {
   title,
   description = 'AI Dossier: verifiable, signed, versioned automation for AI agents.',
   wide = false,
+  noindex = false,
 } = Astro.props;
 const fullTitle = title === 'AI Dossier' ? title : `${title} | AI Dossier`;
 const canonical = new URL(Astro.url.pathname, Astro.site).href;
@@ -22,7 +24,7 @@ const canonical = new URL(Astro.url.pathname, Astro.site).href;
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>{fullTitle}</title>
     <meta name="description" content={description} />
-    <link rel="canonical" href={canonical} />
+    {noindex ? <meta name="robots" content="noindex" /> : <link rel="canonical" href={canonical} />}
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <meta name="color-scheme" content="light dark" />
     <meta property="og:type" content="website" />

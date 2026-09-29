@@ -39,6 +39,8 @@ export async function docsNav() {
     .map(([top, items]) => ({
       key: top,
       label: LABELS[top] ?? top.charAt(0).toUpperCase() + top.slice(1),
-      items: items.sort((a, b) => Number(b.index) - Number(a.index) || a.title.localeCompare(b.title)),
+      items: items.sort(
+        (a, b) => Number(b.index) - Number(a.index) || a.title.localeCompare(b.title)
+      ),
     }));
 }

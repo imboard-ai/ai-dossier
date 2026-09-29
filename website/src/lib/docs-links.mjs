@@ -31,10 +31,19 @@ const EXTERNAL = /^([a-z][a-z0-9+.-]*:|\/\/|#)/i;
  * `docsDir` and `repoRoot`). `exists(absPath)` reports whether a path is a file or
  * directory. Returns the href to emit.
  */
-export function rewriteLink(href, { fromAbs, docsDir, repoRoot, exists, image = false }) {
+export function rewriteLink(
+  href,
+  { fromAbs, docsDir, repoRoot, exists, image = false, onMissing }
+) {
   if (!href || EXTERNAL.test(href)) return href;
   const hashAt = href.search(/[?#]/);
-  const target = decodeURI(hashAt === -1 ? href : href.slice(0, hashAt));
+  const rawTarget = hashAt === -1 ? href : href.slice(0, hashAt);
+  let target = rawTarget;
+  try {
+    target = decodeURI(rawTarget);
+  } catch {
+    // malformed % escape: use it verbatim
+  }
   const suffix = hashAt === -1 ? '' : href.slice(hashAt);
   const abs = target.startsWith('/')
     ? path.join(repoRoot, target)
@@ -50,6 +59,7 @@ export function rewriteLink(href, { fromAbs, docsDir, repoRoot, exists, image = 
     // A directory link like `getting-started/` resolves to its README.
     if (exists(abs) && exists(path.join(abs, 'README.md'))) return docUrl(docId(docRel)) + suffix;
   }
+  if (!exists(abs) && onMissing) onMissing(href, repoRel);
   // Anything else (source files, excluded notes, repo-root docs, assets) lives on GitHub.
   const isDir = exists(abs) && !path.extname(abs);
   const base = image ? RAW_URL : `${REPO_URL}/${isDir ? 'tree' : 'blob'}/main`;

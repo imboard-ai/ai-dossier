@@ -45,23 +45,45 @@ async function mapLimit(items, limit, fn) {
   return out;
 }
 
+const arr = (x) => (Array.isArray(x) ? x : []);
+const str = (x) => (typeof x === 'string' ? x : '');
+const names = (x) =>
+  arr(x)
+    .map((o) => str(o?.name))
+    .filter(Boolean);
+const httpsOnly = (u) => {
+  try {
+    return new URL(u).protocol === 'https:' ? u : '';
+  } catch {
+    return '';
+  }
+};
+// Names become output paths: keep them to a conservative alphabet, no traversal.
+export const validName = (n) =>
+  /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/.test(n) &&
+  !n.split('/').some((s) => s === '..' || s === '.');
+
 function shape(entry, parsed) {
   const meta = parsed?.meta ?? {};
   return {
     name: entry.name,
-    title: entry.title || meta.title || entry.name,
-    version: entry.version || meta.version || '',
-    description: entry.description || meta.description || '',
-    categories: entry.category ?? meta.category ?? [],
-    tags: entry.tags ?? meta.tags ?? [],
-    authors: (entry.authors ?? meta.authors ?? []).map((a) => a.name).filter(Boolean),
-    tools: (entry.tools_required ?? meta.tools_required ?? []).map((t) => t.name).filter(Boolean),
-    sourceUrl: entry.url,
-    objective: meta.objective ?? '',
-    status: meta.status ?? '',
-    riskLevel: meta.risk_level ?? 'unknown',
-    riskFactors: meta.risk_factors ?? [],
-    requiresApproval: meta.requires_approval ?? null,
+    title: str(entry.title) || str(meta.title) || entry.name,
+    version: str(entry.version) || str(meta.version),
+    description: str(entry.description) || str(meta.description),
+    categories: arr(entry.category ?? meta.category)
+      .map(str)
+      .filter(Boolean),
+    tags: arr(entry.tags ?? meta.tags)
+      .map(str)
+      .filter(Boolean),
+    authors: names(entry.authors ?? meta.authors),
+    tools: names(entry.tools_required ?? meta.tools_required),
+    sourceUrl: httpsOnly(entry.url),
+    objective: str(meta.objective),
+    status: str(meta.status),
+    riskLevel: str(meta.risk_level) || 'unknown',
+    riskFactors: arr(meta.risk_factors).map(str),
+    requiresApproval: typeof meta.requires_approval === 'boolean' ? meta.requires_approval : null,
     checksum: meta.checksum?.hash ? `${meta.checksum.algorithm}:${meta.checksum.hash}` : '',
     signature: meta.signature
       ? {
@@ -93,9 +115,17 @@ export async function loadRegistry() {
       }
       throw err;
     }
-    const dossiers = await mapLimit(list, CONCURRENCY, async (entry) => {
+    const valid = list.filter((e) => {
+      const ok = typeof e?.name === 'string' && validName(e.name);
+      if (!ok)
+        console.warn(`[registry] skipping entry with unusable name: ${JSON.stringify(e?.name)}`);
+      return ok;
+    });
+    const dossiers = await mapLimit(valid, CONCURRENCY, async (entry) => {
+      const url = httpsOnly(entry.url);
       try {
-        return shape(entry, parseDossier(await getText(entry.url)));
+        if (!url) throw new Error('no https url');
+        return shape(entry, parseDossier(await getText(url)));
       } catch (err) {
         console.warn(`[registry] no header for ${entry.name}: ${err.message}`);
         return shape(entry, null);

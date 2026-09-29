@@ -130,7 +130,9 @@ jobs:
           BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           git fetch --no-tags origin -- "$BASE_REF"
-          if git diff --name-only "origin/$BASE_REF"...HEAD | grep -qE '^(website/|docs/|\.github/workflows/ci\.yml$)'; then
+          # Capture first: a failing `git diff` inside an `if` pipeline would silently skip the build.
+          changed=$(git diff --name-only "origin/$BASE_REF"...HEAD)
+          if printf '%s\n' "$changed" | grep -qE '^(website/|docs/|\.github/workflows/ci\.yml$)'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"

@@ -14,7 +14,12 @@ export default defineConfig({
   site,
   output: 'static',
   trailingSlash: 'always',
-  integrations: [sitemap()],
+  integrations: [
+    // Internal working notes stay reachable but out of the sitemap.
+    sitemap({
+      filter: (page) => !/\/docs\/(reports|agent-traps|contributing\/mcp)(\/|$)/.test(page),
+    }),
+  ],
   markdown: {
     remarkPlugins: [remarkDocsLinks],
     shikiConfig: { themes: { light: 'github-light', dark: 'github-dark' } },

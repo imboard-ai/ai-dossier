@@ -27,7 +27,10 @@ test('excludes planning internals', () => {
 
 test('relative md links become docs routes and keep anchors', () => {
   const from = '/r/docs/guides/README.md';
-  assert.equal(rewriteLink('signing-dossiers.md#keys', ctx(from)), '/docs/guides/signing-dossiers/#keys');
+  assert.equal(
+    rewriteLink('signing-dossiers.md#keys', ctx(from)),
+    '/docs/guides/signing-dossiers/#keys'
+  );
   assert.equal(rewriteLink('guides/', ctx('/r/docs/index.md')), '/docs/guides/');
 });
 

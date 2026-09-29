@@ -13,7 +13,7 @@ const exists = (p) => fs.existsSync(p);
 export default function remarkDocsLinks() {
   return (tree, file) => {
     const fromAbs = file.path;
-    if (!fromAbs || !path.resolve(fromAbs).startsWith(docsDir)) return;
+    if (!fromAbs || !path.resolve(fromAbs).startsWith(docsDir + path.sep)) return;
     visit(tree, ['link', 'image'], (node) => {
       node.url = rewriteLink(node.url, {
         fromAbs,
@@ -21,6 +21,10 @@ export default function remarkDocsLinks() {
         repoRoot,
         exists,
         image: node.type === 'image',
+        onMissing: (href, repoRel) =>
+          console.warn(
+            `[docs] broken link in ${path.relative(repoRoot, fromAbs)}: ${href} (${repoRel} does not exist)`
+          ),
       });
     });
   };

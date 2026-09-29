@@ -918,7 +918,7 @@ Dossier files use two extensions:
 
 **`.ds.md` (Dossier files)** contain the instructions, metadata, and validation criteria. They are checksummed and optionally signed. Their content should not change during execution.
 
-**`.dsw.md` (Working files)** track execution state: progress, context gathered, decisions made, and action logs. They are mutable and intentionally outside the security boundary. See the [working files example](../../examples/working-files/) for the full pattern.
+**`.dsw.md` (Working files)** track execution state: progress, context gathered, decisions made, and action logs. They are mutable and intentionally outside the security boundary. See the [examples directory](../../examples/) for the full pattern.
 
 **Why not just `.md`?** The `.ds.md` extension makes dossiers discoverable by tooling (CLI, MCP server, IDE plugins) without needing to parse every markdown file in a project.
 
@@ -1802,11 +1802,11 @@ Everything works without internet.
 
 ### Where can I learn more?
 
-- **Documentation**: [Main README](README.md)
+- **Documentation**: [Main README](../../README.md)
 - **Getting Started**: [Quick Start Guide](../getting-started/quick-start.md)
 - **Schema Details**: [Schema Documentation](../reference/schema.md)
 - **Security**: [Security Model](security-model.md)
-- **Examples**: [examples/](examples/) directory
+- **Examples**: [examples/](../../examples/) directory
 
 ### How can I contribute?
 

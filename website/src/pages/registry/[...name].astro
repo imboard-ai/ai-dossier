@@ -58,7 +58,7 @@ const sig = d.signature;
       {d.tags.length > 0 && <tr><th scope="row">Tags</th><td>{d.tags.join(', ')}</td></tr>}
       {d.tools.length > 0 && <tr><th scope="row">Tools required</th><td>{d.tools.join(', ')}</td></tr>}
       {d.authors.length > 0 && <tr><th scope="row">Authors</th><td>{d.authors.join(', ')}</td></tr>}
-      <tr><th scope="row">Source</th><td><a href={d.sourceUrl}>raw <code>.ds.md</code></a></td></tr>
+      {d.sourceUrl && <tr><th scope="row">Source</th><td><a href={d.sourceUrl}>raw <code>.ds.md</code></a></td></tr>}
     </tbody>
   </table>
   {!d.detailLoaded && <p class="muted">The dossier header could not be fetched at build time, so risk and signature data are unavailable.</p>}

@@ -7,12 +7,20 @@ const { command, label } = Astro.props;
   <pre><code>{command}</code></pre>
   <button type="button" class="copy" data-copy={command} aria-label={`Copy: ${label}`}>Copy</button>
 </div>
-<script is:inline>
-  document.addEventListener('click', function (e) {
-    var b = e.target.closest && e.target.closest('button.copy');
-    if (!b) return;
-    var done = function () { var t = b.textContent; b.textContent = 'Copied'; setTimeout(function () { b.textContent = t; }, 1500); };
-    if (navigator.clipboard) navigator.clipboard.writeText(b.dataset.copy).then(done, function () {});
+<script>
+  // Bundled once per page (not once per component instance).
+  document.addEventListener('click', (e) => {
+    const b = (e.target as Element | null)?.closest<HTMLButtonElement>('button.copy');
+    if (!b || !navigator.clipboard) return;
+    navigator.clipboard.writeText(b.dataset.copy ?? '').then(
+      () => {
+        const t = b.dataset.label ?? b.textContent ?? 'Copy';
+        b.dataset.label = t;
+        b.textContent = 'Copied';
+        setTimeout(() => { b.textContent = t; }, 1500);
+      },
+      () => {}
+    );
   });
 </script>
 <style>

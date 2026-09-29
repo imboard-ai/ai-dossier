@@ -149,5 +149,5 @@ cat hello.txt
 
 - Browse [example dossiers](../../examples/) for real-world patterns
 - Read the [Dossier Guide](../guides/dossier-guide.md) for schema details and best practices
-- Try running a [git project review](../../examples/git-project-review/) dossier on your own project
+- Try running a [git workflow](../../examples/git/) dossier on your own project
 - Learn about [security and signatures](../../security/ARCHITECTURE.md)

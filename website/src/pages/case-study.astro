@@ -12,7 +12,7 @@ const pr = (n: number) => `${repo}/pull/${n}`;
   </p>
 
   <h1>One autopilot day on our own repo</h1>
-  <p class="muted">Snapshot: 2026-09-29, taken while the run was still in progress. Every figure below links to its source on GitHub.</p>
+  <p class="muted">Snapshot: 2026-09-29, taken while the run was still in progress. Figures cite their source: the #880 log, GitHub pull requests and releases, or the <code>gh</code> query shown.</p>
 
   <h2>What we did</h2>
   <p>
@@ -31,7 +31,7 @@ const pr = (n: number) => `${repo}/pull/${n}`;
   <table>
     <thead><tr><th>Figure</th><th>Value</th><th>Source</th></tr></thead>
     <tbody>
-      <tr><td>Cycles completed</td><td>10 (an 11th was pending a usage reading)</td><td><a href={log}>#880</a> cycle comments</td></tr>
+      <tr><td>Cycles completed</td><td>10 (an 11th was in progress)</td><td><a href={log}>#880</a> cycle comments</td></tr>
       <tr><td>Pull requests merged from the loop's cycles</td><td>25 (from Cycle 1 to Cycle 10)</td><td>PR numbers named in the #880 cycle comments</td></tr>
       <tr><td>All PRs merged to <code>main</code> in the same window</td><td>29, including 4 from a parallel scheduler session; +17,076 / −1,563 lines</td><td><code>gh pr list --state merged --search "merged:&gt;=2026-09-29"</code>, after the 08:28 UTC start</td></tr>
       <tr><td>Releases published</td><td>11 GitHub releases: CLI <code>cli-v0.72.0</code> to <code>cli-v0.80.0</code> (10, including 0.76.1) and <code>vscode-v0.1.0</code></td><td><a href={`${repo}/releases`}>Releases</a> page, <code>gh release list</code></td></tr>
@@ -45,14 +45,14 @@ const pr = (n: number) => `${repo}/pull/${n}`;
     <li><a href={pr(914)}>#914</a>: VS Code extension MVP (inline diagnostics, completion, dry-run preview), released as <code>vscode-v0.1.0</code>.</li>
     <li><a href={pr(909)}>#909</a>: deep static dry-run preview with a 0-100 risk score, also exposed through the MCP server. Every surface says it is a preview, not a safety guarantee.</li>
     <li><a href={pr(903)}>#903</a>: actionable checksum and signature failure messages, a confirmation prompt for high-risk dossiers, key export and revoke.</li>
-    <li><a href={pr(916)}>#916</a>: only OWNER, MEMBER and COLLABORATOR authors are trusted for <code>plan:v1</code> artifacts posted as issue comments.</li>
-    <li>Scheduler fixes: <a href={pr(886)}>#886</a>, <a href={pr(898)}>#898</a>, <a href={pr(917)}>#917</a>, <a href={pr(918)}>#918</a>, <a href={pr(923)}>#923</a>; and a publish safety net, <a href={pr(881)}>#881</a>, because GitHub had dropped a push event and skipped a release.</li>
+    <li><a href={pr(916)}>#916</a>: only OWNER, MEMBER and COLLABORATOR authors are trusted for <code>plan:v1</code> artifacts posted as issue comments (a partial fix; see the open gaps below).</li>
+    <li>Scheduler fixes: <a href={pr(886)}>#886</a>, <a href={pr(898)}>#898</a>, <a href={pr(917)}>#917</a>, <a href={pr(918)}>#918</a>, <a href={pr(923)}>#923</a>; and a publish safety net, <a href={pr(881)}>#881</a>, because GitHub most likely dropped a push event and skipped a release (a hypothesis in the log, supported by the evidence, not proven).</li>
   </ul>
 
   <h2>How quality was controlled</h2>
-  <p>Two independent review layers ran on every change: a review agent spawned by each worker, then the orchestrator reading the diff, CI results and acceptance criteria before merging. The orchestrator also held merges. Defects caught before they shipped, as recorded in #880:</p>
+  <p>Two independent review layers ran on the workers' pull requests: a review agent spawned by each worker (one Cycle 2 worker skipped this phase), then the orchestrator reading the diff, CI results and acceptance criteria before merging. The orchestrator's own small PRs (#906, #910) had no worker review. The orchestrator also held merges. Defects caught before they shipped, as recorded in #880:</p>
   <ul>
-    <li><a href={pr(917)}>#917</a> (merge-mode detection): the worker's review agent reported <strong>3 HIGH and 7 MEDIUM</strong> findings, including that the fix did not work on this very repository. All were fixed with tests before merge.</li>
+    <li><a href={pr(917)}>#917</a> (merge-mode detection): the worker's review agent reported <strong>3 HIGH and 7 MEDIUM</strong> findings, including that the fix did not work on this very repository. All were addressed with tests before merge (3 further findings were withdrawn as false positives).</li>
     <li><a href={pr(916)}>#916</a> (author trust): the worker's adversarial review said "merge", but its HIGH finding described the core attack, and other readers still trusted any commenter. The orchestrator held the merge until those paths, a duplicated trust set and a bogus association value were fixed.</li>
     <li><a href={pr(922)}>#922</a> (focused test gate): review found that a renamed file hid its source workspace, so a red change could pass the gate. Fixed by diffing without rename detection.</li>
     <li><a href={pr(914)}>#914</a> (VS Code extension): the worker's review agent found 4 real bugs (an off-by-one line in YAML errors, extension tests that never ran in CI, completion breaking on wide JSON indents, stale diagnostics after closing a file).</li>
@@ -62,8 +62,9 @@ const pr = (n: number) => `${repo}/pull/${n}`;
   <h2>What failed, and what we did about it</h2>
   <ul>
     <li><strong>Flaky tests were partly a product bug.</strong> A runstate flake in <a href={pr(894)}>#894</a> was a run-id collision (2 random bytes, about 1 in 65,536); fixed and covered by a deterministic test. Honest caveat from the log: neither flake reproduced locally in 90 and 60 attempts, so those fixes rest on code reading.</li>
-    <li><strong>Release automation raced.</strong> The binaries build fired before npm's listing had caught up, then two runs raced to create the same release (HTTP 403). Fixed in <a href={pr(906)}>#906</a> and <a href={pr(910)}>#910</a>; later releases went out without intervention.</li>
-    <li><strong>Workers skipped their own procedure.</strong> Some workers skipped the review phase or waited on review reports that had already arrived. This was mitigated by prompt changes but, per the log, only partly resolved.</li>
+    <li><strong>Release automation raced.</strong> The binaries build fired before npm's listing had caught up, then two runs raced to create the same release (HTTP 403). The npm-lag race and the duplicate-create race were fixed in <a href={pr(906)}>#906</a> and <a href={pr(910)}>#910</a>. Two later HTTP 403 failures (runs 36563598134 and 36563936905) have an unknown cause and remain open.</li>
+    <li><strong>Workers did not always follow their own procedure.</strong> Some skipped the review phase, and some stalled waiting on review reports that had in fact already arrived. Prompt changes helped only partly, per the log.</li>
+    <li><strong>Reviewed and merged does not mean finished.</strong> Follow-up review of two of the shipped changes found HIGH-severity gaps that are still open: <a href={`${repo}/issues/932`}>#932</a> (the scheduler still acts on runstate milestones posted by any commenter, so the author-trust work in #916 covers only part of the surface) and <a href={`${repo}/issues/933`}>#933</a> (the dry-run analyzer from #909 under-reports some dangerous dossiers as low risk)</li>
     <li><strong>Tooling friction.</strong> Harness worktree isolation fails on this repo's nested <code>main/.git</code> layout, so workers create worktrees by hand; the permission classifier blocked unreviewed subagent merges until a scoped rule was added; a PR's CI did not start for about 25 minutes because of a merge conflict.</li>
   </ul>
 

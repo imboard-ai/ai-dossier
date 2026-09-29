@@ -1,5 +1,5 @@
-import { glob } from 'astro/loaders';
 import { defineCollection, z } from 'astro:content';
+import { glob } from 'astro/loaders';
 import { docId, isExcluded } from './lib/docs-links.mjs';
 
 // The docs collection reads the repo's own `docs/` markdown in place (../docs relative to
