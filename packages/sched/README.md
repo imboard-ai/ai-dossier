@@ -429,8 +429,18 @@ Before the engine respawns an agent onto a worktree that already exists — a ba
 batch **member** reusing its worktree, an issue **takeover** — it preserves whatever the dead
 agent left there (`preserve.ts`):
 
-- a WIP commit on `rescue/<unit>-<timestamp>` holding every tracked change, untracked file
-  and unpushed commit, pushed to origin and journaled as `work-preserved` (`branch` = the ref);
+- a WIP commit under the **non-branch** ref `refs/sched-rescue/<unit>-<timestamp>` (pushing it
+  triggers no CI and adds no branch), holding every tracked change (`git add -u`, deletions
+  included), the unpushed commits, and only those untracked / staged-new files that pass the
+  **secret and size filter** — pushed to origin and journaled as `work-preserved` (`branch` = the
+  ref). Never captured: paths matching `.env*`, `*.env`, `*.pem`, `*.key`, `id_rsa*`,
+  `id_ed25519*`, `*credentials*`, `*.p12`, `*.pfx`, `*secret*` (and `.npmrc`, `.netrc`, `.ssh/`, …),
+  files over 1 MiB, anything past 500 files / 16 MiB, submodule/nested-repo contents. They stay in
+  the worktree; the journal and the respawn prompt say how many were skipped and why. The rescue
+  bypasses the pre-commit secret scan, so this filter is the control;
+- **TTL:** rescue refs are disposable. `sched start` deletes those older than 14 days, locally and
+  on origin (a ref whose remote deletion fails for any reason but "already gone" is kept and retried
+  next start). Find live ones with `git for-each-ref refs/sched-rescue`;
 - built with a throwaway index, so the worktree, its index and its HEAD are untouched — the
   respawned agent still finds the files in place, and preservation cannot itself lose work;
 - idempotent: an unchanged tree reuses its existing rescue ref instead of minting one per tick;
@@ -439,16 +449,22 @@ agent left there (`preserve.ts`):
   not fatal; an unpreservable worktree journals `work-preserve-failed` and is left as it is.
 
 A takeover's worktree path comes from a setup milestone (an issue comment), so it is acted on only
-when `git worktree list` registers it in this repository.
+when `git worktree list` registers it in this repository, it is under the sanctioned `worktrees/`
+roots, it is not the main checkout, and no batch holds it (`takeoverWorktreeRefusal`; a refusal is
+journaled `work-preserve-failed` and never blocks the respawn). **The takeover rescue runs outside
+the state lock** (it shells out to `gh`, `git` and `git push`): a stalled unit enters recovery on
+one tick and its takeover is spawned on the next, after the rescue. Takeover preservation is on
+only when the engine is given a `rescueExec` (the CLI wires one, 120 s per call).
 
 **Batch tail, respawn only:** when the previous tail exited unverified and its worktree holds
-uncommitted files, or a passing `gate.batch` row in `caps.jsonl` (matched by `cwd`) is newer than
-the last pushed head and describes code that is not that head (`dirty: true`, or a `git_tree`
-differing from HEAD's — the #941 fields; legacy rows count only while local work exists), the
-engine does **not** respawn. It blocks the batch `tail-dirty-worktree`, with the evidence and the
+uncommitted files, or the NEWEST `gate.batch` row in `caps.jsonl` for that worktree (matched by realpath of `cwd`) is a
+passing run on a **dirty** tree (`dirty: true` or `git_probe` set — #941's fields) newer than the
+last pushed head while local work exists, the engine does **not** respawn. Rows without #941's
+fields (the engine's own post-landing gate rows) and clean rows are never evidence; an older dirty
+row is superseded by a newer clean or failed one. It blocks the batch `tail-dirty-worktree`, with the evidence and the
 rescue ref in the journal and `sched status`. Commit or discard the work in the worktree, then
 `sched resume --batch <id>`. A tail that left only unpushed commits is respawned, told to resume
-from the rescue ref.
+from the rescue ref. `sched resume --batch` deliberately does NOT re-run this guard: by resuming, the operator has looked at the worktree.
 
 ### Zombie-run fencing (#504)
 

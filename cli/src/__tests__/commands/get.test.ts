@@ -17,6 +17,29 @@ describe('get command', () => {
     ]);
   });
 
+  it('shows the recorded publisher, and N/A for a legacy entry (#971)', async () => {
+    for (const [publishedBy, expected] of [
+      ['alice', 'alice'],
+      [undefined, 'N/A'],
+    ] as const) {
+      vi.mocked(console.log).mockClear();
+      vi.mocked(multiRegistry.multiRegistryGetDossier).mockResolvedValue({
+        result: {
+          name: 'd',
+          title: 'D',
+          version: '1.0.0',
+          published_by: publishedBy,
+          _registry: 'public',
+        },
+        errors: [],
+      });
+      const program = createTestProgram();
+      registerGetCommand(program);
+      await expect(program.parseAsync(['node', 'dossier', 'get', 'd'])).rejects.toThrow();
+      expect(console.log).toHaveBeenCalledWith(`   Published by ${expected}`);
+    }
+  });
+
   it('should display dossier metadata from registry', async () => {
     vi.mocked(multiRegistry.multiRegistryGetDossier).mockResolvedValue({
       result: {

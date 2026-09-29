@@ -127,10 +127,11 @@ import {
 } from './merge-mechanism';
 import type { SchedStore } from './persist';
 import {
-  isRegisteredWorktree,
   type PreservedWork,
   preservedWorkInstruction,
   preserveWork,
+  skippedSummary,
+  takeoverWorktreeRefusal,
 } from './preserve';
 import type { ExecFn } from './project';
 import { DISPATCHABLE_ISSUE_STATUSES, runnableUnits } from './readiness';
@@ -184,7 +185,9 @@ export interface EngineDeps {
   teardownExec: ExecFn;
   /**
    * Exec for `preserveWork` (#945) — git commit-tree + push from a dead
-   * agent's worktree. Falls back to `teardownExec` (same bounded-timeout git).
+   * agent's worktree. Takeover preservation is ON only when this is supplied
+   * (the CLI wires a bounded-timeout one); without it a takeover respawns
+   * exactly as before. It runs OUTSIDE the state lock: see `rescueBeforeTakeover`.
    */
   rescueExec?: ExecFn;
   /**
@@ -389,6 +392,13 @@ interface TickCtx {
    * cache miss runs `gh api`, which must never happen under `store.withLock`.
    */
   mechanism: MergeMechanism | undefined;
+  /**
+   * #945: takeover rescues computed OUTSIDE the lock (`rescueBeforeTakeover`),
+   * keyed by unit; `null` = nothing to preserve. Undefined when preservation is
+   * off. A takeover whose unit is not here yet (it entered recovery during this
+   * very pass) is held until the next tick — never rescued under the lock.
+   */
+  rescued?: Map<string, PreservedWork | null>;
 }
 
 function journal(
@@ -969,7 +979,15 @@ function spawnUnit(ctx: TickCtx, state: SchedState, unit: string): SchedState {
   const evidence = findEntry(seededState, issue)?.failure_evidence ?? null;
   // #945: a takeover (gen > 0) lands on whatever the dead run left in its
   // worktree — preserve it first and tell the respawn to resume from it.
-  const preserved = slot.gen > 0 ? preserveForTakeover(ctx, seededState, unit, issue) : null;
+  let preserved: PreservedWork | null = null;
+  if (slot.gen > 0 && ctx.rescued !== undefined) {
+    if (!ctx.rescued.has(unit)) {
+      // Held: the rescue (git + gh) runs outside the lock before the NEXT tick's
+      // respawn. The slot stays `recovering`; `reconcileRecovering` retries it.
+      return state;
+    }
+    preserved = ctx.rescued.get(unit) ?? null;
+  }
 
   return spawnAndRecord(ctx, seededState, unit, slot, {
     tier: entry.tier,
@@ -1005,37 +1023,87 @@ function spawnUnit(ctx: TickCtx, state: SchedState, unit: string): SchedState {
 
 /**
  * #945: preserve what a superseded run left in its worktree before its takeover
- * is spawned. The worktree comes from the run's setup milestone (an issue
- * COMMENT), so it is acted on only when git lists it as a worktree of THIS
- * repository. Journals `work-preserved` / `work-preserve-failed`; null when
- * there was nothing to preserve or it was not possible (never blocks the
- * respawn — the worktree is untouched either way).
+ * is spawned — for every slot ALREADY awaiting a takeover respawn, computed
+ * OUTSIDE the state lock (`gh` issue read, `git worktree list`, the rescue
+ * script and its push are all subprocesses). The worktree comes from the run's
+ * setup milestone (an issue COMMENT), so it is acted on only when it passes
+ * `takeoverWorktreeRefusal` (registered worktree of THIS repo, under the
+ * sanctioned roots, not the main checkout, not held by a batch). Journals
+ * `work-preserved` / `work-preserve-failed`; a refusal is journaled once per
+ * unit and yields `null`. Nothing here ever blocks the respawn.
  */
+function rescueBeforeTakeover(
+  deps: EngineDeps,
+  state: SchedState
+): Map<string, PreservedWork | null> | undefined {
+  const exec = deps.rescueExec;
+  if (exec === undefined) return undefined;
+  const rescued = new Map<string, PreservedWork | null>();
+  for (const slot of state.slots) {
+    if (slot.unit === null || slot.gen <= 0) continue;
+    const awaiting =
+      slot.status === 'recovering' || (slot.status === 'assigned' && slot.pid === null);
+    const issue = slot.unit.startsWith('issue:') ? Number(slot.unit.slice('issue:'.length)) : NaN;
+    if (!awaiting || !Number.isInteger(issue)) continue;
+    rescued.set(slot.unit, preserveForTakeover(deps, exec, state, slot.unit, issue));
+  }
+  return rescued;
+}
+
 function preserveForTakeover(
-  ctx: TickCtx,
-  _state: SchedState,
+  deps: EngineDeps,
+  exec: ExecFn,
+  state: SchedState,
   unit: string,
   issue: number
 ): PreservedWork | null {
-  const info = ctx.deps.groundTruth.setupInfo(issue);
+  let info: ReturnType<EngineDeps['groundTruth']['setupInfo']>;
+  try {
+    info = deps.groundTruth.setupInfo(issue);
+  } catch {
+    return null;
+  }
   if (info === null || info === undefined) return null;
-  const exec = ctx.deps.rescueExec ?? ctx.deps.teardownExec;
-  if (!isRegisteredWorktree(exec, ctx.deps.repoDir, info.worktree)) return null;
-  const outcome = preserveWork(exec, { worktree: info.worktree, unit, now: ctx.deps.now() });
+  const refusal = takeoverWorktreeRefusal(exec, {
+    repoDir: deps.repoDir,
+    worktree: info.worktree,
+    state,
+    unit,
+  });
+  if (refusal !== null) {
+    deps.journal.append(
+      unitEvent('work-preserve-failed', unit, {
+        worktree: info.worktree,
+        detail: `takeover rescue skipped: ${refusal} — the worktree is not touched`,
+      }),
+      deps.now()
+    );
+    return null;
+  }
+  const outcome = preserveWork(exec, { worktree: info.worktree, unit, now: deps.now() });
   if (outcome.kind === 'preserved') {
     const w = outcome.work;
-    journal(ctx, 'work-preserved', unit, {
-      branch: w.ref,
-      worktree: info.worktree,
-      detail: `${w.dirty_files} uncommitted file(s) + ${w.unpushed_commits} unpushed commit(s) on head ${w.head} preserved as ${w.sha} on ${w.ref} (${w.pushed ? 'pushed' : 'NOT pushed — local ref only'}${w.reused ? ', reused an identical earlier rescue' : ''}); the takeover is told to resume from it`,
-    });
+    if (!w.reused) {
+      const skipped = skippedSummary(w.skipped);
+      deps.journal.append(
+        unitEvent('work-preserved', unit, {
+          branch: w.ref,
+          worktree: info.worktree,
+          detail: `${w.dirty_files} uncommitted file(s) + ${w.unpushed_commits} unpushed commit(s) on head ${w.head} preserved as ${w.sha} at ${w.ref} (${w.pushed ? 'pushed' : 'NOT pushed — local ref only'})${skipped ? `; ${skipped}` : ''}; the takeover is told to resume from it`,
+        }),
+        deps.now()
+      );
+    }
     return w;
   }
   if (outcome.kind === 'failed') {
-    journal(ctx, 'work-preserve-failed', unit, {
-      worktree: info.worktree,
-      detail: `${outcome.reason} — ${outcome.probe.dirty_files} uncommitted file(s), ${outcome.probe.unpushed_commits} unpushed commit(s) left in place in the worktree`,
-    });
+    deps.journal.append(
+      unitEvent('work-preserve-failed', unit, {
+        worktree: info.worktree,
+        detail: `${outcome.reason} — ${outcome.probe.dirty_files} uncommitted file(s), ${outcome.probe.unpushed_commits} unpushed commit(s) left in place in the worktree`,
+      }),
+      deps.now()
+    );
   }
   return null;
 }
@@ -3420,9 +3488,11 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
   const labelVerifiedIssues = labelVerified(labelPoll);
   const closedPoll = pollClosed(deps, state0, config);
   const mechanism = deps.groundTruth.mergeMechanism?.();
+  // #945: takeover rescues (git/gh/push) — outside the lock, like every poll above.
+  const rescued = rescueBeforeTakeover(deps, state0);
 
   const pass1 = deps.store.withLock((state) => {
-    const ctx: TickCtx = { deps, config, dispatch, result: emptyResult(), mechanism };
+    const ctx: TickCtx = { deps, config, dispatch, result: emptyResult(), mechanism, rescued };
     let next = reconcileSlots(ctx, state, polled);
     next = reconcileParked(ctx, next, prPoll);
     next = reconcileStaleFailedParks(ctx, next, prPoll);
@@ -3453,7 +3523,7 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
     }
     if (results.size > 0 || unreachable.length > 0) {
       result = deps.store.withLock((state) => {
-        const ctx: TickCtx = { deps, config, dispatch, result, mechanism };
+        const ctx: TickCtx = { deps, config, dispatch, result, mechanism, rescued };
         let next = state;
         // #636: `setupInfo` answered for these — any unreachable streak is over.
         for (const issue of results.keys()) {

@@ -25,9 +25,6 @@ import type { VercelRequest, VercelResponse } from '../../../lib/types';
 
 const log = createLogger('dossiers/index');
 
-// biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — stripping dangerous chars
-const CONTROL_CHARS = /[\x00-\x1f\x7f]/g;
-
 export default async function handler(req: VercelRequest, res: VercelResponse) {
   if (handleCors(req, res)) return;
 
@@ -181,10 +178,23 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
   const input = result.data;
 
   const { namespace, content, changelog, evidence } = input;
+  let publishedBy: string | null = null;
 
   try {
-    const authorized = await authorizePublish(req, res, namespace);
-    if (!authorized) return;
+    const auth = await authorizePublish(req, res, namespace);
+    if (!auth) return;
+    // The publisher is the verified JWT subject — never anything from the request body.
+    // publishDossier re-applies the same sanitizer at the commit boundary (idempotent).
+    publishedBy = dossier.sanitizeActor(auth.sub);
+    if (publishedBy !== auth.sub) {
+      log.warn('Publisher login sanitized or empty — provenance may be incomplete', {
+        requestId,
+        namespace,
+        user: auth.sub,
+        published_by: publishedBy,
+      });
+    }
+    log.info('Publishing dossier', { requestId, namespace, user: auth.sub });
 
     let parsed: ReturnType<typeof dossier.parseFrontmatter>;
     try {
@@ -225,24 +235,24 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
     }
 
     // Strip control characters (except space) to prevent git commit message injection
-    const sanitizedChangelog = changelog ? changelog.replace(CONTROL_CHARS, '').trim() : '';
+    const sanitizedChangelog = changelog ? dossier.sanitizeCommitText(changelog) : '';
     if (changelog && sanitizedChangelog !== changelog) {
       log.warn('Stripped control characters from changelog', { requestId, namespace });
     }
     const changelogMessage = sanitizedChangelog || 'No changelog provided';
-    await github.publishDossier(
-      fullPath,
-      content,
-      parsed.frontmatter,
-      changelogMessage,
-      evidence ?? null
-    );
+    const publishedAt = new Date().toISOString();
+    await github.publishDossier(fullPath, content, parsed.frontmatter, changelogMessage, {
+      evidence: evidence ?? null,
+      publishedBy,
+      publishedAt,
+    });
 
     log.info('Dossier published', {
       requestId,
       namespace,
       name: fullPath,
       version: parsed.frontmatter.version,
+      published_by: publishedBy,
       evidence: evidence !== undefined ? 'attached' : 'none',
     });
 
@@ -251,7 +261,8 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
       version: parsed.frontmatter.version,
       title: parsed.frontmatter.title,
       content_url: config.getCdnUrl(dossier.dossierFilePath(fullPath)),
-      published_at: new Date().toISOString(),
+      published_at: publishedAt,
+      published_by: publishedBy,
       ...(evidence !== undefined
         ? { evidence_url: config.getCdnUrl(dossier.evidenceFilePath(fullPath)) }
         : {}),
@@ -266,7 +277,7 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
       code: 'PUBLISH_ERROR',
       message: 'Failed to publish dossier',
       requestId,
-      context: { namespace },
+      context: { namespace, published_by: publishedBy },
     });
   }
 }

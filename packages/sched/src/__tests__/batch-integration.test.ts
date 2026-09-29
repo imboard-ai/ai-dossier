@@ -5967,19 +5967,19 @@ describe('#832: the batch tail runs over landed members only, and a tail verdict
     // …and preserved on a rescue ref that reached origin
     const events = h.deps.journal.read();
     const preserved = events.find((e) => e.event === 'work-preserved' && e.branch);
-    expect(preserved?.branch).toMatch(/^rescue\/batch-b-945-dirty-\d{8}T\d{6}Z$/);
+    expect(preserved?.branch).toMatch(/^refs\/sched-rescue\/batch-b-945-dirty-\d{8}T\d{6}Z$/);
     const ref = preserved?.branch as string;
     expect(gitAt(['show', `${ref}:gated-fix.txt`], repo)).toContain('gated but uncommitted');
-    expect(gitAt(['ls-remote', 'origin', `refs/heads/${ref}`], repo)).toContain(ref);
+    expect(gitAt(['ls-remote', 'origin', ref], repo)).toContain(ref);
     expect(
-      events.some((e) => e.event === 'work-preserved' && e.reason === 'tail-dirty-worktree')
+      events.some((e) => e.event === 'tail-respawn-refused' && e.reason === 'tail-dirty-worktree')
     ).toBe(true);
     // the operator's status names the evidence and the way out
     const row = buildStatusReport(h.state(), h.config, 'proj').blocked.find(
       (b) => b.status === 'batch-blocked'
     );
     expect(row?.reason).toMatch(
-      /^tail-dirty-worktree; the batch worktree .*`rescue\/batch-b-945-dirty-\*`/
+      /^tail-dirty-worktree; the batch worktree .*`refs\/sched-rescue\/batch-b-945-dirty-\*`/
     );
     expect(row?.reason).toMatch(/sched resume --batch b-945-dirty/);
   }, 60_000);
@@ -6009,8 +6009,42 @@ describe('#832: the batch tail runs over landed members only, and a tail verdict
       .filter(Boolean);
     expect(told).toEqual(['false', 'true']); // only the respawn is told about preserved work
     const preserved = h.deps.journal.read().find((e) => e.event === 'work-preserved');
-    expect(preserved?.branch).toMatch(/^rescue\/batch-b-945-unpushed-/);
+    expect(preserved?.branch).toMatch(/^refs\/sched-rescue\/batch-b-945-unpushed-/);
     expect(gitAt(['show', `${preserved?.branch}:local-fix.txt`], repo)).toContain('committed');
+  }, 60_000);
+
+  it("#945 H3: the engine's own legacy gate rows (no git fields) never block a tail that only left an unpushed commit", async () => {
+    const repo = scratchRepo();
+    const h = batchHarness(
+      repo,
+      ['--mode=batch', '--commit-file=f-{issue}.txt', '--tail-leave-unpushed=1'],
+      { maxSlots: 1 }
+    );
+    h.enqueue([{ issue: 891, mode: 'slot', batch: 'b-945-legacy-row', anchor: 890, tier: 'mid' }]);
+    h.tick();
+    expect(await waitUntilDead(h.spawnDeps, batchSlotPid(h, 'b-945-legacy-row') as number)).toBe(
+      true
+    );
+    const worktree = findBatch(h.state(), 'b-945-legacy-row')?.worktree as string;
+    // what production wrote before #941: a passing gate row for this worktree, no git fields
+    fs.mkdirSync(path.join(h.homeDir, '.dossier'), { recursive: true });
+    fs.writeFileSync(
+      path.join(h.homeDir, '.dossier', 'caps.jsonl'),
+      `${JSON.stringify({
+        timestamp: new Date(Date.now() + 60_000).toISOString(),
+        capability: 'gate.batch',
+        outcome: 'ok',
+        cwd: worktree,
+      })}\n`
+    );
+    h.tick();
+
+    await tickThroughAgents(h, 'b-945-legacy-row', 8);
+
+    const batch = findBatch(h.state(), 'b-945-legacy-row');
+    expect(batch?.status).toBe('awaiting-merge');
+    expect(batch?.blocked_reason ?? null).toBeNull();
+    expect(tailMemberLists(h, 890)).toHaveLength(2);
   }, 60_000);
 
   it('AC3 (report phase): a report agent that keeps exiting unverified is capped too — the MERGED batch closes without its report instead of looping', async () => {

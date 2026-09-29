@@ -1,9 +1,11 @@
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   buildStatusReport,
+  createExecFn,
   type EngineDeps,
   type EnqueueInput,
   enqueueEntries,
@@ -3195,45 +3197,107 @@ describe('zombie-run fencing on redispatch (#504)', () => {
     expect(h.events().some((e) => e.event === 'fence-written')).toBe(true);
   });
 
-  it('#945: a takeover onto a registered worktree with leftover work preserves it first and is told to resume from the rescue ref', () => {
+  /** A real repo at the harness repoDir with a linked worktree at h.wt(name), holding leftover work. */
+  function realTakeoverRepo(h: ReturnType<typeof stalling>, name = 'wt-504') {
+    const g = (cwd: string, ...args: string[]) =>
+      execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], {
+        cwd,
+        encoding: 'utf8',
+      }).trim();
+    g(h.dir, 'init', '-q');
+    fs.writeFileSync(path.join(h.dir, 'README'), 'r\n');
+    g(h.dir, 'add', 'README');
+    g(h.dir, 'commit', '-q', '-m', 'init');
+    fs.mkdirSync(path.dirname(h.wt(name)), { recursive: true });
+    const worktree = h.wt(name);
+    g(h.dir, 'worktree', 'add', '-q', '-b', `f/${name}`, worktree);
+    const real = fs.realpathSync(worktree);
+    return { g, worktree: real };
+  }
+
+  it('#945: a takeover onto a registered worktree with leftover work preserves it first (outside the lock, real git) and is told to resume from the rescue ref', () => {
     const h = stalling();
-    const worktree = h.wt('wt-504');
-    fs.mkdirSync(worktree, { recursive: true });
-    h.setupInfos.set(504, { worktree, poolClaimed: false, branch: 'f/504' });
-    h.setTeardownScript((file, args) => {
-      const key = `${file} ${args.join(' ')}`;
-      if (key === 'git worktree list --porcelain') return `worktree ${worktree}\nHEAD abc\n`;
-      if (key === 'git rev-parse --show-toplevel') return worktree;
-      if (key === 'git rev-parse HEAD') return 'abc1234';
-      if (key.startsWith('git --no-optional-locks status')) return '?? gated-fix.ts\n M a.ts';
-      if (key.startsWith('git log HEAD --not --remotes')) return 'deadbee local commit';
-      if (file === 'sh') return `created ${'f'.repeat(40)} refs/heads/${args[3]}`;
-      if (key.startsWith('git push origin')) return '';
-      return null;
-    });
+    const { g, worktree } = realTakeoverRepo(h);
+    fs.writeFileSync(path.join(worktree, 'gated-fix.ts'), 'export const x = 1;\n');
+    fs.writeFileSync(path.join(worktree, '.env'), 'SECRET=1\n');
+    h.setupInfos.set(504, { worktree, poolClaimed: false, branch: 'f/wt-504' });
+    const real = createExecFn(30_000);
+    const lockHeldDuring: boolean[] = [];
+    h.deps.rescueExec = (file, args, cwd) => {
+      lockHeldDuring.push(fs.existsSync(path.join(h.dir, '.sched-lock')));
+      return real(file, args, cwd);
+    };
     h.advance(HOUR + 1000);
 
+    // Tick 1: the stall enters recovery; the takeover is HELD (no rescue under the lock).
     expect(h.tick().redispatched).toEqual(['issue:504']);
+    expect(h.spawnCalls).toHaveLength(1);
+    expect(lockHeldDuring).toEqual([]);
+    // Tick 2: the rescue runs before the lock pass, then the takeover spawns.
+    h.tick();
+    expect(h.spawnCalls).toHaveLength(2);
+    expect(lockHeldDuring.length).toBeGreaterThan(0);
+    expect(lockHeldDuring.some(Boolean)).toBe(false);
 
     const takeover = h.spawnCalls[1].prompt;
     expect(takeover).toContain('PRESERVED WORK');
-    expect(takeover).toMatch(/rescue\/issue-504-\d{8}T\d{6}Z/);
-    expect(takeover).toContain('2 uncommitted file(s) and 1 unpushed commit(s)');
+    expect(takeover).toMatch(/refs\/sched-rescue\/issue-504-\d{8}T\d{6}Z/);
+    expect(takeover).toContain('secret pattern');
     const ev = h.events().find((e) => e.event === 'work-preserved');
     expect(ev).toMatchObject({ unit: 'issue:504', worktree });
+    const ref = String(ev?.branch);
+    expect(g(h.dir, 'ls-tree', '-r', '--name-only', ref)).toContain('gated-fix.ts');
+    expect(g(h.dir, 'ls-tree', '-r', '--name-only', ref)).not.toContain('.env');
     expect(h.spawnCalls[0].prompt).not.toContain('PRESERVED WORK');
+    // held ticks do not pile up rescue events
+    h.tick();
+    expect(h.events().filter((e) => e.event === 'work-preserved')).toHaveLength(1);
   });
 
   it('#945: a worktree path git does not list is never acted on (setup milestones are issue comments)', () => {
     const h = stalling();
+    realTakeoverRepo(h);
     h.setupInfos.set(504, { worktree: '/etc', poolClaimed: false, branch: 'f/504' });
-    h.setTeardownScript(() => null);
+    const calls: string[] = [];
+    const real = createExecFn(30_000);
+    h.deps.rescueExec = (file, args, cwd) => {
+      calls.push(file);
+      return real(file, args, cwd);
+    };
     h.advance(HOUR + 1000);
 
     expect(h.tick().redispatched).toEqual(['issue:504']);
+    h.tick();
 
-    expect(h.teardownCalls.filter((c) => c.file === 'sh')).toHaveLength(0);
+    expect(h.spawnCalls).toHaveLength(2); // a refused rescue never blocks the takeover
+    expect(calls.filter((c) => c === 'sh')).toHaveLength(0);
     expect(h.spawnCalls[1].prompt).not.toContain('PRESERVED WORK');
+    expect(h.events().find((e) => e.event === 'work-preserve-failed')?.detail).toMatch(
+      /not-a-registered-worktree/
+    );
+  });
+
+  it('#945: a takeover never touches the main checkout, even when the milestone names it', () => {
+    const h = stalling();
+    realTakeoverRepo(h);
+    fs.writeFileSync(path.join(h.dir, 'dirty.txt'), 'x');
+    h.setupInfos.set(504, { worktree: fs.realpathSync(h.dir), poolClaimed: false, branch: 'main' });
+    h.deps.rescueExec = createExecFn(30_000);
+    h.advance(HOUR + 1000);
+    h.tick();
+    h.tick();
+    expect(h.spawnCalls).toHaveLength(2);
+    expect(h.events().find((e) => e.event === 'work-preserve-failed')?.detail).toMatch(
+      /main-checkout/
+    );
+    expect(h.events().some((e) => e.event === 'work-preserved')).toBe(false);
+  });
+
+  it('without a rescueExec a takeover respawns immediately, exactly as before (no hold)', () => {
+    const h = stalling();
+    h.advance(HOUR + 1000);
+    expect(h.tick().redispatched).toEqual(['issue:504']);
+    expect(h.spawnCalls).toHaveLength(2);
   });
 
   it('records the installed generation on the slot and hands it to the takeover', () => {

@@ -183,7 +183,7 @@ function tailBlockNote(state: SchedState, batch: BatchEntry): string {
     reason === 'respawn-cap:tail'
       ? 'the tail agent exited without a verdict every time — read its log (`sched stats --batch` names it)'
       : reason === 'tail-dirty-worktree'
-        ? `the batch worktree ${batch.worktree ?? '?'} holds uncommitted or post-gate work from the dead tail (its content is also on a \`rescue/batch-${batch.id}-*\` branch, see the \`work-preserved\` journal line) — commit or discard it`
+        ? `the batch worktree ${batch.worktree ?? '?'} holds uncommitted or post-gate work from the dead tail (its content is also under the \`refs/sched-rescue/batch-${batch.id}-*\` ref, see the \`work-preserved\` journal line) — commit or discard it`
         : `read the blocked milestone on anchor #${batch.anchor ?? '?'}`;
   return (
     `; ${evidence}; landed member(s) ${list} are on ${branch} — fix the cause, then ` +

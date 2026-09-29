@@ -1908,6 +1908,10 @@ export type JournalEventName =
   // `branch`/`detail`), or could not (`work-preserve-failed`).
   | 'work-preserved'
   | 'work-preserve-failed'
+  // #940: a tail respawn refused over uncommitted / dirty-gated work (the block reason is `tail-dirty-worktree`).
+  | 'tail-respawn-refused'
+  // #945: rescue refs older than the TTL deleted at `sched start`.
+  | 'rescue-pruned'
   // #537: `--auto-upgrade`'s `npm i -g @ai-dossier/cli@latest` outcome —
   // journaled so an operator whose stderr isn't captured (systemd unit
   // without journald wiring, redirected to /dev/null) can still answer "was

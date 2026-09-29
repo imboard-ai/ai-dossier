@@ -99,3 +99,28 @@ describe('normalizeDossier', () => {
     expect(result.tags).toEqual(['tag1']);
   });
 });
+
+describe('normalizeDossier — publisher provenance (#971)', () => {
+  const base = { name: 'ns/d', title: 'D', version: '1.0.0', path: 'ns/d.ds.md' };
+
+  it('legacy entry without published_by/published_at normalizes both to null', () => {
+    const result = normalizeDossier(base);
+    expect(result.published_by).toBeNull();
+    expect(result.published_at).toBeNull();
+  });
+
+  it('passes through a recorded publisher', () => {
+    const result = normalizeDossier({
+      ...base,
+      published_by: 'alice',
+      published_at: '2026-09-29T00:00:00.000Z',
+    });
+    expect(result.published_by).toBe('alice');
+    expect(result.published_at).toBe('2026-09-29T00:00:00.000Z');
+  });
+
+  it('treats a non-string or empty published_by as unrecorded', () => {
+    expect(normalizeDossier({ ...base, published_by: '' }).published_by).toBeNull();
+    expect(normalizeDossier({ ...base, published_by: 42 as never }).published_by).toBeNull();
+  });
+});

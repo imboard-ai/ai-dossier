@@ -242,9 +242,14 @@ export {
   preservedWorkInstruction,
   preserveWork,
   probeWorktree,
+  pruneRescueRefs,
   pushedHeadDate,
+  RESCUE_REF_TTL_MS,
   rescueRefName,
   rescueUnitSlug,
+  selectRescuableUntracked,
+  skippedSummary,
+  takeoverWorktreeRefusal,
   type WorktreeProbe,
 } from './preserve';
 export {

@@ -146,6 +146,7 @@ import {
   preservedWorkInstruction,
   preserveWork,
   pushedHeadDate,
+  skippedSummary,
 } from './preserve';
 import type { ExecFn } from './project';
 import { batchRank, compareByPriority } from './readiness';
@@ -418,11 +419,16 @@ function journalPreserveOutcome(
 ): PreservedWork | undefined {
   if (outcome.kind === 'preserved') {
     const w = outcome.work;
-    journalEvent(deps, 'work-preserved', unitId, {
-      branch: w.ref,
-      worktree,
-      detail: `${w.dirty_files} uncommitted file(s) + ${w.unpushed_commits} unpushed commit(s) on head ${w.head} preserved as ${w.sha} on ${w.ref} (${w.pushed ? 'pushed' : 'NOT pushed — local ref only'}${w.reused ? ', reused an identical earlier rescue' : ''}); the respawned agent is told to resume from it`,
-    });
+    // A REUSED rescue was journaled when it was minted; a respawn loop must not
+    // add a line per tick.
+    if (!w.reused) {
+      const skipped = skippedSummary(w.skipped);
+      journalEvent(deps, 'work-preserved', unitId, {
+        branch: w.ref,
+        worktree,
+        detail: `${w.dirty_files} uncommitted file(s) + ${w.unpushed_commits} unpushed commit(s) on head ${w.head} preserved as ${w.sha} at ${w.ref} (${w.pushed ? 'pushed' : 'NOT pushed — local ref only'})${skipped ? `; ${skipped}` : ''}; the respawned agent is told to resume from it`,
+      });
+    }
     return w;
   }
   if (outcome.kind === 'failed') {
@@ -437,10 +443,11 @@ function journalPreserveOutcome(
 /**
  * #940 ask 1 + #945: before RESPAWNING a batch tail onto its batch worktree,
  * preserve what the dead tail left there, and refuse the respawn when that
- * includes uncommitted files or a passing `gate.batch` run that describes code
- * past the last pushed head — the operator decides commit vs discard
- * (`tail-dirty-worktree`, resumable). Clean/only-unpushed: respawn, told to
- * resume from the rescue ref.
+ * includes uncommitted files or a passing DIRTY `gate.batch` run past the last
+ * pushed head (`findGatedWorkEvidence`) — the operator decides commit vs
+ * discard (`tail-dirty-worktree`, resumable via `sched resume --batch`, which
+ * deliberately does not re-run this guard: the operator has looked). Clean or
+ * only-unpushed: respawn, told to resume from the rescue ref.
  */
 function guardTailRespawn(
   deps: BatchDispatchDeps,
@@ -458,7 +465,6 @@ function guardTailRespawn(
       ? outcome.probe
       : null;
   if (probe === null) return { block: null, instruction: null };
-  const headTree = deps.exec('git', ['rev-parse', 'HEAD^{tree}'], worktree);
   const since = pushedHeadDate(deps.exec, worktree);
   const gate =
     since === null
@@ -467,14 +473,16 @@ function guardTailRespawn(
           capsFile: path.join(deps.homeDir ?? os.homedir(), '.dossier', 'caps.jsonl'),
           worktree,
           sinceIso: since,
-          headTree: headTree === null ? null : headTree.trim(),
           hasLocalWork: probe.dirty_files > 0 || probe.unpushed_commits > 0,
+          now,
         });
   if (probe.dirty_files > 0 || gate !== null) {
-    journalEvent(deps, 'work-preserved', unitId, {
+    // Its own event: `work-preserved` above already said (once) what was saved, or
+    // `work-preserve-failed` said it was not — this line must not claim otherwise.
+    journalEvent(deps, 'tail-respawn-refused', unitId, {
       worktree,
       reason: 'tail-dirty-worktree',
-      detail: `tail respawn refused: ${probe.dirty_files} uncommitted file(s) at head ${probe.head}${gate ? `; a gate.batch ok row at ${gate.timestamp} is newer than the last pushed head${gate.dirty ? ' and ran on a dirty tree' : ''}` : ''}${work ? `; preserved as ${work.sha} on ${work.ref}` : ''}. Commit or discard in ${worktree}, then \`sched resume --batch ${batch.id}\``,
+      detail: `tail respawn refused: ${probe.dirty_files} uncommitted file(s) at head ${probe.head}${gate ? `; a gate.batch ok row at ${gate.timestamp} ran on a dirty tree newer than the last pushed head` : ''}${work ? `; a rescue exists at ${work.ref} (${work.sha})` : outcome.kind === 'failed' ? '; NO rescue could be made' : ''}. Commit or discard in ${worktree}, then \`sched resume --batch ${batch.id}\``,
     });
     return { block: 'tail-dirty-worktree', instruction: null };
   }
