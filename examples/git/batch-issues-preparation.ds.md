@@ -76,13 +76,13 @@
   "content_scope": "references-external",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "a6d58ab2a9ef4931d18145a64d280ae1dbee951dfae43960e29cb999b9b65e0d"
+    "hash": "87d85d4a5011f6a96d76dff2a62f36d18482b20c783fc2d19f1233b326167a7f"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "YsRF/KC7zbHLNIJti4p+Q7ncTfEoef5/THJfX96g4wHrIZSc9gZ5Vec+kylAojg79QbJM8JzL4/Y4phg2zX6AA==",
+    "signature": "zxz6mdLTcwTbrUurLVozZ9IyoFk8C2GAjicn0vr6ABSxIiKfLxqu8Q3ztlDSfoAHIJS7wDNE67UHmw3RlymICQ==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-29T14:59:29.451Z",
+    "signed_at": "2026-09-29T15:17:41.522Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -234,9 +234,9 @@ This screen is cheap by design — reading a body, not probing the repo. The dec
 
 ### Step 5: Compose Batches (RFC-0001 E.4)
 
-**Review depth is not batch eligibility (#770 P1, operator decision Option A).** `mode` answers "how much process does this issue need?"; sharing one CI run needs only a shared base, independent revert granularity (per-issue commits, rebase-merge, never squash — already guaranteed) and no data mutation. A risk-floor issue — auth, billing/payments, security, migrations-by-keyword — a deploy-pipeline change (E.2 rule 4) and a change predicting > 8 files (E.2 rule 5, #818) or a predicted diff > 400 lines (E.2 rule 6, #927), and a change whose tests are broad (`test_scope=broad` — formerly an E.3 slot-eligibility failure, #939) need *deeper review*, not *their own CI run*: the batch runs the repo's full gate once for every member, so a broad-test member is verified by the same gate it would pay alone. So:
+**Review depth is not batch eligibility (#770 P1, operator decision Option A).** `mode` answers "how much process does this issue need?"; sharing one CI run needs only a shared base, independent revert granularity (per-issue commits, rebase-merge, never squash — already guaranteed) and no data mutation. A risk-floor issue — auth, billing/payments, security, migrations-by-keyword — a deploy-pipeline change (E.2 rule 4), a change predicting > 8 files (E.2 rule 5, #818) or a predicted diff > 400 lines (E.2 rule 6, #927), and a change whose tests are broad (`test_scope=broad`, or still `unknown` — formerly an E.3 slot-eligibility failure, #939) need *deeper review*, not *their own CI run*: the batch runs the repo's full gate once for every member, so a broad-test member is verified by the same gate it would pay alone. So:
 
-- **A risk-floor, deploy-pipeline, > 8-file, > 400-line or broad-test-scope issue (E.2 rules 1, 4, 5, 6; `test_scope=broad`) is a `review=full` slot member, not an exclusion.** It dispatches at `strong` tier minimum (sched enforces it at dispatch), runs full-cycle-grade review in member-cycle (all review agents, security included), and batch-integrate runs the risk-floor review over its commits.
+- **A risk-floor, deploy-pipeline, > 8-file, > 400-line or broad-test-scope issue (E.2 rules 1, 4, 5, 6; `test_scope=broad` or still `unknown`) is a `review=full` slot member, not an exclusion.** It dispatches at `strong` tier minimum (sched enforces it at dispatch), runs full-cycle-grade review in member-cycle (all review agents, security included), and batch-integrate runs the risk-floor review over its commits.
 - **At most 2 `review=full` members per batch** — bounds deploy blast radius (one deploy carries several risky changes). `sched enqueue` rejects a manifest that exceeds `max_full_review_members`.
 - **Hard exclusions** — the only things that genuinely cannot share a PR:
   1. production data mutation or production ops (data migrations/backfills, prod DB writes, secret/SSM writes, DNS, third-party console configuration);
@@ -463,7 +463,7 @@ Example:
 | Open dep outside the submitted set | Classify and plan it, but defer enqueue — out-of-graph deps stay permanently unsatisfied in the queue. |
 | One overlap cluster would become two | Refuse the candidate — ≤ 1 eviction group per batch, hard. |
 | Slot issue depends on an issue this run handed to full-cycle | Defer it (`deferred-external-dep`) — the dep is not in the queue. A dep on a full-mode entry ALREADY in the queue is allowed; the scheduler gates on it. |
-| Risk-floor or deploy-pipeline keyword, a > 8-file plan, a classifier `est_diff` > 400, or a classifier `test_scope=broad`, on an otherwise-ready issue | `review=full` member, not an exclusion (Option A, #818, #927, #939). Only the four hard exclusions (and a classifier mode floor) keep an issue out. |
+| Risk-floor or deploy-pipeline keyword, a > 8-file plan, a classifier `est_diff` > 400, or a classifier `test_scope=broad` (or `unknown`), on an otherwise-ready issue | `review=full` member, not an exclusion (Option A, #818, #927, #939). Only the four hard exclusions (and a classifier mode floor) keep an issue out. |
 | A third `review=full` candidate | Hold it for the next batch; backfill a `review=light` one instead. Never exceed 2 per batch. |
 | Fewer than 2 survivors after backfill | No batch: no anchor, no manifest entries, no claims. Report `hand #N to full-cycle`. |
 | Backfill candidate is a feature/tracker with no AC | Drop it at Step 3b (`not-ready:<signal>`, ai-dossier#802) and take the next ranked candidate. |
@@ -477,7 +477,7 @@ Example:
 - [ ] Issue set resolved from list/range; `ai-dossier batch compose --json` ran over the WHOLE set before any model dispatch; its `excluded[]` reported as skipped with codes
 - [ ] Step 3b body-readiness screen applied to every admitted member (mandatory for backfill); drops reported with their signal; backfill walked `backfill[]` in rank order within the ≤ 2 `review=full` cap
 - [ ] Decision-grade classifiers dispatched ONLY for admitted members — zero for excluded or readiness-dropped issues
-- [ ] Risk-floor, deploy-pipeline, > 8-file, > 400-line and broad-test-scope issues (text-floor keyword, plan:v1 risk-floor path, file count, classifier `est_diff` or classifier `test_scope=broad` — E.2 rules 1, 4, 5, 6; #939) admitted as `review=full` members, not excluded; hard exclusions limited to prod data mutation/ops, designed-sequence slices, decisions/epics/trackers, different base
+- [ ] Risk-floor, deploy-pipeline, > 8-file, > 400-line and broad-test-scope issues (text-floor keyword, plan:v1 risk-floor path, file count, classifier `est_diff` or classifier `test_scope=broad` (or `unknown`) — E.2 rules 1, 4, 5, 6; #939) admitted as `review=full` members, not excluded; hard exclusions limited to prod data mutation/ops, designed-sequence slices, decisions/epics/trackers, different base
 - [ ] No batch below 2 members formed; a batch below `min_members` formed only after backfill ran dry, and says so
 - [ ] DAG built per fleet-cycle Phase 2 rules (explicit authoritative, serialize-when-unsure); cycles surfaced and stopped the run
 - [ ] Every admitted member has a classify record (reused or freshly dispatched) and a plan:v1 artifact (existing or light)

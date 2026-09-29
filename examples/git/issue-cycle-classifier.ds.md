@@ -56,13 +56,13 @@
   ],
   "checksum": {
     "algorithm": "sha256",
-    "hash": "048d5fd93a2ab2a3d40c32c9d479b5660981c7970e851b7e6590ef1e5d879120"
+    "hash": "6e2b3239f2060758731be726dadcc507f8c38181e5d03fbd26e272de35459846"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "RDHIG4Z3wqv78nD+FYBun2biRnj9RbR56YJls89xr8aWan0JTUHBM8gIrBhJFyP5xUoBvl9Xyk9YLbJKT8KTAg==",
+    "signature": "GzotZJ+Jgz/5vzsCcwhST3Sm8DeqG1C/f12W1smC47IHPfHFvb2Zt22sS/bdy2SjCddIDWkJ5HaFdwaMKspUDA==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-29T14:59:26.416Z",
+    "signed_at": "2026-09-29T15:17:44.745Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -74,7 +74,7 @@
 
 ## Objective
 
-Score ONE issue for execution mode (`full` vs `slot`) **and review depth** (`review: light | full`). The two are orthogonal (#770 P1, operator decision Option A): `mode` says whether the issue can share a batch; `review` says how deeply its change must be reviewed. A risk-floor issue — auth, billing, security, migrations — a deploy-pipeline change, a change predicting > 8 files or > 400 diff lines, or one whose tests are broad (`test_scope=broad`) is a batchable `mode=slot` issue with `review=full`, not a `mode=full` exclusion (E.2 rules 1, 4, 5, 6 — #770, #818, #927; the E.3 test-scope condition — #939). A batch already pays one full gate for every member, so a broad-test member is verified by the same gate it would pay alone. A deterministic pre-screen (#538, schema `prescreen:v4` #772/#805/#818) excludes the cases that genuinely cannot share a batch before any model call; the rest run a bounded, no-repo-exploration inspection of issue metadata, escalating to one repo-probing pass only when genuinely uncertain. Apply the RFC-0001 Batch Cycles full-cycle floor (E.2) and slot eligibility (E.3), and emit a structured `phase=classify` runstate verdict plus a `cycle:*` label and a short rationale comment. One classification, many consumers: batch-issues-preparation now, triage later.
+Score ONE issue for execution mode (`full` vs `slot`) **and review depth** (`review: light | full`). The two are orthogonal (#770 P1, operator decision Option A): `mode` says whether the issue can share a batch; `review` says how deeply its change must be reviewed. A risk-floor issue — auth, billing, security, migrations — a deploy-pipeline change, a change predicting > 8 files or > 400 diff lines, or one whose tests are broad (`test_scope=broad`) is a batchable `mode=slot` issue with `review=full`, not a `mode=full` exclusion (E.2 rules 1, 4, 5, 6 — #770, #818, #927; the former E.3 test-scope condition — #939). A batch already pays one full gate for every member, so a broad-test member is verified by the same gate it would pay alone. A deterministic pre-screen (#538, schema `prescreen:v4` #772/#805/#818) excludes the cases that genuinely cannot share a batch before any model call; the rest run a bounded, no-repo-exploration inspection of issue metadata, escalating to one repo-probing pass only when genuinely uncertain. Apply the RFC-0001 Batch Cycles full-cycle floor (E.2) and slot eligibility (E.3), and emit a structured `phase=classify` runstate verdict plus a `cycle:*` label and a short rationale comment. One classification, many consumers: batch-issues-preparation now, triage later.
 
 **Non-responsibilities:** batching (batch-issues-preparation's job — this scores exactly one issue, never composes batches) and execution (dispatching a cycle is the consumer's job).
 
@@ -201,9 +201,11 @@ the way an unresolvable Step 5 mode-floor rule does. Instead:
    found. Continue to Step 5 with these values.
 
 If confidence is STILL `< 0.6` after this one escalated pass, that is now a genuine Step 5
-rule 10 floor hit (below) — proceed to `mode=full`, don't escalate a second time. A
-`test_scope` that is still `unknown` on its own (confidence otherwise ≥ 0.6) is not a mode
-hit: it raises `review=full` in Step 6, exactly like `broad` (#939).
+rule 10 floor hit (below) — proceed to `mode=full`, don't escalate a second time. Test scope
+is the exception: a `test_scope` still `unknown` after this pass is recorded as `unknown` and
+raises `review=full` in Step 6, exactly like `broad` (#939). It must not by itself hold
+`confidence` below 0.6 — score `confidence` on the other estimates; only a shortfall in those
+is a rule 10 hit.
 
 ### Step 5: Full-Cycle Floor (RFC-0001 E.2 — ANY mode-floor hit ⇒ `cycle:full`)
 
@@ -234,11 +236,8 @@ evaluate counts as a hit; this is unrelated to Step 4b's confidence escalation, 
 
 Record the hit/miss outcome of every rule — the rationale comment lists them.
 
-Test scope is deliberately NOT a floor rule (#939, operator decision Option A): a `broad` or
-`unknown` `test_scope` is a review-depth fact the batch gate absorbs — the batch runs the
-repo's full gate once for all members — so it raises `review=full` in Step 6 and never forces
-`mode=full`. The one test-shape reason to hand off to full-cycle is rule 8 (visual/browser
-review): the batch gate has no browser stage.
+Test scope is not a floor rule: it raises `review` in Step 6 (#939); rule 8 remains the only
+test-shape hand-off to full-cycle.
 
 ### Step 6: Slot Eligibility (RFC-0001 E.3 — ALL must hold)
 
@@ -248,8 +247,10 @@ review): the batch gate has no browser stage.
 - Single area, or related files (file count alone is rule 5, a review floor — it does not fail this condition)
 - Issue text implies a bounded change (bug fix, copy, config, small feature, test addition, docs, refactor-in-place) — "bounded" is about scope, not size: a large predicted diff alone is rule 6, a review floor, and does not fail this condition (#927)
 
-**Test scope raises review, it does not decide mode (#939).** `test_scope=focused` is no longer an
-E.3 condition. `test_scope=broad` — or `unknown` after Step 4 (and Step 4b, if it ran) — sets
+**Test scope raises review, it does not decide mode (#939, operator decision Option A).** `test_scope=focused` is no longer an
+E.3 condition: a broad test scope is a review-depth fact the batch absorbs — the batch runs the
+repo's full gate once for all members, so a broad-test member is verified by the gate it would
+pay alone. `test_scope=broad` — or `unknown` after Step 4 (and Step 4b, if it ran) — sets
 `review=full` and leaves `mode` to the conditions above; the member counts against the ≤ 2
 `review=full` per batch cap like a rule 1, 4, 5 or 6 hit. `focused` leaves `review` unchanged.
 
