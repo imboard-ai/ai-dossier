@@ -105,6 +105,7 @@ import {
   recordDispatchApiError,
   resetDispatchApiErrorStreak,
 } from './dispatch-health';
+import { worktreesDirFor } from './dossier-root';
 import type { RunFenceBinder, RunFenceReleaser, RunFencer } from './fence';
 import { takeoverLabelFor } from './fence';
 import {
@@ -482,6 +483,26 @@ function pollUnits(deps: EngineDeps, state: SchedState): Map<string, UnitTruth> 
       });
       continue;
     }
+    if (slot.status === 'assigned') {
+      // #778: a crash-left `assigned` slot is spawned fresh by
+      // `reconcileAssigned` — the same "resume after days" shape as
+      // `recovering`. A live pid is re-attached, never re-spawned, so it needs
+      // no read; report slots close their issue at merge, by design.
+      const issue = issueOfUnit(slot.unit);
+      if (issue === null || out.has(slot.unit) || isReportSlot(slot)) continue;
+      if (slot.pid !== null && deps.spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)) {
+        continue;
+      }
+      if ((findEntry(state, issue)?.stale_closed_at ?? null) !== null) continue;
+      out.set(slot.unit, {
+        reachable: true,
+        milestone: null,
+        closed: deps.groundTruth.issueClosed(issue),
+        head: null,
+        branch: slot.branch,
+      });
+      continue;
+    }
     if (slot.status !== 'running' && slot.status !== 'verifying' && slot.status !== 'exited') {
       continue;
     }
@@ -656,6 +677,37 @@ function pollLabels(
   const labels = new Map<number, string[] | undefined>();
   for (const issue of watched) labels.set(issue, deps.groundTruth.issueLabels(issue));
   return { ran: true, labels };
+}
+
+/**
+ * #778: one `issueClosed` read per issue unit the dispatch pass could place
+ * this tick (the first `max_slots` runnable, unheld, unflagged issue units —
+ * the same ceiling as `pollLabels`) plus orphaned `dispatched` entries that
+ * `requeueOrphanedDispatches` is about to put back in that queue. A paused
+ * fleet dispatches nothing, so it reads nothing. `issueClosed` is false when
+ * gh is unreachable: an unreadable issue is never treated as closed.
+ */
+function pollClosed(
+  deps: EngineDeps,
+  state: SchedState,
+  config: SchedConfig
+): Map<number, boolean> {
+  const out = new Map<number, boolean>();
+  if (state.paused) return out;
+  const held = new Set(state.slots.map((slot) => slot.unit).filter((u): u is string => u !== null));
+  const unflagged = (issue: number) => findEntry(state, issue)?.stale_closed_at === null;
+  const candidates: number[] = state.entries
+    .filter((e) => e.status === 'dispatched' && !held.has(`issue:${e.issue}`))
+    .map((e) => e.issue);
+  for (const unit of runnableUnits(state)) {
+    if (unit.kind === 'issue' && !held.has(`issue:${unit.issue}`)) candidates.push(unit.issue);
+  }
+  for (const issue of candidates) {
+    if (out.size >= config.max_slots) break;
+    if (out.has(issue) || !unflagged(issue)) continue;
+    out.set(issue, deps.groundTruth.issueClosed(issue));
+  }
+  return out;
 }
 
 /**
@@ -967,7 +1019,9 @@ function seedResumeTrail(
     branch,
     baseBranch,
     batch: evidence.batch,
-    worktree: path.join(ctx.deps.repoDir, 'worktrees', branch.replaceAll('/', '-')),
+    // #890: the same project-root resolution batch worktrees use, so a nested
+    // layout (`.dossier/` above the checkout) lands slot + batch trees in one root.
+    worktree: path.join(worktreesDirFor(ctx.deps.repoDir), branch.replaceAll('/', '-')),
     revertedCommits: evidence.reverted_commits,
   });
   if (!outcome.ok) {
@@ -2689,12 +2743,45 @@ function completeUnitOrRecover(
   );
 }
 
+/**
+ * The stale-closed guard shared by every slot rail that would spawn a fresh
+ * agent (#776 `recovering`, #778 `assigned`). Returns the state to keep (the
+ * unit must NOT be spawned this tick) or `null` when the spawn may proceed.
+ *
+ * The flag is sticky and the slot stays held: releasing it is an operator
+ * decision (`sched stop --issue N`), which `sched status` names. `truth.closed`
+ * is false when gh is unreachable, so an unreachable poll never flags a unit
+ * (no work is killed on a network blip) — and an already-flagged unit stays
+ * held without any read, so a blip cannot un-hold it either.
+ */
+function holdIfIssueClosed(
+  ctx: TickCtx,
+  state: SchedState,
+  slot: SlotEntry,
+  unit: string,
+  truth: UnitTruth
+): SchedState | null {
+  const issue = issueOfUnit(unit);
+  const entry = issue === null ? undefined : findEntry(state, issue);
+  if (!entry || issue === null || isReportSlot(slot)) return null;
+  if (entry.stale_closed_at !== null) return state;
+  if (!truth.closed) return null;
+  const now = ctx.deps.now();
+  journal(ctx, 'stale-closed', unit, {
+    slot: slot.id,
+    detail: `issue #${issue} is closed — recovery will not re-dispatch it; release the slot with \`sched stop --issue ${issue}\``,
+  });
+  // Not an activity bump: `updated_at` keeps meaning "last state change".
+  return patchEntry(state, issue, { stale_closed_at: now.toISOString() }, now, false);
+}
+
 /** Re-attach or spawn a slot left `assigned` by a crash between assign and spawn. */
 function reconcileAssigned(
   ctx: TickCtx,
   state: SchedState,
   slot: SlotEntry,
-  unit: string
+  unit: string,
+  truth: UnitTruth
 ): SchedState {
   if (slot.pid !== null && ctx.deps.spawnDeps.isAlive(slot.pid)) {
     // Crash after spawn, before the running transition: re-attach by pid.
@@ -2705,6 +2792,10 @@ function reconcileAssigned(
     });
     return transitionSlot(state, slot.id, 'running', {}, ctx.deps.now());
   }
+  // #778: never spawn fresh for an issue that is closed on GitHub. Same model
+  // as `reconcileRecovering` (#776): flag, journal, hold the slot.
+  const held = holdIfIssueClosed(ctx, state, slot, unit, truth);
+  if (held !== null) return held;
   if (state.paused) return state;
   journal(ctx, 'assigned', unit, { slot: slot.id, detail: 'crash-recovery spawn' });
   return spawnUnit(ctx, state, unit);
@@ -2721,23 +2812,9 @@ function reconcileRecovering(
   // #776: never re-dispatch a unit whose issue is closed. Checked BEFORE the
   // pause guard so a paused scheduler still flags it (the incident shape:
   // paused for days with a recovering slot on an issue shipped elsewhere —
-  // `sched resume` would have re-run finished work). The flag is sticky and
-  // the slot stays held: releasing it is an operator decision
-  // (`sched stop --issue N`), which `sched status` names.
-  const issue = issueOfUnit(unit);
-  const entry = issue === null ? undefined : findEntry(state, issue);
-  if (entry && issue !== null && !isReportSlot(slot)) {
-    if (entry.stale_closed_at !== null) return state;
-    if (truth.closed) {
-      const now = ctx.deps.now();
-      journal(ctx, 'stale-closed', unit, {
-        slot: slot.id,
-        detail: `issue #${issue} is closed — recovery will not re-dispatch it; release the slot with \`sched stop --issue ${issue}\``,
-      });
-      // Not an activity bump: `updated_at` keeps meaning "last state change".
-      return patchEntry(state, issue, { stale_closed_at: now.toISOString() }, now, false);
-    }
-  }
+  // `sched resume` would have re-run finished work).
+  const held = holdIfIssueClosed(ctx, state, slot, unit, truth);
+  if (held !== null) return held;
   // #629: while paused, do not resume a `recovering` slot's respawn — this is
   // the crash-recovery rail (a sched restart caught a slot between
   // `enterRecovery`'s transition and its own `spawnUnit` call, OR `enterRecovery`
@@ -2779,7 +2856,7 @@ function reconcileSlots(
     };
     switch (slot.status) {
       case 'assigned':
-        next = reconcileAssigned(ctx, next, slot, unit);
+        next = reconcileAssigned(ctx, next, slot, unit, truth);
         break;
       case 'running':
         next = reconcileRunning(ctx, next, slot, truth, unit);
@@ -2826,7 +2903,14 @@ function requeueOrphanedDispatches(ctx: TickCtx, state: SchedState): SchedState 
       next,
       entry.issue,
       'queued',
-      { reason: null, ...CLEARED_ENTRY_DEDUP_MARKERS },
+      {
+        reason: null,
+        ...CLEARED_ENTRY_DEDUP_MARKERS,
+        // #778: a stale-closed flag survives the requeue — clearing it would
+        // let one unreachable-gh tick re-dispatch a shipped issue. Unflagged
+        // orphans are read by `pollClosed` and flagged in the dispatch pass.
+        stale_closed_at: entry.stale_closed_at,
+      },
       now
     );
     journal(ctx, 'requeued', `issue:${entry.issue}`, {
@@ -3127,7 +3211,8 @@ function dispatchAssignments(
   ctx: TickCtx,
   state: SchedState,
   config: SchedConfig,
-  labelVerifiedIssues: ReadonlySet<number>
+  labelVerifiedIssues: ReadonlySet<number>,
+  closedPoll: ReadonlyMap<number, boolean>
 ): SchedState {
   const now = ctx.deps.now();
   // #544: `pollLabels` reads only the first `max_slots` runnable units — the
@@ -3150,6 +3235,11 @@ function dispatchAssignments(
             .map((entry) => `issue:${entry.issue}`)
         )
       : new Set<string>();
+  // #778: a stale-closed entry is never dispatched (the flag is sticky; only
+  // `sched stop` / a requeue-elsewhere resolves it).
+  for (const entry of state.entries) {
+    if (entry.stale_closed_at !== null) exclude.add(`issue:${entry.issue}`);
+  }
   // #565: decide who wins each free slot over BOTH kinds — a ready batch
   // outranking a same-readiness issue (priority desc → readiness age → issue
   // number, `runnableUnits`) must not lose its capacity to an issue dispatch
@@ -3179,6 +3269,20 @@ function dispatchAssignments(
     const unit = `issue:${assignment.issue}`;
     const entry = findEntry(next, assignment.issue);
     if (!entry) continue;
+    // #778: queued/classified entries (and requeued orphans) whose issue was
+    // closed while they waited are flagged, not dispatched.
+    // Unread (unblocked mid-tick by the label pass, or slid into the window)
+    // falls back to one bounded read here: assignments never exceed free
+    // capacity, and a same-tick refill (#525 AC5) must not be deferred.
+    const closed =
+      closedPoll.get(assignment.issue) ?? ctx.deps.groundTruth.issueClosed(assignment.issue);
+    if (closed) {
+      journal(ctx, 'stale-closed', unit, {
+        detail: `issue #${assignment.issue} is closed — will not dispatch it; drop it with \`sched stop --issue ${assignment.issue}\``,
+      });
+      next = patchEntry(next, assignment.issue, { stale_closed_at: now.toISOString() }, now, false);
+      continue;
+    }
     const { state: withSlot, slotId } = assignToIdleSlot(next, unit, null, now);
     next = withSlot;
     journal(ctx, 'assigned', unit, { slot: slotId, priority: entry.priority });
@@ -3239,6 +3343,7 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
   const prPoll = pollParkedPrs(deps, state0, dispatch);
   const labelPoll = pollLabels(deps, state0, config, dispatch);
   const labelVerifiedIssues = labelVerified(labelPoll);
+  const closedPoll = pollClosed(deps, state0, config);
 
   const pass1 = deps.store.withLock((state) => {
     const ctx: TickCtx = { deps, config, dispatch, result: emptyResult() };
@@ -3250,7 +3355,7 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
     // #544: immediately before the dispatch pass, so a cleared label can be
     // dispatched this same tick and a fresh one can never be dispatched over.
     next = reconcileLabelBlocks(ctx, next, labelPoll);
-    next = dispatchAssignments(ctx, next, config, labelVerifiedIssues);
+    next = dispatchAssignments(ctx, next, config, labelVerifiedIssues, closedPoll);
     return {
       state: next,
       result: { tick: ctx.result, teardownPending: teardownPendingIssues(next) },

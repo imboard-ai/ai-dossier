@@ -171,6 +171,7 @@ import {
   PR_DETECT_AMBIGUOUS_REASON,
   parkMember,
   patchBatch,
+  patchEntry,
   patchSlot,
   recordedMemberBranch,
   releaseAllBatchSlots,
@@ -1520,6 +1521,28 @@ function spawnMemberAgent(
     return { ok: false, state: target.release(state) };
   }
   const memberIssue = target.issue;
+  // #778: the batch rail's spawn choke point (fresh, `recovering` respawn and
+  // continuation all land here). A member's issue stays OPEN until its batch PR
+  // merges, so a CLOSED one was shipped or abandoned elsewhere — re-running it
+  // burns a slot on finished work. Decision: FLAG (same `stale_closed_at` /
+  // `stale-closed` model as the cycle rail, #776) rather than evict. Evicting
+  // would requeue the member as a full cycle, which is exactly the re-run this
+  // guards against, and dissolves batch structure on what may be a wrong
+  // reading; a flag holds the member for `sched stop --issue N` and `sched
+  // status`. gh unreachable reads "not closed" (nothing is killed on a blip),
+  // and an already-flagged member skips the read and stays held.
+  const memberFlag = findEntry(state, memberIssue)?.stale_closed_at ?? null;
+  if (memberFlag !== null || deps.groundTruth.issueClosed(memberIssue)) {
+    let held = state;
+    if (memberFlag === null) {
+      journalEvent(deps, 'stale-closed', unit(batchId), {
+        issue: memberIssue,
+        detail: `member issue #${memberIssue} is closed — will not spawn it; release it with \`sched stop --issue ${memberIssue}\``,
+      });
+      held = patchEntry(state, memberIssue, { stale_closed_at: now.toISOString() }, now, false);
+    }
+    return { ok: false, state: target.release(held) };
+  }
   const withStatus = advanceMemberToInWork(state, memberIssue, now);
   const memberEntry = findEntry(withStatus, memberIssue);
   // #771: a `review=full` member dispatches at `strong` minimum (within this
