@@ -26,8 +26,12 @@ on:
         default: main
         type: string
 
+# One group for every trigger: a post-publish run, the hourly schedule and a manual
+# dispatch can target the same cli-v<version> release, and two concurrent release jobs
+# race (both see no release, one create loses with HTTP 403). Serialized, the later run's
+# plan sees the finished release and skips.
 concurrency:
-  group: build-binaries-${{ github.event.workflow_run.head_sha || inputs.version || 'schedule' }}
+  group: build-binaries
   cancel-in-progress: false
 
 permissions:
