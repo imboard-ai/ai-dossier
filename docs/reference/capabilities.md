@@ -167,11 +167,23 @@ and (non-`ok` outcomes only, #583) `output_tail`. This mirrors the `runs.jsonl` 
 telemetry but stays a separate file because a capability execution is not a dossier run.
 
 When `cwd` is a git work tree the row also records what was verified (#941): `git_head`
-(`git rev-parse HEAD`), `git_tree` (`HEAD^{tree}`) and `dirty` (`git status --porcelain`
-was non-empty when the run started; a dirty pass may describe uncommitted code). Rows outside
-a work tree omit all three. `ai-dossier cap last-ok <id> --tree <sha>` prints the latest
-clean `ok` row for that tree and exits 0, or exits 1 with no output (a dirty row never
-matches), so a passing gate can be reused by tree.
+(`git rev-parse HEAD`), `git_tree` (`HEAD^{tree}`) and `dirty`. The tree is probed before
+and after the run; `dirty` is true if either probe found changes (tracked, staged, or
+untracked-not-ignored files — regardless of `status.showUntrackedFiles`/submodule-ignore
+config — or files hidden with `--assume-unchanged`/`--skip-worktree`, which includes
+sparse-checkout trees) or if the run moved HEAD or the tree. The probe strips `GIT_*`
+env, uses `--no-optional-locks`, and has a 10 s total budget; if it times out or errors,
+the row records `git_probe: "timeout"|"error"` with `dirty: true` (and a stderr warning).
+Rows outside a work tree omit all of these. Every row also records `args` (the words after
+`--`) and `args_hash` (sha256 of the JSON array).
+
+`ai-dossier cap last-ok <id> --tree <40-hex sha> [-- <args>]` prints the latest clean `ok`
+row for that capability, tree AND exact args (`gate.test -- --only smoke` never satisfies a
+full-gate lookup). Exit codes: 0 match, 1 no match (no output; dirty, probe-failed,
+failed, different-args and pre-`args_hash` rows never match), 2 error (bad `--tree`,
+unreadable log), 3 `auditLog` disabled (cannot answer). A torn line in the log is skipped.
+The match key deliberately excludes: git-ignored files, toolchain/CLI versions, environment,
+and nested repos other than via submodule status.
 
 ## Capability id vocabulary
 

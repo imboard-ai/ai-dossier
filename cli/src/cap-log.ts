@@ -9,6 +9,7 @@
  * duration_ms, reason, signal, cwd, timestamp.
  */
 
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { CapabilityOutcome } from './capability';
@@ -32,8 +33,19 @@ export interface CapLogEntry {
   git_head?: string;
   /** `git rev-parse HEAD^{tree}` when cwd is a git work tree (#941). */
   git_tree?: string;
-  /** `git status --porcelain` was non-empty when the run started (#941). */
+  /** Tree was dirty before or after the run, or HEAD/tree moved during it (#941). */
   dirty?: boolean;
+  /** The git probe timed out or errored; `dirty` is then true (#941). */
+  git_probe?: 'timeout' | 'error';
+  /** Args passed after `--` to `cap run` (#941): `--only smoke` is not a full gate. */
+  args?: string[];
+  /** sha256 of the JSON args array — the match key for `cap last-ok`. */
+  args_hash?: string;
+}
+
+/** Stable digest of a capability's extra args (order-sensitive). */
+export function hashCapArgs(args: string[]): string {
+  return crypto.createHash('sha256').update(JSON.stringify(args)).digest('hex');
 }
 
 const CAP_LOG_FILE = path.join(CONFIG_DIR, 'caps.jsonl');
@@ -46,37 +58,57 @@ export function appendCapLog(entry: CapLogEntry): void {
   appendAuditJsonl(CAP_LOG_FILE, entry);
 }
 
+/** A torn append can leave `{"timestamp"...garbage` glued to the next row; salvage the tail. */
+function parseRow(line: string): CapLogEntry | null {
+  try {
+    return JSON.parse(line) as CapLogEntry;
+  } catch {
+    const at = line.lastIndexOf('{"timestamp"');
+    if (at <= 0) return null;
+    try {
+      return JSON.parse(line.slice(at)) as CapLogEntry;
+    } catch {
+      return null;
+    }
+  }
+}
+
 /**
- * Latest `ok` row for `capability` that verified exactly `tree` on a clean
- * working tree. A dirty row (or one without git fields) never matches: its
- * verdict may describe uncommitted code. Null when nothing qualifies.
+ * Latest `ok` row for `capability` invoked with exactly `args` that verified
+ * exactly `tree` on a clean working tree. Not part of the match key (by
+ * design): git-ignored files, toolchain/CLI versions, env, nested repos.
+ * A dirty row, a probe-failed row, or one without `args_hash` (pre-args
+ * schema) never matches. Null when nothing qualifies; a missing file is
+ * "nothing", any other read error throws.
  */
 export function findLastOk(
   capability: string,
   tree: string,
+  args: string[] = [],
   file: string = CAP_LOG_FILE
 ): CapLogEntry | null {
   let raw: string;
   try {
     raw = fs.readFileSync(file, 'utf8');
-  } catch {
-    return null;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
   }
+  const want = hashCapArgs(args);
   const lines = raw.split('\n');
   for (let i = lines.length - 1; i >= 0; i--) {
     if (!lines[i]) continue;
-    try {
-      const row = JSON.parse(lines[i]) as CapLogEntry;
-      if (
-        row.capability === capability &&
-        row.outcome === 'ok' &&
-        row.git_tree === tree &&
-        row.dirty === false
-      ) {
-        return row;
-      }
-    } catch {
-      // A torn or foreign line must not hide older valid rows.
+    const row = parseRow(lines[i]);
+    if (
+      row &&
+      row.capability === capability &&
+      row.outcome === 'ok' &&
+      row.git_tree === tree &&
+      row.dirty === false &&
+      !row.git_probe &&
+      row.args_hash === want
+    ) {
+      return row;
     }
   }
   return null;
