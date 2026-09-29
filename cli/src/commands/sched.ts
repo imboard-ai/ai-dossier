@@ -36,6 +36,7 @@ import {
   type CommitInBase,
   CorruptStateError,
   checkStaleLeaseAlert,
+  clearStoppingMarker,
   createConfigReloader,
   createExecFn,
   createExecGroundTruth,
@@ -79,12 +80,14 @@ import {
   parseManifest,
   pruneMemberBranches,
   readJsonl,
+  readStoppingMarker,
   recordTickFailure,
   reportCrashRestart,
   reprioritizeBatch,
   reprioritizeIssue,
   requeueParkedMember,
   resolveDispatch,
+  resolveHungAfterMs,
   resolveProfiledDispatch,
   resolveProjectRepo,
   resolveProjectSlug,
@@ -105,6 +108,7 @@ import {
   tick,
   tierExecutors,
   unitEvent,
+  writeStoppingMarker,
 } from '@ai-dossier/sched';
 import { WARM_COMMAND_TIMEOUT_MS } from '@ai-dossier/worktree-pool';
 import type { Command } from 'commander';
@@ -1529,15 +1533,37 @@ function registerStatusSubcommand(cmd: Command): void {
         const { store, project } = resolveStore(opts);
         try {
           if (opts.alert) {
-            checkStaleLeaseAlert(
-              store,
-              new Journal(store.dir),
-              createAlertNotifier(
-                project,
-                resolveProjectRepo(project, defaultExec) ?? undefined,
-                parseAlertIssue(opts.alertIssue)
-              )
-            );
+            // A watcher must never crash on its own input: a bad --alert-issue
+            // downgrades to stderr-only alerting.
+            let alertIssue: number | undefined;
+            try {
+              alertIssue = parseAlertIssue(opts.alertIssue);
+            } catch (err) {
+              process.stderr.write(
+                `⚠ sched status --alert: ${(err as Error).message} — alerting on stderr/journal only\n`
+              );
+            }
+            try {
+              checkStaleLeaseAlert(
+                store,
+                new Journal(store.dir),
+                createAlertNotifier(
+                  project,
+                  resolveProjectRepo(project, defaultExec) ?? undefined,
+                  alertIssue
+                ),
+                new Date(),
+                {
+                  hungAfterMs: resolveHungAfterMs(
+                    resolveDispatch(store.loadConfig()).reconcileIntervalMs
+                  ),
+                }
+              );
+            } catch (err) {
+              process.stderr.write(
+                `⚠ sched status --alert: alert check failed: ${(err as Error).message}\n`
+              );
+            }
           }
           const report = buildStatusReport(
             store.load(),
@@ -2518,6 +2544,14 @@ function registerStartSubcommand(cmd: Command): void {
     .option('--json', 'Output tick results as JSON')
     .action(async (opts: StartOptions) => {
       const { store, project } = resolveStore(opts);
+      // #945: a bad --alert-issue / $DOSSIER_SCHED_ALERT_ISSUE fails at startup,
+      // before any lease is taken — not hours later at the first crash alert.
+      let alertIssue: number | undefined;
+      try {
+        alertIssue = parseAlertIssue(opts.alertIssue);
+      } catch (err) {
+        fail([`--alert-issue: ${(err as Error).message}`]);
+      }
       const acquisition = store.acquireEngineLease();
       if (!acquisition.acquired) {
         // Timer overlap is expected: --once must produce no human or JSON noise.
@@ -2542,18 +2576,30 @@ function registerStartSubcommand(cmd: Command): void {
       };
       process.once('exit', releaseLease);
       const journalAtStart = new Journal(store.dir);
-      journalAtStart.append({
-        event: 'engine-started',
-        pid: process.pid,
-        detail: opts.once ? 'once' : 'loop',
+      // #945/#920: installed IMMEDIATELY after the lease is taken so no later
+      // startup step can exit unlogged. SIGTERM/SIGINT request a graceful stop
+      // (bounded by a hard deadline); SIGHUP is journaled and ignored.
+      let stopping = false;
+      exitLogger = installEngineExitLogging({
+        journal: journalAtStart,
+        requestStop: () => {
+          stopping = true;
+          if (!opts.once) console.log('\n⏹ Stopping engine (spawned agents keep running)…');
+        },
+        markStopping: (signal) =>
+          writeStoppingMarker(store.dir, {
+            pid: process.pid,
+            signal,
+            at: new Date().toISOString(),
+          }),
       });
+      const previousStop = readStoppingMarker(store.dir);
+      clearStoppingMarker(store.dir);
+      // `--once` runs from a timer: an engine-started line per run is spam.
+      if (!opts.once) {
+        journalAtStart.append({ event: 'engine-started', pid: process.pid, detail: 'loop' });
+      }
       if (acquisition.reclaimed) {
-        let alertIssue: number | undefined;
-        try {
-          alertIssue = parseAlertIssue(opts.alertIssue);
-        } catch (err) {
-          process.stderr.write(`⚠ sched: ${(err as Error).message}\n`);
-        }
         reportCrashRestart(
           journalAtStart,
           acquisition.reclaimed,
@@ -2561,7 +2607,11 @@ function registerStartSubcommand(cmd: Command): void {
             project,
             resolveProjectRepo(project, defaultExec) ?? undefined,
             alertIssue
-          )
+          ),
+          new Date(),
+          previousStop !== null && previousStop.pid === acquisition.reclaimed.pid
+            ? previousStop
+            : null
         );
       }
       try {
@@ -2809,6 +2859,7 @@ function registerStartSubcommand(cmd: Command): void {
           } else {
             console.log(`✓ [${project}] tick: ${describe(result)}`);
           }
+          exitLogger.logNormalExit('once tick complete');
           return;
         }
 
@@ -2817,16 +2868,6 @@ function registerStartSubcommand(cmd: Command): void {
         console.log(
           `▶ Scheduler engine running for ${project} (tick every ${interval}s, Ctrl-C to stop)`
         );
-        let stopping = false;
-        // #945/#920: SIGTERM and SIGHUP used to kill the engine with no log line
-        // and no lease release; every observable exit now journals `engine-exit`.
-        exitLogger = installEngineExitLogging({
-          journal: deps.journal,
-          requestStop: () => {
-            stopping = true;
-            console.log('\n⏹ Stopping engine (spawned agents keep running)…');
-          },
-        });
         await runLoop(
           deps,
           () => {
@@ -2849,6 +2890,7 @@ function registerStartSubcommand(cmd: Command): void {
           }
         );
         exitLogger.logNormalExit('loop returned after a stop request');
+        clearStoppingMarker(store.dir);
         console.log('⏹ Engine stopped');
       } finally {
         process.removeListener('exit', releaseLease);

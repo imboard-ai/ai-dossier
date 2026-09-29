@@ -3,7 +3,14 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { type ExitProcess, installEngineExitLogging, Journal } from '../index';
+import {
+  clearStoppingMarker,
+  type ExitProcess,
+  installEngineExitLogging,
+  Journal,
+  readStoppingMarker,
+  writeStoppingMarker,
+} from '../index';
 
 /** A process double: a real EventEmitter so nothing here can signal the test runner. */
 function fakeProc() {
@@ -34,7 +41,6 @@ describe('installEngineExitLogging (#945)', () => {
 
   it.each([
     'SIGTERM',
-    'SIGHUP',
     'SIGINT',
   ])('%s journals engine-exit, requests a graceful stop, and a second one exits hard', (sig) => {
     const { proc, emitter, exit } = fakeProc();
@@ -48,6 +54,101 @@ describe('installEngineExitLogging (#945)', () => {
     expect(log.shouldReleaseLease()).toBe(true);
     emitter.emit(sig);
     expect(exit).toHaveBeenCalledOnce();
+    expect(exits().map((e) => e.reason)).toEqual([`signal:${sig}`]);
+  });
+
+  it('SIGHUP never stops the engine: journaled as ignored, no stop, no exit, lease kept', () => {
+    const { proc, emitter, exit } = fakeProc();
+    const requestStop = vi.fn();
+    const log = installEngineExitLogging({ journal, requestStop, proc });
+    emitter.emit('SIGHUP');
+    emitter.emit('SIGHUP');
+    expect(requestStop).not.toHaveBeenCalled();
+    expect(exit).not.toHaveBeenCalled();
+    expect(exits().map((e) => e.reason)).toEqual([
+      'signal-ignored:SIGHUP',
+      'signal-ignored:SIGHUP',
+    ]);
+    expect(log.reason()).toBeNull();
+    // a real stop afterwards still works
+    emitter.emit('SIGTERM');
+    expect(requestStop).toHaveBeenCalledOnce();
+  });
+
+  it('the first stop signal writes the stopping marker BEFORE requesting the stop', () => {
+    const { proc, emitter } = fakeProc();
+    const order: string[] = [];
+    installEngineExitLogging({
+      journal,
+      proc,
+      markStopping: (sig) => order.push(`mark:${sig}`),
+      requestStop: () => order.push('stop'),
+    });
+    emitter.emit('SIGTERM');
+    emitter.emit('SIGTERM');
+    expect(order).toEqual(['mark:SIGTERM', 'stop']);
+  });
+
+  it('a wedged stop is bounded: the deadline journals stop-timeout and exits without marking a crash', () => {
+    const { proc, emitter, exit } = fakeProc();
+    let fire: () => void = () => undefined;
+    const unref = vi.fn();
+    const log = installEngineExitLogging({
+      journal,
+      proc,
+      requestStop: vi.fn(),
+      stopTimeoutMs: 5_000,
+      setTimer: (fn, ms) => {
+        expect(ms).toBe(5_000);
+        fire = fn;
+        return { unref };
+      },
+    });
+    emitter.emit('SIGTERM');
+    expect(unref).toHaveBeenCalled();
+    expect(exit).not.toHaveBeenCalled();
+    fire();
+    expect(exits().map((e) => e.reason)).toEqual(['signal:SIGTERM', 'stop-timeout']);
+    expect(exit).toHaveBeenCalledWith(143);
+    expect(log.shouldReleaseLease()).toBe(true);
+  });
+
+  it('a crash after a signal is still journaled with its stack (every cause is kept)', () => {
+    const { proc, emitter, exit } = fakeProc();
+    const log = installEngineExitLogging({ journal, requestStop: vi.fn(), proc });
+    emitter.emit('SIGTERM');
+    emitter.emit('uncaughtException', new Error('during stop'));
+    expect(exits().map((e) => e.reason)).toEqual(['signal:SIGTERM', 'uncaught-exception']);
+    expect(exits()[1].detail).toContain('during stop');
+    expect(exit).toHaveBeenCalledWith(70);
+    expect(log.shouldReleaseLease()).toBe(false);
+  });
+
+  it('a signal arriving before anything else was set up (logger is first) is still logged', () => {
+    const { proc, emitter } = fakeProc();
+    installEngineExitLogging({ journal, requestStop: vi.fn(), proc });
+    emitter.emit('SIGINT');
+    expect(exits().map((e) => e.reason)).toEqual(['signal:SIGINT']);
+  });
+
+  it('an unwritable journal cannot block the exit path', () => {
+    const { proc, emitter, exit } = fakeProc();
+    const broken = {
+      append: () => {
+        throw new Error('disk full');
+      },
+    } as unknown as Journal;
+    installEngineExitLogging({ journal: broken, requestStop: vi.fn(), proc });
+    emitter.emit('uncaughtException', new Error('x'));
+    expect(exit).toHaveBeenCalledWith(70);
+  });
+
+  it('the stopping marker round-trips and clears', () => {
+    expect(readStoppingMarker(dir)).toBeNull();
+    writeStoppingMarker(dir, { pid: 5, signal: 'SIGTERM', at: 'T' });
+    expect(readStoppingMarker(dir)).toEqual({ pid: 5, signal: 'SIGTERM', at: 'T' });
+    clearStoppingMarker(dir);
+    expect(readStoppingMarker(dir)).toBeNull();
   });
 
   it('an uncaught exception journals the stack, exits 70 and keeps the lease as the crash marker', () => {

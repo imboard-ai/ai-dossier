@@ -456,24 +456,38 @@ inter-tick sleep handles were unref'd.
 ### Engine exit logging, heartbeat and crash alerts (#945)
 
 The engine must never die silently. Every exit the process can observe writes a final
-`engine-exit` journal line with its `reason`:
+`engine-exit` journal line with its `reason` (every cause is kept: a crash during a stop
+adds a second line with its stack):
 
 | reason | cause | lease |
 |---|---|---|
-| `signal:SIGTERM` / `SIGHUP` / `SIGINT` | graceful stop: finish the tick, agents keep running (a second signal exits at once) | released |
-| `normal` | the loop returned after a stop request | released |
+| `signal:SIGTERM` / `SIGINT` | graceful stop: finish the tick, agents keep running. A `engine-stopping.json` marker is written first; a second signal exits at once (`signal-repeat`); a hard deadline (120 s) forces `stop-timeout` if the stop never completes | released |
+| `signal-ignored:SIGHUP` | SIGHUP never stops the engine (nohup / a closing terminal must not kill an unattended engine); journaled, engine keeps running | kept |
+| `normal` | the loop returned after a stop request (or `--once` finished its tick) | released |
+| `stop-timeout` | a requested stop was still running at the deadline; forced exit | released |
 | `uncaught-exception` / `unhandled-rejection` | crash, stack in `detail`, exit code 70 | **kept** as the crash marker |
 | `process-exit` | a bare `process.exit()` nothing else logged | released |
 | *(no line)* | SIGKILL / OOM killer — unobservable | left stale |
 
-The lease's `updated_at` is a heartbeat rewritten every tick (`sched status` shows it). Two
-visible alerts, both journaled and printed to stderr, and posted as a comment when a
-tracking issue is given (`--alert-issue <n>` or `$DOSSIER_SCHED_ALERT_ISSUE`):
+The exit logger is installed immediately after the lease is acquired, so no later startup
+step can exit unlogged. A tick that is blocked in a synchronous call cannot run signal
+handlers, so every synchronous exec on the tick path is timeout-bounded (`defaultExec`: 120 s;
+the engine's own execs have explicit budgets) and the stop is therefore bounded too.
+
+The lease's `updated_at` is a heartbeat rewritten (compare-and-swap on the lease id) every
+tick; `sched status` shows it. A live pid whose heartbeat is older than the hung threshold
+(10 x the reconcile interval, never under 5 min; `$DOSSIER_SCHED_HUNG_INTERVALS` overrides
+the multiplier) with unfinished work is an `engine-hung` warning/alert. Visible alerts are
+journaled, printed to stderr, and posted as a comment when a tracking issue is given
+(`--alert-issue <n>` or `$DOSSIER_SCHED_ALERT_ISSUE`; validated at `sched start` startup):
 
 - `engine-restarted-after-crash`: a `sched start` reclaimed a lease whose holder died without
-  releasing it (crash, SIGKILL, OOM).
-- `stale-engine-lease-alert`: the lease holder is dead while work is unfinished. Once per
-  stale episode; raised by a watcher — `sched status --alert` (cron-able) today.
+  releasing it (crash, SIGKILL, OOM). If the previous engine had begun a stop (marker for the
+  same pid) it is reported as `stop-interrupted` (a wedged stop), not a crash.
+- `stale-engine-lease-alert`: the lease holder is dead (`reason=stale-lease`) or alive but
+  hung (`reason=engine-hung`) while work is unfinished. Once per episode (an `O_EXCL` marker
+  file, so racing watchers cannot double-alert); raised by a watcher — `sched status --alert`
+  (cron-able). An unwritable store never makes the watcher throw.
 
 **#920's silent exit:** the log ended in `nothing to do`, which is just an idle tick's line.
 Only SIGINT had a handler, so a SIGTERM/SIGHUP (another session's restart, a closing

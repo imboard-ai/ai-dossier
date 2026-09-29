@@ -20,7 +20,7 @@ afterEach(() => {
   while (dirs.length > 0) fs.rmSync(dirs.pop() as string, { recursive: true, force: true });
 });
 
-async function startChild(mode?: 'crash') {
+async function startChild(mode?: 'crash' | 'slow') {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-exit-proc-'));
   dirs.push(dir);
   const child = spawn(process.execPath, [FIXTURE, dir, ...(mode ? [mode] : [])], {
@@ -42,10 +42,15 @@ async function startChild(mode?: 'crash') {
       throw new Error(`child never reached tick 2: ${out}`);
     });
   const store = new SchedStore(dir, path.join(dir, 'user-config.json'));
-  return { dir, child, exited, store, journal: new Journal(dir) };
+  return { dir, child, exited, store, journal: new Journal(dir), output: () => out };
 }
 
-describe.skipIf(!fs.existsSync(DIST_INDEX))('engine exit paths (real process, #945)', () => {
+describe('engine exit paths (real process, #945)', () => {
+  // Fail loudly rather than silently skip: a green run that exercised nothing is worse than red.
+  it('the built package exists (run `make build-all` first)', () => {
+    expect(fs.existsSync(DIST_INDEX), `missing ${DIST_INDEX} — run \`make build-all\``).toBe(true);
+  });
+
   it('heartbeat: a live engine keeps advancing lease updated_at', async () => {
     const { child, exited, store } = await startChild();
     const first = store.engineLeaseStatus()?.updated_at;
@@ -55,17 +60,43 @@ describe.skipIf(!fs.existsSync(DIST_INDEX))('engine exit paths (real process, #9
     await exited;
   }, 20_000);
 
-  it.each([
-    'SIGTERM',
-    'SIGHUP',
-  ] as const)('%s: journals engine-exit, stops gracefully (exit 0) and releases the lease', async (sig) => {
-    const { child, exited, store, journal } = await startChild();
-    child.kill(sig);
+  it('SIGTERM: journals engine-exit, stops gracefully (exit 0), releases the lease, marker written', async () => {
+    const { dir, child, exited, store, journal } = await startChild();
+    child.kill('SIGTERM');
     const result = await exited;
     expect(result).toEqual({ code: 0, signal: null });
     const exits = journal.read().filter((e) => e.event === 'engine-exit');
-    expect(exits.map((e) => e.reason)).toEqual([`signal:${sig}`]);
+    expect(exits.map((e) => e.reason)).toEqual(['signal:SIGTERM']);
     expect(store.engineLeaseStatus()).toBeNull();
+    expect(fs.readFileSync(path.join(dir, 'stopping-marker'), 'utf8')).toBe('SIGTERM');
+  }, 20_000);
+
+  it('SIGHUP does not stop the engine: it keeps ticking and journals the ignored signal', async () => {
+    const { child, exited, store, journal, output } = await startChild();
+    child.kill('SIGHUP');
+    await vi.waitUntil(() => journal.read().some((e) => e.reason === 'signal-ignored:SIGHUP'), {
+      timeout: 5_000,
+    });
+    const ticksBefore = (output().match(/tick \d+/g) ?? []).length;
+    await vi.waitUntil(() => (output().match(/tick \d+/g) ?? []).length > ticksBefore, {
+      timeout: 5_000,
+    });
+    expect(store.engineLeaseStatus()?.alive).toBe(true);
+    child.kill('SIGTERM');
+    expect(await exited).toEqual({ code: 0, signal: null });
+  }, 20_000);
+
+  it('a signal that lands mid-tick is handled after the tick, gracefully', async () => {
+    const { child, exited, journal, output } = await startChild('slow');
+    child.kill('SIGTERM');
+    expect(await exited).toEqual({ code: 0, signal: null });
+    expect(
+      journal
+        .read()
+        .filter((e) => e.event === 'engine-exit')
+        .map((e) => e.reason)
+    ).toEqual(['signal:SIGTERM']);
+    expect(output()).toContain('stopped');
   }, 20_000);
 
   it('uncaught exception: journals the stack, exits 70, keeps the lease as the crash marker', async () => {
