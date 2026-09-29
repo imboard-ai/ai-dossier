@@ -251,10 +251,12 @@ describe('classify prescreen', () => {
       expect(out.degraded).toBe(false);
     });
 
-    it('an app/automation author (BOT) is trusted', async () => {
+    it('an app/Actions-token author (BOT/NONE) is not trusted', async () => {
       serve([comment(plan(9, 'aaa1111'), 'BOT', 'fleet[bot]')]);
       await run();
-      expect(loggedJson().review).toBe('full');
+      const out = loggedJson();
+      expect(out.plan_artifact).toBe('absent');
+      expect((out.warnings as string[]).join('\n')).toMatch(/fleet\[bot\]/);
     });
 
     it('a plan whose association gh did not report fails closed: treated as no artifact, warned, no crash', async () => {

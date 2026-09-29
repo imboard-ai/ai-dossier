@@ -16,6 +16,7 @@ import {
   parsePlanMarker,
   scanRiskFloor,
   toAuthoredComments,
+  trustedCommentBodies,
   validateArtifactBody,
 } from '../plan-artifact';
 
@@ -260,9 +261,29 @@ describe('findLatestTrustedPlan (#808)', () => {
     expect(r.ignored).toHaveLength(1);
   });
 
-  it('trusts an app/automation author reported as BOT', () => {
-    const r = findLatestTrustedPlan([{ body: trusted, authorAssociation: 'BOT' }]);
-    expect(r.latest?.artifact.head).toBe('aaa1111');
+  it('does not trust BOT/CONTRIBUTOR/NONE: an App- or Actions-token plan is untrusted (not a GitHub association value)', () => {
+    for (const assoc of ['BOT', 'CONTRIBUTOR', 'NONE', 'MANNEQUIN']) {
+      expect(
+        findLatestTrustedPlan([{ body: trusted, authorAssociation: assoc }]).latest
+      ).toBeNull();
+    }
+  });
+
+  it('treats a non-string association as untrusted', () => {
+    const r = findLatestTrustedPlan(toAuthoredComments([{ body: trusted, authorAssociation: 1 }]));
+    expect(r.latest).toBeNull();
+  });
+
+  it('trustedCommentBodies keeps only owner/member/collaborator bodies', () => {
+    expect(
+      trustedCommentBodies([
+        { body: 'a', authorAssociation: 'OWNER' },
+        { body: 'b', authorAssociation: 'NONE' },
+        { body: 'c' },
+        { body: 'd', authorAssociation: 'COLLABORATOR' },
+        { body: 'e', authorAssociation: 'BOT' },
+      ])
+    ).toEqual(['a', 'd']);
   });
 
   it('fails closed when gh does not report the association at all', () => {

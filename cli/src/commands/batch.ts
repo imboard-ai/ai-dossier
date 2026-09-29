@@ -53,7 +53,7 @@ import {
   findLatestTrustedPlan,
   ignoredPlanWarning,
   toAuthoredComments,
-  WRITE_ACCESS_ASSOCIATIONS,
+  trustedCommentBodies,
 } from '../plan-artifact';
 import { extractDependencyRefs } from '../prescreen';
 import { parseMilestones } from '../runstate';
@@ -105,9 +105,8 @@ function names(value: unknown, key: 'name' | 'login'): string[] {
  * A `gh` issue object → the core's input (dependencies and sched status filled in later).
  *
  * Both artifact reads are author-gated (#808): predicted files come only from a plan:v1
- * artifact by a write-access author (fail closed on an unreported association), and the
- * latest phase only from a write-access milestone (an unreported association is trusted,
- * matching `runstate`'s fence read). A skipped newer plan artifact lands in `warnings`.
+ * artifact by a trusted author and the latest phase only from a trusted
+ * author's milestone (both fail closed on an unreported association). A skipped newer plan artifact lands in `warnings`.
  */
 function toInput(
   raw: RawIssue,
@@ -118,12 +117,7 @@ function toInput(
   const { latest: plan, ignored } = findLatestTrustedPlan(comments);
   if (ignored.length > 0) warnings.push(`#${Number(raw.number)}: ${ignoredPlanWarning(ignored)}`);
   const milestones = parseMilestones(
-    comments
-      .filter(
-        (c) =>
-          c.authorAssociation === undefined || WRITE_ACCESS_ASSOCIATIONS.has(c.authorAssociation)
-      )
-      .map((c) => c.body)
+    trustedCommentBodies(Array.isArray(raw.comments) ? raw.comments : [])
   );
   return {
     issue: Number(raw.number),

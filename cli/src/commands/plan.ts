@@ -25,7 +25,9 @@ import {
 import {
   buildPlanComment,
   discussionDrift,
-  findLatestPlan,
+  findLatestTrustedPlan,
+  type IgnoredPlan,
+  ignoredPlanWarning,
   isArtifactComment,
   isHeadSha,
   MAX_ARTIFACT_BODY_LENGTH,
@@ -36,6 +38,7 @@ import {
   parsePredictedFileBullets,
   scanRiskFloor,
   type TimestampedComment,
+  toAuthoredComments,
   unreadableCommentCount,
   validateArtifactBody,
 } from '../plan-artifact';
@@ -124,7 +127,7 @@ interface FetchedPlan {
   createdAt: string;
   /** Author login, when gh reported one — part of the get --json output since 0.14.0. */
   author: string;
-  /** gh's authorAssociation for the comment (MEMBER/OWNER/COLLABORATOR/BOT/…). */
+  /** gh's authorAssociation for the comment (always OWNER/MEMBER/COLLABORATOR — only trusted authors are selected). */
   authorAssociation: string;
   /**
    * Every comment gh returned for the issue — the same read `validate`'s discussion-drift
@@ -133,9 +136,6 @@ interface FetchedPlan {
    */
   comments: GhComment[];
 }
-
-/** Author associations GitHub treats as having write access to the repository. */
-const WRITE_ACCESS_ASSOCIATIONS = new Set(['MEMBER', 'OWNER', 'COLLABORATOR', 'BOT']);
 
 /** Read the plan file, exiting with the errno when it cannot be read. */
 function readPlanFile(file: string): string {
@@ -164,23 +164,34 @@ function resolveHead(override?: string): string {
   return res.stdout;
 }
 
-/** Find the canonical (latest) plan on an issue, or `null` when none exists. */
-function fetchLatestPlan(issue: string, repo?: string): FetchedPlan | null {
+/**
+ * Find the canonical plan on an issue: the latest by a trusted author (repo owner / org
+ * member / collaborator, #808). A newer plan from anyone else is reported in `ignored`
+ * and never selected, so the slot agent implements the same plan the pre-screen judged.
+ * `found` is `null` when no trusted plan exists; `ignored` is returned alongside so a
+ * caller can explain why.
+ */
+function fetchLatestPlan(
+  issue: string,
+  repo?: string
+): { found: FetchedPlan | null; ignored: IgnoredPlan[] } {
   const result = tryFetchComments(issue, repo);
   if (!result.ok) fail([result.error]);
 
-  const bodies = result.comments.map((c) => asString(c?.body));
-  const latest = findLatestPlan(bodies);
-  if (latest === null) return null;
+  const { latest, ignored } = findLatestTrustedPlan(toAuthoredComments(result.comments));
+  if (latest === null) return { found: null, ignored };
 
   const comment = result.comments[latest.index];
   return {
-    artifact: latest.artifact,
-    url: asString(comment?.url),
-    createdAt: asString(comment?.createdAt),
-    author: asString(comment?.author?.login),
-    authorAssociation: asString(comment?.authorAssociation),
-    comments: result.comments,
+    found: {
+      artifact: latest.artifact,
+      url: asString(comment?.url),
+      createdAt: asString(comment?.createdAt),
+      author: asString(comment?.author?.login),
+      authorAssociation: asString(comment?.authorAssociation),
+      comments: result.comments,
+    },
+    ignored,
   };
 }
 
@@ -451,7 +462,8 @@ function registerGetSubcommand(cmd: Command): void {
     .option('--json', 'Output the parsed artifact as JSON')
     .action((options: GetOptions) => {
       requireIssueTarget(options);
-      const found = fetchLatestPlan(options.issue, options.repo);
+      const { found, ignored } = fetchLatestPlan(options.issue, options.repo);
+      if (ignored.length > 0) console.error(`⚠ ${ignoredPlanWarning(ignored)}`);
 
       if (found === null) {
         // Distinguishable "no plan" exit (#462 AC2): stderr message + exit code 1, so a
@@ -505,26 +517,25 @@ function registerValidateSubcommand(cmd: Command): void {
       requireIssueTarget(options);
       const reasons: PlanValidationReason[] = [];
 
-      const found = fetchLatestPlan(options.issue, options.repo);
+      const { found, ignored } = fetchLatestPlan(options.issue, options.repo);
       if (found === null) {
         reasons.push({
           check: 'artifact',
           severity: 'error',
-          message: `No plan:v1 artifact on issue #${options.issue} — post one with 'ai-dossier plan post'.`,
+          message: `No trusted plan:v1 artifact on issue #${options.issue} — post one with 'ai-dossier plan post'.${
+            ignored.length > 0 ? ` ${ignoredPlanWarning(ignored)}` : ''
+          }`,
         });
       } else {
-        reasons.push(...artifactReasons(found.artifact));
-        reasons.push(...discussionReasons(found.comments, found.createdAt));
-        // Authorship signal, not a gate: selection is last-plan-wins by design (the
-        // runstate:v1 convention), but a canonical plan from an account without write
-        // access deserves a flag a consumer can act on.
-        if (!WRITE_ACCESS_ASSOCIATIONS.has(found.authorAssociation)) {
+        if (ignored.length > 0) {
           reasons.push({
             check: 'artifact',
             severity: 'warn',
-            message: `Latest plan was posted by '${found.author || 'unknown'}' (association ${found.authorAssociation || 'UNKNOWN'}) — an account without write access. Verify authorship before trusting this plan.`,
+            message: ignoredPlanWarning(ignored),
           });
         }
+        reasons.push(...artifactReasons(found.artifact));
+        reasons.push(...discussionReasons(found.comments, found.createdAt));
       }
 
       const valid = reasons.every((r) => r.severity !== 'error');
