@@ -162,7 +162,7 @@ A missing, unreadable, `blocked` or `partial` milestone is NOT full-tier reviewe
 **3. Shared surfaces and the risk-floor delta** (both feed the interaction agent's scope):
 
 - **Shared files** — any path changed by the boundary commits of two or more members (intersect each member's file list from item 1's command).
-- **Delta** — everything that changed after the member reviews: (a) every commit on the batch branch without a member `(#N)` trailer (batch-level repairs); (b) every file whose conflict you resolved (the rebase note above); (c) every landed member commit whose patch the member's review never saw — a `git patch-id --stable` of the landed `(#<n>)` commits (`origin/<base_branch>..HEAD`) that is not among those of the reviewed ones (`origin/<base_branch>..<member review head=>`): a fix added after the review, or a commit a rebase conflict changed; when the reviewed head is not fetchable (`git cat-file -e <head>` fails), count ALL of that member's files as delta.
+- **Delta** — everything that changed after the member reviews: (a) every commit on the batch branch without a member `(#N)` trailer (batch-level repairs); (b) every file whose conflict you resolved (the rebase note above); (c) every member file whose change as landed differs from its change as reviewed — a fix added after the review, or an edit a rebase resolution altered or dropped. Compare per file, never per commit (one resolved file must not drag a whole commit's files into the delta): `git diff $(git merge-base <review head=> origin/<base_branch>) <review head=> -- <f> | git patch-id --stable` against `git diff origin/<base_branch>...HEAD -- <f> | git patch-id --stable`, for each file the member touched on either side; when the reviewed head is not fetchable (`git cat-file -e <head>` fails), count ALL of that member's files as delta.
 
 **Selection:**
 
@@ -180,7 +180,7 @@ A missing, unreadable, `blocked` or `partial` milestone is NOT full-tier reviewe
 
 **Escalating to `full` mid-review.** When the Interaction agent returns `interaction=substantive`, the combined diff shows cross-member interaction: run the full tier's agents (Aggregate Step 2c/3) over the combined diff as well, merge their findings with the Interaction agent's, and record `integration_review=full integration_review_reason=interaction-substantive`. A `seam` result (a textual collision the interaction findings already fix) stays `interaction`.
 
-State the selection in one line before launching, e.g. `Integration review: interaction (all-members-full-tier: #4451 full/7, #4136 full/7, #4484 light/conformance; shared 0, delta 1 file, no risk floor) — 1 agent`.
+State the selection in one line before launching, e.g. `Integration review: interaction (all-members-full-tier: #4451 full/7, #4136 full/7, #4484 light/conformance; shared 0, delta 2 docs files from the rebase resolution, no risk floor) — 1 agent`. That is b-20260929-01's evidence: the old rule ran 6 agents there, and paid a gate beside the review plus another after it.
 
 ### Aggregate Step 2b: Member Risks
 
