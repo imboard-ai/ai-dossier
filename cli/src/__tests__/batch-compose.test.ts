@@ -48,6 +48,7 @@ function assessed(
     review: 'light',
     packages: [],
     prescreen: [],
+    readiness: { score: 3, ready: true, blockers: [], signals: [] },
     excluded: [],
     ...over,
   };

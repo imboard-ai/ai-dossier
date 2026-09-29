@@ -24,6 +24,10 @@
  * hard-block label and a rule-9 open dependency. Rule 8 (visual/browser) stays excluding, but
  * this module never detected it — the classifier's model pass does.
  *
+ * v5-in-behaviour (#784, contract still `prescreen:v4`): the text floor also masks negated mentions,
+ * unquoted file/path/workflow names and other word senses (`maskFloorFalsePositives`), so a
+ * false-positive class no longer spends a scarce review=full slot.
+ *
  * Pure and dependency-free (no `gh`, network, or fs), same discipline as `plan-artifact.ts` and
  * `runstate.ts` — unit-testable directly. Subprocess access (fetching the issue, resolving
  * dependency state, filtering by submitted set) lives in the command layer (`commands/classify.ts`).

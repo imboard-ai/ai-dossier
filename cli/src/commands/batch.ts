@@ -11,6 +11,8 @@
  * `status` field is the payload, not a pass/fail gate (same contract as `classify prescreen`).
  */
 
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   MAX_FULL_REVIEW_MEMBERS,
   resolveProjectSlug,
@@ -57,6 +59,11 @@ import {
 } from '../plan-artifact';
 import { extractDependencyRefs } from '../prescreen';
 import { parseMilestones } from '../runstate';
+import {
+  discoverWorkspaceLayout,
+  type WorkspaceFileReader,
+  type WorkspaceLayout,
+} from '../workspace-layout';
 
 interface ComposeCliOptions {
   issues?: string;
@@ -183,6 +190,86 @@ function fetchBacklog(
     .map((r) => toInput(r, 'backlog', warnings));
 }
 
+/** Workspace-config reader over `gh api repos/<r>/contents/…` — the target repo need not be local. */
+function ghWorkspaceReader(repo: string): WorkspaceFileReader {
+  return {
+    topLevelDirs() {
+      const res = exec('gh', [
+        'api',
+        `repos/${repo}/contents/`,
+        '--jq',
+        '.[] | select(.type=="dir") | .name',
+      ]);
+      return res.ok ? res.stdout.split('\n').filter((n) => n !== '') : null;
+    },
+    readFile(path) {
+      const res = exec('gh', [
+        'api',
+        '-H',
+        'Accept: application/vnd.github.raw',
+        `repos/${repo}/contents/${path.split('/').map(encodeURIComponent).join('/')}`,
+      ]);
+      return res.ok ? res.stdout : null;
+    },
+  };
+}
+
+/** Workspace-config reader over the local checkout at `root` (no `--repo`: `gh` targets the cwd repo). */
+function fsWorkspaceReader(root: string): WorkspaceFileReader {
+  return {
+    topLevelDirs() {
+      try {
+        return readdirSync(root, { withFileTypes: true })
+          .filter((e) => e.isDirectory())
+          .map((e) => e.name);
+      } catch {
+        return null;
+      }
+    },
+    readFile(path) {
+      const full = join(root, path);
+      try {
+        return existsSync(full) ? readFileSync(full, 'utf8') : null;
+      } catch {
+        return null;
+      }
+    },
+  };
+}
+
+/**
+ * The target repo's declared workspace layout (#801), or null with a warning saying the path
+ * heuristic is in force instead. Read-only: `gh api` contents reads, or plain file reads locally.
+ */
+function resolveWorkspaceLayout(
+  repo: string | undefined,
+  warnings: string[]
+): WorkspaceLayout | null {
+  let reader: WorkspaceFileReader;
+  let where: string;
+  if (repo) {
+    reader = ghWorkspaceReader(repo);
+    where = repo;
+  } else {
+    const top = exec('git', ['rev-parse', '--show-toplevel']);
+    if (!top.ok || top.stdout === '') {
+      warnings.push(
+        'Workspace packages inferred from path heuristics: not in a git checkout and no --repo given, so no workspace config could be read.'
+      );
+      return null;
+    }
+    reader = fsWorkspaceReader(top.stdout);
+    where = top.stdout;
+  }
+  const layout = discoverWorkspaceLayout(reader);
+  if (layout === null) {
+    warnings.push(
+      `Workspace packages inferred from path heuristics: no workspace config (pnpm-workspace.yaml, package.json workspaces, lerna.json) found in ${where}.`
+    );
+  }
+  return layout;
+}
+
 /** The sched project slug: explicit `--project`, else `--repo` as `owner-name`, else the cwd's repo. */
 function resolveProject(opts: ComposeCliOptions): string {
   if (opts.project) return opts.project;
@@ -261,10 +348,17 @@ export interface ComposeReport extends CompositionResult {
     reasons: AssessedIssue['excluded'];
   }>;
   counts: { assessed: number; admissible: number; excluded: number };
+  /** Where package names came from: the repo's declared workspaces (#801) or the path heuristic. */
+  workspace: {
+    source: 'workspace-config' | 'heuristic';
+    roots: Array<{ prefix: string; file: string; globs: string[] }>;
+  };
   /** Always 0 — the whole point of this command (#773 AC2). */
   model_calls: 0;
   degraded: boolean;
   warnings: string[];
+  /** Advisories that leave `degraded` false — e.g. an explicit pick that does not look batch-ready (#802). */
+  notices: string[];
 }
 
 /** Terminal control characters — issue titles and label names are untrusted, network-sourced text. */
@@ -280,12 +374,17 @@ function renderText(r: ComposeReport): void {
     `status: ${r.status} — ${r.members.length} member(s), ${r.members.filter((m) => m.review === 'full').length}/${r.params.max_full_review} review=full, min ${r.params.min_members}, max ${r.params.max_members}`
   );
   line(`→ ${r.recommendation}`);
+  line(
+    r.workspace.source === 'workspace-config'
+      ? `workspaces: ${r.workspace.roots.map((w) => `${w.prefix === '' ? '.' : w.prefix}/${w.file} [${w.globs.join(', ')}]`).join('; ')}`
+      : 'workspaces: path heuristic (no workspace config found)'
+  );
   line();
   line('Members:');
   if (r.members.length === 0) line('  (none)');
   for (const m of r.members) {
     const pk = m.packages.length > 0 ? ` [${m.packages.join(', ')}]` : '';
-    line(`  #${m.issue}  review=${m.review}  (${m.source})${pk}  ${m.title}`);
+    line(`  #${m.issue}  review=${m.review}  ready=${m.readiness}  (${m.source})${pk}  ${m.title}`);
     for (const why of m.review_reasons) line(`      full because: ${why}`);
   }
   if (r.shared_packages.length > 0) line(`  shared packages: ${r.shared_packages.join(', ')}`);
@@ -308,11 +407,12 @@ function renderText(r: ComposeReport): void {
     for (const b of r.backfill.slice(0, 10)) {
       const sh = b.shared_packages.length > 0 ? ` shares ${b.shared_packages.join(', ')}` : '';
       line(
-        `  ${b.rank}. #${b.issue}  review=${b.review}${b.selected ? '  ← selected' : ''}${sh}  ${b.title}`
+        `  ${b.rank}. #${b.issue}  review=${b.review}  ready=${b.readiness}${b.selected ? '  ← selected' : ''}${sh}  ${b.title}`
       );
     }
     if (r.backfill.length > 10) line(`  … ${r.backfill.length - 10} more (see --json)`);
   }
+  for (const n of r.notices) console.error(`note: ${n.replace(TERMINAL_CONTROL_RE, '')}`);
   for (const w of r.warnings) console.error(`⚠ ${w.replace(TERMINAL_CONTROL_RE, '')}`);
 }
 
@@ -351,6 +451,7 @@ function runCompose(opts: ComposeCliOptions): void {
       ? positiveInt(opts.maxFullReview, '--max-full-review', { min: 0, max: DEFAULT_MAX_MEMBERS })
       : (sched.config?.max_full_review_members ?? MAX_FULL_REVIEW_MEMBERS);
 
+  const layout = resolveWorkspaceLayout(opts.repo, warnings);
   const inputs: ComposeIssueInput[] = picks.map((n) => fetchPick(n, opts.repo, warnings));
   const pickSet = new Set(picks);
 
@@ -402,7 +503,7 @@ function runCompose(opts: ComposeCliOptions): void {
   const isOpen = (issue: number) => (knownState.get(issue) ?? 'OPEN').toUpperCase() === 'OPEN';
   const assessAll = (list: ComposeIssueInput[]) =>
     applyPickDependencies(
-      list.map((i) => assessIssue(withDeps(i), rules)),
+      list.map((i) => assessIssue(withDeps(i), rules, layout)),
       pickDeps,
       isOpen
     );
@@ -432,10 +533,18 @@ function runCompose(opts: ComposeCliOptions): void {
     for (const b of backlog) if (!pickSet.has(b.issue)) inputs.push(b);
   }
 
+  /** Advisories that do not make the report `degraded` (unlike `warnings`, which mean missing data). */
+  const notices: string[] = [];
   const assessed = assessAll(inputs);
   for (const a of assessed) {
     const input = inputs.find((i) => i.issue === a.issue);
     if (input?.error !== undefined) warnings.push(input.error);
+    // An explicit pick is never dropped by the readiness screen, but the operator should know.
+    if (a.source === 'pick' && input?.error === undefined && !a.readiness.ready) {
+      notices.push(
+        `#${a.issue} (pick) does not look batch-ready: ${a.readiness.blockers.join('; ')}.`
+      );
+    }
   }
   if (unresolved.size > 0) {
     warnings.push(
@@ -475,9 +584,14 @@ function runCompose(opts: ComposeCliOptions): void {
       admissible: assessed.length - excluded.length,
       excluded: excluded.length,
     },
+    workspace: {
+      source: layout === null ? 'heuristic' : 'workspace-config',
+      roots: (layout?.roots ?? []).map((w) => ({ prefix: w.prefix, file: w.file, globs: w.globs })),
+    },
     model_calls: 0,
     degraded: warnings.length > 0,
     warnings,
+    notices,
   };
 
   if (opts.json) {

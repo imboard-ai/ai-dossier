@@ -1248,6 +1248,8 @@ At least one of `--issues` / `--backlog` is required. With `--issues` alone, the
 read **only** when the picks by themselves compose fewer than `--min-members` members — counted
 after the caps, so five admissible `review=full` picks (cap 2) still trigger backfill.
 
+**Workspace packages (#801).** "Shares a package" ranking uses the target repo's own workspace config — `pnpm-workspace.yaml`, `package.json` `workspaces`, or `lerna.json`, at the repo root or (imboard's `main/`) in a top-level directory — read via `gh api repos/<r>/contents/…` with `--repo`, or from the local checkout without it. Paths outside every declared workspace belong to no package. Only when no config is found does compose fall back to the path heuristic (`…/packages/<x>/…`, else the first path segment) and say so in a warning; `--json` reports `workspace.source` (`workspace-config` | `heuristic`).
+
 **Admission.** An issue is excluded — with every reason recorded, not just the first — on:
 
 | `code` | Rule |
@@ -1259,6 +1261,7 @@ after the caps, so five admissible `review=full` picks (cap 2) still trigger bac
 | `hard-block-label` | `decision-pending`, `needs-clarification`, `epic`, `decomposed` |
 | `batch-anchor` | Carries `batch-epic` |
 | `not-a-unit` | Tracker / decision / research / parked: labels `tracker` `decision` `question` `discussion` `research` `parked` `on-hold` `wontfix` `duplicate`; titles like `[PARKED] …`, `research: …`, `epic(x): …`; a `## Decision needed` section |
+| `not-ready` | **Backlog candidates only** (#802; an explicit `--issues` pick only gets a warning; not under `--rules legacy`). No model call — labels, title and body: a tracker/initiative shape (`initiative`/`umbrella`/`roadmap`/`punch-list` labels, a punch-list/umbrella/roadmap title, an `audit`/`triage` title with a findings list, a checklist of ≥ 10 task items, ≥ 3 task items linking sub-issues, ≥ 3 `Phase N` headings, ≥ 2 strategy/metrics/kill-criteria headings, declared sub-issues), a feature (`enhancement`/`feature` label or `feat:` title) with no acceptance-criteria section, an empty body, or a readiness score below the floor (2: AC section +3, checklist of 1–9 items +2, bounded type `bug`/`chore`/`refactor`/`engineering-ready`/`ready:*`/`fix:` title +2, named code path +1). The message names every signal; survivors are ranked by score (`ready=` in the output) |
 | `in-flight` | Latest runstate milestone is any phase other than `classify` |
 | `sched-active` | A non-terminal, not-yet-merged sched queue entry exists |
 | `open-dependency` | `Depends on #N` with N open and not among the picks; N a pick that is itself excluded; or N whose state could not be read (fails closed) |
