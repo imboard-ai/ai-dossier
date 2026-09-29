@@ -2712,6 +2712,34 @@ describe('#630: pr-watch-failed journals once per distinct condition, not once p
   });
 });
 
+describe('#778: a batch member whose issue is closed is flagged, not spawned', () => {
+  it('holds the member (stale_closed_at + stale-closed journal, no agent) and stays held when gh reads open', () => {
+    const repo = scratchRepo();
+    const h = batchHarness(repo, ['--mode=batch', '--commit-file=member-7781.txt'], {
+      maxSlots: 1,
+    });
+    const closed = new Set<number>([7781]);
+    h.deps.groundTruth = { ...h.deps.groundTruth, issueClosed: (i) => closed.has(i) };
+    h.enqueue([{ issue: 7781, mode: 'slot', batch: 'b-778', anchor: 7780, tier: 'mid' }]);
+
+    h.tick();
+    const entry = () => h.state().entries.find((e) => e.issue === 7781);
+    expect(entry()?.stale_closed_at).not.toBeNull();
+    expect(batchSlotPid(h, 'b-778')).toBeFalsy();
+    const flagged = () => h.deps.journal.read().filter((e) => e.event === 'stale-closed');
+    expect(flagged()).toHaveLength(1);
+    expect(flagged()[0].detail).toContain('sched stop --issue 7781');
+
+    // gh unreachable / open now: the flag is sticky, the member is still not spawned.
+    closed.clear();
+    h.tick();
+    h.tick();
+    expect(entry()?.stale_closed_at).not.toBeNull();
+    expect(batchSlotPid(h, 'b-778')).toBeFalsy();
+    expect(flagged()).toHaveLength(1);
+  }, 60_000);
+});
+
 describe('#867: PR-watch conflict recovery', () => {
   it('rebases a conflicting batch PR, force-pushes the rewritten integration branch, and resumes watching it', async () => {
     const repo = scratchRepo();

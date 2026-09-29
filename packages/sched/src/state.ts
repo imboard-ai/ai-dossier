@@ -1765,6 +1765,13 @@ export function requeueMember(
     ...profilePatch,
     reason,
     ...CLEARED_ENTRY_DEDUP_MARKERS,
+    // #778: a requeue is a fresh attempt, so the stale-closed flag is normally
+    // cleared — but not while a `recovering` slot still holds `issue:N`. With
+    // the flag gone, the next tick would read the issue via `issueClosed`,
+    // which is false when gh is unreachable, and respawn a shipped issue.
+    ...(state.slots.some((s) => s.unit === `issue:${issue}` && s.status === 'recovering')
+      ? { stale_closed_at: entry.stale_closed_at }
+      : {}),
     ...extra,
   };
   if (entry.status === 'queued' || entry.status === 'classified' || entry.status === 'requeued') {

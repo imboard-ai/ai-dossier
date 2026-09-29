@@ -16,6 +16,7 @@ import {
   type RunFenceBinder,
   type RunFenceReleaser,
   type RunFencer,
+  requeueMember,
   type SchedConfig,
   SchedStore,
   type SetupInfo,
@@ -28,7 +29,7 @@ import {
   transitionIssue,
   transitionSlot,
 } from '../index';
-import { advanceStreak } from '../state';
+import { advanceStreak, patchEntry } from '../state';
 import {
   writeAnnouncedWaitLog,
   writeApiErrorLog,
@@ -4385,6 +4386,295 @@ describe('#776: recovery never re-dispatches a unit whose issue is closed', () =
     h.store.withLock((state) => ({ state: setPaused(state, false), result: null }));
     h.tick();
     expect(h.spawnCalls).toHaveLength(1);
+  });
+});
+
+describe('#778: no dispatch path spawns an issue that is closed on GitHub', () => {
+  const flagged = (h: ReturnType<typeof harness>, issue = 101) =>
+    h.state().entries.find((e) => e.issue === issue)?.stale_closed_at ?? null;
+  const staleEvents = (h: ReturnType<typeof harness>) =>
+    h.journal.read().filter((e) => e.event === 'stale-closed');
+
+  /** Spawn #101, then leave its slot `assigned` with no live agent (crash between assign and spawn). */
+  function assignedUnit() {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    h.alive.delete(h.spawnCalls[0].pid);
+    h.store.withLock((state) => ({
+      state: {
+        ...state,
+        slots: state.slots.map((sl) =>
+          sl.unit === 'issue:101' ? { ...sl, status: 'assigned' as const, pid: null } : sl
+        ),
+      },
+      result: null,
+    }));
+    return h;
+  }
+
+  describe('reconcileAssigned (crash-left assigned slot)', () => {
+    it('control: an OPEN issue is spawned fresh', () => {
+      const h = assignedUnit();
+      h.tick();
+      expect(h.spawnCalls).toHaveLength(2);
+      expect(staleEvents(h)).toHaveLength(0);
+    });
+
+    it('a CLOSED issue is flagged, journaled once, and never spawned; the flag is sticky', () => {
+      const h = assignedUnit();
+      h.closedIssues.add(101);
+      h.tick();
+      expect(h.spawnCalls).toHaveLength(1);
+      expect(flagged(h)).not.toBeNull();
+      expect(h.state().slots.find((sl) => sl.unit === 'issue:101')?.status).toBe('assigned');
+      // gh now reads the issue as open (or unreachable): still held, still one event.
+      h.closedIssues.delete(101);
+      h.tick();
+      h.tick();
+      expect(h.spawnCalls).toHaveLength(1);
+      expect(staleEvents(h)).toHaveLength(1);
+    });
+
+    it('flags while PAUSED so `sched resume` cannot re-run shipped work', () => {
+      const h = assignedUnit();
+      h.store.withLock((state) => ({ state: setPaused(state, true), result: null }));
+      h.closedIssues.add(101);
+      h.tick();
+      expect(flagged(h)).not.toBeNull();
+      h.store.withLock((state) => ({ state: setPaused(state, false), result: null }));
+      h.tick();
+      expect(h.spawnCalls).toHaveLength(1);
+    });
+
+    it('a slot whose agent is still alive is re-attached, not flagged or killed', () => {
+      const h = harness();
+      REGISTRIES.push(h.dir);
+      h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+      h.tick();
+      h.store.withLock((state) => ({
+        state: {
+          ...state,
+          slots: state.slots.map((sl) =>
+            sl.unit === 'issue:101' ? { ...sl, status: 'assigned' as const } : sl
+          ),
+        },
+        result: null,
+      }));
+      h.closedIssues.add(101);
+      h.tick();
+      expect(h.spawnCalls).toHaveLength(1);
+      expect(h.killedPids).toHaveLength(0);
+    });
+  });
+
+  describe('queued / classified entries closed while waiting', () => {
+    it('control: an open queued entry dispatches', () => {
+      const h = harness();
+      REGISTRIES.push(h.dir);
+      h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+      h.tick();
+      expect(h.spawnCalls).toHaveLength(1);
+    });
+
+    it('a closed queued entry is flagged and not dispatched, and the next entry still is', () => {
+      const h = harness();
+      REGISTRIES.push(h.dir);
+      h.enqueue([
+        { issue: 101, mode: 'full', tier: 'mechanical' },
+        { issue: 102, mode: 'full', tier: 'mechanical' },
+      ]);
+      h.closedIssues.add(101);
+      h.tick();
+      expect(flagged(h)).not.toBeNull();
+      expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('queued');
+      expect(h.spawnCalls).toHaveLength(1);
+      expect(h.state().slots.some((sl) => sl.unit === 'issue:102')).toBe(true);
+      expect(h.state().slots.some((sl) => sl.unit === 'issue:101')).toBe(false);
+      // Sticky: reading open afterwards does not dispatch it; excluded without re-reads.
+      h.closedIssues.delete(101);
+      h.tick();
+      expect(h.state().slots.some((sl) => sl.unit === 'issue:101')).toBe(false);
+      expect(staleEvents(h)).toHaveLength(1);
+    });
+
+    it('a closed classified entry is not dispatched', () => {
+      const h = harness();
+      REGISTRIES.push(h.dir);
+      h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+      h.store.withLock((state) => ({
+        state: transitionIssue(state, 101, 'classified', {}, h.clock()),
+        result: null,
+      }));
+      h.closedIssues.add(101);
+      h.tick();
+      expect(h.spawnCalls).toHaveLength(0);
+      expect(flagged(h)).not.toBeNull();
+    });
+
+    it('a paused fleet reads nothing', () => {
+      const h = harness();
+      REGISTRIES.push(h.dir);
+      h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+      h.store.withLock((state) => ({ state: setPaused(state, true), result: null }));
+      const reads: number[] = [];
+      const real = h.deps.groundTruth.issueClosed;
+      h.deps.groundTruth.issueClosed = (i) => {
+        reads.push(i);
+        return real(i);
+      };
+      h.tick();
+      expect(reads).toEqual([]);
+    });
+
+    it('gh unreachable reads as "not closed": the unit is NOT flagged (no work lost on a blip)', () => {
+      const h = harness();
+      REGISTRIES.push(h.dir);
+      h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+      // issueClosed is false when gh is unreachable — modeled by the default fake.
+      h.tick();
+      expect(flagged(h)).toBeNull();
+      expect(h.spawnCalls).toHaveLength(1);
+    });
+  });
+
+  describe('requeueOrphanedDispatches', () => {
+    /** Entry `dispatched` with its slot gone — the crash window the requeue self-heals. */
+    function orphan(h: ReturnType<typeof harness>) {
+      h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+      h.store.withLock((state) => {
+        let next = transitionIssue(state, 101, 'classified', {}, h.clock());
+        next = transitionIssue(next, 101, 'dispatched', {}, h.clock());
+        return { state: next, result: null };
+      });
+    }
+
+    it('control: an orphan on an OPEN issue is requeued and re-dispatched', () => {
+      const h = harness();
+      REGISTRIES.push(h.dir);
+      orphan(h);
+      h.tick();
+      expect(h.spawnCalls).toHaveLength(1);
+    });
+
+    it('an orphan on a CLOSED issue is requeued but flagged, never re-dispatched', () => {
+      const h = harness();
+      REGISTRIES.push(h.dir);
+      orphan(h);
+      h.closedIssues.add(101);
+      h.tick();
+      expect(h.spawnCalls).toHaveLength(0);
+      expect(flagged(h)).not.toBeNull();
+      // The flag survives the requeue rail: an open/unreachable read cannot free it.
+      h.closedIssues.delete(101);
+      h.tick();
+      expect(h.spawnCalls).toHaveLength(0);
+    });
+
+    it('an already-flagged orphan keeps its flag through the requeue', () => {
+      const h = harness();
+      REGISTRIES.push(h.dir);
+      orphan(h);
+      h.store.withLock((state) => ({
+        state: patchEntry(state, 101, { stale_closed_at: h.clock().toISOString() }),
+        result: null,
+      }));
+      h.tick();
+      expect(flagged(h)).not.toBeNull();
+      expect(h.spawnCalls).toHaveLength(0);
+    });
+  });
+
+  describe('requeueMember edge (recovering slot still holds the unit)', () => {
+    it('keeps the flag while a recovering slot holds issue:N; clears it otherwise', () => {
+      const h = harness();
+      REGISTRIES.push(h.dir);
+      h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+      h.tick();
+      h.store.withLock((state) => {
+        const slot = state.slots.find((sl) => sl.unit === 'issue:101');
+        if (!slot) throw new Error('no slot');
+        const rec = transitionSlot(state, slot.id, 'recovering', { pid: null });
+        return {
+          state: patchEntry(rec, 101, { stale_closed_at: h.clock().toISOString() }),
+          result: null,
+        };
+      });
+      const held = h.store.withLock((state) => ({
+        state: requeueMember(state, 101, { mode: 'full', batch: null }, 'r', h.clock()).state,
+        result: null,
+      }));
+      expect(held).toBeNull();
+      expect(flagged(h)).not.toBeNull();
+      // No slot holding it -> a requeue is a fresh attempt and clears the flag.
+      const bare = patchEntry(
+        { ...h.state(), slots: h.state().slots.map((sl) => ({ ...sl, unit: null })) },
+        101,
+        { stale_closed_at: h.clock().toISOString() }
+      );
+      const cleared = requeueMember(bare, 101, { mode: 'full', batch: null }, 'r', h.clock()).state;
+      expect(cleared.entries.find((e) => e.issue === 101)?.stale_closed_at).toBeNull();
+    });
+  });
+});
+
+describe('#890: slot worktree paths use the project root (worktreesDirFor)', () => {
+  function requeuedMemberSeed(h: ReturnType<typeof harness>) {
+    h.enqueue([
+      { issue: 900, mode: 'slot', batch: 'b-890', anchor: 899, base_branch: 'develop' },
+      { issue: 890, mode: 'full', tier: 'mid' },
+    ]);
+    h.store.withLock((state) => ({
+      state: {
+        ...state,
+        entries: state.entries.map((e) =>
+          e.issue === 890
+            ? {
+                ...e,
+                failure_evidence: {
+                  batch: 'b-890',
+                  reason: 'suite-red-after-fix',
+                  failing_tests: [],
+                  attribution: 'overlap' as const,
+                  reverted_commits: [],
+                  branch: 'batch/b-890-m1-890',
+                  at: new Date().toISOString(),
+                },
+              }
+            : e
+        ),
+      },
+      result: null,
+    }));
+    const seen: string[] = [];
+    h.deps.resumeSeeder = (_issue, seed) => {
+      seen.push(seed.worktree);
+      return { ok: true, run: 'r-890' };
+    };
+    return seen;
+  }
+
+  it('nested layout: the slot worktree lands under <project root>/worktrees', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-nested-'));
+    REGISTRIES.push(project);
+    fs.mkdirSync(path.join(project, '.dossier'));
+    const checkout = path.join(project, 'main');
+    fs.mkdirSync(checkout);
+    h.deps.repoDir = checkout;
+    const seen = requeuedMemberSeed(h);
+    h.tick();
+    expect(seen).toEqual([path.join(project, 'worktrees', 'batch-b-890-m1-890')]);
+  });
+
+  it('flat layout: unchanged (<repoDir>/worktrees)', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    const seen = requeuedMemberSeed(h);
+    h.tick();
+    expect(seen).toEqual([path.join(h.dir, 'worktrees', 'batch-b-890-m1-890')]);
   });
 });
 
