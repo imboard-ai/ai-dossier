@@ -1,7 +1,7 @@
 # Dossier Build System
 # Handles build order dependencies across npm workspaces
 
-.PHONY: all build build-all clean test test-coverage install help lint format check build-pool build-sched build-binary
+.PHONY: all build build-all clean test test-coverage install help lint format check build-pool build-sched build-vscode build-binary
 .DEFAULT_GOAL := help
 
 ## help: Show this help message
@@ -29,7 +29,7 @@ install:
 build: lint build-all
 
 ## build-all: Build all packages in dependency order (no lint)
-build-all: build-core build-pool build-sched build-mcp build-cli
+build-all: build-core build-pool build-sched build-mcp build-cli build-vscode
 	@echo "✓ All packages built successfully"
 
 ## build-core: Build @ai-dossier/core package
@@ -49,6 +49,12 @@ build-cli: build-core build-sched
 	@echo "Building CLI..."
 	cd cli && npm run build
 	@echo "✓ cli built"
+
+## build-vscode: Typecheck and bundle the VS Code extension (depends on core)
+build-vscode: build-core
+	@echo "Building packages/vscode..."
+	cd packages/vscode && npm run typecheck && npm run build
+	@echo "✓ packages/vscode built"
 
 ## build-pool: Build @ai-dossier/worktree-pool package
 build-pool:

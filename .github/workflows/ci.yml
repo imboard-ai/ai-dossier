@@ -71,6 +71,11 @@ jobs:
       - name: Run tests with coverage
         run: make test-coverage
 
+      # The extension is private (never on npm), so nothing else proves it still packages.
+      - name: Package VS Code extension
+        if: matrix.node-version == 22
+        run: npm run package --workspace=ai-dossier-vscode
+
   # Guards against the failure in #448: a package's source merges to main with its
   # version unchanged (or bumped to a number the base-branch tip already holds, #826),
   # so npm lags main. The publish workflow used to skip such a package silently
