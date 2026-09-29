@@ -131,7 +131,11 @@ jobs:
         run: |
           git fetch --no-tags origin -- "$BASE_REF"
           # Capture first: a failing `git diff` inside an `if` pipeline would silently skip the build.
-          changed=$(git diff --name-only "origin/$BASE_REF"...HEAD)
+          # If the diff cannot be computed, fail open: build.
+          if ! changed=$(git diff --name-only "origin/$BASE_REF"...HEAD); then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if printf '%s\n' "$changed" | grep -qE '^(website/|docs/|\.github/workflows/ci\.yml$)'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else

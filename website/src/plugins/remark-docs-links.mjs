@@ -21,10 +21,12 @@ export default function remarkDocsLinks() {
         repoRoot,
         exists,
         image: node.type === 'image',
-        onMissing: (href, repoRel) =>
-          console.warn(
-            `[docs] broken link in ${path.relative(repoRoot, fromAbs)}: ${href} (${repoRel} does not exist)`
-          ),
+        onMissing: (href, repoRel) => {
+          const msg = `[docs] broken link in ${path.relative(repoRoot, fromAbs)}: ${href} (${repoRel} does not exist)`;
+          // Astro's content loader swallows errors thrown here, so this only warns;
+          // `npm run check:links` is what fails on dead links to repo files.
+          console.warn(msg);
+        },
       });
     });
   };

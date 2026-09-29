@@ -54,12 +54,13 @@ export function rewriteLink(
   const docRel = path.relative(docsDir, abs).split(path.sep).join('/');
   const insideDocs = !docRel.startsWith('..');
 
+  if (!exists(abs) && onMissing) onMissing(href, repoRel);
+
   if (insideDocs && !isExcluded(docRel)) {
     if (/\.md$/i.test(docRel)) return docUrl(docId(docRel)) + suffix;
     // A directory link like `getting-started/` resolves to its README.
     if (exists(abs) && exists(path.join(abs, 'README.md'))) return docUrl(docId(docRel)) + suffix;
   }
-  if (!exists(abs) && onMissing) onMissing(href, repoRel);
   // Anything else (source files, excluded notes, repo-root docs, assets) lives on GitHub.
   const isDir = exists(abs) && !path.extname(abs);
   const base = image ? RAW_URL : `${REPO_URL}/${isDir ? 'tree' : 'blob'}/main`;

@@ -10,7 +10,8 @@ npm ci
 npm run dev        # http://localhost:4321
 npm run build      # -> dist/
 npm test           # link-rewriting + registry parsing unit tests
-npm run check:links  # after a build: every internal link/anchor in dist/ resolves
+npm run check:links  # after a build: every internal link/anchor in dist/ resolves, and every
+                     # GitHub link to a repo file points at a file that exists
 ```
 
 Needs Node 22.12+.

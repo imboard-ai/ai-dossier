@@ -31,10 +31,20 @@ const resolve = (urlPath) => {
   return null;
 };
 
+const repoRoot = path.resolve(dist, '../..');
+const GH =
+  /\s(?:href|src)="https:\/\/(?:github\.com\/imboard-ai\/ai-dossier\/(?:blob|tree)|raw\.githubusercontent\.com\/imboard-ai\/ai-dossier)\/main\/([^"#?]+)/g;
+
 const problems = [];
 for (const file of htmlFiles) {
   const html = fs.readFileSync(file, 'utf8');
   const page = `/${path.relative(dist, file)}`;
+  // Links rewritten to GitHub (docs pointing at repo files) must name files that exist.
+  for (const m of html.matchAll(GH)) {
+    const rel = decodeURI(m[1]).replace(/\/$/, '');
+    if (!fs.existsSync(path.join(repoRoot, rel)))
+      problems.push(`${page}: GitHub link to missing repo path ${rel}`);
+  }
   for (const m of html.matchAll(/\s(?:href|src)="([^"]+)"/g)) {
     const url = m[1];
     if (!url.startsWith('/') || url.startsWith('//')) continue;
