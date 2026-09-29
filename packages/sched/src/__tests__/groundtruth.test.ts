@@ -475,6 +475,28 @@ describe('isWrongProcedureMilestone (#822)', () => {
   });
 });
 
+describe('createExecGroundTruth — milestone reads are trusted-only (#932)', () => {
+  it('passes --trusted on both milestone reads the scheduler acts on', () => {
+    const calls: string[][] = [];
+    const exec: ExecFn = (_file, args) => {
+      calls.push(args);
+      return args[1] === 'list' ? '[]' : 'null';
+    };
+    const gt = createExecGroundTruth(exec);
+    gt.latestMilestone(7);
+    gt.milestonesSince?.(7, '2026-09-29T00:00:00Z');
+    expect(calls).toHaveLength(2);
+    for (const args of calls) expect(args).toContain('--trusted');
+  });
+
+  it('an older CLI that rejects --trusted reads as unreachable (fail closed), never unfiltered', () => {
+    const exec: ExecFn = (_file, args) => (args.includes('--trusted') ? null : 'null');
+    const gt = createExecGroundTruth(exec);
+    expect(gt.latestMilestone(7)).toBeUndefined();
+    expect(gt.milestonesSince?.(7, '2026-09-29T00:00:00Z')).toBeUndefined();
+  });
+});
+
 describe('createExecGroundTruth', () => {
   it('reads milestones, issue state, and branch heads through the exec fn', () => {
     const calls: Array<[string, string[]]> = [];

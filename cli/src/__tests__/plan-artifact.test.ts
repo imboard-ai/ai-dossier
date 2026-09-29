@@ -6,6 +6,7 @@ import {
   extractPredictedFiles,
   findLatestPlan,
   findLatestTrustedPlan,
+  ignoredMilestoneWarning,
   ignoredPlanWarning,
   isArtifactComment,
   isHeadSha,
@@ -14,6 +15,7 @@ import {
   PLAN_SECTIONS,
   parsePlanArtifact,
   parsePlanMarker,
+  readTrustedMilestones,
   scanRiskFloor,
   toAuthoredComments,
   trustedCommentBodies,
@@ -429,5 +431,70 @@ describe('newestTimestamp', () => {
 
   it('returns null for an empty list', () => {
     expect(newestTimestamp([])).toBeNull();
+  });
+});
+
+describe('readTrustedMilestones (#932)', () => {
+  const ms = (phase: string, status: string, run = 'r-1-aaaa') =>
+    `<!-- runstate:v1 -->\nphase=${phase}\nstatus=${status}\nrun=${run}\nat=2026-09-29T10:00:00Z`;
+  const member = (body: string) => ({ body, authorAssociation: 'MEMBER', author: { login: 'op' } });
+  const stranger = (body: string, authorAssociation?: unknown) => ({
+    body,
+    authorAssociation,
+    author: { login: 'mallory' },
+  });
+
+  it("a stranger's newer batch-review done never becomes the latest milestone", () => {
+    const { milestones, ignored } = readTrustedMilestones([
+      member(ms('batch-review', 'started')),
+      stranger(ms('batch-review', 'done'), 'NONE'),
+    ]);
+    expect(milestones.map((m) => `${m.phase}:${m.status}`)).toEqual(['batch-review:started']);
+    expect(ignored).toHaveLength(1);
+    expect(ignored[0]).toMatchObject({
+      author: 'mallory',
+      association: 'NONE',
+      phase: 'batch-review',
+    });
+    expect(ignoredMilestoneWarning(ignored)).toContain('mallory');
+  });
+
+  it('fails closed on a missing or non-string association', () => {
+    for (const assoc of [undefined, null, 7, {}, 'CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR']) {
+      const { milestones, ignored } = readTrustedMilestones([
+        stranger(ms('report', 'done'), assoc),
+      ]);
+      expect(milestones).toEqual([]);
+      expect(ignored).toHaveLength(1);
+    }
+  });
+
+  it('keeps trusted milestones from OWNER / MEMBER / COLLABORATOR unchanged and in order', () => {
+    const { milestones, ignored } = readTrustedMilestones(
+      ['OWNER', 'MEMBER', 'COLLABORATOR'].map((a, i) => ({
+        body: ms(i === 2 ? 'report' : 'gate', 'done'),
+        authorAssociation: a,
+      }))
+    );
+    expect(milestones).toHaveLength(3);
+    expect(ignored).toEqual([]);
+  });
+
+  it('drops an untrusted milestone OLDER than the latest trusted one without a warning', () => {
+    const { milestones, ignored } = readTrustedMilestones([
+      stranger(ms('report', 'done'), 'NONE'),
+      member(ms('gate', 'done')),
+    ]);
+    expect(milestones).toHaveLength(1);
+    expect(ignored).toEqual([]);
+  });
+
+  it("ignores a stranger's non-milestone comments and tolerates junk bodies", () => {
+    const { milestones, ignored } = readTrustedMilestones([
+      { body: 42, authorAssociation: 'MEMBER' },
+      stranger('just chatting', 'NONE'),
+    ]);
+    expect(milestones).toEqual([]);
+    expect(ignored).toEqual([]);
   });
 });
