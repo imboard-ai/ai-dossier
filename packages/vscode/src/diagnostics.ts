@@ -99,8 +99,12 @@ export function computeDiagnostics(content: string, lintConfig?: LintConfig): Do
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     const rel = parseErrorLine(message);
-    // Error positions count from the first line after the opener.
-    const line = rel === null ? block.openLine : Math.min(block.openLine + rel, block.closeLine);
+    // The parser numbers lines from 1 = the rest of the opener line, so its line N is file
+    // line openLine + N - 1; clamp into the block.
+    const line =
+      rel === null
+        ? block.openLine
+        : Math.min(Math.max(block.openLine + rel - 1, block.openLine + 1), block.closeLine);
     return [{ message, severity: 'error', range: lineRange(block.lines, line), code: 'parse' }];
   }
 

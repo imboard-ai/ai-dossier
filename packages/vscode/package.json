@@ -111,12 +111,14 @@
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "package": "node scripts/build.mjs && vsce package --no-dependencies --out dist/ai-dossier-vscode.vsix"
   },
   "devDependencies": {
     "@ai-dossier/core": "^1.12.0",
     "@types/node": "^24.10.0",
     "@types/vscode": "^1.85.0",
+    "@vitest/coverage-v8": "^4.0.9",
     "@vscode/vsce": "^3.6.0",
     "esbuild": "^0.27.7",
     "typescript": "^5.9.3",

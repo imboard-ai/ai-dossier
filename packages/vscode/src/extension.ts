@@ -1,15 +1,21 @@
 import { loadTrustedKeys } from '@ai-dossier/core';
 import * as vscode from 'vscode';
 import { completionsAt, hoverAt } from './completion';
+import { KeyedDebouncer } from './debounce';
 import { computeDiagnostics, type DossierDiagnostic } from './diagnostics';
 import { dryRunContent, formatDryRun } from './dryrun';
 import { buildDossier, slugify } from './template';
 import { formatVerifyReport, verifyContent } from './verify';
 
-const SELECTOR: vscode.DocumentSelector = { pattern: '**/*.ds.md' };
+const SELECTOR: vscode.DocumentSelector = [
+  { scheme: 'file', pattern: '**/*.ds.md' },
+  { scheme: 'untitled', pattern: '**/*.ds.md' },
+];
 const SOURCE = 'ai-dossier';
 
-const isDossier = (doc: vscode.TextDocument) => doc.uri.fsPath.endsWith('.ds.md');
+// Only real files and unsaved buffers: `git:` diff sides would otherwise get duplicate diagnostics.
+const isDossier = (doc: vscode.TextDocument) =>
+  (doc.uri.scheme === 'file' || doc.uri.scheme === 'untitled') && doc.uri.path.endsWith('.ds.md');
 
 const SEVERITY: Record<DossierDiagnostic['severity'], vscode.DiagnosticSeverity> = {
   error: vscode.DiagnosticSeverity.Error,
@@ -43,7 +49,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel('AI Dossier');
   context.subscriptions.push(collection, output);
 
-  const timers = new Map<string, NodeJS.Timeout>();
+  const debouncer = new KeyedDebouncer();
   const refresh = (doc: vscode.TextDocument) => {
     if (!isDossier(doc)) return;
     const cfg = vscode.workspace.getConfiguration('aiDossier');
@@ -69,22 +75,22 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   };
   const refreshDebounced = (doc: vscode.TextDocument) => {
-    const key = doc.uri.toString();
-    clearTimeout(timers.get(key));
     const delay = vscode.workspace
       .getConfiguration('aiDossier')
       .get<number>('validate.debounceMs', 300);
-    timers.set(
-      key,
-      setTimeout(() => refresh(doc), delay)
-    );
+    debouncer.schedule(doc.uri.toString(), delay, () => refresh(doc));
   };
 
   context.subscriptions.push(
     vscode.workspace.onDidOpenTextDocument(refresh),
     vscode.workspace.onDidSaveTextDocument(refresh),
     vscode.workspace.onDidChangeTextDocument((e) => refreshDebounced(e.document)),
-    vscode.workspace.onDidCloseTextDocument((doc) => collection.delete(doc.uri)),
+    vscode.workspace.onDidCloseTextDocument((doc) => {
+      debouncer.cancel(doc.uri.toString());
+      collection.delete(doc.uri);
+    }),
+    // Disposed on deactivate: no timer may fire after the extension is torn down.
+    debouncer,
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('aiDossier')) vscode.workspace.textDocuments.forEach(refresh);
     })

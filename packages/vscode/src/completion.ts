@@ -10,6 +10,7 @@
 import {
   type FrontmatterBlock,
   isInsideFrontmatter,
+  isTopLevelLine,
   locateFrontmatter,
   topLevelKeyOnLine,
 } from './frontmatter';
@@ -36,7 +37,7 @@ function presentKeys(block: FrontmatterBlock): Set<string> {
   const keys = new Set<string>();
   const end = block.closeLine === -1 ? block.lines.length : block.closeLine;
   for (let i = block.openLine + 1; i < end; i++) {
-    const k = topLevelKeyOnLine(block, block.lines[i]);
+    const k = topLevelKeyOnLine(block, i);
     if (k) keys.add(k);
   }
   return keys;
@@ -54,10 +55,12 @@ export function completionsAt(content: string, line: number, col: number): Compl
   const text = block.lines[line] ?? '';
   const prefix = text.slice(0, col);
   const json = block.style === 'json';
+  // Nested values (inside objects/arrays) are not described by top-level schema entries.
+  if (!isTopLevelLine(block, line)) return [];
 
   // Value position: `"status": "Dr` / `"status": ` (JSON) or `status: Dr` (YAML).
   const valueMatch = json
-    ? prefix.match(/^ {0,2}"([^"]+)"\s*:\s*("?)([^"]*)$/)
+    ? prefix.match(/^\s*"([^"]+)"\s*:\s*("?)([^"]*)$/)
     : prefix.match(/^([A-Za-z_][\w-]*)\s*:\s*(["']?)([^"']*)$/);
   if (valueMatch) {
     const field = getField(valueMatch[1]);
@@ -78,8 +81,9 @@ export function completionsAt(content: string, line: number, col: number): Compl
   }
 
   // Key position: `  "ti` (JSON, top level) or `ti` (YAML, column 0).
-  const keyMatch = json ? prefix.match(/^ {0,2}"([^"]*)$/) : prefix.match(/^([A-Za-z_][\w-]*)?$/);
-  if (keyMatch) {
+  const keyMatch = json ? prefix.match(/^\s*"([^"]*)$/) : prefix.match(/^([A-Za-z_][\w-]*)?$/);
+  // YAML: don't offer keys at the start of a line that already has one.
+  if (keyMatch && (json || !text.slice(col).includes(':'))) {
     const partial = keyMatch[1] ?? '';
     const have = presentKeys(block);
     return FIELDS.filter((f) => !have.has(f.name)).map((f) => ({
@@ -99,7 +103,7 @@ export function hoverAt(content: string, line: number, col: number): HoverEntry 
   const block = locateFrontmatter(content);
   if (!block || !isInsideFrontmatter(block, line)) return null;
   const text = block.lines[line] ?? '';
-  const key = topLevelKeyOnLine(block, text);
+  const key = topLevelKeyOnLine(block, line);
   if (!key) return null;
   const field = getField(key);
   if (!field) return null;

@@ -69,31 +69,71 @@ function keyPattern(key: string): RegExp {
 }
 
 /**
- * Finds the key token for a dotted field path like `signature.algorithm` or `authors.0.name`,
- * descending one segment at a time so a nested key is only matched after its parent.
+ * Nesting depth (`{`/`[` opened minus closed, outside strings) at the START of `line`, counting
+ * from the line after the opener. A top-level key of a JSON block sits at depth 1, inside the
+ * outer `{`. Depth, not indentation, so 2-space, 4-space and tab-indented files all work.
+ */
+export function jsonDepthAtLineStart(block: FrontmatterBlock, line: number): number {
+  let depth = 0;
+  for (let i = block.openLine + 1; i < line; i++) {
+    let inString = false;
+    const text = block.lines[i] ?? '';
+    for (let c = 0; c < text.length; c++) {
+      const ch = text[c];
+      if (inString) {
+        if (ch === '\\') c++;
+        else if (ch === '"') inString = false;
+      } else if (ch === '"') inString = true;
+      else if (ch === '{' || ch === '[') depth++;
+      else if (ch === '}' || ch === ']') depth--;
+    }
+  }
+  return depth;
+}
+
+/** True when `line` starts at the top level of the frontmatter mapping. */
+export function isTopLevelLine(block: FrontmatterBlock, line: number): boolean {
+  return block.style === 'json'
+    ? jsonDepthAtLineStart(block, line) === 1
+    : !/^\s/.test(block.lines[line] ?? '');
+}
+
+/**
+ * Finds the key token for a dotted field path like `signature.algorithm` or `authors.0.name`.
+ * The first segment must be a top-level key (so a nested `version` cannot capture `version`);
+ * later segments are searched between their parent and the next top-level key.
  * Falls back to the deepest segment that was found, then to null.
  */
 export function findFieldRange(block: FrontmatterBlock, fieldPath: string): Range | null {
   const end = block.closeLine === -1 ? block.lines.length : block.closeLine;
   const segments = fieldPath.split('.').filter((s) => s !== '' && !/^\d+$/.test(s));
-  let from = block.openLine + 1;
   let found: Range | null = null;
-  for (const seg of segments) {
-    const re = keyPattern(seg);
+  let from = block.openLine + 1;
+  let limit = end;
+  for (let idx = 0; idx < segments.length; idx++) {
+    const re = keyPattern(segments[idx]);
     let hit = -1;
-    for (let i = from; i < end; i++) {
-      if (re.test(block.lines[i])) {
+    for (let i = from; i < limit; i++) {
+      if (re.test(block.lines[i]) && (idx > 0 || isTopLevelLine(block, i))) {
         hit = i;
         break;
       }
     }
     if (hit === -1) break;
-    const m = block.lines[hit].match(re) as RegExpMatchArray;
-    const startCol = m[1].length;
-    found = { line: hit, startCol, endLine: hit, endCol: startCol + m[2].length };
-    from = hit;
+    const startCol = (block.lines[hit].match(re) as RegExpMatchArray)[1].length;
+    const keyLen = (block.lines[hit].match(re) as RegExpMatchArray)[2].length;
+    found = { line: hit, startCol, endLine: hit, endCol: startCol + keyLen };
+    if (idx === 0) limit = nextTopLevelLine(block, hit + 1, end);
+    from = hit + 1;
   }
   return found;
+}
+
+function nextTopLevelLine(block: FrontmatterBlock, from: number, end: number): number {
+  for (let i = from; i < end; i++) {
+    if (topLevelKeyOnLine(block, i)) return i;
+  }
+  return end;
 }
 
 /** Whole-line range, used when a diagnostic has no better anchor. */
@@ -102,11 +142,10 @@ export function lineRange(lines: string[], line: number): Range {
   return { line: l, startCol: 0, endLine: l, endCol: (lines[l] ?? '').length };
 }
 
-/** The frontmatter key at the start of `lineText` when it is a top-level key, else null. */
-export function topLevelKeyOnLine(block: FrontmatterBlock, lineText: string): string | null {
+/** The frontmatter key on `line` when it is a top-level key, else null. */
+export function topLevelKeyOnLine(block: FrontmatterBlock, line: number): string | null {
+  const text = block.lines[line] ?? '';
   const m =
-    block.style === 'json'
-      ? lineText.match(/^ {0,2}"([^"]+)"\s*:/)
-      : lineText.match(/^([A-Za-z_][\w-]*)\s*:/);
-  return m ? m[1] : null;
+    block.style === 'json' ? text.match(/^\s*"([^"]+)"\s*:/) : text.match(/^([A-Za-z_][\w-]*)\s*:/);
+  return m && isTopLevelLine(block, line) ? m[1] : null;
 }
