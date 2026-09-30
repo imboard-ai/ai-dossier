@@ -271,7 +271,7 @@ Because dossiers are portable:
 
 **The question**: "What's the best way to distribute dossiers to my team, other projects, or the open-source community?"
 
-**Short answer**: Dossiers are built for sharing. Because they're protocol-based plain text, share them like code.
+**Short answer**: Copying the file works, but then nobody knows which version they have or who changed it. Publish to a registry so everyone installs the same signed version — or share the file directly; its checksum and signature still let the recipient verify it.
 
 #### Sharing Scenarios
 
