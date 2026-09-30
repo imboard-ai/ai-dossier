@@ -1,6 +1,6 @@
-# Dossier — Portable, Signed Skills for Any AI Agent
+# Dossier — Versioned, Signed Agent Skills
 
-**Skills are easy to write. Dossiers make them trustworthy, versioned, and portable across every LLM tool.**
+**A package manager for agent skills: every skill is versioned and signed, so everyone installs the same thing and can verify who wrote it and that it wasn't changed.** [Website](https://ai-dossier-imboard.vercel.app)
 
 [![CI](https://github.com/imboard-ai/ai-dossier/actions/workflows/ci.yml/badge.svg)](https://github.com/imboard-ai/ai-dossier/actions/workflows/ci.yml)
 [![Examples](https://github.com/imboard-ai/ai-dossier/actions/workflows/test-examples.yml/badge.svg)](https://github.com/imboard-ai/ai-dossier/actions/workflows/test-examples.yml)
@@ -13,14 +13,15 @@
 [![GitHub](https://img.shields.io/github/stars/imboard-ai/ai-dossier?style=social)](https://github.com/imboard-ai/ai-dossier)
 
 > **Quick Concept**
-> A dossier is a skill — a reusable instruction set an AI executes — with trust, versioning, and cross-tool portability built in.
-> Think npm or Docker Hub, but for AI skills: signed, versioned, shareable.
+> A dossier is an agent skill with a version and a signature (a `.ds.md` file).
+> Copying skill files between machines and teammates works, until nobody knows which version is running or who changed it. Dossier gives every skill a pinned version and an Ed25519 signature, so everyone installs the same thing and can verify who wrote it and that it wasn't changed.
+> Think npm or Docker Hub, but for agent skills. Signatures prove integrity and origin; they do not prevent prompt injection or make a skill safe to run.
 
 ```
   ┌──────────────────────────────────────────────────────────────────────┐
   │                                                                      │
-  │    Write instructions       Verify integrity       AI executes       │
-  │    in Markdown (.ds.md)     with checksums &       the workflow      │
+  │    Write a skill (.ds.md)   Verify integrity       AI executes       │
+  │    in Markdown, then sign   with checksums &       the workflow      │
   │                             signatures             intelligently     │
   │                                                                      │
   │    ┌──────────┐    sign     ┌──────────┐   run     ┌──────────┐     │
@@ -55,8 +56,8 @@ flowchart LR
 ```
 
 **What**: Skills (`.ds.md` files) any AI agent can run — signed, versioned, portable across tools
-**Why**: A plain skill lives in one tool and anyone can tamper with it; a dossier is that same skill made verifiable, version-pinned, and shareable
-**Safety**: Built-in checksums, cryptographic signatures, and CLI verification tools
+**Why**: A plain skill lives in one tool and anyone can tamper with it; a dossier is that same skill made verifiable, version-pinned
+**Integrity**: Built-in checksums, cryptographic signatures, and CLI verification tools
 **Works with**: Claude, ChatGPT, Cursor, any LLM — no vendor lock-in
 
 **Status**: Protocol v1.0 (stable spec) | CLI v0.14.0 | 15+ example skills | Active development
@@ -361,7 +362,7 @@ Detailed playbooks in [docs/guides/adopter-playbooks.md](docs/guides/adopter-pla
 
 > "A skill tells an agent what to do. A dossier lets you trust it."
 
-Dossiers take the skill — a reusable instruction set any AI can run — and add the things that make it safe to share: a verifiable signature, a pinnable version, and a registry to distribute it through.
+Dossiers take the agent skill and add what copying files lacks: a pinnable version, a verifiable signature (so you can tell who wrote it and that it was not changed), and a registry to install it from. Verification proves integrity and origin; it does not prevent prompt injection or make a skill safe to run.
 
 **The dossier standard** enables:
 - **Trust**: cryptographic signatures and checksums, verified before execution

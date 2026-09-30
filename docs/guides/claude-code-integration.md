@@ -9,7 +9,7 @@
 
 There are two ways to use dossiers in Claude Code, and most teams use both:
 
-1. **Trigger skills** *(recommended for shareable, versioned workflows)* — a thin Claude Code skill (`SKILL.md`) that fires on a phrase and invokes a versioned, signed dossier. This is how you turn a workflow into something installable, pinnable, and verifiable.
+1. **Trigger skills** *(recommended for versioned, signed workflows)* — a thin Claude Code skill (`SKILL.md`) that fires on a phrase and invokes a versioned, signed dossier. This is how you turn a workflow into something installable, pinnable, and verifiable.
 2. **MCP server** *(for interactive discovery and authoring)* — gives Claude Code native tools to search, verify, read, and run dossiers through natural conversation.
 
 See [Dossiers as Claude Code Skills](#dossiers-as-claude-code-skills) below for the full trigger-skill treatment.

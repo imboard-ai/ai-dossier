@@ -1,6 +1,6 @@
 # Dossier Documentation
 
-Welcome to the Dossier project documentation. A dossier is a skill — a reusable instruction set an AI executes — with trust, versioning, and cross-tool portability built in. Think npm or Docker Hub, but for AI skills: signed, versioned, shareable.
+Welcome to the Dossier project documentation. A dossier is an agent skill with a version and a signature (a `.ds.md` file), so everyone installs the same thing and can verify who wrote it and that it wasn't changed. Think npm or Docker Hub, but for agent skills.
 
 ## Quick Navigation
 
