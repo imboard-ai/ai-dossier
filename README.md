@@ -158,7 +158,7 @@ This scaffolds a `.ds.md` file you can edit. A dossier is just Markdown with a J
 - Expected outcome was achieved
 ```
 
-See the [Authoring Guide](docs/guides/authoring-guidelines.md) for the full spec, or browse the [Dossier Registry](https://dossier-registry.vercel.app) for real-world examples.
+See the [Authoring Guide](docs/guides/authoring-guidelines.md) for the full spec, or browse the [Dossier Registry](https://ai-dossier-imboard.vercel.app/registry/) for real-world examples.
 
 ---
 
@@ -263,7 +263,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system architecture.
 | [Scaffold TypeScript Project](./examples/setup/scaffold-typescript-project.ds.md) | Scaffold a production-ready TS project with CI, testing, linting |
 | [Context Engineering Best Practices](./examples/guides/context-engineering-best-practices.ds.md) | Reference guide for writing effective AI agent context files |
 
-Browse the **[Dossier Registry](https://dossier-registry.vercel.app)** for the full collection — DevOps, databases, data science, security, and more.
+Browse the **[Dossier Registry](https://ai-dossier-imboard.vercel.app/registry/)** for the full collection — DevOps, databases, data science, security, and more.
 
 ```bash
 # Search from the CLI

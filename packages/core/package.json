@@ -1,6 +1,6 @@
 {
   "name": "@ai-dossier/core",
-  "version": "1.14.0",
+  "version": "1.14.1",
   "description": "Parsing, verification, and signing for dossiers — portable, signed, versioned skills for any LLM tool.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -33,7 +33,7 @@
     "url": "https://github.com/imboard-ai/ai-dossier.git",
     "directory": "packages/core"
   },
-  "homepage": "https://github.com/imboard-ai/ai-dossier#readme",
+  "homepage": "https://ai-dossier-imboard.vercel.app",
   "bugs": {
     "url": "https://github.com/imboard-ai/ai-dossier/issues"
   },

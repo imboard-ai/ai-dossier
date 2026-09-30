@@ -15,5 +15,12 @@
       "source": "/auth/callback",
       "destination": "/api/auth/callback"
     }
+  ],
+  "redirects": [
+    {
+      "source": "/",
+      "destination": "https://ai-dossier-imboard.vercel.app/registry/",
+      "permanent": false
+    }
   ]
 }
