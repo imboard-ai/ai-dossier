@@ -1,6 +1,6 @@
 # Dossier — Versioned, Signed Agent Skills
 
-**A package manager for agent skills: every skill is versioned and signed, so everyone installs the same thing and can verify who wrote it and that it wasn't changed.** [Website](https://ai-dossier-imboard.vercel.app)
+**An open standard for versioned, signed agent skills. Host them anywhere — a GitHub repo, your own server, or the Dossier registry — and everyone installs the same version and can verify who wrote it and that it wasn't changed.** [Website](https://ai-dossier-imboard.vercel.app)
 
 [![CI](https://github.com/imboard-ai/ai-dossier/actions/workflows/ci.yml/badge.svg)](https://github.com/imboard-ai/ai-dossier/actions/workflows/ci.yml)
 [![Examples](https://github.com/imboard-ai/ai-dossier/actions/workflows/test-examples.yml/badge.svg)](https://github.com/imboard-ai/ai-dossier/actions/workflows/test-examples.yml)
@@ -15,7 +15,7 @@
 > **Quick Concept**
 > A dossier is an agent skill with a version and a signature (a `.ds.md` file).
 > Copying skill files between machines and teammates works, until nobody knows which version is running or who changed it. Dossier gives every skill a pinned version and an Ed25519 signature, so everyone installs the same thing and can verify who wrote it and that it wasn't changed.
-> Think npm or Docker Hub, but for agent skills. Signatures prove integrity and origin; they do not prevent prompt injection or make a skill safe to run.
+> Like an npm package, a dossier works wherever it lives: the format carries the version and signature, so a skill fetched from GitHub verifies the same as one installed from a registry. Signatures prove integrity and origin; they do not prevent prompt injection or make a skill safe to run.
 
 ```
   ┌──────────────────────────────────────────────────────────────────────┐
