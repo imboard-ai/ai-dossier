@@ -41,7 +41,9 @@ if (checked === 0) {
   process.exit(1);
 }
 if (bad.length) {
-  console.error(`check-canonical: ${bad.length} URL(s) not on ${expected}:\n${bad.slice(0, 20).join('\n')}`);
+  console.error(
+    `check-canonical: ${bad.length} URL(s) not on ${expected}:\n${bad.slice(0, 20).join('\n')}`
+  );
   process.exit(1);
 }
 console.log(`check-canonical: ${checked} URLs all on ${expected}`);
