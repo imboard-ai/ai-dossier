@@ -7,6 +7,7 @@ import {
   createEmptyState,
   createExecFn,
   findGatedWorkEvidence,
+  firstOccurrence,
   isRegisteredWorktree,
   preservedWorkInstruction,
   preserveWork,
@@ -63,7 +64,7 @@ describe('preserveWork (#945 ask 3, #940 ask 1)', () => {
     expect(probeWorktree(exec, path.join(root, 'missing'))).toBeNull();
   });
 
-  it('preserves modified + untracked + unpushed work on a pushed rescue ref, leaving the worktree exactly as it was', () => {
+  it('preserves modified + untracked + unpushed work on a LOCAL-only rescue ref (untracked files are never pushed), leaving the worktree exactly as it was', () => {
     fs.writeFileSync(path.join(wt, 'b.txt'), 'unpushed commit\n');
     git(wt, 'add', 'b.txt');
     git(wt, 'commit', '-q', '-m', 'local only');
@@ -78,7 +79,9 @@ describe('preserveWork (#945 ask 3, #940 ask 1)', () => {
     if (r.kind !== 'preserved') return;
     expect(r.work).toMatchObject({
       ref: 'refs/sched-rescue/batch-b-1-20260929T123456Z',
-      pushed: true,
+      pushed: false,
+      local_only: true,
+      untracked_included: 1,
       reused: false,
       dirty_files: 2,
       unpushed_commits: 1,
@@ -96,8 +99,8 @@ describe('preserveWork (#945 ask 3, #940 ask 1)', () => {
     expect(git(wt, 'show', `${sha}:gated-fix.ts`)).toContain('x = 1');
     expect(git(wt, 'show', `${sha}:a.txt`)).toContain('modified');
     expect(git(wt, 'show', `${sha}:b.txt`)).toContain('unpushed commit');
-    // and reached origin
-    expect(git(origin, 'rev-parse', r.work.ref)).toBe(sha);
+    // and did NOT reach origin: it carries an untracked file
+    expect(git(origin, 'for-each-ref', 'refs/sched-rescue')).toBe('');
     // a NON-branch namespace: no branch on origin, no rescue/* head anywhere
     expect(git(origin, 'for-each-ref', 'refs/heads')).not.toContain('rescue');
     expect(git(wt, 'for-each-ref', 'refs/heads')).not.toContain('rescue');
@@ -139,7 +142,7 @@ describe('preserveWork (#945 ask 3, #940 ask 1)', () => {
   });
 
   it('the instruction names the ref and forbids resetting to the pushed head', () => {
-    fs.writeFileSync(path.join(wt, 'w.txt'), 'wip\n');
+    fs.writeFileSync(path.join(wt, 'a.txt'), 'one\nwip\n');
     const r = preserveWork(exec, { worktree: wt, unit: 'issue:7', now: NOW });
     if (r.kind !== 'preserved') throw new Error('expected preserved');
     const text = preservedWorkInstruction(r.work);
@@ -184,54 +187,122 @@ describe('preserveWork security and robustness (#945 review)', () => {
   };
   const filesIn = (sha: string) => git(wt, 'ls-tree', '-r', '--name-only', sha).split('\n');
 
-  it('never pushes secret-looking untracked or staged-new files; tracked changes and safe untracked files are kept', () => {
+  const SECRET_NAMES = [
+    '.env',
+    '.env.local',
+    'prod.env',
+    'a.env.bak',
+    'server.pem',
+    'server.pem.bak',
+    'tls.key',
+    'tls.key.old',
+    'id_rsa',
+    'id_ed25519.pub',
+    'aws-credentials.json',
+    'store.p12',
+    'store.pfx',
+    'my-secret-notes.txt',
+    '.pypirc',
+    'terraform.tfstate',
+    'terraform.tfstate.backup',
+    'prod.tfvars',
+    'kubeconfig',
+    '.kube/config',
+    '.docker/config.json',
+    '.vault-token',
+    '.htpasswd',
+    '.s3cfg',
+    'api-token.txt',
+  ];
+
+  it('untracked files are never pushed: the rescue stays local and holds the safe ones', () => {
     fs.writeFileSync(path.join(wt, 'a.txt'), 'one\nedit\n'); // tracked change
     fs.writeFileSync(path.join(wt, 'safe.ts'), 'ok\n');
-    for (const f of [
-      '.env',
-      '.env.local',
-      'server.pem',
-      'tls.key',
-      'id_rsa',
-      'id_ed25519.pub',
-      'aws-credentials.json',
-      'store.p12',
-      'store.pfx',
-      'my-secret-notes.txt',
-    ]) {
+    for (const f of SECRET_NAMES) {
+      fs.mkdirSync(path.dirname(path.join(wt, f)), { recursive: true });
       fs.writeFileSync(path.join(wt, f), 'TOPSECRET\n');
     }
-    fs.writeFileSync(path.join(wt, 'staged.env'), 'x\n');
-    fs.writeFileSync(path.join(wt, '.env.staged'), 'STAGED-SECRET\n');
-    git(wt, 'add', '.env.staged'); // staged-new secret: also excluded
     const work = rescue();
+    expect(work.local_only).toBe(true);
+    expect(work.pushed).toBe(false);
     const files = filesIn(work.sha);
     expect(files).toContain('safe.ts');
-    expect(files).toContain('a.txt');
-    for (const f of [
-      '.env',
-      '.env.local',
-      'server.pem',
-      'tls.key',
-      'id_rsa',
-      'id_ed25519.pub',
-      'aws-credentials.json',
-      'store.p12',
-      'store.pfx',
-      'my-secret-notes.txt',
-      '.env.staged',
-    ]) {
-      expect(files).not.toContain(f);
-    }
-    expect(git(wt, 'show', `${work.sha}:a.txt`)).toContain('edit');
-    expect(work.skipped.secret).toBeGreaterThanOrEqual(11);
+    for (const f of SECRET_NAMES) expect(files).not.toContain(f);
+    expect(work.skipped.secret).toBeGreaterThanOrEqual(SECRET_NAMES.length);
     // still in the worktree, untouched
     expect(fs.readFileSync(path.join(wt, '.env'), 'utf8')).toBe('TOPSECRET\n');
     expect(preservedWorkInstruction(work)).toMatch(/secret pattern/);
-    // and nothing secret reached origin
-    expect(git(origin, 'ls-tree', '-r', '--name-only', work.ref)).not.toMatch(
-      /env|pem|key|secret|credentials/
-    );
+    expect(preservedWorkInstruction(work)).toMatch(/local only/);
+    // nothing reached origin — not even the tracked change
+    expect(git(origin, 'for-each-ref', 'refs/sched-rescue')).toBe('');
+  });
+
+  it('tracked changes and unpushed commits ARE pushed; a staged-new secret (or a rename into a secret name) is filtered from the final tree first', () => {
+    fs.writeFileSync(path.join(wt, 'b.txt'), 'unpushed\n');
+    git(wt, 'add', 'b.txt');
+    git(wt, 'commit', '-q', '-m', 'local only');
+    fs.writeFileSync(path.join(wt, 'a.txt'), 'one\nedit\n');
+    fs.writeFileSync(path.join(wt, 'api-token.txt'), 'STAGED-SECRET\n');
+    git(wt, 'add', 'api-token.txt');
+    git(wt, 'mv', 'b.txt', 'prod.tfvars'); // rename INTO a secret name
+    const work = rescue();
+    expect(work.local_only).toBe(false);
+    expect(work.pushed).toBe(true);
+    const remote = git(origin, 'ls-tree', '-r', '--name-only', work.ref).split('\n');
+    expect(remote).toContain('a.txt');
+    expect(remote).not.toContain('api-token.txt');
+    expect(remote).not.toContain('prod.tfvars');
+    expect(git(origin, 'show', `${work.ref}:a.txt`)).toContain('edit');
+    // the unpushed commit travels with the ref (it is the rescue commit's parent)
+    expect(git(origin, 'log', '--format=%s', work.ref)).toContain('local only');
+  });
+
+  it('a staged rename and an intent-to-add file reach the rescue tree (throwaway index is seeded from the REAL index)', () => {
+    fs.writeFileSync(path.join(wt, 'old.ts'), 'old\n');
+    git(wt, 'add', 'old.ts');
+    git(wt, 'commit', '-q', '-m', 'add old');
+    git(wt, 'push', '-q', 'origin', 'HEAD:main');
+    git(wt, 'fetch', '-q');
+    git(wt, 'mv', 'old.ts', 'new.ts');
+    fs.writeFileSync(path.join(wt, 'new.ts'), 'new edited\n');
+    fs.writeFileSync(path.join(wt, 'ita.ts'), 'intent\n');
+    git(wt, 'add', '-N', 'ita.ts');
+    const work = rescue();
+    const files = filesIn(work.sha);
+    expect(files).toContain('new.ts');
+    expect(files).toContain('ita.ts');
+    expect(files).not.toContain('old.ts');
+    expect(git(wt, 'show', `${work.sha}:new.ts`)).toBe('new edited');
+  });
+
+  it('git status failure is never read as clean (unknown probe blocks)', () => {
+    fs.writeFileSync(path.join(wt, 'a.txt'), 'one\nsmall edit\n');
+    const p = probeWorktree(exec, wt);
+    expect(p?.tracked_dirty_files).toBe(1);
+    // corrupt index: git cannot report the state -> unknown, treated dirty, rescue reports failure
+    fs.writeFileSync(path.join(wt, '.git', 'index'), 'garbage');
+    const probe = probeWorktree(exec, wt);
+    expect(probe?.unknown).toBe(true);
+    expect(probe?.dirty_files).toBeGreaterThan(0);
+    const r = preserveWork(exec, { worktree: wt, unit: 'issue:7', now: NOW });
+    expect(r.kind).toBe('failed');
+  });
+
+  it('leaves no throwaway index or pathspec list behind', () => {
+    fs.writeFileSync(path.join(wt, 'a.txt'), 'one\nedit\n');
+    fs.writeFileSync(path.join(wt, 'n.txt'), 'x\n');
+    rescue();
+    const leftovers = fs
+      .readdirSync(path.join(wt, '.git'))
+      .filter((f) => f.startsWith('sched-rescue-') && !f.startsWith('sched-rescue-pushed-'));
+    expect(leftovers).toEqual([]);
+  });
+
+  it('slugs are valid ref components', () => {
+    for (const u of ['..', 'a..b', '.hidden', 'x.lock', 'a b/c']) {
+      const ref = `refs/sched-rescue/${rescueRefName(u, NOW)}`;
+      expect(() => git(wt, 'check-ref-format', ref)).not.toThrow();
+    }
   });
 
   it('caps untracked file size and count; the rest stays in the worktree', () => {
@@ -283,7 +354,7 @@ describe('preserveWork security and robustness (#945 review)', () => {
   });
 
   it('a reused rescue is not re-pushed every tick', () => {
-    fs.writeFileSync(path.join(wt, 'w.txt'), 'wip\n');
+    fs.writeFileSync(path.join(wt, 'a.txt'), 'one\nwip\n');
     const first = rescue();
     expect(first.pushed).toBe(true);
     git(wt, 'remote', 'set-url', 'origin', path.join(root, 'gone.git')); // a re-push would now fail
@@ -297,25 +368,35 @@ describe('preserveWork security and robustness (#945 review)', () => {
     expect(probeWorktree(exec, wt)?.dirty_files).toBe(300);
   });
 
-  it('prunes rescue refs past the TTL locally and on origin, keeps fresh ones', () => {
-    fs.writeFileSync(path.join(wt, 'w.txt'), 'wip\n');
+  it('prunes rescue refs past the TTL (by ref-name time) locally and on origin — incl. refs only origin has — and their markers; keeps fresh ones', () => {
+    fs.writeFileSync(path.join(wt, 'a.txt'), 'one\nwip\n');
     const old = rescue();
-    fs.writeFileSync(path.join(wt, 'w2.txt'), 'wip2\n');
+    fs.writeFileSync(path.join(wt, 'a.txt'), 'one\nwip2\n');
     const fresh = rescue('issue:8', new Date(NOW.getTime() + 10 * 24 * 3_600_000));
-    // rescue commit dates are "now" of the real clock; prune relative to a far-future clock for `old` only
-    const future = new Date(Date.now() + RESCUE_REF_TTL_MS + 3_600_000);
-    const pruned = pruneRescueRefs(exec, wt, future);
-    expect(pruned.sort()).toEqual([old.ref, fresh.ref].sort());
-    expect(git(wt, 'for-each-ref', 'refs/sched-rescue')).toBe('');
-    expect(git(origin, 'for-each-ref', 'refs/sched-rescue')).toBe('');
-    expect(pruneRescueRefs(exec, wt, new Date())).toEqual([]);
+    // a ref pushed from ANOTHER clone: not in this repo's refs at all
+    git(wt, 'update-ref', 'refs/sched-rescue/issue-9-20260101T000000Z', old.sha);
+    git(wt, 'push', '-q', 'origin', 'refs/sched-rescue/issue-9-20260101T000000Z');
+    git(wt, 'update-ref', '-d', 'refs/sched-rescue/issue-9-20260101T000000Z');
+    const marker = path.join(wt, '.git', `sched-rescue-pushed-${old.sha}`);
+    expect(fs.existsSync(marker)).toBe(true);
+    const pruned = pruneRescueRefs(
+      exec,
+      wt,
+      new Date(NOW.getTime() + RESCUE_REF_TTL_MS + 3_600_000)
+    );
+    expect(pruned.sort()).toEqual([old.ref, 'refs/sched-rescue/issue-9-20260101T000000Z'].sort());
+    expect(git(wt, 'for-each-ref', 'refs/sched-rescue')).toContain(fresh.ref);
+    expect(git(origin, 'for-each-ref', 'refs/sched-rescue')).toContain(fresh.ref);
+    expect(git(origin, 'for-each-ref', 'refs/sched-rescue')).not.toContain(old.ref);
+    expect(fs.existsSync(marker)).toBe(false);
+    expect(fs.existsSync(path.join(wt, '.git', `sched-rescue-pushed-${fresh.sha}`))).toBe(true);
   });
 
   it('keeps a local rescue whose remote deletion failed for a non-"already gone" reason', () => {
-    fs.writeFileSync(path.join(wt, 'w.txt'), 'wip\n');
+    fs.writeFileSync(path.join(wt, 'a.txt'), 'one\nwip\n');
     const work = rescue();
     git(wt, 'remote', 'set-url', 'origin', path.join(root, 'unreachable.git'));
-    const pruned = pruneRescueRefs(exec, wt, new Date(Date.now() + RESCUE_REF_TTL_MS + 1000));
+    const pruned = pruneRescueRefs(exec, wt, new Date(NOW.getTime() + RESCUE_REF_TTL_MS + 1000));
     expect(pruned).toEqual([]);
     expect(git(wt, 'rev-parse', work.ref)).toBe(work.sha);
   });
@@ -399,6 +480,20 @@ describe('findGatedWorkEvidence (#940 ask 1, #941 fields)', () => {
       { ...base, timestamp: '2026-09-29T11:30:00Z', dirty: true, outcome: 'task-failed' }
     );
     expect(q()).toBeNull();
+  });
+
+  it("a dirty row whose tree is now HEAD's tree was committed since: no false block", () => {
+    write({ ...base, timestamp: '2026-09-29T11:35:00Z', dirty: true, git_tree: 'TREE1' });
+    expect(q({ headTree: 'TREE1' })).toBeNull();
+    expect(q({ headTree: 'TREE2' })).not.toBeNull();
+  });
+
+  it('firstOccurrence announces a (scope, key) once', () => {
+    const scope = {};
+    expect(firstOccurrence(scope, 'u|r')).toBe(true);
+    expect(firstOccurrence(scope, 'u|r')).toBe(false);
+    expect(firstOccurrence(scope, 'u|other')).toBe(true);
+    expect(firstOccurrence({}, 'u|r')).toBe(true);
   });
 
   it('a probe-failed row counts as dirty', () => {

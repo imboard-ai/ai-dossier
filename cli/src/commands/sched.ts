@@ -2760,6 +2760,8 @@ function registerStartSubcommand(cmd: Command): void {
           // OUTSIDE the state lock. Bounded like every other engine exec; failures
           // are per-call diagnostics — a failed rescue never blocks the respawn.
           rescueExec: createExecFn(RESCUE_TIMEOUT_MS, {
+            // A push that wants credentials must fail, never hang on a prompt.
+            env: { GIT_TERMINAL_PROMPT: '0' },
             onError: (file, args, err) =>
               process.stderr.write(
                 `⚠ sched rescue: '${file} ${args.slice(0, 2).join(' ')}…' failed: ${err.message}\n`

@@ -470,18 +470,28 @@ Before the engine respawns an agent onto a worktree that already exists — a ba
 batch **member** reusing its worktree, an issue **takeover** — it preserves whatever the dead
 agent left there (`preserve.ts`):
 
-- a WIP commit under the **non-branch** ref `refs/sched-rescue/<unit>-<timestamp>` (pushing it
-  triggers no CI and adds no branch), holding every tracked change (`git add -u`, deletions
-  included), the unpushed commits, and only those untracked / staged-new files that pass the
-  **secret and size filter** — pushed to origin and journaled as `work-preserved` (`branch` = the
-  ref). Never captured: paths matching `.env*`, `*.env`, `*.pem`, `*.key`, `id_rsa*`,
-  `id_ed25519*`, `*credentials*`, `*.p12`, `*.pfx`, `*secret*` (and `.npmrc`, `.netrc`, `.ssh/`, …),
-  files over 1 MiB, anything past 500 files / 16 MiB, submodule/nested-repo contents. They stay in
-  the worktree; the journal and the respawn prompt say how many were skipped and why. The rescue
-  bypasses the pre-commit secret scan, so this filter is the control;
-- **TTL:** rescue refs are disposable. `sched start` deletes those older than 14 days, locally and
-  on origin (a ref whose remote deletion fails for any reason but "already gone" is kept and retried
-  next start). Find live ones with `git for-each-ref refs/sched-rescue`;
+- a WIP commit under the **non-branch** ref `refs/sched-rescue/<unit>-<timestamp>` (adds no branch,
+  triggers no CI), holding every tracked change (`git add -u`, deletions and staged renames
+  included), the unpushed commits, and those untracked / staged-new files that pass the **secret
+  and size filter**, journaled as `work-preserved` (`branch` = the ref). **Only tracked changes and
+  unpushed commits are ever pushed.** A rescue whose tree also holds untracked / staged-new files
+  stays **local** (the ref lives in the local repo; the worktree and its `.git` survive a respawn
+  anyway) and says `local only` in the journal and the respawn prompt. The final tree is filtered
+  once more: any path new relative to HEAD (a rename into a secret name, `git add -N`, staged-new)
+  matching `.env*`, `*.env.*`, `*.pem`/`*.key` (and `*.pem.*`/`*.key.*`), `id_rsa*`, `id_ed25519*`,
+  `*credentials*`, `*secret*`, `*token*`, `*.p12`, `*.pfx`, `*.tfstate*`, `*.tfvars`, `kubeconfig`,
+  `.kube/`, `.docker/config.json`, `.pypirc`, `.vault-token`, `.htpasswd`, `.s3cfg`, `.npmrc`,
+  `.netrc`, `.ssh/` … is dropped. Untracked files over 1 MiB, past 500 files / 16 MiB, tracked
+  changes over 50 MiB and submodule/nested-repo contents are not captured; they stay in the
+  worktree and the journal / prompt count what was skipped and why. This filter is
+  defence-in-depth: the rescue bypasses the pre-commit secret scan;
+- **TTL is housekeeping, not privacy.** A pushed rescue ref is **world-readable on a public
+  repository, and deleting a ref does NOT unpublish it** (GitHub keeps objects reachable by SHA).
+  Rescue refs older than 14 days (by the timestamp in the ref name) are deleted locally and on
+  origin (listed with `git ls-remote`, so refs pushed from other clones are covered) together with
+  their `sched-rescue-pushed-<sha>` markers: at `sched start` and then daily outside the state
+  lock. A ref whose remote deletion fails for any reason but "already gone" is kept and retried.
+  Find live ones with `git for-each-ref refs/sched-rescue`;
 - built with a throwaway index, so the worktree, its index and its HEAD are untouched — the
   respawned agent still finds the files in place, and preservation cannot itself lose work;
 - idempotent: an unchanged tree reuses its existing rescue ref instead of minting one per tick;

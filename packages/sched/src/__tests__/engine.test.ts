@@ -3293,6 +3293,64 @@ describe('zombie-run fencing on redispatch (#504)', () => {
     expect(h.events().some((e) => e.event === 'work-preserved')).toBe(false);
   });
 
+  it('#945: a paused scheduler makes no rescue git/gh calls and never respawns without one', () => {
+    const h = stalling();
+    const calls: string[] = [];
+    h.deps.rescueExec = (file) => {
+      calls.push(file);
+      return null;
+    };
+    h.advance(HOUR + 1000);
+    h.tick(); // stall enters recovery
+    h.store.withLock((state) => ({ state: setPaused(state, true), result: null }));
+    calls.length = 0;
+    h.tick();
+    h.tick();
+    expect(calls).toEqual([]);
+    expect(h.spawnCalls).toHaveLength(1);
+  });
+
+  it('#945: a refusal that repeats every tick is journaled once per (unit, reason)', () => {
+    const h = stalling();
+    realTakeoverRepo(h);
+    h.setupInfos.set(504, { worktree: '/etc', poolClaimed: false, branch: 'f/504' });
+    h.deps.rescueExec = createExecFn(30_000);
+    h.advance(HOUR + 1000);
+    h.tick();
+    // keep the slot awaiting a takeover across several ticks by reading the refusal repeatedly
+    for (let i = 0; i < 3; i++) h.tick();
+    expect(
+      h
+        .events()
+        .filter((e) => e.event === 'work-preserve-failed' && /registered/.test(String(e.detail)))
+    ).toHaveLength(1);
+  });
+
+  it('#945: rescue refs are pruned daily, outside the lock — baseline on the first tick, then once per 24h', () => {
+    const h = stalling();
+    const lockHeld: boolean[] = [];
+    const prunes: number[] = [];
+    h.deps.rescueExec = (file, args) => {
+      if (file === 'git' && args[0] === 'for-each-ref' && args.includes('refs/sched-rescue/')) {
+        prunes.push(1);
+        lockHeld.push(fs.existsSync(path.join(h.dir, '.sched-lock')));
+      }
+      return null;
+    };
+    h.tick();
+    expect(prunes).toHaveLength(0); // baseline (the CLI pruned at start)
+    h.advance(HOUR);
+    h.tick();
+    expect(prunes).toHaveLength(0);
+    h.advance(24 * HOUR);
+    h.tick();
+    expect(prunes).toHaveLength(1);
+    expect(lockHeld).toEqual([false]);
+    h.advance(HOUR);
+    h.tick();
+    expect(prunes).toHaveLength(1);
+  });
+
   it('without a rescueExec a takeover respawns immediately, exactly as before (no hold)', () => {
     const h = stalling();
     h.advance(HOUR + 1000);

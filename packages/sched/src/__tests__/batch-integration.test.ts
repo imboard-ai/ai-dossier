@@ -5943,7 +5943,7 @@ describe('#832: the batch tail runs over landed members only, and a tail verdict
     expect(events.filter((e) => e.event === 'batch-blocked')).toHaveLength(1);
   }, 60_000);
 
-  it('#945/#940: a tail that dies leaving uncommitted work is NOT respawned onto it — the work is preserved on a pushed rescue ref and the batch blocks tail-dirty-worktree', async () => {
+  it('#945/#940: a tail that dies leaving uncommitted work is NOT respawned onto it — the work is preserved on a local rescue ref and the batch blocks tail-dirty-worktree', async () => {
     const repo = scratchRepo();
     const h = batchHarness(
       repo,
@@ -5964,13 +5964,14 @@ describe('#832: the batch tail runs over landed members only, and a tail verdict
     // the agent's work is still in the worktree, untouched
     const worktree = batch?.worktree as string;
     expect(fs.readFileSync(path.join(worktree, 'gated-fix.txt'), 'utf8')).toContain('gated');
-    // …and preserved on a rescue ref that reached origin
+    // …and preserved on a LOCAL rescue ref (the dirty work is an untracked file: never pushed)
     const events = h.deps.journal.read();
     const preserved = events.find((e) => e.event === 'work-preserved' && e.branch);
     expect(preserved?.branch).toMatch(/^refs\/sched-rescue\/batch-b-945-dirty-\d{8}T\d{6}Z$/);
     const ref = preserved?.branch as string;
     expect(gitAt(['show', `${ref}:gated-fix.txt`], repo)).toContain('gated but uncommitted');
-    expect(gitAt(['ls-remote', 'origin', ref], repo)).toContain(ref);
+    expect(gitAt(['ls-remote', 'origin', ref], repo)).not.toContain(ref);
+    expect(preserved?.detail).toMatch(/local only/);
     expect(
       events.some((e) => e.event === 'tail-respawn-refused' && e.reason === 'tail-dirty-worktree')
     ).toBe(true);

@@ -141,6 +141,7 @@ import {
 import type { SchedStore } from './persist';
 import {
   findGatedWorkEvidence,
+  firstOccurrence,
   type PreservedWork,
   type PreserveOutcome,
   preservedWorkInstruction,
@@ -426,12 +427,12 @@ function journalPreserveOutcome(
       journalEvent(deps, 'work-preserved', unitId, {
         branch: w.ref,
         worktree,
-        detail: `${w.dirty_files} uncommitted file(s) + ${w.unpushed_commits} unpushed commit(s) on head ${w.head} preserved as ${w.sha} at ${w.ref} (${w.pushed ? 'pushed' : 'NOT pushed — local ref only'})${skipped ? `; ${skipped}` : ''}; the respawned agent is told to resume from it`,
+        detail: `${w.dirty_files} uncommitted file(s) + ${w.unpushed_commits} unpushed commit(s) on head ${w.head} preserved as ${w.sha} at ${w.ref} (${w.pushed ? 'pushed' : w.local_only ? 'local only — includes untracked files, never pushed' : 'NOT pushed — local ref only'})${skipped ? `; ${skipped}` : ''}; the respawned agent is told to resume from it`,
       });
     }
     return w;
   }
-  if (outcome.kind === 'failed') {
+  if (outcome.kind === 'failed' && firstOccurrence(deps.journal, `${unitId}|${outcome.reason}`)) {
     journalEvent(deps, 'work-preserve-failed', unitId, {
       worktree,
       detail: `${outcome.reason} — ${outcome.probe.dirty_files} uncommitted file(s), ${outcome.probe.unpushed_commits} unpushed commit(s) left in place in the worktree`,
@@ -473,10 +474,19 @@ function guardTailRespawn(
           capsFile: path.join(deps.homeDir ?? os.homedir(), '.dossier', 'caps.jsonl'),
           worktree,
           sinceIso: since,
+          headTree: headTreeOf(deps, worktree),
           hasLocalWork: probe.dirty_files > 0 || probe.unpushed_commits > 0,
           now,
         });
-  if (probe.dirty_files > 0 || gate !== null) {
+  // Stray untracked files (logs, scratch) that the rescue deliberately left out must not wedge a
+  // respawn: block on tracked changes, on untracked work the rescue captured, or when the
+  // state is unknowable (a failed rescue counts everything as dirty).
+  const rescuedUntracked = work?.untracked_included ?? 0;
+  const dirty =
+    outcome.kind === 'failed'
+      ? probe.dirty_files > 0
+      : probe.tracked_dirty_files > 0 || rescuedUntracked > 0;
+  if (dirty || gate !== null) {
     // Its own event: `work-preserved` above already said (once) what was saved, or
     // `work-preserve-failed` said it was not — this line must not claim otherwise.
     journalEvent(deps, 'tail-respawn-refused', unitId, {
@@ -487,6 +497,12 @@ function guardTailRespawn(
     return { block: 'tail-dirty-worktree', instruction: null };
   }
   return { block: null, instruction: work ? preservedWorkInstruction(work) : null };
+}
+
+/** HEAD's tree id (for gate-evidence comparison), null when unreadable. */
+function headTreeOf(deps: BatchDispatchDeps, worktree: string): string | null {
+  const tree = deps.exec('git', ['rev-parse', 'HEAD^{tree}'], worktree);
+  return tree === null || tree.trim() === '' ? null : tree.trim();
 }
 
 /** Whether the slot's agent is still alive (pid-start-safe: a reused pid reads dead). */

@@ -253,6 +253,7 @@ export {
 } from './persist';
 export {
   findGatedWorkEvidence,
+  firstOccurrence,
   isRegisteredWorktree,
   type PreservedWork,
   type PreserveOutcome,

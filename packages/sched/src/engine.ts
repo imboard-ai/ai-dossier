@@ -127,9 +127,11 @@ import {
 } from './merge-mechanism';
 import type { SchedStore } from './persist';
 import {
+  firstOccurrence,
   type PreservedWork,
   preservedWorkInstruction,
   preserveWork,
+  pruneRescueRefs,
   skippedSummary,
   takeoverWorktreeRefusal,
 } from './preserve';
@@ -1037,7 +1039,10 @@ function rescueBeforeTakeover(
   state: SchedState
 ): Map<string, PreservedWork | null> | undefined {
   const exec = deps.rescueExec;
+  // A paused scheduler dispatches nothing: no gh/git calls for slots that cannot respawn.
   if (exec === undefined) return undefined;
+  // Held slots: nothing to rescue for now — and nothing may respawn without a rescue either.
+  if (state.paused) return new Map();
   const rescued = new Map<string, PreservedWork | null>();
   for (const slot of state.slots) {
     if (slot.unit === null || slot.gen <= 0) continue;
@@ -1048,6 +1053,41 @@ function rescueBeforeTakeover(
     rescued.set(slot.unit, preserveForTakeover(deps, exec, state, slot.unit, issue));
   }
   return rescued;
+}
+
+const RESCUE_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const lastRescuePrune = new WeakMap<object, number>();
+
+/**
+ * #945: rescue refs are disposable (14-day TTL) — prune once a day, OUTSIDE the state
+ * lock (it talks to origin), not only at `sched start`. The first tick only sets the
+ * baseline: the CLI already pruned at start. Never throws.
+ */
+function pruneRescueRefsDaily(deps: EngineDeps): void {
+  const exec = deps.rescueExec;
+  if (exec === undefined) return;
+  const now = deps.now();
+  const last = lastRescuePrune.get(deps.journal);
+  if (last === undefined) {
+    lastRescuePrune.set(deps.journal, now.getTime());
+    return;
+  }
+  if (now.getTime() - last < RESCUE_PRUNE_INTERVAL_MS) return;
+  lastRescuePrune.set(deps.journal, now.getTime());
+  try {
+    const pruned = pruneRescueRefs(exec, deps.repoDir, now);
+    if (pruned.length > 0) {
+      deps.journal.append(
+        {
+          event: 'rescue-pruned',
+          detail: `pruned ${pruned.length} expired rescue ref(s): ${pruned.join(', ')}`,
+        },
+        now
+      );
+    }
+  } catch {
+    // housekeeping only
+  }
 }
 
 function preserveForTakeover(
@@ -1071,13 +1111,15 @@ function preserveForTakeover(
     unit,
   });
   if (refusal !== null) {
-    deps.journal.append(
-      unitEvent('work-preserve-failed', unit, {
-        worktree: info.worktree,
-        detail: `takeover rescue skipped: ${refusal} — the worktree is not touched`,
-      }),
-      deps.now()
-    );
+    if (firstOccurrence(deps.journal, `${unit}|${refusal}`)) {
+      deps.journal.append(
+        unitEvent('work-preserve-failed', unit, {
+          worktree: info.worktree,
+          detail: `takeover rescue skipped: ${refusal} — the worktree is not touched`,
+        }),
+        deps.now()
+      );
+    }
     return null;
   }
   const outcome = preserveWork(exec, { worktree: info.worktree, unit, now: deps.now() });
@@ -1089,14 +1131,14 @@ function preserveForTakeover(
         unitEvent('work-preserved', unit, {
           branch: w.ref,
           worktree: info.worktree,
-          detail: `${w.dirty_files} uncommitted file(s) + ${w.unpushed_commits} unpushed commit(s) on head ${w.head} preserved as ${w.sha} at ${w.ref} (${w.pushed ? 'pushed' : 'NOT pushed — local ref only'})${skipped ? `; ${skipped}` : ''}; the takeover is told to resume from it`,
+          detail: `${w.dirty_files} uncommitted file(s) + ${w.unpushed_commits} unpushed commit(s) on head ${w.head} preserved as ${w.sha} at ${w.ref} (${w.pushed ? 'pushed' : w.local_only ? 'local only — includes untracked files, never pushed' : 'NOT pushed — local ref only'})${skipped ? `; ${skipped}` : ''}; the takeover is told to resume from it`,
         }),
         deps.now()
       );
     }
     return w;
   }
-  if (outcome.kind === 'failed') {
+  if (outcome.kind === 'failed' && firstOccurrence(deps.journal, `${unit}|${outcome.reason}`)) {
     deps.journal.append(
       unitEvent('work-preserve-failed', unit, {
         worktree: info.worktree,
@@ -3490,6 +3532,7 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
   const mechanism = deps.groundTruth.mergeMechanism?.();
   // #945: takeover rescues (git/gh/push) — outside the lock, like every poll above.
   const rescued = rescueBeforeTakeover(deps, state0);
+  pruneRescueRefsDaily(deps);
 
   const pass1 = deps.store.withLock((state) => {
     const ctx: TickCtx = { deps, config, dispatch, result: emptyResult(), mechanism, rescued };
