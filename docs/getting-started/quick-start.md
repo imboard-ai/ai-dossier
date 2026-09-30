@@ -2,7 +2,7 @@
 
 Run your first dossier in **under 5 minutes**.
 
-A dossier is a skill — a reusable instruction set an AI executes — with trust, versioning, and cross-tool portability built in. You don't have to teach your AI "what a dossier is"; modern agents already understand skills. You just point them at one.
+A dossier is an agent skill with a version and a signature (a `.ds.md` file), so everyone installs the same thing and can verify who wrote it and that it wasn't changed. You don't have to teach your AI "what a dossier is"; modern agents already understand skills. You just point them at one.
 
 > Need to install the CLI or MCP server, or configure a registry first? See [Installation & Configuration](installation.md).
 

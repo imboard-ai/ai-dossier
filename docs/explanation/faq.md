@@ -14,7 +14,7 @@
 
 ### What exactly is a dossier?
 
-A dossier is a skill — a reusable instruction set an AI executes — with **trust, versioning, and cross-tool portability** built in. It's the same kind of thing as a Claude Code `SKILL.md`, plus a cryptographic signature, a pinnable version, and a registry to distribute it through.
+A dossier is an agent skill with a version and a signature (a `.ds.md` file), so everyone installs the same thing and can verify who wrote it and that it wasn't changed. It's the same kind of thing as a Claude Code `SKILL.md`, plus a cryptographic signature, a pinnable version, and a registry to distribute it through.
 
 **Key difference from a plain skill**: a dossier combines human-readable instructions with machine-readable metadata (JSON frontmatter) and a verification pipeline, so it can be signed, version-pinned, and run safely on *any* LLM tool — not just the one it was written in.
 

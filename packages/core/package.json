@@ -1,7 +1,7 @@
 {
   "name": "@ai-dossier/core",
-  "version": "1.14.1",
-  "description": "Parsing, verification, and signing for dossiers — portable, signed, versioned skills for any LLM tool.",
+  "version": "1.14.2",
+  "description": "Parsing, verification, and signing for dossiers, the versioned, signed agent skills behind the ai-dossier package manager.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [

@@ -1,6 +1,6 @@
 # Getting Started with Dossier
 
-Welcome! A dossier is a skill — a reusable instruction set an AI executes — with trust, versioning, and cross-tool portability built in. This guide gets you running one, then authoring your own.
+Welcome! A dossier is an agent skill with a version and a signature (a `.ds.md` file), so everyone installs the same thing and can verify who wrote it and that it wasn't changed. This guide gets you running one, then authoring your own.
 
 ## Recommended Learning Path
 

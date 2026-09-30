@@ -8,7 +8,7 @@ A comprehensive guide to understanding, creating, and using dossiers.
 
 ## What Are Dossiers?
 
-A **dossier** is a skill — a reusable instruction set an AI executes — with trust, versioning, and cross-tool portability built in. It's the same kind of thing as a Claude Code `SKILL.md`, plus a cryptographic signature, a pinnable version, and a registry to distribute it through. The same `.ds.md` file runs on Claude Code, GPT, Cursor, or any capable agent.
+A **dossier** is an agent skill with a version and a signature (a `.ds.md` file), so everyone installs the same thing and can verify who wrote it and that it wasn't changed. It's the same kind of thing as a Claude Code `SKILL.md`, plus a cryptographic signature, a pinnable version, and a registry to distribute it through. The same `.ds.md` file runs on Claude Code, GPT, Cursor, or any capable agent.
 
 > See [FAQ](../explanation/faq.md) for common objections and detailed comparisons — including [Isn't a dossier just a skill?](../explanation/faq.md#isnt-a-dossier-just-a-skill) and AGENTS.md, scripts, CI/CD, and frameworks.
 
