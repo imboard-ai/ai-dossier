@@ -27,7 +27,8 @@ const flag = (file, u) => {
     else if (e.name.endsWith('.html')) {
       const html = fs.readFileSync(p, 'utf8');
       for (const m of html.matchAll(/<link[^>]*rel="canonical"[^>]*href="([^"]+)"/g)) flag(p, m[1]);
-      for (const m of html.matchAll(/<meta[^>]*property="og:url"[^>]*content="([^"]+)"/g)) flag(p, m[1]);
+      for (const m of html.matchAll(/<meta[^>]*property="og:url"[^>]*content="([^"]+)"/g))
+        flag(p, m[1]);
     } else if (/^sitemap.*\.xml$/.test(e.name)) {
       for (const m of fs.readFileSync(p, 'utf8').matchAll(/<loc>([^<]+)<\/loc>/g)) flag(p, m[1]);
     } else if (e.name === 'robots.txt') {
