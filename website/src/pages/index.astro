@@ -38,21 +38,21 @@ const example = `---dossier
 ---
 # Hello World Dossier
 
-Instructions an AI agent follows, written in plain markdown.
+The skill an AI agent follows, written in plain markdown.
 The header above is what makes them verifiable.`;
 ---
-<Base bare title="AI Dossier" description="Verifiable, signed, versioned automation for AI agents. Write instructions in markdown, sign them, and let any agent verify before it runs.">
+<Base bare title="AI Dossier" description="Your agent skills, versioned and signed. Publish a skill once, install it on every machine, and let teammates and customers verify it came from you.">
   <section class="hero">
     <div class="wrap hero-grid">
       <div class="hero-copy">
         <p class="pill"><svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3 3 7-7.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>Signed &middot; Verifiable &middot; Open source</p>
-        <h1>Automation for AI agents you can verify before it runs</h1>
+        <h1>Your agent skills, versioned and signed</h1>
         <p class="lead">
-          A <strong>dossier</strong> is a reusable instruction set an AI agent executes, with an integrity
-          checksum, an Ed25519 signature, a declared risk level and a pinnable version. Think of a
-          package registry, but for agent skills and workflows.
+          A <strong>dossier</strong> is an agent skill with a version and a signature. Copying skill files
+          between machines, teammates and customers works, until nobody knows which version they are
+          running or who changed it. Dossier gives every skill a version and your Ed25519 signature, so
+          everyone installs the same thing and can verify it came from you.
         </p>
-        <p class="why">Know exactly what your agents will run: tamper-evident, signed, pinned automation instead of ad-hoc prompts and unreviewed skills.</p>
         <p class="cta">
           <a class="btn" href="/docs/getting-started/quick-start/">Quick start</a>
           <a class="btn secondary" href="/registry/">Browse {registry.dossiers.length || ''} dossiers</a>
@@ -130,12 +130,18 @@ The header above is what makes them verifiable.`;
 
     <section aria-labelledby="how" class="block">
       <p class="eyebrow">Workflow</p>
-      <h2 id="how">How it works</h2>
+      <h2 id="how">Sign once, install anywhere</h2>
       <ol class="steps">
-        <li><span class="num" aria-hidden="true">01</span><h3>Write</h3><p>Author instructions in markdown in a <code>.ds.md</code> file with a JSON header: name, version, risk level, tools required.</p></li>
-        <li><span class="num" aria-hidden="true">02</span><h3>Sign and publish</h3><p>The CLI computes the checksum, signs the file with your key and publishes it to the registry, or you host the file anywhere.</p></li>
-        <li><span class="num" aria-hidden="true">03</span><h3>Verify and run</h3><p>Before an agent acts, <code>ai-dossier verify</code> checks the checksum and signature and surfaces the declared risk. Then the agent executes it.</p></li>
+        <li><span class="num" aria-hidden="true">01</span><h3>Write and sign</h3><p>Author the skill in a <code>.ds.md</code> file, then sign it with your Ed25519 key.</p><pre tabindex="0"><code>ai-dossier sign --method ed25519 my-skill.ds.md \
+  --key my-key --key-id my-key</code></pre></li>
+        <li><span class="num" aria-hidden="true">02</span><h3>Publish</h3><p>Push a new version to the registry (after <code>ai-dossier login</code>), or host the file anywhere.</p><pre tabindex="0"><code>ai-dossier publish my-skill.ds.md</code></pre></li>
+        <li><span class="num" aria-hidden="true">03</span><h3>Install anywhere</h3><p>On any server or laptop, install it as a skill, or run it and refresh from the registry. The signature and checksum are checked first.</p><pre tabindex="0"><code>ai-dossier install-skill org/skills/my-skill
+ai-dossier run org/my-skill --pull</code></pre></li>
       </ol>
+      <div class="vs">
+        <div><h3>Copying files</h3><ul><li>No versions: copies drift apart</li><li>No author: nobody can tell who wrote it</li><li>Silent edits: changes go unnoticed</li></ul></div>
+        <div class="vs-yes"><h3>With dossier</h3><ul><li>Pinned versions everyone can install</li><li>Signed by your key</li><li>Tamper-evident checksum</li></ul></div>
+      </div>
     </section>
 
     <section aria-labelledby="example" class="block">
@@ -147,7 +153,7 @@ The header above is what makes them verifiable.`;
       <ul class="trust">
         <li>Trust is a local decision. A valid signature from a key you have not added is reported as untrusted, never auto-trusted.</li>
         <li>Trusted keys live in <code>~/.dossier/trusted-keys.txt</code>, managed with <code>ai-dossier keys add</code>, <code>list</code>, <code>export</code> and <code>revoke</code>. Revoking is local to that machine.</li>
-        <li>Teams sign with their own Ed25519 keys (<code>keys generate</code>) and share the public key. Extra registries, including self-hosted ones over HTTPS, are added with <code>config --add-registry</code>.</li>
+        <li>To let others verify your skills, sign with your own Ed25519 key (<code>keys generate</code>), send them the public key (<code>keys export</code>), and they run <code>keys add</code>. Extra registries, including self-hosted ones over HTTPS, are added with <code>config --add-registry</code>.</li>
         <li>Verification proves integrity and origin. It does not prevent prompt injection or make a dossier safe to run. <a href="/docs/explanation/security-model/">Read the security model</a>.</li>
       </ul>
     </section>
@@ -234,13 +240,17 @@ ai-dossier --help</code></pre>
   .cta { display: flex; gap: 10px; flex-wrap: wrap; margin: 28px 0 8px; }
   .installs { max-width: 560px; }
 
-  .why { font-size: var(--step-1); font-weight: 600; color: var(--fg); max-width: 34em; margin: 16px 0 0; line-height: 1.45; }
   .feat, .works { list-style: none; padding: 0; margin: 20px 0 12px; display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
   .feat li, .works li { border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; background: var(--bg-soft); display: flex; flex-direction: column; gap: 6px; min-width: 0; }
   .feat-name { font-weight: 600; color: var(--fg); text-decoration: none; overflow-wrap: anywhere; }
   .feat-name:hover { color: var(--accent); }
   .feat p, .works span { margin: 0; color: var(--muted); font-size: .92rem; }
   .feat-meta { display: flex; gap: 6px; flex-wrap: wrap; margin-top: auto !important; padding-top: 4px; }
+  .steps pre { margin: 12px 0 0; font-size: .8rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .vs { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); margin-top: 24px; }
+  .vs > div { border: 1px solid var(--line); border-radius: var(--radius); padding: 4px 20px 14px; background: var(--bg-soft); }
+  .vs > .vs-yes { border-color: var(--accent-line); }
+  .vs ul { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .95rem; display: grid; gap: 4px; }
   .trust-h { margin: 24px 0 8px; }
   .trust { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .95rem; display: grid; gap: 6px; }
   .trust li { padding-left: 4px; }
