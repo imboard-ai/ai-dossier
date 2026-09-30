@@ -6,6 +6,25 @@ import { loadRegistry } from '../lib/registry.mjs';
 
 const registry = await loadRegistry();
 const repo = 'https://github.com/imboard-ai/ai-dossier';
+// Curated, deterministic picks; names missing from the registry snapshot are skipped and the
+// list is topped up with the first described dossiers (registry is sorted by name).
+const FEATURED_NAMES = [
+  'getting-started/hello',
+  'imboard-ai/git/pr-review',
+  'imboard-ai/security/scan-markdown-security',
+  'imboard-ai/meta/create-dossier',
+];
+const blurb = (d) => d.description || d.objective;
+const byName = new Map(registry.dossiers.map((d) => [d.name, d]));
+const featured = FEATURED_NAMES.map((n) => byName.get(n)).filter((d) => d && blurb(d));
+for (const d of registry.dossiers) {
+  if (featured.length >= FEATURED_NAMES.length) break;
+  if (!featured.includes(d) && blurb(d)) featured.push(d);
+}
+const oneLine = (t) => {
+  const first = t.split(/(?<=[.!?])\s/)[0].trim();
+  return first.length > 150 ? `${first.slice(0, 147).trimEnd()}…` : first;
+};
 const example = `---dossier
 {
   "name": "hello",
@@ -19,19 +38,20 @@ const example = `---dossier
 ---
 # Hello World Dossier
 
-Instructions an AI agent follows, written in plain markdown.
+The skill an AI agent follows, written in plain markdown.
 The header above is what makes them verifiable.`;
 ---
-<Base bare title="AI Dossier" description="Verifiable, signed, versioned automation for AI agents. Write instructions in markdown, sign them, and let any agent verify before it runs.">
+<Base bare title="AI Dossier" description="Your agent skills, versioned and signed. Publish a skill once, install it on every machine, and let teammates and customers verify it came from you.">
   <section class="hero">
     <div class="wrap hero-grid">
       <div class="hero-copy">
         <p class="pill"><svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3 3 7-7.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>Signed &middot; Verifiable &middot; Open source</p>
-        <h1>Automation for AI agents you can verify before it runs</h1>
+        <h1>Your agent skills, versioned and signed</h1>
         <p class="lead">
-          A <strong>dossier</strong> is a reusable instruction set an AI agent executes, with an integrity
-          checksum, an Ed25519 signature, a declared risk level and a pinnable version. Think of a
-          package registry, but for agent skills and workflows.
+          A <strong>dossier</strong> is an agent skill with a version and a signature. Copying skill files
+          between machines, teammates and customers works, until nobody knows which version they are
+          running or who changed it. Dossier gives every skill a version and your Ed25519 signature, so
+          everyone installs the same thing and can verify it came from you.
         </p>
         <p class="cta">
           <a class="btn" href="/docs/getting-started/quick-start/">Quick start</a>
@@ -41,6 +61,7 @@ The header above is what makes them verifiable.`;
         <div class="installs">
           <CopyCommand label="Install with npm" command="npm install -g @ai-dossier/cli" />
           <CopyCommand label="Or a standalone binary, no Node.js" command="curl -fsSL https://raw.githubusercontent.com/imboard-ai/ai-dossier/main/install.sh | sh" />
+          <CopyCommand label="Or add the MCP server to Claude Code" command="claude mcp add dossier --scope user -- npx @ai-dossier/mcp-server" />
         </div>
       </div>
 
@@ -87,14 +108,40 @@ The header above is what makes them verifiable.`;
       </div>
     </section>
 
+    {featured.length > 0 && (
+      <section aria-labelledby="featured" class="block">
+        <p class="eyebrow">From the registry</p>
+        <h2 id="featured">Featured dossiers</h2>
+        <ul class="feat">
+          {featured.map((d) => (
+            <li>
+              <a class="feat-name" href={`/registry/${d.name}/`}>{d.title}</a>
+              <p>{oneLine(blurb(d))}</p>
+              <p class="feat-meta">
+                <span class={`badge risk-${d.riskLevel}`}>risk: {d.riskLevel}</span>
+                {d.signature && <span class="badge signed">signed</span>}
+              </p>
+            </li>
+          ))}
+        </ul>
+        <p class="muted"><a href="/registry/">Browse all {registry.dossiers.length} dossiers</a></p>
+      </section>
+    )}
+
     <section aria-labelledby="how" class="block">
       <p class="eyebrow">Workflow</p>
-      <h2 id="how">How it works</h2>
+      <h2 id="how">Sign once, install anywhere</h2>
       <ol class="steps">
-        <li><span class="num" aria-hidden="true">01</span><h3>Write</h3><p>Author instructions in markdown in a <code>.ds.md</code> file with a JSON header: name, version, risk level, tools required.</p></li>
-        <li><span class="num" aria-hidden="true">02</span><h3>Sign and publish</h3><p>The CLI computes the checksum, signs the file with your key and publishes it to the registry, or you host the file anywhere.</p></li>
-        <li><span class="num" aria-hidden="true">03</span><h3>Verify and run</h3><p>Before an agent acts, <code>ai-dossier verify</code> checks the checksum and signature and surfaces the declared risk. Then the agent executes it.</p></li>
+        <li><span class="num" aria-hidden="true">01</span><h3>Write and sign</h3><p>Author the skill in a <code>.ds.md</code> file, then sign it with your Ed25519 key.</p><pre tabindex="0"><code>ai-dossier sign --method ed25519 my-skill.ds.md \
+  --key my-key --key-id my-key</code></pre></li>
+        <li><span class="num" aria-hidden="true">02</span><h3>Publish</h3><p>Push a new version to the registry (after <code>ai-dossier login</code>), or host the file anywhere.</p><pre tabindex="0"><code>ai-dossier publish my-skill.ds.md</code></pre></li>
+        <li><span class="num" aria-hidden="true">03</span><h3>Install anywhere</h3><p>On any server or laptop, install it as a skill, or run it and refresh from the registry. The signature and checksum are checked first.</p><pre tabindex="0"><code>ai-dossier install-skill org/skills/my-skill
+ai-dossier run org/my-skill --pull</code></pre></li>
       </ol>
+      <div class="vs">
+        <div><h3>Copying files</h3><ul><li>No versions: copies drift apart</li><li>No author: nobody can tell who wrote it</li><li>Silent edits: changes go unnoticed</li></ul></div>
+        <div class="vs-yes"><h3>With dossier</h3><ul><li>Pinned versions everyone can install</li><li>Signed by your key</li><li>Tamper-evident checksum</li></ul></div>
+      </div>
     </section>
 
     <section aria-labelledby="example" class="block">
@@ -102,6 +149,13 @@ The header above is what makes them verifiable.`;
       <h2 id="example">What a dossier looks like</h2>
       <Code code={example} lang="markdown" themes={{ light: 'github-light', dark: 'github-dark-default' }} />
       <p class="muted">Trimmed from the published <a href="/registry/getting-started/hello/">getting-started/hello</a> dossier.</p>
+      <h3 class="trust-h">How trust works</h3>
+      <ul class="trust">
+        <li>Trust is a local decision. A valid signature from a key you have not added is reported as untrusted, never auto-trusted.</li>
+        <li>Trusted keys live in <code>~/.dossier/trusted-keys.txt</code>, managed with <code>ai-dossier keys add</code>, <code>list</code>, <code>export</code> and <code>revoke</code>. Revoking is local to that machine.</li>
+        <li>To let others verify your skills, sign with your own Ed25519 key (<code>keys generate</code>), send them the public key (<code>keys export</code>), and they run <code>keys add</code>. Extra registries, including self-hosted ones over HTTPS, are added with <code>config --add-registry</code>.</li>
+        <li>Verification proves integrity and origin. It does not prevent prompt injection or make a dossier safe to run. <a href="/docs/explanation/security-model/">Read the security model</a>.</li>
+      </ul>
     </section>
 
     <section aria-labelledby="install" class="block">
@@ -131,6 +185,18 @@ ai-dossier --help</code></pre>
           <p class="muted"><a href="/docs/tutorials/mcp-quickstart/">MCP in 60 seconds</a></p>
         </div>
       </div>
+    </section>
+
+    <section aria-labelledby="works" class="block">
+      <p class="eyebrow">Integrations</p>
+      <h2 id="works">Works with</h2>
+      <ul class="works">
+        <li><strong>Claude Code</strong><span>Install dossiers as skills with <code>ai-dossier install-skill</code>, or use the MCP server.</span></li>
+        <li><strong>Claude Desktop and other MCP clients</strong><span>Any client that can launch a stdio MCP server (Claude Desktop config is documented): <code>npx @ai-dossier/mcp-server</code>.</span></li>
+        <li><strong>opencode</strong><span><code>install-skill</code> and <code>sync-skills</code> write opencode skill wrappers; <code>run</code> can target it.</span></li>
+        <li><strong>VS Code</strong><span>Diagnostics, completion and dry-run preview for <code>*.ds.md</code> (<code>.vsix</code> from GitHub releases).</span></li>
+        <li><strong>GitHub Actions</strong><span>Verify changed dossiers on every pull request with the <a href="/docs/guides/ci-cd-integration/">workflow template</a>.</span></li>
+      </ul>
     </section>
 
     <section aria-labelledby="explore" class="block">
@@ -173,6 +239,21 @@ ai-dossier --help</code></pre>
   .lead strong { color: var(--fg); font-weight: 600; }
   .cta { display: flex; gap: 10px; flex-wrap: wrap; margin: 28px 0 8px; }
   .installs { max-width: 560px; }
+
+  .feat, .works { list-style: none; padding: 0; margin: 20px 0 12px; display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+  .feat li, .works li { border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; background: var(--bg-soft); display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .feat-name { font-weight: 600; color: var(--fg); text-decoration: none; overflow-wrap: anywhere; }
+  .feat-name:hover { color: var(--accent); }
+  .feat p, .works span { margin: 0; color: var(--muted); font-size: .92rem; }
+  .feat-meta { display: flex; gap: 6px; flex-wrap: wrap; margin-top: auto !important; padding-top: 4px; }
+  .steps pre { margin: 12px 0 0; font-size: .8rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .vs { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); margin-top: 24px; }
+  .vs > div { border: 1px solid var(--line); border-radius: var(--radius); padding: 4px 20px 14px; background: var(--bg-soft); }
+  .vs > .vs-yes { border-color: var(--accent-line); }
+  .vs ul { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .95rem; display: grid; gap: 4px; }
+  .trust-h { margin: 24px 0 8px; }
+  .trust { margin: 0; padding-left: 1.2em; color: var(--muted); font-size: .95rem; display: grid; gap: 6px; }
+  .trust li { padding-left: 4px; }
 
   .term { margin: 0; border: 1px solid var(--line-strong); border-radius: var(--radius); background: #0b0d10; box-shadow: var(--shadow); overflow: hidden; min-width: 0; color: #e6e9ee; }
   .term-bar { display: flex; align-items: center; gap: 7px; padding: 11px 14px; border-bottom: 1px solid #262b33; background: #12151a; }

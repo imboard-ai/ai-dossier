@@ -2,13 +2,10 @@ import sitemap from '@astrojs/sitemap';
 import { defineConfig } from 'astro/config';
 import remarkDocsLinks from './src/plugins/remark-docs-links.mjs';
 
-// Vercel sets VERCEL_PROJECT_PRODUCTION_URL for every build; SITE_URL overrides it
-// (use it once a custom domain exists).
-const site =
-  process.env.SITE_URL ||
-  (process.env.VERCEL_PROJECT_PRODUCTION_URL
-    ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`
-    : 'https://ai-dossier.vercel.app');
+// SITE_URL is the single source for canonical, og:url, sitemap and robots.txt. Deliberately
+// not derived from VERCEL_PROJECT_PRODUCTION_URL (a different alias than the public site).
+export const DEFAULT_SITE_URL = 'https://ai-dossier-imboard.vercel.app';
+const site = process.env.SITE_URL || DEFAULT_SITE_URL;
 
 export default defineConfig({
   site,

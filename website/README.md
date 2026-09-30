@@ -29,7 +29,7 @@ a daily GitHub Action cron, or on registry publish.
 
 Environment: `REGISTRY_API_URL` (default the production registry), `REGISTRY_OPTIONAL=1` (build with
 no registry pages if the API is unreachable; used in PR CI), `SITE_URL` (canonical/sitemap origin;
-defaults to Vercel's production URL, else `https://ai-dossier.vercel.app`).
+defaults to `https://ai-dossier-imboard.vercel.app`; `npm run check:canonical` fails the build if any page's canonical host differs).
 
 ## Vercel settings
 
