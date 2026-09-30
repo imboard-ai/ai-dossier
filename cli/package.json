@@ -1,6 +1,6 @@
 {
   "name": "@ai-dossier/cli",
-  "version": "0.88.0",
+  "version": "0.89.0",
   "description": "Create, verify, sign, publish, and run dossiers — portable, signed, versioned skills for any LLM tool. The dossier ⇄ Claude Code skill bridge (install-skill / skill-export).",
   "main": "dist/cli.js",
   "bin": {
@@ -41,7 +41,7 @@
     "url": "https://github.com/imboard-ai/ai-dossier.git",
     "directory": "cli"
   },
-  "homepage": "https://github.com/imboard-ai/ai-dossier#readme",
+  "homepage": "https://ai-dossier-imboard.vercel.app",
   "bugs": {
     "url": "https://github.com/imboard-ai/ai-dossier/issues"
   },

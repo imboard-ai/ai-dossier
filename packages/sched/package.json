@@ -29,7 +29,7 @@
     "url": "https://github.com/imboard-ai/ai-dossier.git",
     "directory": "packages/sched"
   },
-  "homepage": "https://github.com/imboard-ai/ai-dossier#readme",
+  "homepage": "https://ai-dossier-imboard.vercel.app",
   "bugs": {
     "url": "https://github.com/imboard-ai/ai-dossier/issues"
   },
