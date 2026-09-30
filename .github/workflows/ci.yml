@@ -172,3 +172,8 @@ jobs:
         if: steps.changes.outputs.run == 'true'
         working-directory: website
         run: npm run check:links
+
+      - name: Check canonical host matches SITE_URL
+        if: steps.changes.outputs.run == 'true'
+        working-directory: website
+        run: npm run check:canonical
