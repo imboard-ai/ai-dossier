@@ -1,6 +1,6 @@
 # Dossier Documentation
 
-Welcome to the Dossier project documentation. A dossier is an agent skill with a version and a signature (a `.ds.md` file), so everyone installs the same thing and can verify who wrote it and that it wasn't changed. Think npm or Docker Hub, but for agent skills.
+Welcome to the Dossier project documentation. A dossier is an agent skill with a version and a signature (a `.ds.md` file), so everyone installs the same thing and can verify who wrote it and that it wasn't changed. The format is an open standard: the version and signature travel with the file, so a skill verifies the same whether it comes from a GitHub repo, your own server, or a registry.
 
 ## Quick Navigation
 
