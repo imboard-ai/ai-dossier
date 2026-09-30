@@ -30,7 +30,7 @@ Understanding-oriented documentation that explains how and why Dossier works. A 
 
 ## Philosophy
 
-Dossier takes a skill and adds what makes it safe to share:
+Dossier takes a skill and adds what copying files lacks:
 - **Trust**: cryptographic signatures + checksums, verified before execution
 - **Versioning**: semantic versions you can pin and upgrade deliberately
 - **Distribution**: a registry that makes skills discoverable and installable

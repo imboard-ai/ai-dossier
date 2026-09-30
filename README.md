@@ -56,8 +56,8 @@ flowchart LR
 ```
 
 **What**: Skills (`.ds.md` files) any AI agent can run — signed, versioned, portable across tools
-**Why**: A plain skill lives in one tool and anyone can tamper with it; a dossier is that same skill made verifiable, version-pinned, and shareable
-**Safety**: Built-in checksums, cryptographic signatures, and CLI verification tools
+**Why**: A plain skill lives in one tool and anyone can tamper with it; a dossier is that same skill made verifiable, version-pinned
+**Integrity**: Built-in checksums, cryptographic signatures, and CLI verification tools
 **Works with**: Claude, ChatGPT, Cursor, any LLM — no vendor lock-in
 
 **Status**: Protocol v1.0 (stable spec) | CLI v0.14.0 | 15+ example skills | Active development

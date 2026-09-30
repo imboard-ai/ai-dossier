@@ -16,11 +16,11 @@ This document defines the **Dossier standard** - a universal format for portable
 
 ### 1.1 Purpose
 
-The Dossier specification establishes a standard format for creating automation instructions that:
+The Dossier specification establishes a standard format for creating versioned, verifiable agent skills that:
 - LLM agents can execute reliably across different implementations
 - Adapt to project-specific contexts rather than hardcoding assumptions
 - Improve continuously through structured feedback
-- Maintain safety and validation standards
+- Can be integrity-checked and validated
 
 ### 1.2 Scope
 
@@ -44,7 +44,7 @@ This specification covers:
 
 ### 2.1 Definition
 
-A **dossier** is an agent skill with a version and a signature, expressed as a structured markdown document (a `.ds.md` file). In this specification, "skill" and "dossier" refer to the same artifact: a dossier is a skill plus the metadata that makes it versioned and verifiable (a signature is optional in the format but expected for shared skills). It is the same kind of artifact as a Claude Code `SKILL.md`, plus a cryptographic signature, a pinnable version, and a registry path.
+A **dossier** is an agent skill with a version and a signature, expressed as a structured markdown document (a `.ds.md` file). In this specification, "skill" and "dossier" refer to the same artifact: a skill plus metadata (version, checksum, signature, registry path) that makes it versioned and verifiable, analogous to a Claude Code `SKILL.md`. A signature is optional in the format but expected for shared skills.
 
 ### 2.2 Key Characteristics
 
