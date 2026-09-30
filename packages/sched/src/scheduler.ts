@@ -301,6 +301,9 @@ export const LANDED_RESUMABLE_BLOCK_PREFIXES: readonly string[] = [
   'tail-blocked:',
   'members-mismatch:',
   'respawn-cap:tail',
+  // #940: a tail respawn over a dirty / post-gate worktree — the operator
+  // commits or discards, then resumes.
+  'tail-dirty-worktree',
 ];
 
 /** #822: whether `reason` is a block `resumeLandedBatch` can resume. */

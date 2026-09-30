@@ -79,6 +79,7 @@ import {
   orphanAnchorListArgs,
   parseManifest,
   pruneMemberBranches,
+  pruneRescueRefs,
   readJsonl,
   readStoppingMarker,
   recordTickFailure,
@@ -2408,6 +2409,9 @@ function registerReprioritizeSubcommand(cmd: Command): void {
     });
 }
 
+/** #945: rescue commit + push of a dead agent's worktree. */
+const RESCUE_TIMEOUT_MS = 120_000;
+
 /** `npm i -g @ai-dossier/cli@latest` can take a while (network + install). */
 const UPGRADE_TIMEOUT_MS = 120_000;
 
@@ -2752,6 +2756,17 @@ function registerStartSubcommand(cmd: Command): void {
                 `⚠ sched teardown: '${file} ${args.join(' ')}' failed: ${err.message}\n`
               ),
           }),
+          // #945: takeover rescue (git commit-tree + push of a dead agent's WIP), run
+          // OUTSIDE the state lock. Bounded like every other engine exec; failures
+          // are per-call diagnostics — a failed rescue never blocks the respawn.
+          rescueExec: createExecFn(RESCUE_TIMEOUT_MS, {
+            // A push that wants credentials must fail, never hang on a prompt.
+            env: { GIT_TERMINAL_PROMPT: '0' },
+            onError: (file, args, err) =>
+              process.stderr.write(
+                `⚠ sched rescue: '${file} ${args.slice(0, 2).join(' ')}…' failed: ${err.message}\n`
+              ),
+          }),
           // #504: the ladder fences a superseded run before respawning its takeover.
           // Its own exec rather than the ground-truth one: a fence is a WRITE, and
           // borrowing `groundTruthExec` would file the only diagnostic for a failed write
@@ -2839,6 +2854,25 @@ function registerStartSubcommand(cmd: Command): void {
             parts.push(`blocked ${result.blocked.map((i) => `#${i}`).join(', ')}`);
           return parts.length > 0 ? parts.join(' · ') : 'nothing to do';
         };
+
+        // #945: rescue refs (`refs/sched-rescue/*`) are disposable — delete those past
+        // their 14-day TTL, locally and on origin, once per start. Never blocks a start.
+        if (deps.rescueExec) {
+          try {
+            const pruned = pruneRescueRefs(deps.rescueExec, deps.repoDir, new Date());
+            if (pruned.length > 0) {
+              deps.journal.append(
+                {
+                  event: 'rescue-pruned',
+                  detail: `pruned ${pruned.length} expired rescue ref(s): ${pruned.join(', ')}`,
+                },
+                new Date()
+              );
+            }
+          } catch {
+            // best effort
+          }
+        }
 
         if (opts.once) {
           let result: TickResult;

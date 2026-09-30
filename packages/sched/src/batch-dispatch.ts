@@ -63,6 +63,7 @@
  */
 
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { type DispatchApiError, parseDispatchApiError, parseLastToolUse } from '@ai-dossier/core';
 import {
@@ -138,6 +139,16 @@ import {
   parkedWithoutMerger,
 } from './merge-mechanism';
 import type { SchedStore } from './persist';
+import {
+  findGatedWorkEvidence,
+  firstOccurrence,
+  type PreservedWork,
+  type PreserveOutcome,
+  preservedWorkInstruction,
+  preserveWork,
+  pushedHeadDate,
+  skippedSummary,
+} from './preserve';
 import type { ExecFn } from './project';
 import { batchRank, compareByPriority } from './readiness';
 import {
@@ -382,6 +393,116 @@ function journalEvent(
   extra: Record<string, unknown> = {}
 ): void {
   deps.journal.append(unitEvent(event, unitId, extra), deps.now());
+}
+
+/**
+ * #945: preserve whatever a dead agent left in `worktree` before a respawn
+ * reuses it (see `preserve.ts`). Journals the outcome; returns the preserved
+ * work for the respawned agent's prompt, or undefined when there was nothing to
+ * preserve (clean) or preservation was not possible (failure is journaled, the
+ * worktree is untouched either way — the respawn is not made worse by it).
+ */
+function preserveForRespawn(
+  deps: BatchDispatchDeps,
+  unitId: string,
+  worktree: string,
+  now: Date
+): PreservedWork | undefined {
+  const outcome = preserveWork(deps.exec, { worktree, unit: unitId, now });
+  return journalPreserveOutcome(deps, unitId, worktree, outcome);
+}
+
+function journalPreserveOutcome(
+  deps: BatchDispatchDeps,
+  unitId: string,
+  worktree: string,
+  outcome: PreserveOutcome
+): PreservedWork | undefined {
+  if (outcome.kind === 'preserved') {
+    const w = outcome.work;
+    // A REUSED rescue was journaled when it was minted; a respawn loop must not
+    // add a line per tick.
+    if (!w.reused) {
+      const skipped = skippedSummary(w.skipped);
+      journalEvent(deps, 'work-preserved', unitId, {
+        branch: w.ref,
+        worktree,
+        detail: `${w.dirty_files} uncommitted file(s) + ${w.unpushed_commits} unpushed commit(s) on head ${w.head} preserved as ${w.sha} at ${w.ref} (${w.pushed ? 'pushed' : w.local_only ? 'local only — includes untracked files, never pushed' : 'NOT pushed — local ref only'})${skipped ? `; ${skipped}` : ''}; the respawned agent is told to resume from it`,
+      });
+    }
+    return w;
+  }
+  if (outcome.kind === 'failed' && firstOccurrence(deps.journal, `${unitId}|${outcome.reason}`)) {
+    journalEvent(deps, 'work-preserve-failed', unitId, {
+      worktree,
+      detail: `${outcome.reason} — ${outcome.probe.dirty_files} uncommitted file(s), ${outcome.probe.unpushed_commits} unpushed commit(s) left in place in the worktree`,
+    });
+  }
+  return undefined;
+}
+
+/**
+ * #940 ask 1 + #945: before RESPAWNING a batch tail onto its batch worktree,
+ * preserve what the dead tail left there, and refuse the respawn when that
+ * includes uncommitted files or a passing DIRTY `gate.batch` run past the last
+ * pushed head (`findGatedWorkEvidence`) — the operator decides commit vs
+ * discard (`tail-dirty-worktree`, resumable via `sched resume --batch`, which
+ * deliberately does not re-run this guard: the operator has looked). Clean or
+ * only-unpushed: respawn, told to resume from the rescue ref.
+ */
+function guardTailRespawn(
+  deps: BatchDispatchDeps,
+  batch: BatchEntry,
+  now: Date
+): { block: string | null; instruction: string | null } {
+  const worktree = batch.worktree;
+  if (worktree === null) return { block: null, instruction: null };
+  const unitId = unit(batch.id);
+  const outcome = preserveWork(deps.exec, { worktree, unit: unitId, now });
+  const work = journalPreserveOutcome(deps, unitId, worktree, outcome);
+  if (outcome.kind === 'skipped') return { block: null, instruction: null };
+  const probe =
+    outcome.kind === 'preserved' || outcome.kind === 'failed' || outcome.kind === 'clean'
+      ? outcome.probe
+      : null;
+  if (probe === null) return { block: null, instruction: null };
+  const since = pushedHeadDate(deps.exec, worktree);
+  const gate =
+    since === null
+      ? null
+      : findGatedWorkEvidence({
+          capsFile: path.join(deps.homeDir ?? os.homedir(), '.dossier', 'caps.jsonl'),
+          worktree,
+          sinceIso: since,
+          headTree: headTreeOf(deps, worktree),
+          hasLocalWork: probe.dirty_files > 0 || probe.unpushed_commits > 0,
+          now,
+        });
+  // Stray untracked files (logs, scratch) that the rescue deliberately left out must not wedge a
+  // respawn: block on tracked changes, on untracked work the rescue captured, or when the
+  // state is unknowable (a failed rescue counts everything as dirty).
+  const rescuedUntracked = work?.untracked_included ?? 0;
+  const dirty =
+    outcome.kind === 'failed'
+      ? probe.dirty_files > 0
+      : probe.tracked_dirty_files > 0 || rescuedUntracked > 0;
+  if (dirty || gate !== null) {
+    // Its own event: `work-preserved` above already said (once) what was saved, or
+    // `work-preserve-failed` said it was not — this line must not claim otherwise.
+    journalEvent(deps, 'tail-respawn-refused', unitId, {
+      worktree,
+      reason: 'tail-dirty-worktree',
+      detail: `tail respawn refused: ${probe.dirty_files} uncommitted file(s) at head ${probe.head}${gate ? `; a gate.batch ok row at ${gate.timestamp} ran on a dirty tree newer than the last pushed head` : ''}${work ? `; a rescue exists at ${work.ref} (${work.sha})` : outcome.kind === 'failed' ? '; NO rescue could be made' : ''}. Commit or discard in ${worktree}, then \`sched resume --batch ${batch.id}\``,
+    });
+    return { block: 'tail-dirty-worktree', instruction: null };
+  }
+  return { block: null, instruction: work ? preservedWorkInstruction(work) : null };
+}
+
+/** HEAD's tree id (for gate-evidence comparison), null when unreadable. */
+function headTreeOf(deps: BatchDispatchDeps, worktree: string): string | null {
+  const tree = deps.exec('git', ['rev-parse', 'HEAD^{tree}'], worktree);
+  return tree === null || tree.trim() === '' ? null : tree.trim();
 }
 
 /** Whether the slot's agent is still alive (pid-start-safe: a reused pid reads dead). */
@@ -979,6 +1100,8 @@ interface MemberWorktree {
   branch: string;
   worktree: string;
   poolClaimed: boolean;
+  /** #945: work the previous agent left in this (reused) worktree, preserved before the respawn. */
+  preserved?: PreservedWork;
 }
 
 /**
@@ -1682,7 +1805,9 @@ function spawnMemberAgent(
     // #822: a member respawned after running the wrong procedure.
     (batch.reprompted_members.some((r) => r.issue === memberIssue)
       ? wrongProcedureDirective(memberIssue, batchId)
-      : '');
+      : '') +
+    // #945: a respawn onto a reused worktree resumes from what was preserved there.
+    (target.member.preserved ? `\n\n${preservedWorkInstruction(target.member.preserved)}` : '');
   const logFile = batchMemberLogPath(deps.store.runsDir, batchId, target.index, memberIssue);
   // #629: captured BEFORE spawning, mirroring `engine.ts`'s own
   // `spawnAndRecord` — the log is per-role and append-mode, so the size at
@@ -2052,6 +2177,14 @@ function spawnMemberContinuation(
       worktree: batch.member_worktree as string,
       poolClaimed: batch.member_pool_claimed,
     };
+    // #945: preserve whatever the previous agent left BEFORE the respawn, outside the lock.
+    const preserved = preserveForRespawn(
+      deps,
+      `batch:${batchId}#${memberIssue}`,
+      member.worktree,
+      now
+    );
+    if (preserved) member.preserved = preserved;
   } else {
     if (batch.member_worktree !== null) {
       // Stale context for a DIFFERENT member (or a vanished tree): journal
@@ -2123,6 +2256,9 @@ function spawnTailAgent(
   // #887: read outside the store lock (a cache miss runs `gh api`).
   const mechanism = deps.groundTruth.mergeMechanism?.();
   const pending = findBatch(before, batchId);
+  // #945/#940: a RESPAWN (the previous tail exited unverified) never lands on
+  // work it cannot see — preserve first, outside the store lock.
+  let resumeNote: string | null = null;
   if (pending) {
     const refusal = tailDispatchRefusal(before, pending);
     if (refusal !== null) {
@@ -2135,6 +2271,21 @@ function spawnTailAgent(
         result
       );
       return;
+    }
+    if (pending.agent_exits?.phase === 'tail' && pending.agent_exits.count >= 1) {
+      const guard = guardTailRespawn(deps, pending, now);
+      if (guard.block !== null) {
+        blockBatchForOperator(
+          deps,
+          config,
+          batchId,
+          { reason: guard.block, milestonePhase: 'batch-review' },
+          now,
+          result
+        );
+        return;
+      }
+      resumeNote = guard.instruction;
     }
   }
   claimAndSpawn(deps, config, batchId, 'reviewing', now, (state, slot) => {
@@ -2159,15 +2310,16 @@ function spawnTailAgent(
     }
     const spawnSpec = resolveTierSpawn(dispatch, 'strong', batch.anchor);
     const cmd = spawnSpec.cmd;
-    const prompt = buildBatchTailPrompt(
-      dispatch.batchTailPrompt,
-      batchId,
-      batch.anchor,
-      landed,
-      batch.worktree,
-      // #887: the repo's detected merge mechanism decides detached vs attached ship.
-      mechanism
-    );
+    const prompt =
+      buildBatchTailPrompt(
+        dispatch.batchTailPrompt,
+        batchId,
+        batch.anchor,
+        landed,
+        batch.worktree,
+        // #887: the repo's detected merge mechanism decides detached vs attached ship.
+        mechanism
+      ) + (resumeNote === null ? '' : `\n\n${resumeNote}`);
     const logFile = batchTailLogPath(deps.store.runsDir, batchId);
     // #629: fences `handleDeadDispatchApiError`'s classification to this
     // dispatch's slice — see `spawnMember`'s identical comment.
@@ -6020,6 +6172,13 @@ function spawnParallelMembers(
         worktree: next.run.worktree,
         poolClaimed: next.run.pool_claimed,
       };
+      const preserved = preserveForRespawn(
+        deps,
+        batchMemberUnit(batchId, next.issue),
+        member.worktree,
+        now
+      );
+      if (preserved) member.preserved = preserved;
     } else {
       // The serial-member fields describe no member of a parallel batch —
       // blank them so the reuse branch re-derives THIS member's branch/path.
