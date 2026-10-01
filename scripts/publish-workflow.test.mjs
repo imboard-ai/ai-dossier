@@ -35,6 +35,7 @@ describe('publish-packages.yml next-channel contract', () => {
     const promote = workflow.jobs.promote.steps.find(
       (step) => step.name === 'Promote the current next cohort'
     );
+    expect(promote.env).toEqual({ NODE_AUTH_TOKEN: '${' + '{ secrets.NPM_TOKEN }}' });
     expect(promote.run).toContain('npm dist-tag add "$package@$version" latest');
     expect(promote.run).toContain('npm view "$package@next" version --prefer-online');
   });

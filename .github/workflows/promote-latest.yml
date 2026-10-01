@@ -25,6 +25,8 @@ jobs:
           echo "/tmp/npm-latest/node_modules/.bin" >> $GITHUB_PATH
 
       - name: Promote the current next cohort
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           for package in @ai-dossier/core @ai-dossier/worktree-pool @ai-dossier/sched @ai-dossier/cli @ai-dossier/mcp-server; do
             version=$(npm view "$package@next" version --prefer-online)

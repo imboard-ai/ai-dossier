@@ -16,7 +16,7 @@ The pipeline runs: **lint → build → test → prepare next cohort → publish
 2. Click "Run workflow"
 3. Click "Run workflow" to publish the current `main` commit as a `next` cohort.
 
-To deliberately promote the current cohort, run **Promote npm next to latest** from the Actions page. It reads each package's current `next` version and moves that version's `latest` dist-tag. Default installs, `ai-dossier update`, and scheduler version checks continue to use `latest`.
+To deliberately promote the current cohort, run **Promote npm next to latest** from the Actions page. It reads each package's current `next` version and moves that version's `latest` dist-tag. The workflow uses the repository's `NPM_TOKEN` secret because npm trusted publishing does not authorize dist-tag mutations. Default installs, `ai-dossier update`, and scheduler version checks continue to use `latest`.
 
 ### Manual Publishing (Local)
 
