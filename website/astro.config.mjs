@@ -11,6 +11,8 @@ export default defineConfig({
   site,
   output: 'static',
   trailingSlash: 'always',
+  // Alias: /brand is where people look for logos; the page lives at /logo-showcase.
+  redirects: { '/brand': '/logo-showcase/' },
   integrations: [
     // Internal working notes stay reachable but out of the sitemap.
     sitemap({
