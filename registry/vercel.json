@@ -19,7 +19,7 @@
   "redirects": [
     {
       "source": "/",
-      "destination": "https://ai-dossier-imboard.vercel.app/registry/",
+      "destination": "https://ai-dossier.dev/registry/",
       "permanent": false
     }
   ]

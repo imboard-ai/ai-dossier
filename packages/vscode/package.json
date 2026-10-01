@@ -12,7 +12,7 @@
     "url": "https://github.com/imboard-ai/ai-dossier.git",
     "directory": "packages/vscode"
   },
-  "homepage": "https://ai-dossier-imboard.vercel.app",
+  "homepage": "https://ai-dossier.dev",
   "bugs": {
     "url": "https://github.com/imboard-ai/ai-dossier/issues"
   },

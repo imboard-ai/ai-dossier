@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-const expected = new URL(process.env.SITE_URL || 'https://ai-dossier-imboard.vercel.app').host;
+const expected = new URL(process.env.SITE_URL || 'https://ai-dossier.dev').host;
 const dist = path.resolve(process.argv[2] || 'dist');
 const bad = [];
 let checked = 0;

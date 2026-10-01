@@ -4,7 +4,7 @@ import remarkDocsLinks from './src/plugins/remark-docs-links.mjs';
 
 // SITE_URL is the single source for canonical, og:url, sitemap and robots.txt. Deliberately
 // not derived from VERCEL_PROJECT_PRODUCTION_URL (a different alias than the public site).
-export const DEFAULT_SITE_URL = 'https://ai-dossier-imboard.vercel.app';
+export const DEFAULT_SITE_URL = 'https://ai-dossier.dev';
 const site = process.env.SITE_URL || DEFAULT_SITE_URL;
 
 export default defineConfig({

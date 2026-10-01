@@ -1,6 +1,6 @@
 # Dossier — Versioned, Signed Agent Skills
 
-**An open standard for versioned, signed agent skills. Host them anywhere — a GitHub repo, your own server, or the Dossier registry — and everyone installs the same version and can verify who wrote it and that it wasn't changed.** [Website](https://ai-dossier-imboard.vercel.app)
+**An open standard for versioned, signed agent skills. Host them anywhere — a GitHub repo, your own server, or the Dossier registry — and everyone installs the same version and can verify who wrote it and that it wasn't changed.** [Website](https://ai-dossier.dev)
 
 [![CI](https://github.com/imboard-ai/ai-dossier/actions/workflows/ci.yml/badge.svg)](https://github.com/imboard-ai/ai-dossier/actions/workflows/ci.yml)
 [![Examples](https://github.com/imboard-ai/ai-dossier/actions/workflows/test-examples.yml/badge.svg)](https://github.com/imboard-ai/ai-dossier/actions/workflows/test-examples.yml)
@@ -159,7 +159,7 @@ This scaffolds a `.ds.md` file you can edit. A dossier is just Markdown with a J
 - Expected outcome was achieved
 ```
 
-See the [Authoring Guide](docs/guides/authoring-guidelines.md) for the full spec, or browse the [Dossier Registry](https://ai-dossier-imboard.vercel.app/registry/) for real-world examples.
+See the [Authoring Guide](docs/guides/authoring-guidelines.md) for the full spec, or browse the [Dossier Registry](https://ai-dossier.dev/registry/) for real-world examples.
 
 ---
 
@@ -264,7 +264,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for the full system architecture.
 | [Scaffold TypeScript Project](./examples/setup/scaffold-typescript-project.ds.md) | Scaffold a production-ready TS project with CI, testing, linting |
 | [Context Engineering Best Practices](./examples/guides/context-engineering-best-practices.ds.md) | Reference guide for writing effective AI agent context files |
 
-Browse the **[Dossier Registry](https://ai-dossier-imboard.vercel.app/registry/)** for the full collection — DevOps, databases, data science, security, and more.
+Browse the **[Dossier Registry](https://ai-dossier.dev/registry/)** for the full collection — DevOps, databases, data science, security, and more.
 
 ```bash
 # Search from the CLI
