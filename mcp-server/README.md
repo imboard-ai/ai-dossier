@@ -4,7 +4,11 @@
 [![npm downloads](https://img.shields.io/npm/dm/@ai-dossier/mcp-server)](https://www.npmjs.com/package/@ai-dossier/mcp-server)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](https://github.com/imboard-ai/ai-dossier/blob/main/LICENSE)
 
-MCP server that lets any MCP-capable LLM discover, verify, and run dossiers — portable, signed skills — through the [Model Context Protocol](https://modelcontextprotocol.io/). If you've used Claude Code skills, dossiers will feel familiar: they're skills you can verify, version, and pull from a registry.
+**Use one portable AI-agent skill across Claude Code, Codex, OpenCode, and MCP-compatible workflows.**
+
+`@ai-dossier/mcp-server` is for teams that want their MCP clients to discover, verify, and run trusted skills through the [Model Context Protocol](https://modelcontextprotocol.io/). Dossiers are portable, signed, versioned skills: familiar to Claude Code users, but verifiable and registry-backed for any compatible LLM tool.
+
+> **Part of the ai-dossier ecosystem**: use [`@ai-dossier/cli`](../cli/README.md) to author and install skills, [`@ai-dossier/core`](../packages/core/README.md) for verification, and the [ai-dossier project](https://github.com/imboard-ai/ai-dossier) for the complete platform.
 
 ## Installation
 

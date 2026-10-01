@@ -1,7 +1,7 @@
 {
   "name": "@ai-dossier/mcp-server",
   "version": "1.6.3",
-  "description": "MCP server that lets any LLM discover, verify, and run dossiers (versioned, signed agent skills) via the Model Context Protocol.",
+  "description": "Secure MCP server for discovering, verifying, and running portable AI-agent skills through the Model Context Protocol.",
   "main": "dist/index.js",
   "bin": {
     "dossier-mcp-server": "dist/index.js"
@@ -14,15 +14,13 @@
     "test": "vitest run"
   },
   "keywords": [
-    "mcp",
-    "dossier",
-    "skill",
-    "skills",
-    "claude-code",
-    "automation",
-    "llm",
-    "ai",
-    "model-context-protocol"
+    "mcp-server",
+    "model-context-protocol",
+    "secure-mcp",
+    "claude-code-mcp",
+    "agent-skills",
+    "llm-workflows",
+    "skill-verification"
   ],
   "author": "Yuval Dimnik <yuval.dimnik@gmail.com>",
   "license": "AGPL-3.0-only",

@@ -4,9 +4,11 @@
 [![npm downloads](https://img.shields.io/npm/dm/@ai-dossier/cli)](https://www.npmjs.com/package/@ai-dossier/cli)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](https://github.com/imboard-ai/ai-dossier/blob/main/LICENSE)
 
-**Install, verify, and publish dossiers — portable, signed, versioned skills — for any LLM tool.**
+**Use one portable AI-agent skill across Claude Code, Codex, OpenCode, and MCP-compatible workflows.**
 
-A dossier is a skill with trust built in. This CLI is how you author them, verify their signatures, publish them to a registry, and install them as Claude Code skills (`install-skill` / `skill-export`).
+`@ai-dossier/cli` is for developers and AI-agent teams that need to create, verify, sign, publish, and install reusable skills. A dossier is a portable, versioned skill with trust built in: it can be hosted anywhere, verified before use, and installed as a Claude Code skill with `install-skill` or `skill-export`.
+
+> **Part of the ai-dossier ecosystem**: pair this CLI with [`@ai-dossier/core`](../packages/core/README.md) for verification, [`@ai-dossier/mcp-server`](../mcp-server/README.md) for MCP clients, and the [ai-dossier project](https://github.com/imboard-ai/ai-dossier) for the complete platform.
 
 ## The Problem This Solves
 
