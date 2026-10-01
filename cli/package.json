@@ -1,7 +1,7 @@
 {
   "name": "@ai-dossier/cli",
   "version": "0.89.3",
-  "description": "Create, verify, sign, publish, and run dossiers — the open standard for versioned, signed agent skills. Host them anywhere and verify who wrote them. The dossier ⇄ Claude Code skill bridge (install-skill / skill-export).",
+  "description": "CLI for portable AI-agent skills: create, verify, sign, publish, and install workflows for Claude Code, Codex, OpenCode, and LLM tools.",
   "main": "dist/cli.js",
   "bin": {
     "ai-dossier": "./bin/ai-dossier"
@@ -19,20 +19,13 @@
     "test:smoke": "node test/smoke/login.smoke.mjs ./bin/ai-dossier"
   },
   "keywords": [
-    "dossier",
-    "skill",
-    "skills",
-    "claude-code",
+    "agent-skills",
     "claude-code-skills",
-    "ai",
-    "llm",
-    "agent",
-    "security",
-    "verification",
-    "checksum",
-    "signature",
-    "automation",
-    "cli"
+    "codex-skills",
+    "signed-skills",
+    "skill-registry",
+    "ai-agent-cli",
+    "workflow-verification"
   ],
   "author": "Imboard AI",
   "license": "AGPL-3.0-only",

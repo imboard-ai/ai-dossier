@@ -4,7 +4,11 @@
 [![npm downloads](https://img.shields.io/npm/dm/@ai-dossier/core)](https://www.npmjs.com/package/@ai-dossier/core)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](https://github.com/imboard-ai/ai-dossier/blob/main/LICENSE)
 
-Core parsing, verification, signing, and linting logic for [Dossier](https://github.com/imboard-ai/ai-dossier) — portable, signed, versioned skills for any LLM tool.
+**Use one portable AI-agent skill across Claude Code, Codex, OpenCode, and MCP-compatible workflows.**
+
+`@ai-dossier/core` is the TypeScript library for developers building secure AI-agent workflows. It parses, verifies, signs, and lints dossiers: portable, versioned skills whose integrity and publisher can be checked before an LLM uses them.
+
+> **Part of the ai-dossier ecosystem**: use [`@ai-dossier/cli`](../../cli/README.md) to author and install skills, [`@ai-dossier/mcp-server`](../../mcp-server/README.md) to expose them through MCP, and the [ai-dossier project](https://github.com/imboard-ai/ai-dossier) for the complete platform.
 
 ## Installation
 

@@ -2,6 +2,8 @@
 
 Serverless API for discovering, publishing, and managing dossiers. Deployed on Vercel.
 
+> **Part of the ai-dossier ecosystem**: use [`@ai-dossier/cli`](../cli/README.md) to author and publish portable AI-agent skills, [`@ai-dossier/mcp-server`](../mcp-server/README.md) to expose them through MCP, and the [ai-dossier project](https://github.com/imboard-ai/ai-dossier) for the complete platform.
+
 ## Part of the Monorepo
 
 This package (`@ai-dossier/registry`) is an npm workspace within the [ai-dossier](https://github.com/imboard-ai/ai-dossier) monorepo. It depends on `@ai-dossier/core` for shared verification logic.

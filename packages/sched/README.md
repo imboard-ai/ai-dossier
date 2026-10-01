@@ -2,6 +2,12 @@
 
 [![npm](https://img.shields.io/npm/v/@ai-dossier/sched.svg)](https://www.npmjs.com/package/@ai-dossier/sched)
 
+**Use one portable AI-agent skill across Claude Code, Codex, OpenCode, and MCP-compatible workflows.**
+
+`@ai-dossier/sched` is for engineering teams running parallel coding agents. It is a deterministic scheduler that queues work, manages worker slots, verifies completion, watches PRs, and recovers stalled multi-agent workflows without invoking an LLM itself.
+
+> **Part of the ai-dossier ecosystem**: use [`@ai-dossier/cli`](../../cli/README.md) to run workflows, [`@ai-dossier/worktree-pool`](../worktree-pool/README.md) for ready worktrees, and the [ai-dossier project](https://github.com/imboard-ai/ai-dossier) for the complete platform.
+
 Deterministic scheduler core for dossier batch cycles — queue, worker slots, typed state
 machines, crash-safe persistence, the **dispatch engine** (#464: spawning agent
 processes, verifying their completion against ground truth, mechanizing the
