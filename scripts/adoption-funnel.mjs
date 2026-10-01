@@ -28,7 +28,10 @@ export async function fetchJson(url, { fetchImpl = fetch, token } = {}) {
   const response = await fetchImpl(url, {
     headers: {
       accept: 'application/vnd.github+json',
-      ...(token ? { authorization: `Bearer ${token}` } : {}),
+      // Never send the workflow token to public npm endpoints.
+      ...(token && url.startsWith('https://api.github.com/')
+        ? { authorization: `Bearer ${token}` }
+        : {}),
     },
   });
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}: ${url}`);
@@ -62,7 +65,7 @@ async function npmRanks(options) {
       const result = await fetchJson(
         `https://registry.npmjs.com/-/v1/search?text=${encodeURIComponent(keyword)}&size=250`,
         options
-      );
+      ).catch(() => ({ objects: [] }));
       ranks[keyword] = Object.fromEntries(
         PACKAGES.map((packageName) => [packageName, rankFor(result.objects ?? [], packageName)])
       );
@@ -74,23 +77,33 @@ async function npmRanks(options) {
 export async function collectMetrics({ repo, fetchImpl = fetch, token }) {
   const options = { fetchImpl, token };
   const githubBase = `https://api.github.com/repos/${repo}`;
+  const unavailable = (value) => Promise.resolve(value).catch(() => null);
   const [packages, ranks, repository, clones, views, releases] = await Promise.all([
-    Promise.all(PACKAGES.map((name) => npmPackageMetrics(name, options))),
+    Promise.all(
+      PACKAGES.map((name) =>
+        npmPackageMetrics(name, options).catch(() => ({
+          name,
+          weekly_downloads: null,
+          daily_downloads: null,
+          version_count: null,
+        }))
+      )
+    ),
     npmRanks(options),
-    fetchJson(githubBase, options),
-    fetchJson(`${githubBase}/traffic/clones`, options),
-    fetchJson(`${githubBase}/traffic/views`, options),
-    fetchJson(`${githubBase}/releases?per_page=100`, options),
+    unavailable(fetchJson(githubBase, options)),
+    unavailable(fetchJson(`${githubBase}/traffic/clones`, options)),
+    unavailable(fetchJson(`${githubBase}/traffic/views`, options)),
+    unavailable(fetchJson(`${githubBase}/releases?per_page=100`, options)),
   ]);
   return {
     collected_at: new Date().toISOString(),
     packages,
     ranks,
     github: {
-      stars: repository.stargazers_count ?? null,
-      unique_clones_14d: clones.uniques ?? null,
-      unique_views_14d: views.uniques ?? null,
-      release_asset_downloads: releases.reduce(
+      stars: repository?.stargazers_count ?? null,
+      unique_clones_14d: clones?.uniques ?? null,
+      unique_views_14d: views?.uniques ?? null,
+      release_asset_downloads: (releases ?? []).reduce(
         (sum, release) =>
           sum + (release.assets ?? []).reduce((n, asset) => n + (asset.download_count ?? 0), 0),
         0

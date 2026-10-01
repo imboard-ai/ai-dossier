@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { divergence, parseLedgerComment, rankFor, renderLedger } from './adoption-funnel.mjs';
+import {
+  divergence,
+  fetchJson,
+  parseLedgerComment,
+  rankFor,
+  renderLedger,
+} from './adoption-funnel.mjs';
 
 const current = {
   collected_at: '2026-10-01T00:00:00.000Z',
@@ -15,6 +21,24 @@ describe('adoption funnel ledger', () => {
   it('finds a package rank and treats missing results as unranked', () => {
     expect(rankFor([{ package: { name: '@ai-dossier/cli' } }], '@ai-dossier/cli')).toBe(1);
     expect(rankFor([], '@ai-dossier/cli')).toBeNull();
+  });
+
+  it('only sends the workflow token to GitHub', async () => {
+    const headers = [];
+    const fetchImpl = async (_url, options) => {
+      headers.push(options.headers);
+      return { ok: true, json: async () => ({}) };
+    };
+    await fetchJson('https://api.npmjs.org/downloads/point/last-day/example', {
+      fetchImpl,
+      token: 'secret',
+    });
+    await fetchJson('https://api.github.com/repos/imboard-ai/ai-dossier', {
+      fetchImpl,
+      token: 'secret',
+    });
+    expect(headers[0].authorization).toBeUndefined();
+    expect(headers[1].authorization).toBe('Bearer secret');
   });
 
   it('flags npm growth when GitHub signals remain flat', () => {
