@@ -4,25 +4,19 @@ Guide for publishing `@ai-dossier` packages to the public npm registry.
 
 ## Quick Start
 
-### Tag-based Publishing (Recommended)
+### Automatic Next Releases
 
-Create a git tag and push it to trigger the publish pipeline:
+Every merge to `main` publishes a unique prerelease cohort such as `0.89.3-next.123` under npm's `next` dist-tag. The build keeps all publishable workspace dependencies pinned to that same cohort, so `npm install @ai-dossier/cli@next` resolves matching prerelease dependencies.
 
-```bash
-git tag v1.2.0
-git push origin v1.2.0
-```
-
-This runs: **lint → build → test → publish core → publish cli → publish mcp-server → verify**.
+The pipeline runs: **lint → build → test → prepare next cohort → publish → verify next**. It never advances `latest`.
 
 ### Manual Dispatch
 
 1. Go to: https://github.com/imboard-ai/ai-dossier/actions/workflows/publish-packages.yml
 2. Click "Run workflow"
-3. Select version bump (patch/minor/major) or skip
-4. Click "Run workflow"
+3. Click "Run workflow" to publish the current `main` commit as a `next` cohort.
 
-The workflow will bump versions, commit, tag, and publish automatically.
+To deliberately promote the current cohort, run **Promote npm next to latest** from the Actions page. It reads each package's current `next` version and moves that version's `latest` dist-tag. The workflow uses the repository's `NPM_TOKEN` secret because npm trusted publishing does not authorize dist-tag mutations. Default installs, `ai-dossier update`, and scheduler version checks continue to use `latest`.
 
 ### Manual Publishing (Local)
 
@@ -65,22 +59,18 @@ npx @ai-dossier/mcp-server
 
 ## Version Management
 
-### Via Manual Dispatch
+### Channels
 
-When running the workflow manually:
-- **patch**: 1.0.0 → 1.0.1 (bug fixes)
-- **minor**: 1.0.0 → 1.1.0 (new features, backward compatible)
-- **major**: 1.0.0 → 2.0.0 (breaking changes)
-- **skip**: Don't bump version, just publish current
+- **`next`**: automatically updated by every publish workflow run with a unique prerelease version.
+- **`latest`**: promoted manually from the current `next` cohort when it is ready for stable users.
+- Package manifest versions remain the next intended stable baseline; the workflow derives its temporary prerelease versions without committing them back to `main`.
 
 ### Enforced on Pull Requests
 
 CI's `version-bump` job fails a PR that changes a publishable package's `src/` or `bin/` without
 bumping that package's `package.json` version (or bumps it to a number the base-branch tip already
-holds), because the publish workflow never re-releases a version already on npm — since #826 it fails
-the run with a version collision (`scripts/publish-guard.mjs`) when that version was built from
-different source. Apply the `no-release-needed` label when a change truly needs no release; a
-labelled change to `src/`/`bin/` still fails the next publish run until the package is bumped.
+holds). The publish workflow derives a unique prerelease from that stable baseline for each run.
+Apply the `no-release-needed` label when a change truly needs no release.
 
 ### Manual Version Bumps
 
@@ -113,9 +103,11 @@ git push && git push --tags
 
 The publish pipeline runs on:
 
-1. **Tag push** (`v*`) — the primary trigger
-2. **GitHub Release** — when a release is published
-3. **Manual dispatch** — via GitHub Actions UI with optional version bump
+1. **Push to main** — automatically publishes the next cohort
+2. **Tag push** (`v*`) or **GitHub Release** — publishes a next cohort for that ref
+3. **Manual dispatch** — publishes the selected ref as a next cohort
+
+`latest` moves only through the manually dispatched **Promote npm next to latest** workflow.
 
 A `concurrency` group prevents duplicate runs when both a tag push and release event fire.
 

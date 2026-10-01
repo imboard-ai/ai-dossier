@@ -1,0 +1,35 @@
+name: Promote npm next to latest
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: npm-promote-latest
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install npm 11+ to local prefix
+        run: |
+          npm install --prefix /tmp/npm-latest npm@latest
+          echo "/tmp/npm-latest/node_modules/.bin" >> $GITHUB_PATH
+
+      - name: Promote the current next cohort
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for package in @ai-dossier/core @ai-dossier/worktree-pool @ai-dossier/sched @ai-dossier/cli @ai-dossier/mcp-server; do
+            version=$(npm view "$package@next" version --prefer-online)
+            npm dist-tag add "$package@$version" latest
+            npm view "$package@latest" version --prefer-online
+          done
