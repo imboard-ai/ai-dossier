@@ -2934,7 +2934,8 @@ function registerStartSubcommand(cmd: Command): void {
         console.log(
           `▶ Scheduler engine running for ${project} (tick every ${interval}s, Ctrl-C to stop)`
         );
-        const upgradeHandoff = await runLoop(
+        let upgradeHandoff = false;
+        await runLoop(
           deps,
           () => {
             tickConfig = configReloader.current();
@@ -2948,16 +2949,16 @@ function registerStartSubcommand(cmd: Command): void {
               // Preserve the non-blocking advisory check when upgrades are
               // disabled (or shutdown was requested during the tick).
               void checkAndHandleEngineStaleness(deps.journal, false, upgradeExec).catch(() => {});
-              return false;
+              return;
             }
-            // #945: await the complete upgrade after this tick. `runLoop` does
-            // not start another tick when this callback returns true, so the
-            // old package cannot write state after the updated package lands.
-            return await checkAndHandleEngineStaleness(
-              deps.journal,
-              autoUpgradeEnabled && !stopping,
-              upgradeExec
-            );
+            // #945: await the complete upgrade after this tick. On success,
+            // `shouldStop` becomes true before `runLoop` can start another tick,
+            // so the old package cannot write state after the install lands.
+            const requested = await checkAndHandleEngineStaleness(deps.journal, true, upgradeExec);
+            if (requested) {
+              upgradeHandoff = true;
+              stopping = true;
+            }
           }
         );
         if (upgradeHandoff) {
