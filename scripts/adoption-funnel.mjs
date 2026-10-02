@@ -60,25 +60,27 @@ async function npmPackageMetrics(name, options) {
 
 async function npmRanks(options) {
   const ranks = {};
+  const rankSearchStatus = {};
   await Promise.all(
     KEYWORDS.map(async (keyword) => {
       const result = await fetchJson(
         `https://registry.npmjs.com/-/v1/search?text=${encodeURIComponent(keyword)}&size=250`,
         options
-      ).catch(() => ({ objects: [] }));
+      ).catch(() => null);
+      if (!result) rankSearchStatus[keyword] = 'unavailable';
       ranks[keyword] = Object.fromEntries(
-        PACKAGES.map((packageName) => [packageName, rankFor(result.objects ?? [], packageName)])
+        PACKAGES.map((packageName) => [packageName, rankFor(result?.objects ?? [], packageName)])
       );
     })
   );
-  return ranks;
+  return { ranks, rank_search_status: rankSearchStatus };
 }
 
 export async function collectMetrics({ repo, fetchImpl = fetch, token }) {
   const options = { fetchImpl, token };
   const githubBase = `https://api.github.com/repos/${repo}`;
   const unavailable = (value) => Promise.resolve(value).catch(() => null);
-  const [packages, ranks, repository, clones, views, releases] = await Promise.all([
+  const [packages, rankMetrics, repository, clones, views, releases] = await Promise.all([
     Promise.all(
       PACKAGES.map((name) =>
         npmPackageMetrics(name, options).catch(() => ({
@@ -95,10 +97,12 @@ export async function collectMetrics({ repo, fetchImpl = fetch, token }) {
     unavailable(fetchJson(`${githubBase}/traffic/views`, options)),
     unavailable(fetchJson(`${githubBase}/releases?per_page=100`, options)),
   ]);
+  const { ranks, rank_search_status } = rankMetrics;
   return {
     collected_at: new Date().toISOString(),
     packages,
     ranks,
+    rank_search_status,
     github: {
       stars: repository?.stargazers_count ?? null,
       unique_clones_14d: clones?.uniques ?? null,
@@ -127,6 +131,15 @@ export function divergence(current, previous) {
   const total = (metrics) =>
     metrics.packages.reduce((sum, item) => sum + (item.weekly_downloads ?? 0), 0);
   const npmDelta = total(current) - total(previous);
+  const hasTrafficMetrics = (metrics) =>
+    Number.isFinite(metrics.github?.unique_clones_14d) &&
+    Number.isFinite(metrics.github?.unique_views_14d);
+  if (!hasTrafficMetrics(current) || !hasTrafficMetrics(previous)) {
+    return { flagged: false, reason: 'Unknown: GitHub traffic unavailable.' };
+  }
+  if (!Number.isFinite(current.github?.stars) || !Number.isFinite(previous.github?.stars)) {
+    return { flagged: false, reason: 'Unknown: GitHub star data unavailable.' };
+  }
   const githubFlat =
     current.github.stars <= previous.github.stars &&
     current.github.unique_clones_14d <= previous.github.unique_clones_14d &&
@@ -154,10 +167,14 @@ export function renderLedger(current, previous) {
       return `| ${item.name} | ${item.weekly_downloads ?? 'unavailable'} (${prior ? delta(item.weekly_downloads, prior.weekly_downloads) : 'baseline'}) | ${item.daily_downloads ?? 'unavailable'} | ${item.version_count ?? 'unavailable'} |`;
     })
     .join('\n');
-  const ranks = KEYWORDS.map(
-    (keyword) =>
-      `| ${keyword} | ${PACKAGES.map((name) => `${name}: ${current.ranks[keyword]?.[name] ?? 'unranked'}`).join('<br>')} |`
-  ).join('\n');
+  const ranks = KEYWORDS.map((keyword) => {
+    const unavailable = current.rank_search_status?.[keyword] === 'unavailable';
+    const values = PACKAGES.map((name) => {
+      const rank = current.ranks[keyword]?.[name];
+      return `${name}: ${unavailable ? 'unavailable' : (rank ?? 'unranked')}`;
+    }).join('<br>');
+    return `| ${keyword} | ${values} |`;
+  }).join('\n');
   return `## Weekly adoption funnel ledger\n\nCollected: ${current.collected_at}\n\n### Npm\n| Package | Weekly downloads (WoW) | Daily downloads | Published versions |\n| --- | ---: | ---: | ---: |\n${rows}\n\n### Npm search ranks\n| Keyword | Rank (1 is highest) |\n| --- | --- |\n${ranks}\n\n### GitHub\n| Signal | Value |\n| --- | ---: |\n| Stars | ${current.github.stars ?? 'unavailable'} |\n| Unique clones (rolling 14 days) | ${current.github.unique_clones_14d ?? 'unavailable'} |\n| Unique views (rolling 14 days) | ${current.github.unique_views_14d ?? 'unavailable'} |\n| Release asset downloads (all releases) | ${current.github.release_asset_downloads ?? 'unavailable'} |\n\n### Divergence\n${signal.flagged ? '**FLAGGED:**' : 'Not flagged:'} ${signal.reason}\n\nOut of scope: registry accounts/pulls (#986) and website traffic (#987).\n\n<!-- ${MARKER} ${JSON.stringify(current)} -->`;
 }
 
