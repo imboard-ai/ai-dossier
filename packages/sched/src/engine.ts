@@ -3675,14 +3675,28 @@ function mergeBatchResult(result: TickResult, batch: BatchTickResult): TickResul
  * journaled (`tick-failed`, with the error name — `LockTimeoutError` and
  * `CorruptStateError` demand different operator actions) and reported on
  * stderr, and the loop continues — one bad tick (e.g. a transient gh
- * failure) never stops the scheduler.
+ * failure) never stops the scheduler. The post-tick callback may be async; it
+ * runs after the tick has fully persisted and can return `true` to stop before
+ * the next tick (used for a supervised CLI upgrade handoff).
  */
-export async function runLoop(
+export function runLoop(
   deps: EngineDeps,
   configSource: SchedConfig | (() => SchedConfig),
   shouldStop: () => boolean,
   onTick?: (result: TickResult) => void
-): Promise<void> {
+): Promise<boolean>;
+export function runLoop(
+  deps: EngineDeps,
+  configSource: SchedConfig | (() => SchedConfig),
+  shouldStop: () => boolean,
+  onTick: (result: TickResult) => boolean | Promise<boolean>
+): Promise<boolean>;
+export async function runLoop(
+  deps: EngineDeps,
+  configSource: SchedConfig | (() => SchedConfig),
+  shouldStop: () => boolean,
+  onTick?: (result: TickResult) => unknown
+): Promise<boolean> {
   // #883: a function source is consulted at the top of EVERY tick, so a config
   // edit applies from the next tick on. The sleep interval is fixed at start.
   const resolveConfig = typeof configSource === 'function' ? configSource : () => configSource;
@@ -3693,7 +3707,7 @@ export async function runLoop(
     deps.store.touchEngineLease?.(deps.now());
     try {
       const result = tick(deps, resolveConfig());
-      onTick?.(result);
+      if ((await onTick?.(result)) === true) return true;
     } catch (err) {
       const detail = `${(err as Error).name}: ${(err as Error).message}`;
       process.stderr.write(`⚠ sched tick failed: ${detail}\n`);
@@ -3702,6 +3716,7 @@ export async function runLoop(
     if (shouldStop()) break;
     await sleep(interval, shouldStop);
   }
+  return false;
 }
 
 function sleep(ms: number, shouldStop: () => boolean): Promise<void> {

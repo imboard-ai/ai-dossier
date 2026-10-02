@@ -1702,6 +1702,7 @@ export class EngineTooOldError extends Error {
  */
 export type JournalEventName =
   | 'assigned'
+  | 'assigned-recovered'
   | 'spawned'
   | 'exit-detected'
   | 'orphan-pid'

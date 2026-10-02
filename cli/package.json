@@ -1,6 +1,6 @@
 {
   "name": "@ai-dossier/cli",
-  "version": "0.89.5",
+  "version": "0.89.6",
   "description": "CLI for portable AI-agent skills: create, verify, sign, publish, and install workflows for Claude Code, Codex, OpenCode, and LLM tools.",
   "main": "dist/cli.js",
   "bin": {

@@ -402,9 +402,12 @@ ai-dossier sched service uninstall
   `--repo-dir`), and the node/nvm `PATH` at install time (absolute entries only). Install refuses
   node / entry-point / repo paths that are missing, relative, or under a temp or `worktrees/`
   directory, and warns that an nvm node path must be re-pinned (re-run `install`) after a node
-  upgrade. It runs `sched start --auto-upgrade` (opt out with `--no-auto-upgrade`); **note that in
-  the continuous loop `--auto-upgrade` only journals `engine-stale` — the running engine keeps the
-  code it started with until it restarts** (the actual `npm i -g` is the cron/`--once` path).
+  upgrade. It runs `sched start --auto-upgrade` (opt out with `--no-auto-upgrade`); after a
+  completed tick, a stale engine installs the latest CLI and re-execs the same command before
+  another state write. Detached agents keep running and the new engine reattaches by pid. The
+  new version migrates state on load; older engines reject newer schemas. If the Node runtime
+  cannot replace the process directly, exit code 75 asks systemd/the watchdog to restart the
+  updated entry point.
   Output goes to the journal (`journalctl --user -u <unit>`) and the durable trail is the
   project's `events.jsonl`. Run `loginctl enable-linger $USER` once so it starts at boot without a
   login. Re-running `install` is idempotent; a changed unit is restarted (agents keep running).

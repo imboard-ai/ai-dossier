@@ -68,7 +68,6 @@ import {
   Journal,
   type KeptWorktreeReader,
   killSlotAgent,
-  LIVE_SLOT_STATUSES,
   LockTimeoutError,
   labelBlockReason,
   labelOfBlockReason,
@@ -2416,6 +2415,8 @@ const RESCUE_TIMEOUT_MS = 120_000;
 
 /** `npm i -g @ai-dossier/cli@latest` can take a while (network + install). */
 const UPGRADE_TIMEOUT_MS = 120_000;
+/** Supervisor restart request used when the runtime has no `process.execve`. */
+export const UPGRADE_RESTART_EXIT_CODE = 75;
 
 /**
  * A local `ExecFn` built directly on this file's own `execFileSync` import,
@@ -2449,24 +2450,23 @@ function createUpgradeExec(): ExecFn {
 }
 
 /**
- * #537: after a tick, compare the installed engine against npm latest;
+ * #537/#945: after a tick, compare the installed engine against npm latest;
  * when behind, journal `engine-stale` once per distinct (installed, latest)
  * pair (not every tick — a long-running loop would otherwise spam the
  * journal every reconcile) and warn on stderr. When `autoUpgradeEnabled`
- * and nothing is mid-dispatch (`LIVE_SLOT_STATUSES` against freshly
- * re-read state — must reflect what the tick that just ran actually did),
- * self-upgrade via `upgradeExec`.
+ * self-upgrade via `upgradeExec`. The caller awaits this AFTER a completed
+ * tick and stops the old loop on success; live agents are detached and the
+ * restarted engine reattaches to their persisted pids.
  */
 async function checkAndHandleEngineStaleness(
-  store: SchedStore,
   journal: Journal,
   autoUpgradeEnabled: boolean,
   upgradeExec: ExecFn
-): Promise<void> {
+): Promise<boolean> {
   const staleness = await checkEngineStaleness();
-  if (!staleness.stale) return;
+  if (!staleness.stale) return false;
   const { installed, latest } = staleness;
-  if (installed === null || latest === null) return; // unreachable when stale=true; keeps TS honest
+  if (installed === null || latest === null) return false; // unreachable when stale=true; keeps TS honest
 
   const events = journal.read();
   const lastStale = [...events].reverse().find((e) => e.event === 'engine-stale');
@@ -2483,27 +2483,17 @@ async function checkAndHandleEngineStaleness(
     process.stderr.write(`${formatEngineStaleWarning(installed, latest)}\n`);
   }
 
-  if (!autoUpgradeEnabled) return;
-
-  // Re-read fresh — must reflect what the tick that just ran left behind,
-  // not a pre-tick snapshot (AC2: "only while no unit is mid-dispatch").
-  // Best-effort like the rest of this function: a failure here (state became
-  // unreadable between the tick that just succeeded and this re-check) must
-  // not crash the `--once` cron path after the tick itself already
-  // completed successfully — never surface as an unhandled rejection.
-  let busy: boolean;
-  try {
-    const state = store.load();
-    busy = state.slots.some((s) => LIVE_SLOT_STATUSES.has(s.status));
-  } catch (err) {
-    process.stderr.write(
-      `⚠ sched auto-upgrade: could not re-read state to confirm no unit is mid-dispatch, skipping upgrade: ${(err as Error).message}\n`
-    );
-    return;
-  }
-  if (busy) return;
+  if (!autoUpgradeEnabled) return false;
 
   process.stderr.write('⚠ sched: auto-upgrading (npm i -g @ai-dossier/cli@latest)…\n');
+  // Record the attempt before npm can replace this CLI. After a successful
+  // install, the old engine performs no more state writes and hands off.
+  journal.append({
+    event: 'engine-auto-upgrade-attempted',
+    installed_version: installed,
+    latest_version: latest,
+    detail: 'npm i -g @ai-dossier/cli@latest started after a completed tick',
+  });
   const output = upgradeExec('npm', ['i', '-g', '@ai-dossier/cli@latest']);
   if (output === null) {
     journal.append({
@@ -2513,14 +2503,40 @@ async function checkAndHandleEngineStaleness(
       detail: 'npm i -g @ai-dossier/cli@latest failed — see stderr for the npm error',
     });
     process.stderr.write('⚠ sched: auto-upgrade failed — see above\n');
+    return false;
   } else {
-    journal.append({
-      event: 'engine-auto-upgrade-attempted',
-      installed_version: installed,
-      latest_version: latest,
-      detail: 'npm i -g @ai-dossier/cli@latest completed',
-    });
     process.stderr.write('✓ sched: auto-upgrade completed\n');
+    return true;
+  }
+}
+
+type ExecveFn = (file: string, args: string[], env: NodeJS.ProcessEnv) => never;
+
+/** Replace this process with the updated CLI, preserving its invocation. */
+export function reexecUpdatedCli(execveOverride?: ExecveFn | null): boolean {
+  const execve =
+    execveOverride === undefined
+      ? (process as unknown as { execve?: ExecveFn }).execve
+      : execveOverride;
+  if (typeof execve !== 'function') {
+    process.stderr.write(
+      `⚠ sched auto-upgrade: process.execve is unavailable; requesting supervisor restart (${UPGRADE_RESTART_EXIT_CODE})\n`
+    );
+    return false;
+  }
+  try {
+    execve.call(
+      process,
+      process.execPath,
+      [process.execPath, ...process.argv.slice(1)],
+      process.env
+    );
+    return true;
+  } catch (err) {
+    process.stderr.write(
+      `⚠ sched auto-upgrade: re-exec failed; requesting supervisor restart (${UPGRADE_RESTART_EXIT_CODE}): ${(err as Error).message}\n`
+    );
+    return false;
   }
 }
 
@@ -2539,7 +2555,7 @@ function registerStartSubcommand(cmd: Command): void {
     .option('--once', 'Run a single reconcile+refill tick and exit (cron-style)')
     .option(
       '--auto-upgrade',
-      'Self-upgrade (npm i -g @ai-dossier/cli@latest) when the installed engine is behind npm latest and no unit is mid-dispatch'
+      'After a completed tick, install and re-exec @ai-dossier/cli@latest when this engine is stale'
     )
     .option(
       '--alert-issue <n>',
@@ -2889,7 +2905,17 @@ function registerStartSubcommand(cmd: Command): void {
             handleKnownError(err);
             fail([`sched tick failed: ${(err as Error).name}: ${(err as Error).message}`]);
           }
-          await checkAndHandleEngineStaleness(store, deps.journal, autoUpgradeEnabled, upgradeExec);
+          const upgradeHandoff = await checkAndHandleEngineStaleness(
+            deps.journal,
+            autoUpgradeEnabled && !stopping,
+            upgradeExec
+          );
+          if (upgradeHandoff) {
+            exitLogger.logNormalExit('auto-upgrade handoff');
+            releaseLease();
+            if (!reexecUpdatedCli()) process.exitCode = UPGRADE_RESTART_EXIT_CODE;
+            return;
+          }
           if (opts.json) {
             console.log(JSON.stringify(result, null, 2));
           } else {
@@ -2904,33 +2930,45 @@ function registerStartSubcommand(cmd: Command): void {
         console.log(
           `▶ Scheduler engine running for ${project} (tick every ${interval}s, Ctrl-C to stop)`
         );
-        await runLoop(
+        const upgradeHandoff = await runLoop(
           deps,
           () => {
             tickConfig = configReloader.current();
             return tickConfig;
           },
           () => stopping,
-          (result) => {
+          async (result) => {
             if (!opts.json) console.log(`✓ [${new Date().toISOString()}] ${describe(result)}`);
             else console.log(JSON.stringify({ ts: new Date().toISOString(), ...result }));
-            // #537: journal/warn only in the continuous loop — the actual
-            // `npm i -g` shell-out (up to UPGRADE_TIMEOUT_MS) only runs from
-            // the cron-driven --once path below; running it here would stall
-            // reconciliation for however long the install takes. Fire-and-
-            // forget: bounded by the check's own short network timeout, never
-            // blocks the next tick (onTick is synchronous by contract).
-            void checkAndHandleEngineStaleness(store, deps.journal, false, upgradeExec).catch(
-              () => {}
+            if (!autoUpgradeEnabled || stopping) {
+              // Preserve the non-blocking advisory check when upgrades are
+              // disabled (or shutdown was requested during the tick).
+              void checkAndHandleEngineStaleness(deps.journal, false, upgradeExec).catch(() => {});
+              return false;
+            }
+            // #945: await the complete upgrade after this tick. `runLoop` does
+            // not start another tick when this callback returns true, so the
+            // old package cannot write state after the updated package lands.
+            return await checkAndHandleEngineStaleness(
+              deps.journal,
+              autoUpgradeEnabled && !stopping,
+              upgradeExec
             );
           }
         );
+        if (upgradeHandoff) {
+          exitLogger.logNormalExit('auto-upgrade handoff');
+          releaseLease();
+          if (!reexecUpdatedCli()) process.exitCode = UPGRADE_RESTART_EXIT_CODE;
+          return;
+        }
         exitLogger.logNormalExit('loop returned after a stop request');
         clearStoppingMarker(store.dir);
         console.log('⏹ Engine stopped');
       } finally {
         process.removeListener('exit', releaseLease);
         releaseLease();
+        exitLogger.dispose();
       }
     });
 }
