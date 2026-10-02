@@ -6,6 +6,7 @@
 
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import {
   defaultExec,
   Journal,
@@ -69,7 +70,8 @@ export function readCrontabStrict(): string {
   if (res.error) throw new Error(`crontab -l failed: ${res.error.message}`);
   if (res.status === 0) return res.stdout ?? '';
   const stderr = (res.stderr ?? '').trim();
-  if (res.status === 1 && /^no crontab for /i.test(stderr)) return '';
+  const noCrontabForCurrentUser = `no crontab for ${os.userInfo().username}`;
+  if (res.status === 1 && stderr.toLowerCase() === noCrontabForCurrentUser.toLowerCase()) return '';
   throw new Error(`crontab -l exited ${res.status}: ${stderr || 'no output'}`);
 }
 

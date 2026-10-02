@@ -1,0 +1,19 @@
+name: Dispatch stable npm publishing
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: npm-promote-latest
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch stable package publish through the trusted workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run publish-packages.yml --repo imboard-ai/ai-dossier --ref main --field channel=stable

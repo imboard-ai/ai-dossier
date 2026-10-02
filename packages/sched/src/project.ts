@@ -26,7 +26,11 @@ export type ExecFn = (file: string, args: string[], cwd?: string) => string | nu
 /** Build an `ExecFn` via `execFileSync` (never throws), optionally with a hard timeout and a failure observer. */
 export function createExecFn(
   timeoutMs?: number,
-  opts?: { onError?: (file: string, args: string[], err: Error) => void }
+  opts?: {
+    onError?: (file: string, args: string[], err: Error) => void;
+    /** Extra environment for the child (merged over the process env). */
+    env?: Record<string, string>;
+  }
 ): ExecFn {
   return (file, args, cwd) => {
     try {
@@ -36,6 +40,7 @@ export function createExecFn(
           stdio: ['ignore', 'pipe', 'pipe'],
           ...(timeoutMs !== undefined ? { timeout: timeoutMs } : {}),
           ...(cwd ? { cwd } : {}),
+          ...(opts?.env ? { env: { ...process.env, ...opts.env } } : {}),
         })
       ).trim();
     } catch (err) {

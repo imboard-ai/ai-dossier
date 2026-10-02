@@ -4,25 +4,19 @@ Guide for publishing `@ai-dossier` packages to the public npm registry.
 
 ## Quick Start
 
-### Tag-based Publishing (Recommended)
+### Automatic Next Releases
 
-Create a git tag and push it to trigger the publish pipeline:
+Push, tag, and release events, plus manual `next` dispatches, publish a unique prerelease cohort such as `0.89.3-next.123` under npm's `next` dist-tag. The build keeps all publishable workspace dependencies pinned to that same cohort, so `npm install @ai-dossier/cli@next` resolves matching prerelease dependencies. A manual `stable` dispatch publishes the committed manifest versions under `latest`.
 
-```bash
-git tag v1.2.0
-git push origin v1.2.0
-```
-
-This runs: **lint → build → test → publish core → publish cli → publish mcp-server → verify**.
+The workflow runs **lint → build → test → smoke → publish → verify**. Only the `next` channel prepares a prerelease cohort; `stable` uses the committed versions and verifies `latest`.
 
 ### Manual Dispatch
 
 1. Go to: https://github.com/imboard-ai/ai-dossier/actions/workflows/publish-packages.yml
 2. Click "Run workflow"
-3. Select version bump (patch/minor/major) or skip
-4. Click "Run workflow"
+3. Select `next` (the default) to publish a prerelease cohort, or select `stable` to publish the committed stable manifest versions from `main`.
 
-The workflow will bump versions, commit, tag, and publish automatically.
+The **Dispatch stable npm publishing** workflow is a shortcut for the `stable` channel: it dispatches `publish-packages.yml` on `main`. Both channels publish through the existing npm Trusted Publishing/OIDC identity in `publish-packages.yml`; no `NPM_TOKEN` is used. Stable publishing skips temporary prerelease preparation, checks each committed version with `publish-guard`, and publishes with `--tag latest`. Default installs, `ai-dossier update`, and scheduler version checks continue to use `latest`.
 
 ### Manual Publishing (Local)
 
@@ -31,6 +25,8 @@ The workflow will bump versions, commit, tag, and publish automatically.
 npm run publish:all
 ```
 
+This local convenience publishes core, CLI, and MCP server only. Use the Actions `stable` channel to publish and verify the complete five-package cohort through the existing OIDC publisher.
+
 ---
 
 ## Packages
@@ -38,6 +34,8 @@ npm run publish:all
 | Package | npm | Description |
 |---------|-----|-------------|
 | `@ai-dossier/core` | Core verification and parsing logic |
+| `@ai-dossier/worktree-pool` | Pre-warmed Git worktree pool for coding agents |
+| `@ai-dossier/sched` | Deterministic scheduler for multi-agent coding workflows |
 | `@ai-dossier/cli` | Command-line tool for dossier operations |
 | `@ai-dossier/mcp-server` | MCP server for LLM integrations |
 
@@ -65,47 +63,32 @@ npx @ai-dossier/mcp-server
 
 ## Version Management
 
-### Via Manual Dispatch
+### Channels
 
-When running the workflow manually:
-- **patch**: 1.0.0 → 1.0.1 (bug fixes)
-- **minor**: 1.0.0 → 1.1.0 (new features, backward compatible)
-- **major**: 1.0.0 → 2.0.0 (breaking changes)
-- **skip**: Don't bump version, just publish current
+- **`next`**: automatically updated by every publish workflow run with a unique prerelease version.
+- **`latest`**: updated by a stable-channel publish of the committed stable versions. Bump the publishable package manifests as a cohort; the workflow publishes those exact versions and does not retag prereleases.
+- Package manifest versions are the stable baseline. The `next` channel derives temporary prerelease versions without committing them back to `main`.
 
 ### Enforced on Pull Requests
 
 CI's `version-bump` job fails a PR that changes a publishable package's `src/` or `bin/` without
 bumping that package's `package.json` version (or bumps it to a number the base-branch tip already
-holds), because the publish workflow never re-releases a version already on npm — since #826 it fails
-the run with a version collision (`scripts/publish-guard.mjs`) when that version was built from
-different source. Apply the `no-release-needed` label when a change truly needs no release; a
-labelled change to `src/`/`bin/` still fails the next publish run until the package is bumped.
+holds). The publish workflow derives a unique prerelease from that stable baseline for each run.
+Apply the `no-release-needed` label when a change truly needs no release.
 
-### Manual Version Bumps
+### Manual Stable Cohort Bumps
 
 ```bash
-# Bump core version
-cd packages/core
-npm version patch  # or minor, major
-
-# Bump CLI version and update dependency
-cd ../../cli
-npm version patch
-npm pkg set "dependencies.@ai-dossier/core=^$(cd ../packages/core && node -p 'require(\"./package.json\").version')"
-
-# Bump MCP server version
-cd ../mcp-server
-npm version patch
-
-# Commit and tag
-cd ..
-git add packages/core/package.json cli/package.json mcp-server/package.json
-VERSION=$(cd cli && node -p "require('./package.json').version")
-git commit -m "chore: bump version to $VERSION"
-git tag "v$VERSION"
-git push && git push --tags
+# Patch-bump every publishable package in the same PR.
+npm version patch --no-git-tag-version --workspace=@ai-dossier/core
+npm version patch --no-git-tag-version --workspace=@ai-dossier/worktree-pool
+npm version patch --no-git-tag-version --workspace=@ai-dossier/sched
+npm version patch --no-git-tag-version --workspace=@ai-dossier/cli
+npm version patch --no-git-tag-version --workspace=@ai-dossier/mcp-server
+npm install --package-lock-only
 ```
+
+After the PR merges, dispatch the stable channel (directly from `publish-packages.yml` or through **Dispatch stable npm publishing**) to publish the cohort under `latest`.
 
 ---
 
@@ -113,9 +96,11 @@ git push && git push --tags
 
 The publish pipeline runs on:
 
-1. **Tag push** (`v*`) — the primary trigger
-2. **GitHub Release** — when a release is published
-3. **Manual dispatch** — via GitHub Actions UI with optional version bump
+1. **Push to main** — automatically publishes the next cohort
+2. **Tag push** (`v*`) or **GitHub Release** — publishes a next cohort for that ref
+3. **Manual dispatch** — `next` (default) publishes a prerelease cohort; `stable` publishes committed stable manifests from `main`
+
+The stable channel uses the same trusted-publisher workflow as `next`; **Dispatch stable npm publishing** only dispatches `publish-packages.yml` with `channel=stable`.
 
 A `concurrency` group prevents duplicate runs when both a tag push and release event fire.
 
@@ -143,12 +128,9 @@ npm run publish:cli
 npm run publish:mcp
 ```
 
-### Authentication Errors
+### Trusted Publishing / OIDC Errors
 
-Ensure the `NPM_TOKEN` repository secret is set:
-1. Get an automation token from https://www.npmjs.com/settings/YOUR_USERNAME/tokens
-2. Add to GitHub: Settings → Secrets → Actions → New repository secret
-3. Name: `NPM_TOKEN`
+Both publish channels must run in `.github/workflows/publish-packages.yml`, which requests the OIDC identity token. If publishing cannot authenticate, confirm the npm Trusted Publisher remains bound to this repository and workflow. The dispatcher only needs GitHub Actions permission to dispatch that workflow and does not use npm credentials.
 
 ---
 

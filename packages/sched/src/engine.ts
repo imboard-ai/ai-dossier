@@ -126,6 +126,15 @@ import {
   parkedWithoutMerger,
 } from './merge-mechanism';
 import type { SchedStore } from './persist';
+import {
+  firstOccurrence,
+  type PreservedWork,
+  preservedWorkInstruction,
+  preserveWork,
+  pruneRescueRefs,
+  skippedSummary,
+  takeoverWorktreeRefusal,
+} from './preserve';
 import type { ExecFn } from './project';
 import { DISPATCHABLE_ISSUE_STATUSES, runnableUnits } from './readiness';
 import type { MemberResumeSeeder } from './resume-seed';
@@ -176,6 +185,13 @@ export interface EngineDeps {
   repoDir: string;
   /** Exec for teardown scripts (#468); injectable so tests never touch git/npx. */
   teardownExec: ExecFn;
+  /**
+   * Exec for `preserveWork` (#945) — git commit-tree + push from a dead
+   * agent's worktree. Takeover preservation is ON only when this is supplied
+   * (the CLI wires a bounded-timeout one); without it a takeover respawns
+   * exactly as before. It runs OUTSIDE the state lock: see `rescueBeforeTakeover`.
+   */
+  rescueExec?: ExecFn;
   /**
    * Writes the takeover record before a redispatch respawns (#504). Optional: an
    * engine constructed without one redispatches exactly as it did before fencing
@@ -378,6 +394,13 @@ interface TickCtx {
    * cache miss runs `gh api`, which must never happen under `store.withLock`.
    */
   mechanism: MergeMechanism | undefined;
+  /**
+   * #945: takeover rescues computed OUTSIDE the lock (`rescueBeforeTakeover`),
+   * keyed by unit; `null` = nothing to preserve. Undefined when preservation is
+   * off. A takeover whose unit is not here yet (it entered recovery during this
+   * very pass) is held until the next tick — never rescued under the lock.
+   */
+  rescued?: Map<string, PreservedWork | null>;
 }
 
 function journal(
@@ -956,6 +979,17 @@ function spawnUnit(ctx: TickCtx, state: SchedState, unit: string): SchedState {
   const seeded = slot.gen === 0 ? seedResumeTrail(ctx, state, issue) : { state, run: null };
   const seededState = seeded.state;
   const evidence = findEntry(seededState, issue)?.failure_evidence ?? null;
+  // #945: a takeover (gen > 0) lands on whatever the dead run left in its
+  // worktree — preserve it first and tell the respawn to resume from it.
+  let preserved: PreservedWork | null = null;
+  if (slot.gen > 0 && ctx.rescued !== undefined) {
+    if (!ctx.rescued.has(unit)) {
+      // Held: the rescue (git + gh) runs outside the lock before the NEXT tick's
+      // respawn. The slot stays `recovering`; `reconcileRecovering` retries it.
+      return state;
+    }
+    preserved = ctx.rescued.get(unit) ?? null;
+  }
 
   return spawnAndRecord(ctx, seededState, unit, slot, {
     tier: entry.tier,
@@ -965,27 +999,155 @@ function spawnUnit(ctx: TickCtx, state: SchedState, unit: string): SchedState {
     // replaced is refused. A first dispatch is generation 0 and reads as it always did.
     // The tier's own resolved prompt (#527) — falls back to the global
     // dispatch.prompt when the tier has no override.
-    prompt: withPriorWork(
-      buildPrompt(
-        dispatch.tiers[entry.tier].prompt,
-        issue,
-        slot.gen,
-        // #683 AC6: the takeover is told its slot identity alongside the generation —
-        // the same label the fence announced and the bind names (one spelling,
-        // `takeoverLabelFor`). Descriptive only: ownership is decided by run id +
-        // generation, never by matching this label (AC7).
-        slot.gen > 0 ? takeoverLabelFor(slot.id, slot.recoveries) : undefined,
-        // #887: the repo's detected merge mechanism decides detached vs attached ship.
-        ctx.mechanism
-      ),
-      // #810: a requeued parked batch member continues from its member branch —
-      // on the FIRST generation only: a takeover resumes its own run's pushed
-      // branch (the takeover instruction), which may already carry newer work.
-      slot.gen === 0 ? priorWorkInstruction(issue, evidence, evidence?.resume_run ?? null) : null
-    ),
+    prompt:
+      withPriorWork(
+        buildPrompt(
+          dispatch.tiers[entry.tier].prompt,
+          issue,
+          slot.gen,
+          // #683 AC6: the takeover is told its slot identity alongside the generation —
+          // the same label the fence announced and the bind names (one spelling,
+          // `takeoverLabelFor`). Descriptive only: ownership is decided by run id +
+          // generation, never by matching this label (AC7).
+          slot.gen > 0 ? takeoverLabelFor(slot.id, slot.recoveries) : undefined,
+          // #887: the repo's detected merge mechanism decides detached vs attached ship.
+          ctx.mechanism
+        ),
+        // #810: a requeued parked batch member continues from its member branch —
+        // on the FIRST generation only: a takeover resumes its own run's pushed
+        // branch (the takeover instruction), which may already carry newer work.
+        slot.gen === 0 ? priorWorkInstruction(issue, evidence, evidence?.resume_run ?? null) : null
+      ) + (preserved === null ? '' : `\n\n${preservedWorkInstruction(preserved)}`),
     phase: 'gate',
     ...(slot.gen > 0 ? { journalExtra: { detail: `takeover gen=${slot.gen}` } } : {}),
   });
+}
+
+/**
+ * #945: preserve what a superseded run left in its worktree before its takeover
+ * is spawned — for every slot ALREADY awaiting a takeover respawn, computed
+ * OUTSIDE the state lock (`gh` issue read, `git worktree list`, the rescue
+ * script and its push are all subprocesses). The worktree comes from the run's
+ * setup milestone (an issue COMMENT), so it is acted on only when it passes
+ * `takeoverWorktreeRefusal` (registered worktree of THIS repo, under the
+ * sanctioned roots, not the main checkout, not held by a batch). Journals
+ * `work-preserved` / `work-preserve-failed`; a refusal is journaled once per
+ * unit and yields `null`. Nothing here ever blocks the respawn.
+ */
+function rescueBeforeTakeover(
+  deps: EngineDeps,
+  state: SchedState
+): Map<string, PreservedWork | null> | undefined {
+  const exec = deps.rescueExec;
+  // A paused scheduler dispatches nothing: no gh/git calls for slots that cannot respawn.
+  if (exec === undefined) return undefined;
+  // Held slots: nothing to rescue for now — and nothing may respawn without a rescue either.
+  if (state.paused) return new Map();
+  const rescued = new Map<string, PreservedWork | null>();
+  for (const slot of state.slots) {
+    if (slot.unit === null || slot.gen <= 0) continue;
+    const awaiting =
+      slot.status === 'recovering' || (slot.status === 'assigned' && slot.pid === null);
+    const issue = slot.unit.startsWith('issue:') ? Number(slot.unit.slice('issue:'.length)) : NaN;
+    if (!awaiting || !Number.isInteger(issue)) continue;
+    rescued.set(slot.unit, preserveForTakeover(deps, exec, state, slot.unit, issue));
+  }
+  return rescued;
+}
+
+const RESCUE_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const lastRescuePrune = new WeakMap<object, number>();
+
+/**
+ * #945: rescue refs are disposable (14-day TTL) — prune once a day, OUTSIDE the state
+ * lock (it talks to origin), not only at `sched start`. The first tick only sets the
+ * baseline: the CLI already pruned at start. Never throws.
+ */
+function pruneRescueRefsDaily(deps: EngineDeps): void {
+  const exec = deps.rescueExec;
+  if (exec === undefined) return;
+  const now = deps.now();
+  const last = lastRescuePrune.get(deps.journal);
+  if (last === undefined) {
+    lastRescuePrune.set(deps.journal, now.getTime());
+    return;
+  }
+  if (now.getTime() - last < RESCUE_PRUNE_INTERVAL_MS) return;
+  lastRescuePrune.set(deps.journal, now.getTime());
+  try {
+    const pruned = pruneRescueRefs(exec, deps.repoDir, now);
+    if (pruned.length > 0) {
+      deps.journal.append(
+        {
+          event: 'rescue-pruned',
+          detail: `pruned ${pruned.length} expired rescue ref(s): ${pruned.join(', ')}`,
+        },
+        now
+      );
+    }
+  } catch {
+    // housekeeping only
+  }
+}
+
+function preserveForTakeover(
+  deps: EngineDeps,
+  exec: ExecFn,
+  state: SchedState,
+  unit: string,
+  issue: number
+): PreservedWork | null {
+  let info: ReturnType<EngineDeps['groundTruth']['setupInfo']>;
+  try {
+    info = deps.groundTruth.setupInfo(issue);
+  } catch {
+    return null;
+  }
+  if (info === null || info === undefined) return null;
+  const refusal = takeoverWorktreeRefusal(exec, {
+    repoDir: deps.repoDir,
+    worktree: info.worktree,
+    state,
+    unit,
+  });
+  if (refusal !== null) {
+    if (firstOccurrence(deps.journal, `${unit}|${refusal}`)) {
+      deps.journal.append(
+        unitEvent('work-preserve-failed', unit, {
+          worktree: info.worktree,
+          detail: `takeover rescue skipped: ${refusal} — the worktree is not touched`,
+        }),
+        deps.now()
+      );
+    }
+    return null;
+  }
+  const outcome = preserveWork(exec, { worktree: info.worktree, unit, now: deps.now() });
+  if (outcome.kind === 'preserved') {
+    const w = outcome.work;
+    if (!w.reused) {
+      const skipped = skippedSummary(w.skipped);
+      deps.journal.append(
+        unitEvent('work-preserved', unit, {
+          branch: w.ref,
+          worktree: info.worktree,
+          detail: `${w.dirty_files} uncommitted file(s) + ${w.unpushed_commits} unpushed commit(s) on head ${w.head} preserved as ${w.sha} at ${w.ref} (${w.pushed ? 'pushed' : w.local_only ? 'local only — includes untracked files, never pushed' : 'NOT pushed — local ref only'})${skipped ? `; ${skipped}` : ''}; the takeover is told to resume from it`,
+        }),
+        deps.now()
+      );
+    }
+    return w;
+  }
+  if (outcome.kind === 'failed' && firstOccurrence(deps.journal, `${unit}|${outcome.reason}`)) {
+    deps.journal.append(
+      unitEvent('work-preserve-failed', unit, {
+        worktree: info.worktree,
+        detail: `${outcome.reason} — ${outcome.probe.dirty_files} uncommitted file(s), ${outcome.probe.unpushed_commits} unpushed commit(s) left in place in the worktree`,
+      }),
+      deps.now()
+    );
+  }
+  return null;
 }
 
 /**
@@ -3368,9 +3530,12 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
   const labelVerifiedIssues = labelVerified(labelPoll);
   const closedPoll = pollClosed(deps, state0, config);
   const mechanism = deps.groundTruth.mergeMechanism?.();
+  // #945: takeover rescues (git/gh/push) — outside the lock, like every poll above.
+  const rescued = rescueBeforeTakeover(deps, state0);
+  pruneRescueRefsDaily(deps);
 
   const pass1 = deps.store.withLock((state) => {
-    const ctx: TickCtx = { deps, config, dispatch, result: emptyResult(), mechanism };
+    const ctx: TickCtx = { deps, config, dispatch, result: emptyResult(), mechanism, rescued };
     let next = reconcileSlots(ctx, state, polled);
     next = reconcileParked(ctx, next, prPoll);
     next = reconcileStaleFailedParks(ctx, next, prPoll);
@@ -3401,7 +3566,7 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
     }
     if (results.size > 0 || unreachable.length > 0) {
       result = deps.store.withLock((state) => {
-        const ctx: TickCtx = { deps, config, dispatch, result, mechanism };
+        const ctx: TickCtx = { deps, config, dispatch, result, mechanism, rescued };
         let next = state;
         // #636: `setupInfo` answered for these — any unreachable streak is over.
         for (const issue of results.keys()) {

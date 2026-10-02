@@ -57,7 +57,7 @@ describe('systemd unit rendering (#945 AC1)', () => {
     expect(unit).toContain(
       'ExecStart=/home/u/.nvm/versions/node/v22.1.0/bin/node /home/u/.nvm/versions/node/v22.1.0/bin/ai-dossier sched start --project imboard-ai-ai-dossier --auto-upgrade --alert-issue 945'
     );
-    expect(unit).toContain('WorkingDirectory=/home/u/projects/ai-dossier/main');
+    expect(unit).toContain('WorkingDirectory="/home/u/projects/ai-dossier/main"');
     expect(unit).toContain(
       'Environment="PATH=/home/u/.nvm/versions/node/v22.1.0/bin:/usr/bin:/bin"'
     );
@@ -68,9 +68,16 @@ describe('systemd unit rendering (#945 AC1)', () => {
     expect(plain).toMatch(/sched start --project imboard-ai-ai-dossier\n/);
   });
 
-  it('quotes paths with spaces and escapes % and $; rejects newlines', () => {
-    const odd = renderSystemdUnit({ ...spec, cliPath: '/opt/my tools/100%/ai-dossier' });
-    expect(odd).toContain('"/opt/my tools/100%%/ai-dossier"');
+  it('quotes systemd paths and escapes unit syntax; rejects newlines', () => {
+    const odd = renderSystemdUnit({
+      ...spec,
+      cliPath: '/opt/my tools/100%/$bin/ai-dossier',
+      repoDir: '/home/u/My Projects/100%/repo',
+      envPath: '/opt/my "tools"/100%/bin:/usr/bin',
+    });
+    expect(odd).toContain('"/opt/my tools/100%%/$$bin/ai-dossier"');
+    expect(odd).toContain('WorkingDirectory="/home/u/My Projects/100%%/repo"');
+    expect(odd).toContain('Environment="PATH=/opt/my \\"tools\\"/100%%/bin:/usr/bin"');
     expect(() => renderSystemdUnit({ ...spec, repoDir: '/x\nExecStart=/bin/evil' })).toThrow(
       /newline/
     );
@@ -433,8 +440,10 @@ describe('readCrontabStrict (fake crontab binary on PATH)', () => {
     expect(readCrontabStrict()).toBe('0 3 * * * backup\n');
   });
   it('treats ONLY the exact "no crontab for <user>" as empty', () => {
-    fake('echo "no crontab for alice" >&2; exit 1');
+    fake(`echo "no crontab for ${os.userInfo().username}" >&2; exit 1`);
     expect(readCrontabStrict()).toBe('');
+    fake(`echo "no crontab for ${os.userInfo().username}; permission denied" >&2; exit 1`);
+    expect(() => readCrontabStrict()).toThrow(/crontab -l exited 1/);
   });
   it('throws on any other failure (permission, wrong exit, spawn failure)', () => {
     fake('echo "crontab: must be privileged to use -l" >&2; exit 1');

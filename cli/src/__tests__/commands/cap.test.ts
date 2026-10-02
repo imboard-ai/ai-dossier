@@ -8,7 +8,8 @@ import { registerCapCommand } from '../../commands/cap';
 import { compareVersions } from '../../version';
 import { createTestProgram } from '../helpers/test-utils';
 
-vi.mock('../../cap-log', () => ({
+vi.mock('../../cap-log', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../cap-log')>()),
   appendCapLog: vi.fn(),
 }));
 

@@ -1,7 +1,7 @@
 {
   "name": "@ai-dossier/sched",
-  "version": "0.67.0",
-  "description": "Deterministic scheduler core for dossier batch cycles — queue, slots, persistent state machine, dispatch engine with completion verification and stall/escalation ladder, PR watching with script-based teardown, and batch failure recovery (attribution, bisect, eviction, dissolve). The scheduler never invokes an LLM.",
+  "version": "0.68.3",
+  "description": "Deterministic scheduler for multi-agent coding workflows: queue work, orchestrate parallel agents, verify completion, and recover stalled runs.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
@@ -16,11 +16,13 @@
     "test:coverage": "vitest run --coverage"
   },
   "keywords": [
-    "scheduler",
+    "agent-scheduler",
+    "multi-agent-orchestration",
+    "parallel-coding-agents",
+    "workflow-orchestration",
     "state-machine",
-    "dossier",
-    "batch",
-    "orchestration"
+    "coding-agents",
+    "task-scheduler"
   ],
   "author": "Yuval Dimnik <yuval.dimnik@gmail.com>",
   "license": "AGPL-3.0-only",
@@ -29,7 +31,7 @@
     "url": "https://github.com/imboard-ai/ai-dossier.git",
     "directory": "packages/sched"
   },
-  "homepage": "https://github.com/imboard-ai/ai-dossier#readme",
+  "homepage": "https://ai-dossier.dev",
   "bugs": {
     "url": "https://github.com/imboard-ai/ai-dossier/issues"
   },

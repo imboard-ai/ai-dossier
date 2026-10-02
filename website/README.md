@@ -4,6 +4,8 @@ Static site for AI Dossier: landing page, docs and registry browser, built with
 [Astro](https://astro.build). It is a standalone project (its own `package-lock.json`), **not** an
 npm workspace, so `make build-all`, the publish pipeline and the version-bump check never see it.
 
+> **Part of the ai-dossier ecosystem**: use [`@ai-dossier/cli`](../cli/README.md) to author portable AI-agent skills, [`@ai-dossier/mcp-server`](../mcp-server/README.md) to use them with MCP clients, and the [ai-dossier project](https://github.com/imboard-ai/ai-dossier) for the complete platform.
+
 ```bash
 cd website
 npm ci
@@ -29,7 +31,7 @@ a daily GitHub Action cron, or on registry publish.
 
 Environment: `REGISTRY_API_URL` (default the production registry), `REGISTRY_OPTIONAL=1` (build with
 no registry pages if the API is unreachable; used in PR CI), `SITE_URL` (canonical/sitemap origin;
-defaults to Vercel's production URL, else `https://ai-dossier.vercel.app`).
+defaults to `https://ai-dossier.dev`; `npm run check:canonical` fails the build if any page's canonical host differs).
 
 ## Vercel settings
 

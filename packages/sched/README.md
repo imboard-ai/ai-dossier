@@ -2,6 +2,12 @@
 
 [![npm](https://img.shields.io/npm/v/@ai-dossier/sched.svg)](https://www.npmjs.com/package/@ai-dossier/sched)
 
+**Use one portable AI-agent skill across Claude Code, Codex, OpenCode, and MCP-compatible workflows.**
+
+`@ai-dossier/sched` is for engineering teams running parallel coding agents. It is a deterministic scheduler that queues work, manages worker slots, verifies completion, watches PRs, and recovers stalled multi-agent workflows without invoking an LLM itself.
+
+> **Part of the ai-dossier ecosystem**: use [`@ai-dossier/cli`](../../cli/README.md) to run workflows, [`@ai-dossier/worktree-pool`](../worktree-pool/README.md) for ready worktrees, and the [ai-dossier project](https://github.com/imboard-ai/ai-dossier) for the complete platform.
+
 Deterministic scheduler core for dossier batch cycles — queue, worker slots, typed state
 machines, crash-safe persistence, the **dispatch engine** (#464: spawning agent
 processes, verifying their completion against ground truth, mechanizing the
@@ -508,6 +514,59 @@ Only SIGINT had a handler, so a SIGTERM/SIGHUP (another session's restart, a clo
 terminal) killed the engine with no line and no lease release. That is now logged; if the
 2026-09-29 cause was SIGKILL/OOM, the missing `engine-exit` plus the stale lease is now the
 documented signature (`journalctl -k` for the OOM window).
+
+### Restart never discards work (#945, #940)
+
+Before the engine respawns an agent onto a worktree that already exists — a batch **tail**, a
+batch **member** reusing its worktree, an issue **takeover** — it preserves whatever the dead
+agent left there (`preserve.ts`):
+
+- a WIP commit under the **non-branch** ref `refs/sched-rescue/<unit>-<timestamp>` (adds no branch,
+  triggers no CI), holding every tracked change (`git add -u`, deletions and staged renames
+  included), the unpushed commits, and those untracked / staged-new files that pass the **secret
+  and size filter**, journaled as `work-preserved` (`branch` = the ref). **Only tracked changes and
+  unpushed commits are ever pushed.** A rescue whose tree also holds untracked / staged-new files
+  stays **local** (the ref lives in the local repo; the worktree and its `.git` survive a respawn
+  anyway) and says `local only` in the journal and the respawn prompt. The final tree is filtered
+  once more: any path new relative to HEAD (a rename into a secret name, `git add -N`, staged-new)
+  matching `.env*`, `*.env.*`, `*.pem`/`*.key` (and `*.pem.*`/`*.key.*`), `id_rsa*`, `id_ed25519*`,
+  `*credentials*`, `*secret*`, `*token*`, `*.p12`, `*.pfx`, `*.tfstate*`, `*.tfvars`, `kubeconfig`,
+  `.kube/`, `.docker/config.json`, `.pypirc`, `.vault-token`, `.htpasswd`, `.s3cfg`, `.npmrc`,
+  `.netrc`, `.ssh/` … is dropped. Untracked files over 1 MiB, past 500 files / 16 MiB, tracked
+  changes over 50 MiB and submodule/nested-repo contents are not captured; they stay in the
+  worktree and the journal / prompt count what was skipped and why. This filter is
+  defence-in-depth: the rescue bypasses the pre-commit secret scan;
+- **TTL is housekeeping, not privacy.** A pushed rescue ref is **world-readable on a public
+  repository, and deleting a ref does NOT unpublish it** (GitHub keeps objects reachable by SHA).
+  Rescue refs older than 14 days (by the timestamp in the ref name) are deleted locally and on
+  origin (listed with `git ls-remote`, so refs pushed from other clones are covered) together with
+  their `sched-rescue-pushed-<sha>` markers: at `sched start` and then daily outside the state
+  lock. A ref whose remote deletion fails for any reason but "already gone" is kept and retried.
+  Find live ones with `git for-each-ref refs/sched-rescue`;
+- built with a throwaway index, so the worktree, its index and its HEAD are untouched — the
+  respawned agent still finds the files in place, and preservation cannot itself lose work;
+- idempotent: an unchanged tree reuses its existing rescue ref instead of minting one per tick;
+- the respawned agent's prompt gets a `PRESERVED WORK` instruction naming the ref and forbidding a
+  reset to the last pushed head. A failed push is journaled (`pushed: false` in the detail) and is
+  not fatal; an unpreservable worktree journals `work-preserve-failed` and is left as it is.
+
+A takeover's worktree path comes from a setup milestone (an issue comment), so it is acted on only
+when `git worktree list` registers it in this repository, it is under the sanctioned `worktrees/`
+roots, it is not the main checkout, and no batch holds it (`takeoverWorktreeRefusal`; a refusal is
+journaled `work-preserve-failed` and never blocks the respawn). **The takeover rescue runs outside
+the state lock** (it shells out to `gh`, `git` and `git push`): a stalled unit enters recovery on
+one tick and its takeover is spawned on the next, after the rescue. Takeover preservation is on
+only when the engine is given a `rescueExec` (the CLI wires one, 120 s per call).
+
+**Batch tail, respawn only:** when the previous tail exited unverified and its worktree holds
+uncommitted files, or the NEWEST `gate.batch` row in `caps.jsonl` for that worktree (matched by realpath of `cwd`) is a
+passing run on a **dirty** tree (`dirty: true` or `git_probe` set — #941's fields) newer than the
+last pushed head while local work exists, the engine does **not** respawn. Rows without #941's
+fields (the engine's own post-landing gate rows) and clean rows are never evidence; an older dirty
+row is superseded by a newer clean or failed one. It blocks the batch `tail-dirty-worktree`, with the evidence and the
+rescue ref in the journal and `sched status`. Commit or discard the work in the worktree, then
+ `sched resume --batch <id>`. A tail that left only unpushed commits is respawned, told to resume
+ from the rescue ref. `sched resume --batch` deliberately does NOT re-run this guard: by resuming, the operator has looked at the worktree.
 
 ### Zombie-run fencing (#504)
 

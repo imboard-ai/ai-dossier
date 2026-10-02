@@ -4,7 +4,11 @@
 [![npm downloads](https://img.shields.io/npm/dm/@ai-dossier/worktree-pool)](https://www.npmjs.com/package/@ai-dossier/worktree-pool)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](https://github.com/imboard-ai/ai-dossier/blob/main/LICENSE)
 
-Pre-warmed git worktree pool for instant issue setup. Eliminates the ~3-5 minute cold start (git worktree add + install + build) by maintaining a pool of ready-to-use worktrees.
+**Use one portable AI-agent skill across Claude Code, Codex, OpenCode, and MCP-compatible workflows.**
+
+`@ai-dossier/worktree-pool` is for developers and coding-agent teams that need isolated, parallel Git worktrees without repeated setup. It maintains ready-to-use worktrees so issue work can begin in seconds instead of repeating a dependency install and build for every agent.
+
+> **Part of the ai-dossier ecosystem**: use [`@ai-dossier/sched`](../sched/README.md) to orchestrate agents, [`@ai-dossier/cli`](../../cli/README.md) to run workflows, and the [ai-dossier project](https://github.com/imboard-ai/ai-dossier) for the complete platform.
 
 Works with pnpm, yarn, bun and npm — the package manager, lockfile and build command are detected from the project, or pinned explicitly in `.worktree-pool.json`.
 

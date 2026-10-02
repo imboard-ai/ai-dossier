@@ -4,6 +4,7 @@
  *   cap init [--print]       scaffold a manifest from the detected project (#645)
  *   cap list [--json]        inspect .dossier/automation/manifest.yaml
  *   cap run <id> [-- args]   execute one capability
+ *   cap last-ok <id> --tree <sha> [-- args]   did this exact tree already pass? (#941)
  *
  * `cap run` owns its exit codes (the four-way outcome contract):
  *   0 ok · 1 task-failed · 2 automation-broken · 3 capability-unavailable
@@ -16,8 +17,9 @@
 import { findDossierRoot } from '@ai-dossier/sched';
 import type { Command } from 'commander';
 import { CAP_ENVELOPE_FILE_ENV, CAP_ENVELOPE_MARKER, writeCapEnvelopeFile } from '../cap-envelope';
+import { captureGitState, mergeGitStates } from '../cap-git';
 import { initManifest, missingGateCapabilities, scaffoldManifest } from '../cap-init';
-import { appendCapLog } from '../cap-log';
+import { appendCapLog, findLastOk, hashCapArgs, hashCapCommand } from '../cap-log';
 import {
   AUTOMATION_DIR,
   CAPABILITY_EXIT_CODES,
@@ -29,6 +31,7 @@ import {
   MANIFEST_FILE,
   runCapabilityFromCwd,
 } from '../capability';
+import { getConfig } from '../config';
 import { fail } from '../helpers';
 import { renderTable } from '../table';
 
@@ -62,6 +65,9 @@ function drain(stream: NodeJS.WriteStream): Promise<void> {
     }
   });
 }
+
+/** `cap last-ok` exit codes: distinct so a caller can tell "run it" from "could not ask". */
+const LAST_OK_EXIT = { match: 0, noMatch: 1, error: 2, auditDisabled: 3 } as const;
 
 function loadOrFail(): CapabilityManifest {
   try {
@@ -176,6 +182,78 @@ export function registerCapCommand(program: Command): void {
     });
 
   cap
+    .command('last-ok <id> [args...]')
+    .description(
+      'Did this exact tree already pass? Prints the latest clean `ok` caps.jsonl row for <id> run with exactly [args] (after --) at --tree. ' +
+        `Exit codes: ${LAST_OK_EXIT.match} match, ${LAST_OK_EXIT.noMatch} no match (no output; dirty, failed and different-args runs never match), ` +
+        `${LAST_OK_EXIT.error} error (bad --tree, unreadable log), ${LAST_OK_EXIT.auditDisabled} audit log disabled (cannot answer) (#941)`
+    )
+    .option(
+      '--tree <sha>',
+      'git tree sha, 40 or 64 hex (`git rev-parse HEAD^{tree}`); must come from a CLEAN tree'
+    )
+    .option(
+      '--here',
+      'Probe the current directory instead: use its tree and prefix, exit 1 if the tree is dirty'
+    )
+    .option(
+      '--prefix <path>',
+      "Directory inside the repo the run happened in (default: the current directory's own prefix)"
+    )
+    .allowUnknownOption(true)
+    .action(
+      (id: string, args: string[], opts: { tree?: string; here?: boolean; prefix?: string }) => {
+        const cwd = process.cwd();
+        const here = captureGitState(cwd);
+        let tree = opts.tree;
+        if (opts.here) {
+          if (here === null) {
+            process.stderr.write('cap last-ok --here: not inside a git work tree with a commit\n');
+            process.exit(LAST_OK_EXIT.error);
+          }
+          if (here.dirty) process.exit(LAST_OK_EXIT.noMatch);
+          tree = here.git_tree;
+        }
+        if (tree === undefined || !/^([0-9a-f]{40}|[0-9a-f]{64})$/.test(tree)) {
+          process.stderr.write(
+            `cap last-ok: --tree must be a 40- or 64-hex git tree sha (or use --here), got '${tree}'\n`
+          );
+          process.exit(LAST_OK_EXIT.error);
+        }
+        let commandHash: string | undefined;
+        try {
+          const entry = loadCapabilityManifest(cwd).capabilities[id];
+          if (!entry) process.exit(LAST_OK_EXIT.noMatch);
+          commandHash = hashCapCommand(entry.command);
+        } catch (err) {
+          if (err instanceof CapManifestError) {
+            process.stderr.write(`cap last-ok: ${err.message}\n`);
+            process.exit(LAST_OK_EXIT.error);
+          }
+          throw err;
+        }
+        if (getConfig('auditLog') === false) {
+          process.stderr.write('cap last-ok: auditLog is disabled — no caps.jsonl to consult\n');
+          process.exit(LAST_OK_EXIT.auditDisabled);
+        }
+        let row: ReturnType<typeof findLastOk>;
+        try {
+          row = findLastOk(id, tree, args, undefined, {
+            prefix: opts.prefix ?? here?.git_prefix ?? '',
+            commandHash,
+          });
+        } catch (err) {
+          process.stderr.write(
+            `cap last-ok: could not read caps.jsonl: ${(err as Error).message}\n`
+          );
+          process.exit(LAST_OK_EXIT.error);
+        }
+        if (!row) process.exit(LAST_OK_EXIT.noMatch);
+        console.log(JSON.stringify(row));
+      }
+    );
+
+  cap
     .command('run <id> [args...]')
     .description(
       'Execute one capability; extra args after -- are shell-quoted and appended to the command. ' +
@@ -196,7 +274,18 @@ export function registerCapCommand(program: Command): void {
       if (!Number.isFinite(tailBytes) || tailBytes < 0) {
         fail([`--tail-bytes must be a non-negative number, got '${opts.tailBytes}'`]);
       }
+      // Probed before AND after: the row names the tree the run started on and
+      // is dirty if the run (or anything before it) changed the work tree.
+      let commandHash: string | undefined;
+      try {
+        const entry = loadCapabilityManifest(cwd).capabilities[id];
+        if (entry) commandHash = hashCapCommand(entry.command);
+      } catch {
+        // runCapabilityFromCwd reports a bad manifest as the run's own outcome
+      }
+      const gitBefore = captureGitState(cwd);
       const result = runCapabilityFromCwd(id, args, cwd, tailBytes);
+      const gitState = mergeGitStates(gitBefore, gitBefore ? captureGitState(cwd) : null);
 
       // The verdict channel is written FIRST: nothing after this point (the
       // telemetry append, stdout) may prevent a consumer from reading it.
@@ -224,6 +313,10 @@ export function registerCapCommand(program: Command): void {
           reason: result.reason,
           signal: result.signal,
           cwd,
+          args,
+          args_hash: hashCapArgs(args),
+          ...(commandHash ? { command_hash: commandHash } : {}),
+          ...(gitState ?? {}),
           ...(result.output_tail !== undefined ? { output_tail: result.output_tail } : {}),
         });
       } catch (err) {

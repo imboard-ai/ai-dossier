@@ -4,7 +4,7 @@ This document provides a high-level overview of the Dossier project architecture
 
 ## Quick Overview
 
-A dossier is a skill — a reusable instruction set an AI executes — with trust, versioning, and cross-tool portability built in. Dossier adds four things on top of a plain skill:
+A dossier is an agent skill with a version and a signature (a `.ds.md` file), so everyone installs the same thing and can verify who wrote it and that it wasn't changed. Dossier adds four things on top of a plain skill:
 1. **Trust**: SHA256 checksums + cryptographic signatures, verified before execution
 2. **Versioning**: semantic versions you can pin
 3. **Distribution**: a registry that makes skills discoverable and installable

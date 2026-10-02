@@ -9,6 +9,8 @@
  * duration_ms, reason, signal, cwd, timestamp.
  */
 
+import crypto from 'node:crypto';
+import fs from 'node:fs';
 import path from 'node:path';
 import type { CapabilityOutcome } from './capability';
 import { CONFIG_DIR } from './config';
@@ -27,6 +29,31 @@ export interface CapLogEntry {
   cwd: string;
   /** Last bytes of combined stdout+stderr on a non-ok outcome (#583 AC1/AC3). */
   output_tail?: string;
+  /** `git rev-parse HEAD` when cwd is a git work tree (#941). */
+  git_head?: string;
+  /** `git rev-parse HEAD^{tree}` when cwd is a git work tree (#941). */
+  git_tree?: string;
+  /** Tree was dirty before or after the run, or HEAD/tree moved during it (#941). */
+  dirty?: boolean;
+  /** Directory inside the repo the run happened in (`--show-prefix`); part of the match key. */
+  git_prefix?: string;
+  /** The git probe timed out or errored; `dirty` is then true (#941). */
+  git_probe?: 'timeout' | 'error';
+  /** Args passed after `--` to `cap run` (#941): `--only smoke` is not a full gate. */
+  args?: string[];
+  /** sha256 of the manifest `command` string that ran — a changed command never matches. */
+  command_hash?: string;
+  /** sha256 of the JSON args array — the match key for `cap last-ok`. */
+  args_hash?: string;
+}
+
+/** Stable digest of a capability's extra args (order-sensitive). */
+export function hashCapCommand(command: string): string {
+  return crypto.createHash('sha256').update(command).digest('hex');
+}
+
+export function hashCapArgs(args: string[]): string {
+  return crypto.createHash('sha256').update(JSON.stringify(args)).digest('hex');
 }
 
 const CAP_LOG_FILE = path.join(CONFIG_DIR, 'caps.jsonl');
@@ -37,6 +64,65 @@ const CAP_LOG_FILE = path.join(CONFIG_DIR, 'caps.jsonl');
  */
 export function appendCapLog(entry: CapLogEntry): void {
   appendAuditJsonl(CAP_LOG_FILE, entry);
+}
+
+/** A torn append can leave `{"timestamp"...garbage` glued to the next row; salvage the tail. */
+function parseRow(line: string): CapLogEntry | null {
+  try {
+    return JSON.parse(line) as CapLogEntry;
+  } catch {
+    const at = line.lastIndexOf('{"timestamp"');
+    if (at <= 0) return null;
+    try {
+      return JSON.parse(line.slice(at)) as CapLogEntry;
+    } catch {
+      return null;
+    }
+  }
+}
+
+/**
+ * Latest `ok` row for `capability` invoked with exactly `args` (from `scope.prefix`, with `scope.commandHash`, when given) that verified
+ * exactly `tree` on a clean working tree. Not part of the match key (by
+ * design): git-ignored files, toolchain/CLI versions, env, nested repos.
+ * A dirty row, a probe-failed row, or one without `args_hash` (pre-args
+ * schema) never matches. Null when nothing qualifies; a missing file is
+ * "nothing", any other read error throws.
+ */
+export function findLastOk(
+  capability: string,
+  tree: string,
+  args: string[] = [],
+  file: string = CAP_LOG_FILE,
+  scope: { prefix?: string; commandHash?: string } = {}
+): CapLogEntry | null {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
+  }
+  const want = hashCapArgs(args);
+  const lines = raw.split('\n');
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!lines[i]) continue;
+    const row = parseRow(lines[i]);
+    if (
+      row &&
+      row.capability === capability &&
+      row.outcome === 'ok' &&
+      row.git_tree === tree &&
+      row.dirty === false &&
+      !row.git_probe &&
+      row.args_hash === want &&
+      (scope.prefix === undefined || row.git_prefix === scope.prefix) &&
+      (scope.commandHash === undefined || row.command_hash === scope.commandHash)
+    ) {
+      return row;
+    }
+  }
+  return null;
 }
 
 export { CAP_LOG_FILE };

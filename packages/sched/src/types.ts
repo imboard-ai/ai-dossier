@@ -1903,6 +1903,15 @@ export type JournalEventName =
   // unit-scoped). Appended once per distinct (installed, latest) pair, not
   // every tick — see `installed_version`/`latest_version` on `JournalEvent`.
   | 'engine-stale'
+  // #945/#940: before respawning onto an existing worktree the engine
+  // preserved what the dead agent left (`work-preserved`, ref + sha in
+  // `branch`/`detail`), or could not (`work-preserve-failed`).
+  | 'work-preserved'
+  | 'work-preserve-failed'
+  // #940: a tail respawn refused over uncommitted / dirty-gated work (the block reason is `tail-dirty-worktree`).
+  | 'tail-respawn-refused'
+  // #945: rescue refs older than the TTL deleted at `sched start`.
+  | 'rescue-pruned'
   // #945: engine lifecycle — `engine-started` on every `sched start`;
   // `engine-exit` (reason + stack) on EVERY termination path the process can
   // observe (signal, uncaught exception, unhandled rejection, normal stop, bare

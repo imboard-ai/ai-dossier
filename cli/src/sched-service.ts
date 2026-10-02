@@ -66,6 +66,12 @@ function unitValue(v: string): string {
   return v.replace(/%/g, '%%');
 }
 
+/** Quote a systemd unit value that may contain spaces, quotes, or backslashes. */
+function quotedUnitValue(v: string): string {
+  if (/[\r\n]/.test(v)) throw new Error(`refusing a newline in a unit value: ${JSON.stringify(v)}`);
+  return `"${v.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/%/g, '%%')}"`;
+}
+
 /** Quote one ExecStart argument (systemd's own quoting: double quotes, `\"` and `\\`). */
 function execArg(v: string): string {
   if (/[\r\n]/.test(v)) throw new Error(`refusing a newline in an ExecStart argument`);
@@ -73,7 +79,7 @@ function execArg(v: string): string {
     .replace(/\\/g, '\\\\')
     .replace(/"/g, '\\"')
     .replace(/%/g, '%%')
-    .replace(/\$/g, '$$$$');
+    .replace(/\$/g, () => '$$');
   return /^[A-Za-z0-9_./:@=+-]+$/.test(v) ? escaped : `"${escaped}"`;
 }
 
@@ -107,8 +113,8 @@ export function renderSystemdUnit(spec: ServiceSpec): string {
     '',
     '[Service]',
     'Type=simple',
-    `WorkingDirectory=${unitValue(spec.repoDir)}`,
-    `Environment="PATH=${unitValue(spec.envPath)}"`,
+    `WorkingDirectory=${quotedUnitValue(spec.repoDir)}`,
+    `Environment=${quotedUnitValue(`PATH=${spec.envPath}`)}`,
     `ExecStart=${exec}`,
     // Always: a clean exit (a graceful stop, an upgrade restart) must come back too.
     'Restart=always',
