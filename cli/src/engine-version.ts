@@ -20,6 +20,7 @@ import { getConfiguredTtlSeconds, isWithinTtl } from './ttl-cache';
 import { compareVersions } from './version';
 
 const SCHED_PACKAGE_NAME = '@ai-dossier/sched';
+const CLI_PACKAGE_NAME = '@ai-dossier/cli';
 const NPM_LATEST_TIMEOUT_MS = 3000;
 
 export const ENGINE_VERSION_CACHE_DIR = path.join(
@@ -36,16 +37,16 @@ interface EngineVersionCacheRecord {
 }
 
 export interface EngineStalenessCheck {
-  /** Installed `@ai-dossier/sched` version, or null if it could not be resolved. */
+  /** Installed package version, or null if it could not be resolved. */
   installed: string | null;
-  /** npm registry latest, or null when the best-effort check couldn't complete. */
+  /** npm registry latest for that package, or null when the best-effort check couldn't complete. */
   latest: string | null;
   /** True only when both versions are known and installed < latest. */
   stale: boolean;
 }
 
-function cachePath(): string {
-  return path.join(ENGINE_VERSION_CACHE_DIR, 'sched-latest.json');
+function cachePath(packageName: string): string {
+  return path.join(ENGINE_VERSION_CACHE_DIR, `${path.basename(packageName)}-latest.json`);
 }
 
 /**
@@ -57,9 +58,9 @@ function cachePath(): string {
  */
 const VERSION_FORMAT = /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/;
 
-function readCache(): EngineVersionCacheRecord | null {
+function readCache(packageName: string): EngineVersionCacheRecord | null {
   try {
-    const raw = fs.readFileSync(cachePath(), 'utf8');
+    const raw = fs.readFileSync(cachePath(packageName), 'utf8');
     const parsed = JSON.parse(raw);
     if (
       typeof parsed?.latest_version === 'string' &&
@@ -74,10 +75,13 @@ function readCache(): EngineVersionCacheRecord | null {
   }
 }
 
-function writeCache(record: EngineVersionCacheRecord): void {
+function writeCache(packageName: string, record: EngineVersionCacheRecord): void {
   try {
     fs.mkdirSync(ENGINE_VERSION_CACHE_DIR, { recursive: true, mode: 0o700 });
-    fs.writeFileSync(cachePath(), JSON.stringify(record), { encoding: 'utf8', mode: 0o600 });
+    fs.writeFileSync(cachePath(packageName), JSON.stringify(record), {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
   } catch {
     // Best-effort — a failed cache write never blocks the check.
   }
@@ -85,7 +89,10 @@ function writeCache(record: EngineVersionCacheRecord): void {
 
 async function fetchNpmLatest(packageName: string): Promise<string | null> {
   try {
-    const response = await fetch(`https://registry.npmjs.org/${packageName}/latest`, {
+    const registryName = packageName.startsWith('@')
+      ? packageName.replace('/', '%2f')
+      : packageName;
+    const response = await fetch(`https://registry.npmjs.org/${registryName}/latest`, {
       signal: AbortSignal.timeout(NPM_LATEST_TIMEOUT_MS),
     });
     if (!response.ok) return null;
@@ -103,7 +110,7 @@ async function fetchNpmLatest(packageName: string): Promise<string | null> {
 }
 
 /**
- * Compare the installed `@ai-dossier/sched` against npm registry latest.
+ * Compare one installed engine package against npm registry latest.
  * Never throws.
  *
  * `opts.fresh` bypasses the TTL cache and forces a live fetch (used by
@@ -114,30 +121,45 @@ async function fetchNpmLatest(packageName: string): Promise<string | null> {
  * unreachable registry. `sched start`/`--once` is the process that performs
  * live fetches and refreshes the cache.
  */
-export async function checkEngineStaleness(
+async function checkPackageStaleness(
+  packageName: string,
   opts: { fresh?: boolean; noFetch?: boolean } = {}
 ): Promise<EngineStalenessCheck> {
-  const installed = getPackageVersion(SCHED_PACKAGE_NAME);
+  const installed = getPackageVersion(packageName);
   const ttl = getConfiguredTtlSeconds(
     'cache.engineVersionTtlSeconds',
     DEFAULT_ENGINE_VERSION_TTL_SECONDS
   );
 
   let latest: string | null = null;
-  const cached = opts.fresh ? null : readCache();
+  const cached = opts.fresh ? null : readCache(packageName);
   if (cached && isWithinTtl(cached.checked_at, ttl)) {
     latest = cached.latest_version;
   }
 
   if (latest === null && !opts.noFetch) {
-    latest = await fetchNpmLatest(SCHED_PACKAGE_NAME);
+    latest = await fetchNpmLatest(packageName);
     if (latest !== null) {
-      writeCache({ latest_version: latest, checked_at: new Date().toISOString() });
+      writeCache(packageName, { latest_version: latest, checked_at: new Date().toISOString() });
     }
   }
 
   const stale = installed !== null && latest !== null && compareVersions(installed, latest) < 0;
   return { installed, latest, stale };
+}
+
+/** Check the scheduler library version; `sched status` uses this offline-friendly view. */
+export async function checkEngineStaleness(
+  opts: { fresh?: boolean; noFetch?: boolean } = {}
+): Promise<EngineStalenessCheck> {
+  return checkPackageStaleness(SCHED_PACKAGE_NAME, opts);
+}
+
+/** Check the executable package too: CLI-only releases must also reach a running service. */
+export async function checkCliStaleness(
+  opts: { fresh?: boolean; noFetch?: boolean } = {}
+): Promise<EngineStalenessCheck> {
+  return checkPackageStaleness(CLI_PACKAGE_NAME, opts);
 }
 
 /**
@@ -146,4 +168,9 @@ export async function checkEngineStaleness(
  */
 export function formatEngineStaleWarning(installed: string, latest: string): string {
   return `⚠ Engine stale: installed @ai-dossier/sched@${installed}, npm latest ${latest} — upgrade: npm i -g @ai-dossier/cli@latest`;
+}
+
+/** The CLI-specific warning, shared by the service loop's upgrade decision. */
+export function formatCliStaleWarning(installed: string, latest: string): string {
+  return `⚠ CLI stale: installed @ai-dossier/cli@${installed}, npm latest ${latest} — upgrade: npm i -g @ai-dossier/cli@latest`;
 }

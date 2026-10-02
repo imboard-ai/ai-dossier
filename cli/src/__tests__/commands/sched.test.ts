@@ -7,8 +7,8 @@ import { CorruptStateError, patchBatch, SchedStore } from '@ai-dossier/sched';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { withBlockedBatch } from '../../../../packages/sched/src/__tests__/helpers/blocked-batch';
 import { graphqlIssueResponse } from '../../../../packages/sched/src/__tests__/helpers/graphql-fixtures';
-import { registerSchedCommand } from '../../commands/sched';
-import { checkEngineStaleness } from '../../engine-version';
+import { reexecUpdatedCli, registerSchedCommand } from '../../commands/sched';
+import { checkCliStaleness, checkEngineStaleness } from '../../engine-version';
 import { readRunLog } from '../../run-log';
 import { createTestProgram, type ExecStub, execHandles, execReturns } from '../helpers/test-utils';
 
@@ -29,7 +29,7 @@ vi.mock('../../run-log');
 // without this comment as the tripwire).
 vi.mock('../../engine-version', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../engine-version')>();
-  return { ...actual, checkEngineStaleness: vi.fn() };
+  return { ...actual, checkEngineStaleness: vi.fn(), checkCliStaleness: vi.fn() };
 });
 
 let home: string;
@@ -41,6 +41,54 @@ async function runSched(args: string[]): Promise<void> {
   registerSchedCommand(program);
   await program.parseAsync(['node', 'dossier', ...args]);
 }
+
+function stubProcessExecve() {
+  const target = process as unknown as Record<string, unknown>;
+  const descriptor = Object.getOwnPropertyDescriptor(target, 'execve');
+  const calls: Array<{ file: string; args: string[]; env: NodeJS.ProcessEnv }> = [];
+  Object.defineProperty(target, 'execve', {
+    configurable: true,
+    writable: true,
+    value: (file: string, args: string[], env: NodeJS.ProcessEnv) => {
+      calls.push({ file, args, env });
+    },
+  });
+  return {
+    calls,
+    restore: () => {
+      if (descriptor) Object.defineProperty(target, 'execve', descriptor);
+      else delete target.execve;
+    },
+  };
+}
+
+describe('reexecUpdatedCli', () => {
+  it('replaces the process with the same Node executable, CLI args, and environment', () => {
+    const previousArgv = process.argv;
+    process.argv = ['/node', '/global/bin/ai-dossier', 'sched', 'start', '--auto-upgrade'];
+    const calls: Array<{ file: string; args: string[]; env: NodeJS.ProcessEnv }> = [];
+    const execve = (file: string, args: string[], env: NodeJS.ProcessEnv) => {
+      calls.push({ file, args, env });
+      return undefined as never;
+    };
+    try {
+      expect(reexecUpdatedCli(execve)).toBe(true);
+    } finally {
+      process.argv = previousArgv;
+    }
+    expect(calls).toEqual([
+      {
+        file: process.execPath,
+        args: [process.execPath, '/global/bin/ai-dossier', 'sched', 'start', '--auto-upgrade'],
+        env: process.env,
+      },
+    ]);
+  });
+
+  it('returns false when process replacement is unavailable so the caller can request supervisor restart', () => {
+    expect(reexecUpdatedCli(null)).toBe(false);
+  });
+});
 
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-cli-test-home-'));
@@ -56,6 +104,11 @@ beforeEach(() => {
   // unchanged (no warning line, no journal entry, no auto-upgrade attempt).
   vi.mocked(checkEngineStaleness).mockResolvedValue({
     installed: '0.12.1',
+    latest: null,
+    stale: false,
+  });
+  vi.mocked(checkCliStaleness).mockResolvedValue({
+    installed: '0.89.6',
     latest: null,
     stale: false,
   });
@@ -642,21 +695,56 @@ describe('ai-dossier sched start (#537: engine-stale detection)', () => {
     expect(staleEvents[1]).toMatchObject({ latest_version: '0.14.0' });
   });
 
-  it('--auto-upgrade self-upgrades when stale and no unit is mid-dispatch', async () => {
+  it('--once installs the new CLI after the tick and re-execs with the same argv', async () => {
     vi.mocked(checkEngineStaleness).mockResolvedValue({
       installed: '0.12.1',
       latest: '0.13.0',
       stale: true,
     });
     vi.mocked(execFileSync).mockClear();
-
-    await runSched(['sched', 'start', '--once', '--auto-upgrade', '--project', 'test-proj']);
+    const execve = stubProcessExecve();
+    const previousArgv = process.argv;
+    process.argv = [
+      process.execPath,
+      '/tmp/global/ai-dossier',
+      'sched',
+      'start',
+      '--once',
+      '--auto-upgrade',
+      '--project',
+      'test-proj',
+    ];
+    try {
+      await runSched(['sched', 'start', '--once', '--auto-upgrade', '--project', 'test-proj']);
+    } finally {
+      process.argv = previousArgv;
+      execve.restore();
+    }
 
     const upgradeCalls = vi
       .mocked(execFileSync)
       .mock.calls.filter(([file, args]) => file === 'npm' && (args as string[])[0] === 'i');
     expect(upgradeCalls).toHaveLength(1);
     expect(upgradeCalls[0][1]).toEqual(['i', '-g', '@ai-dossier/cli@latest']);
+    expect(execve.calls).toEqual([
+      {
+        file: process.execPath,
+        args: [
+          process.execPath,
+          '/tmp/global/ai-dossier',
+          'sched',
+          'start',
+          '--once',
+          '--auto-upgrade',
+          '--project',
+          'test-proj',
+        ],
+        env: process.env,
+      },
+    ]);
+    expect(
+      fs.existsSync(path.join(home, '.dossier', 'sched', 'test-proj', '.sched-engine-lease'))
+    ).toBe(false);
   });
 
   it('without --auto-upgrade, stale never triggers an upgrade', async () => {
@@ -675,7 +763,34 @@ describe('ai-dossier sched start (#537: engine-stale detection)', () => {
     expect(upgradeCalls).toHaveLength(0);
   });
 
-  it('--auto-upgrade does NOT self-upgrade while a unit is mid-dispatch', async () => {
+  it('auto-upgrades when the CLI is stale even if the scheduler package is current', async () => {
+    vi.mocked(checkEngineStaleness).mockResolvedValue({
+      installed: '0.68.3',
+      latest: '0.68.3',
+      stale: false,
+    });
+    vi.mocked(checkCliStaleness).mockResolvedValue({
+      installed: '0.89.5',
+      latest: '0.89.6',
+      stale: true,
+    });
+    vi.mocked(execFileSync).mockClear();
+    const execve = stubProcessExecve();
+    try {
+      await runSched(['sched', 'start', '--once', '--auto-upgrade', '--project', 'test-proj']);
+    } finally {
+      execve.restore();
+    }
+
+    const upgradeCalls = vi
+      .mocked(execFileSync)
+      .mock.calls.filter(([file, args]) => file === 'npm' && (args as string[])[0] === 'i');
+    expect(upgradeCalls).toHaveLength(1);
+    expect(journalEvents().some((event) => event.event === 'engine-cli-stale')).toBe(true);
+    expect(execve.calls).toHaveLength(1);
+  });
+
+  it('the continuous service loop upgrades at a tick boundary even with a live unit', async () => {
     await runSched(['sched', 'enqueue', '--issues', '101', '--project', 'test-proj']);
     const state = readState() as Record<string, unknown>;
     fs.writeFileSync(
@@ -729,17 +844,20 @@ describe('ai-dossier sched start (#537: engine-stale detection)', () => {
       return '{"labels":[]}';
     });
     vi.mocked(execFileSync).mockClear();
-
-    await runSched(['sched', 'start', '--once', '--auto-upgrade', '--project', 'test-proj']);
+    const execve = stubProcessExecve();
+    try {
+      await runSched(['sched', 'start', '--auto-upgrade', '--project', 'test-proj']);
+    } finally {
+      execve.restore();
+    }
 
     const upgradeCalls = vi
       .mocked(execFileSync)
       .mock.calls.filter(([file, args]) => file === 'npm' && (args as string[])[0] === 'i');
-    expect(upgradeCalls).toHaveLength(0);
-    // The stale signal is still journaled — only the upgrade itself is gated.
+    expect(upgradeCalls).toHaveLength(1);
+    expect(execve.calls).toHaveLength(1);
+    // The live agent remains recorded; the restarted engine will reconcile its pid.
     expect(journalEvents().some((e) => e.event === 'engine-stale')).toBe(true);
-    // And the mid-dispatch slot really is what gated it — not a slot the
-    // tick's ground-truth reconciliation quietly cleared out from under us.
     const finalState = readState() as { slots: Array<Record<string, unknown>> };
     expect(finalState.slots[0]).toMatchObject({ status: 'running', unit: 'issue:101' });
   });

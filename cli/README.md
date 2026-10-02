@@ -1609,14 +1609,20 @@ per running parallel member) and stops unfinished members atomically. `abandon` 
   `label blocked <units>` / `label check unreachable <units>`. Since #537, every tick
   also checks the installed `@ai-dossier/sched` against npm registry latest (best-effort,
   cached — `cache.engineVersionTtlSeconds`, default 300s — and non-blocking, never stalls
-  a tick): when behind, it journals `engine-stale` once per distinct (installed, latest)
-  pair and warns on stderr, surfaced again in `status` below. `--auto-upgrade` (or
-  `auto_upgrade: true` in `config.json`, the flag wins when both are set) lets a
-  cron-driven `--once` self-upgrade (`npm i -g @ai-dossier/cli@latest`) once behind, but
-  only after re-confirming no slot is mid-dispatch on a fresh post-tick state read; the
-  continuous (non-`--once`) loop only ever journals/warns, never self-upgrades, since a
-  multi-minute install must not stall reconciliation. The attempt's outcome is journaled
-  too (`engine-auto-upgrade-attempted` / `engine-auto-upgrade-failed`).
+  a tick): when the installed `@ai-dossier/sched` is behind, it journals `engine-stale`
+  once per distinct (installed, latest) pair and warns on stderr, surfaced again in
+  `status` below. It also checks the installed CLI version and journals
+  `engine-cli-stale` for CLI-only releases; with `--auto-upgrade` enabled, either stale
+  package triggers the same handoff. `--auto-upgrade` (or
+  `auto_upgrade: true` in `config.json`, the flag wins when both are set) lets either
+  `sched start --once` or the continuous engine install `@ai-dossier/cli@latest` after a
+  completed tick. On success, the old loop stops before another state write and replaces
+  itself with the updated CLI, preserving its arguments, environment, and working directory;
+  detached agents continue running and the new engine reattaches by pid. State is migrated
+  by the new version on load, and an older engine refuses a newer schema. If the Node runtime
+  cannot replace the process directly, the engine exits with code 75 so the service/watchdog
+  restarts the updated entry point. Install failures are journaled as
+  `engine-auto-upgrade-failed`; attempts are recorded before installation begins.
 - **`status`** renders the queue (with `priority`, `pr`, and `cleanup` columns — a
   slot-mode member's own `priority` cell reads `-`, since the scheduler never reads it;
   the BATCH's `priority` in the batches table below is what governs assignment, #565),
@@ -1753,9 +1759,9 @@ repo's `test` script delegates to something that cannot take a reporter flag and
 unverified exit — set `[]` to opt out, never applied when the command's binary isn't
 `claude` (an `opencode` tier has no such flag) or already carries the flag itself;
 `pr_poll_interval_ms` (default 150 000) sets the
-parked-PR poll cadence; `auto_upgrade` (default false, #537) lets a cron-driven
-`sched start --once` self-upgrade when behind npm latest — the `--auto-upgrade` CLI flag
-overrides this when passed; `dissolve_policy` — `{ fraction, min_evictions_before_dissolve }`,
+parked-PR poll cadence; `auto_upgrade` (default false, #537) lets either
+`sched start --once` or the continuous service self-upgrade at a completed tick when behind
+npm latest — the `--auto-upgrade` CLI flag overrides this when passed; `dissolve_policy` — `{ fraction, min_evictions_before_dissolve }`,
 #563, overrides the batch dissolve threshold `max(ceil(N × fraction),
 min_evictions_before_dissolve)` (default `{ fraction: 1/3, min_evictions_before_dissolve: 1 }`);
 both fields are required when the key is present, and an invalid value degrades the WHOLE

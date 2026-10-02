@@ -20,6 +20,7 @@ import {
   type RunFenceReleaser,
   type RunFencer,
   requeueMember,
+  runLoop,
   type SchedConfig,
   SchedStore,
   type SetupInfo,
@@ -1702,6 +1703,32 @@ describe('restart self-healing', () => {
     expect(result.spawned).toEqual(['issue:101']);
     expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('dispatched');
     expect(h.state().slots.find((s) => s.unit === 'issue:101')?.status).toBe('running');
+  });
+});
+
+describe('runLoop post-tick handoff', () => {
+  it('awaits an async callback and stops before the next tick when the callback requests shutdown', async () => {
+    const h = harness({ maxSlots: 1 });
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full' }]);
+    let callbacks = 0;
+    let stopAfterTick = false;
+
+    await runLoop(
+      h.deps,
+      { ...h.config, reconcile_interval_ms: 1 },
+      () => stopAfterTick,
+      async (result) => {
+        callbacks += 1;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        expect(result.spawned).toEqual(['issue:101']);
+        stopAfterTick = true;
+      }
+    );
+
+    expect(callbacks).toBe(1);
+    expect(h.spawnCalls).toHaveLength(1);
+    expect(h.state().slots.find((slot) => slot.unit === 'issue:101')?.status).toBe('running');
   });
 });
 

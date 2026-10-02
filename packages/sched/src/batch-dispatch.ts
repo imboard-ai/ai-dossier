@@ -2012,15 +2012,37 @@ function claimAndSetup(
     return;
   }
 
+  // Persist the completed setup and the batch's executing/member-1 assignment
+  // BEFORE spawning. If SIGKILL lands between this write and the provider
+  // process creation, the next engine sees `executing` + an assigned slot and
+  // `reconcileMemberSlot` resumes from the deterministic member worktree. The
+  // previous single lock pass spawned first and only saved afterward, leaving
+  // a kill window with batch=status ready + an assigned slot that no tick arm
+  // could claim again.
   deps.store.withLock((s) => ({
-    state: landSetup(deps, s, batchId, setup, now, { member_dispatch: 'serial' }, 1, (next) => {
-      const slot = slotFor(next, batchId);
-      return slot
-        ? spawnMember(deps, dispatch, next, slot, batchId, now, result, memberPrep)
-        : next;
-    }),
+    state: landSetup(
+      deps,
+      s,
+      batchId,
+      setup,
+      now,
+      { member_dispatch: 'serial' },
+      1,
+      (next) => next
+    ),
     result: undefined,
   }));
+  deps.store.withLock((s) => {
+    const freshBatch = findBatch(s, batchId);
+    const slot = slotFor(s, batchId);
+    if (!freshBatch || freshBatch.status !== 'executing' || !slot) {
+      return { state: s, result: undefined };
+    }
+    return {
+      state: spawnMember(deps, dispatch, s, slot, batchId, now, result, memberPrep),
+      result: undefined,
+    };
+  });
 }
 
 /**
@@ -4161,6 +4183,58 @@ function reconcileMemberSlot(
       () => runLog?.append()
     );
   }
+}
+
+/**
+ * Recover the durable setup→member handoff when an engine dies after
+ * `landSetup` saved `batch.status=executing` but before the member process was
+ * spawned and its pid was saved. The slot is still `assigned`; release that
+ * claim and reuse `spawnMemberContinuation`, whose deterministic member
+ * worktree path adopts the already-prepared tree. This is the batch equivalent
+ * of `engine.ts`'s assigned-before-spawn recovery rail.
+ */
+function recoverAssignedMemberSlot(
+  deps: BatchDispatchDeps,
+  config: SchedConfig,
+  dispatch: ResolvedDispatch,
+  batchId: string,
+  slot: SlotEntry,
+  now: Date,
+  result: BatchTickResult
+): void {
+  const current = deps.store.load();
+  const batch = findBatch(current, batchId);
+  if (
+    !batch ||
+    batch.status !== 'executing' ||
+    isParallelBatch(batch) ||
+    slot.status !== 'assigned' ||
+    slot.pid !== null
+  ) {
+    return;
+  }
+  const released = deps.store.withLock((state) => {
+    const fresh = findBatch(state, batchId);
+    const freshSlot = slotFor(state, batchId);
+    if (
+      !fresh ||
+      fresh.status !== 'executing' ||
+      isParallelBatch(fresh) ||
+      !freshSlot ||
+      freshSlot.status !== 'assigned' ||
+      freshSlot.pid !== null
+    ) {
+      return { state, result: false };
+    }
+    return { state: releaseSlot(state, batchId, now), result: true };
+  });
+  if (!released) return;
+  journalEvent(deps, 'assigned-recovered', unit(batchId), {
+    slot: slot.id,
+    detail:
+      'engine restarted after a serial batch assignment was persisted but before member spawn was recorded',
+  });
+  spawnMemberContinuation(deps, config, dispatch, batchId, now, result);
 }
 
 /**
@@ -7167,6 +7241,15 @@ export function runBatchTick(
       // `executing` phase is one arm.
       if (batch.status === 'executing' && isParallelBatch(batch)) {
         reconcileParallelBatch(deps, config, batchDispatch, batch.id, now, result, paused);
+        continue;
+      }
+      if (
+        batch.status === 'executing' &&
+        !isParallelBatch(batch) &&
+        slot?.status === 'assigned' &&
+        slot.pid === null
+      ) {
+        recoverAssignedMemberSlot(deps, config, batchDispatch, batch.id, slot, now, result);
         continue;
       }
       if (slot && (slot.status === 'running' || slot.status === 'assigned')) {

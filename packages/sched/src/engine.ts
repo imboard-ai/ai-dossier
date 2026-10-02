@@ -3675,13 +3675,27 @@ function mergeBatchResult(result: TickResult, batch: BatchTickResult): TickResul
  * journaled (`tick-failed`, with the error name — `LockTimeoutError` and
  * `CorruptStateError` demand different operator actions) and reported on
  * stderr, and the loop continues — one bad tick (e.g. a transient gh
- * failure) never stops the scheduler.
+ * failure) never stops the scheduler. The post-tick callback may be async; it
+ * runs after the tick has fully persisted and can return `true` to stop before
+ * the next tick (used for a supervised CLI upgrade handoff).
  */
-export async function runLoop(
+export function runLoop(
   deps: EngineDeps,
   configSource: SchedConfig | (() => SchedConfig),
   shouldStop: () => boolean,
   onTick?: (result: TickResult) => void
+): Promise<void>;
+export function runLoop(
+  deps: EngineDeps,
+  configSource: SchedConfig | (() => SchedConfig),
+  shouldStop: () => boolean,
+  onTick: (result: TickResult) => Promise<void>
+): Promise<void>;
+export async function runLoop(
+  deps: EngineDeps,
+  configSource: SchedConfig | (() => SchedConfig),
+  shouldStop: () => boolean,
+  onTick?: (result: TickResult) => unknown
 ): Promise<void> {
   // #883: a function source is consulted at the top of EVERY tick, so a config
   // edit applies from the next tick on. The sleep interval is fixed at start.
@@ -3693,7 +3707,7 @@ export async function runLoop(
     deps.store.touchEngineLease?.(deps.now());
     try {
       const result = tick(deps, resolveConfig());
-      onTick?.(result);
+      await onTick?.(result);
     } catch (err) {
       const detail = `${(err as Error).name}: ${(err as Error).message}`;
       process.stderr.write(`⚠ sched tick failed: ${detail}\n`);
