@@ -92,11 +92,15 @@ describe('adoption funnel ledger', () => {
 
     const metrics = await collectMetrics({ repo: 'imboard-ai/ai-dossier', fetchImpl });
     const body = renderLedger(metrics, null);
+    const persisted = parseLedgerComment(body);
 
-    expect(metrics.ranks['agent skills']['@ai-dossier/cli']).toBe('unavailable');
+    expect(metrics.ranks['agent skills']['@ai-dossier/cli']).toBeNull();
+    expect(metrics.rank_search_status['agent skills']).toBe('unavailable');
     expect(metrics.ranks['claude code skill']['@ai-dossier/cli']).toBeNull();
     expect(body).toContain('@ai-dossier/cli: unavailable');
     expect(body).toContain('@ai-dossier/cli: unranked');
+    expect(persisted.ranks['agent skills']['@ai-dossier/cli']).toBeNull();
+    expect(persisted.rank_search_status['agent skills']).toBe('unavailable');
   });
 
   it('renders a parseable structured ledger comment', () => {
