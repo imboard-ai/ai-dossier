@@ -124,8 +124,10 @@ import { formatCost, formatCount } from '../cost-format';
 import { detectDispatchProfile, type ProfileCandidate } from '../dispatch-detect';
 import { formatAge, formatDurationMs } from '../duration';
 import {
+  checkCliStaleness,
   checkEngineStaleness,
   type EngineStalenessCheck,
+  formatCliStaleWarning,
   formatEngineStaleWarning,
 } from '../engine-version';
 import {
@@ -2450,56 +2452,58 @@ function createUpgradeExec(): ExecFn {
 }
 
 /**
- * #537/#945: after a tick, compare the installed engine against npm latest;
- * when behind, journal `engine-stale` once per distinct (installed, latest)
- * pair (not every tick — a long-running loop would otherwise spam the
- * journal every reconcile) and warn on stderr. When `autoUpgradeEnabled`
- * self-upgrade via `upgradeExec`. The caller awaits this AFTER a completed
- * tick and stops the old loop on success; live agents are detached and the
- * restarted engine reattaches to their persisted pids.
+ * #537/#945: after a tick, compare the installed scheduler library and CLI
+ * executable against npm latest. Each stale package is journaled once per
+ * distinct (installed, latest) pair and warned on stderr. When auto-upgrade is
+ * enabled, either stale package requests an install of the latest CLI. The
+ * caller awaits this AFTER a completed tick and stops the old loop on success;
+ * live agents are detached and the restarted engine reattaches to their pids.
  */
 async function checkAndHandleEngineStaleness(
   journal: Journal,
   autoUpgradeEnabled: boolean,
   upgradeExec: ExecFn
 ): Promise<boolean> {
-  const staleness = await checkEngineStaleness();
-  if (!staleness.stale) return false;
-  const { installed, latest } = staleness;
-  if (installed === null || latest === null) return false; // unreachable when stale=true; keeps TS honest
-
+  const [engine, cli] = await Promise.all([checkEngineStaleness(), checkCliStaleness()]);
   const events = journal.read();
-  const lastStale = [...events].reverse().find((e) => e.event === 'engine-stale');
-  const alreadyJournaled =
-    lastStale?.installed_version === installed && lastStale?.latest_version === latest;
-
-  if (!alreadyJournaled) {
-    journal.append({
-      event: 'engine-stale',
-      installed_version: installed,
-      latest_version: latest,
-      detail: `installed @ai-dossier/sched@${installed} behind npm latest ${latest}`,
-    });
-    process.stderr.write(`${formatEngineStaleWarning(installed, latest)}\n`);
+  const stalePackages: string[] = [];
+  for (const [check, eventName, packageName, warning] of [
+    [engine, 'engine-stale', '@ai-dossier/sched', formatEngineStaleWarning] as const,
+    [cli, 'engine-cli-stale', '@ai-dossier/cli', formatCliStaleWarning] as const,
+  ]) {
+    if (!check.stale || check.installed === null || check.latest === null) continue;
+    const lastStale = [...events].reverse().find((event) => event.event === eventName);
+    const alreadyJournaled =
+      lastStale?.installed_version === check.installed &&
+      lastStale?.latest_version === check.latest;
+    if (!alreadyJournaled) {
+      journal.append({
+        event: eventName,
+        installed_version: check.installed,
+        latest_version: check.latest,
+        detail: `installed ${packageName}@${check.installed} behind npm latest ${check.latest}`,
+      });
+      process.stderr.write(`${warning(check.installed, check.latest)}\n`);
+    }
+    stalePackages.push(`${packageName}@${check.installed}->${check.latest}`);
   }
-
-  if (!autoUpgradeEnabled) return false;
+  if (stalePackages.length === 0 || !autoUpgradeEnabled) return false;
 
   process.stderr.write('⚠ sched: auto-upgrading (npm i -g @ai-dossier/cli@latest)…\n');
   // Record the attempt before npm can replace this CLI. After a successful
   // install, the old engine performs no more state writes and hands off.
   journal.append({
     event: 'engine-auto-upgrade-attempted',
-    installed_version: installed,
-    latest_version: latest,
-    detail: 'npm i -g @ai-dossier/cli@latest started after a completed tick',
+    installed_version: cli.installed ?? engine.installed ?? undefined,
+    latest_version: cli.latest ?? engine.latest ?? undefined,
+    detail: `npm i -g @ai-dossier/cli@latest started after a completed tick (${stalePackages.join('; ')})`,
   });
   const output = upgradeExec('npm', ['i', '-g', '@ai-dossier/cli@latest']);
   if (output === null) {
     journal.append({
       event: 'engine-auto-upgrade-failed',
-      installed_version: installed,
-      latest_version: latest,
+      installed_version: cli.installed ?? engine.installed ?? undefined,
+      latest_version: cli.latest ?? engine.latest ?? undefined,
       detail: 'npm i -g @ai-dossier/cli@latest failed — see stderr for the npm error',
     });
     process.stderr.write('⚠ sched: auto-upgrade failed — see above\n');

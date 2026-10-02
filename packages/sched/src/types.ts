@@ -1904,6 +1904,9 @@ export type JournalEventName =
   // unit-scoped). Appended once per distinct (installed, latest) pair, not
   // every tick — see `installed_version`/`latest_version` on `JournalEvent`.
   | 'engine-stale'
+  // #945: the installed `@ai-dossier/cli` is behind npm latest; a CLI-only
+  // release must still reach a running service even when sched's version is unchanged.
+  | 'engine-cli-stale'
   // #945/#940: before respawning onto an existing worktree the engine
   // preserved what the dead agent left (`work-preserved`, ref + sha in
   // `branch`/`detail`), or could not (`work-preserve-failed`).

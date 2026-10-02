@@ -1609,8 +1609,10 @@ per running parallel member) and stops unfinished members atomically. `abandon` 
   `label blocked <units>` / `label check unreachable <units>`. Since #537, every tick
   also checks the installed `@ai-dossier/sched` against npm registry latest (best-effort,
   cached — `cache.engineVersionTtlSeconds`, default 300s — and non-blocking, never stalls
-  a tick): when behind, it journals `engine-stale` once per distinct (installed, latest)
-  pair and warns on stderr, surfaced again in `status` below. `--auto-upgrade` (or
+  a tick): when the installed `@ai-dossier/sched` is behind, it journals `engine-stale`
+  once per distinct (installed, latest) pair and warns on stderr, surfaced again in
+  `status` below. When `--auto-upgrade` is enabled, it also checks the installed CLI
+  version, so a CLI-only release triggers the same handoff. `--auto-upgrade` (or
   `auto_upgrade: true` in `config.json`, the flag wins when both are set) lets either
   `sched start --once` or the continuous engine install `@ai-dossier/cli@latest` after a
   completed tick. On success, the old loop stops before another state write and replaces

@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { withBlockedBatch } from '../../../../packages/sched/src/__tests__/helpers/blocked-batch';
 import { graphqlIssueResponse } from '../../../../packages/sched/src/__tests__/helpers/graphql-fixtures';
 import { reexecUpdatedCli, registerSchedCommand } from '../../commands/sched';
-import { checkEngineStaleness } from '../../engine-version';
+import { checkCliStaleness, checkEngineStaleness } from '../../engine-version';
 import { readRunLog } from '../../run-log';
 import { createTestProgram, type ExecStub, execHandles, execReturns } from '../helpers/test-utils';
 
@@ -29,7 +29,7 @@ vi.mock('../../run-log');
 // without this comment as the tripwire).
 vi.mock('../../engine-version', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../engine-version')>();
-  return { ...actual, checkEngineStaleness: vi.fn() };
+  return { ...actual, checkEngineStaleness: vi.fn(), checkCliStaleness: vi.fn() };
 });
 
 let home: string;
@@ -104,6 +104,11 @@ beforeEach(() => {
   // unchanged (no warning line, no journal entry, no auto-upgrade attempt).
   vi.mocked(checkEngineStaleness).mockResolvedValue({
     installed: '0.12.1',
+    latest: null,
+    stale: false,
+  });
+  vi.mocked(checkCliStaleness).mockResolvedValue({
+    installed: '0.89.6',
     latest: null,
     stale: false,
   });
@@ -756,6 +761,33 @@ describe('ai-dossier sched start (#537: engine-stale detection)', () => {
       .mocked(execFileSync)
       .mock.calls.filter(([file, args]) => file === 'npm' && (args as string[])[0] === 'i');
     expect(upgradeCalls).toHaveLength(0);
+  });
+
+  it('auto-upgrades when the CLI is stale even if the scheduler package is current', async () => {
+    vi.mocked(checkEngineStaleness).mockResolvedValue({
+      installed: '0.68.3',
+      latest: '0.68.3',
+      stale: false,
+    });
+    vi.mocked(checkCliStaleness).mockResolvedValue({
+      installed: '0.89.5',
+      latest: '0.89.6',
+      stale: true,
+    });
+    vi.mocked(execFileSync).mockClear();
+    const execve = stubProcessExecve();
+    try {
+      await runSched(['sched', 'start', '--once', '--auto-upgrade', '--project', 'test-proj']);
+    } finally {
+      execve.restore();
+    }
+
+    const upgradeCalls = vi
+      .mocked(execFileSync)
+      .mock.calls.filter(([file, args]) => file === 'npm' && (args as string[])[0] === 'i');
+    expect(upgradeCalls).toHaveLength(1);
+    expect(journalEvents().some((event) => event.event === 'engine-cli-stale')).toBe(true);
+    expect(execve.calls).toHaveLength(1);
   });
 
   it('the continuous service loop upgrades at a tick boundary even with a live unit', async () => {
