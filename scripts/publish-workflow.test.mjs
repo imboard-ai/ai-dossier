@@ -72,7 +72,10 @@ describe('publish-packages.yml channel contract', () => {
     expect(verify.env.PUBLISH_TAG).toContain("'latest' || 'next'");
     expect(step.run).toContain('for attempt in 1 2 3 4 5');
     expect(step.run).toContain('sleep "$delay"');
-    expect(step.run).toContain('npm view "$package@$PUBLISH_TAG" version --prefer-online');
+    expect(step.run).toContain(
+      'npm view "$package@$PUBLISH_TAG" version --prefer-online 2>"$error_file"'
+    );
+    expect(step.run).toContain("sed 's/::/: :/g'");
     expect(step.run).toContain('[ "$actual" = "$expected" ]');
   });
 });

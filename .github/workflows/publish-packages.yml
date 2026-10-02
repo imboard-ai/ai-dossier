@@ -293,22 +293,34 @@ jobs:
             package=${entry#*:}
             expected=$(node -p "require('./$directory/package.json').version")
             verified=false
+            error_file="$RUNNER_TEMP/npm-view-error"
 
             for attempt in 1 2 3 4 5; do
-              actual=$(npm view "$package@$PUBLISH_TAG" version --prefer-online 2>/dev/null) || actual=""
+              : > "$error_file"
+              actual=$(npm view "$package@$PUBLISH_TAG" version --prefer-online 2>"$error_file") || actual=""
               if [ -n "$actual" ] && { [ "$PUBLISH_CHANNEL" = "next" ] || [ "$actual" = "$expected" ]; }; then
                 echo "Verified $package@$PUBLISH_TAG at $actual"
                 verified=true
                 break
               fi
 
+              actual_log=$(printf '%s' "$actual" | tr '\r\n' '  ' | sed 's/::/: :/g' | cut -c1-120)
+              error_detail=$(tr '\r\n' '  ' < "$error_file" | sed 's/::/: :/g' | cut -c1-240)
+              if [ -n "$actual_log" ]; then
+                reason="resolved $actual_log"
+              elif [ -n "$error_detail" ]; then
+                reason="$error_detail"
+              else
+                reason="no version returned"
+              fi
+
               if [ "$attempt" -eq 5 ]; then
-                echo "::error::$package@$PUBLISH_TAG did not resolve to the expected published version after 5 attempts."
+                echo "::error::$package@$PUBLISH_TAG failed verification after 5 attempts ($reason)."
                 exit 1
               fi
 
               delay=$((attempt * 5))
-              echo "Attempt $attempt/5 did not verify $package@$PUBLISH_TAG; retrying in ${delay}s."
+              echo "Attempt $attempt/5 did not verify $package@$PUBLISH_TAG ($reason); retrying in ${delay}s."
               sleep "$delay"
             done
 

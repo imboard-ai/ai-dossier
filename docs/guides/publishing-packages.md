@@ -6,9 +6,9 @@ Guide for publishing `@ai-dossier` packages to the public npm registry.
 
 ### Automatic Next Releases
 
-Every merge to `main` publishes a unique prerelease cohort such as `0.89.3-next.123` under npm's `next` dist-tag. The build keeps all publishable workspace dependencies pinned to that same cohort, so `npm install @ai-dossier/cli@next` resolves matching prerelease dependencies.
+Push, tag, and release events, plus manual `next` dispatches, publish a unique prerelease cohort such as `0.89.3-next.123` under npm's `next` dist-tag. The build keeps all publishable workspace dependencies pinned to that same cohort, so `npm install @ai-dossier/cli@next` resolves matching prerelease dependencies. A manual `stable` dispatch publishes the committed manifest versions under `latest`.
 
-The pipeline runs: **lint → build → test → prepare next cohort → publish → verify next**. It never advances `latest`.
+The workflow runs **lint → build → test → smoke → publish → verify**. Only the `next` channel prepares a prerelease cohort; `stable` uses the committed versions and verifies `latest`.
 
 ### Manual Dispatch
 
@@ -24,6 +24,8 @@ The **Dispatch stable npm publishing** workflow is a shortcut for the `stable` c
 # From repository root
 npm run publish:all
 ```
+
+This local convenience publishes core, CLI, and MCP server only. Use the Actions `stable` channel to publish and verify the complete five-package cohort through the existing OIDC publisher.
 
 ---
 
