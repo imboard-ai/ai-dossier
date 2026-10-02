@@ -319,7 +319,7 @@ jobs:
                 exit 1
               fi
 
-              delay=$((attempt * 5))
+              delay=$((15 * (2 ** (attempt - 1))))
               echo "Attempt $attempt/5 did not verify $package@$PUBLISH_TAG ($reason); retrying in ${delay}s."
               sleep "$delay"
             done
