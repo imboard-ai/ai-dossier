@@ -117,76 +117,31 @@ Automate the publishing of `@ai-dossier/core`, `@ai-dossier/sched`, `@ai-dossier
 
 ### Triggers
 
-**1. Automatic (Push to main)**
+**Automatic**
 
-Triggers when pushing to `main` branch AND changes affect:
-- `cli/**` - CLI package files
-- `packages/core/**` - Core package files
-- `.github/workflows/publish-packages.yml` - Workflow itself
+- Push to `main`, tag push matching `v*`, and published GitHub releases publish to npm's `next` dist-tag.
+- The workflow has no path filter; each matching event runs the publish checks and attempts a complete prerelease cohort.
 
-**2. Manual (workflow_dispatch)**
+**Manual (`workflow_dispatch`)**
 
-Run manually via GitHub Actions UI with options:
-```
-Actions → Publish Packages to npm → Run workflow
-```
-
-**Input: Version bump**
-- `skip` (default) - Publish current version without bumping
-- `patch` - Bug fixes (0.1.0 → 0.1.1)
-- `minor` - New features (0.1.0 → 0.2.0)
-- `major` - Breaking changes (0.1.0 → 1.0.0)
+Run **Publish Packages to npm** from GitHub Actions and choose `next` (the default) or `stable`. `next` prepares and publishes a prerelease cohort. `stable` must run from `main`, skips prerelease preparation, and publishes the committed manifest versions to `latest`.
 
 ### Flow
 
 ```
-1. Checkout code
-   - Full repository checkout
-   ↓
-2. Setup Node.js (v20+)
-   - Configure npm registry
-   - Set @ai-dossier scope
-   ↓
-3. Install dependencies
-   - npm install (all workspaces)
-   ↓
-4. Build @ai-dossier/core
-   - Compile TypeScript → JavaScript
-   - Generate type definitions
-   ↓
-5. Bump version (if requested)
-   - Update version in packages/core/package.json
-   - Update version in cli/package.json
-   - Update version in mcp-server/package.json
-   - Update CLI dependency on core
-   ↓
-6. Commit version bump (if bumped)
-   - Commit updated package.json files
-   - Push to main branch
-   ↓
-7. Publish @ai-dossier/core
-   - Publish to https://registry.npmjs.org with --provenance
-   - Includes: dist/, package.json, README
-   ↓
-8. Publish @ai-dossier/sched, @ai-dossier/cli, @ai-dossier/mcp-server, @ai-dossier/worktree-pool
-   - Publish to https://registry.npmjs.org with --provenance
-   - Each package checked by `scripts/publish-guard.mjs`: skipped if its version is already on
-     npm from this commit or from identical release-relevant source; a version on npm built from
-     different source is a collision — unaffected packages still publish (dependents of the
-     colliding one are held), then `Fail on version collisions` fails the job (#826). A package
-     the guard cannot decide (registry error, missing gitHead) is handled the same way, as
-     `unavailable` — never skipped silently
-   ↓
-9. Create Git tag (if version bumped)
-   - Tag format: v0.1.0, v0.2.0, etc.
-   - Push tag to repository
+1. The `test` job checks out the ref, installs dependencies, lints, builds, and runs tests.
+2. The `smoke` job packs the five packages and verifies the CLI from those tarballs.
+3. The `publish` job checks out full history, installs npm 11+ for OIDC trusted publishing, and runs `publish-guard.mjs` for every package.
+4. For `next`, it prepares a unique prerelease cohort. For `stable`, it keeps the committed manifest versions; guard outputs skip safe unchanged versions and the final collision report fails closed on collisions or unavailable checks.
+5. It publishes the packages in dependency order with provenance, using the selected `next` or `latest` dist-tag.
+6. The `verify` job retries registry reads up to five times with backoff and verifies the selected dist-tag (including the expected committed version for `stable`).
 ```
 
 ### Configuration
 
 **Permissions:**
-- `contents: write` - Commit version bumps, create tags
-- `id-token: write` - npm provenance attestation
+- The publish job grants `contents: write` and `id-token: write` for repository checkout and npm trusted publishing.
+- The dispatcher grants `actions: write` only, to dispatch `publish-packages.yml`.
 
 **Node.js Setup:**
 - Version: 22
@@ -207,28 +162,17 @@ Actions → Publish Packages to npm → Run workflow
 - `@ai-dossier/worktree-pool` → https://www.npmjs.com/package/@ai-dossier/worktree-pool
 
 **Git Artifacts:**
-- Version bump commit (if bumped)
-- Git tag (e.g., `v0.2.0`)
+- No package version commit or tag is created by the workflow. Stable cohort version bumps are committed in the PR; `next` derives temporary prerelease versions in the runner.
 
 ### Use Cases
 
 **Automatic Publishing (Push-based)**
-```bash
-# Make changes to CLI
-vim cli/bin/ai-dossier
+Merge a change to `main` after satisfying the package version-bump check. The automatic publish run prepares a prerelease cohort and publishes it under `next`; it does not commit version bumps or tags.
 
-# Commit and push
-git add cli/
-git commit -m "fix: improve error messages"
-git push origin main
-
-# Workflow automatically publishes new version
-```
-
-**Manual Release with Version Bump**
-1. Go to Actions → Publish Packages → Run workflow
-2. Select `minor` for new feature release
-3. Workflow bumps version, publishes, and tags
+**Manual Stable Release**
+1. Bump all five publishable package versions and synchronize `package-lock.json` in one PR.
+2. After merge, dispatch the `stable` channel from `main` (or use the **Dispatch stable npm publishing** shortcut).
+3. Confirm the workflow's verification job succeeds for `latest`.
 
 **Testing Before Release**
 1. Ensure CI passes on the branch
@@ -237,17 +181,7 @@ git push origin main
 
 ### Version Management
 
-**Automatic (workflow manages it):**
-```
-Input: patch
-Before: @ai-dossier/cli@0.1.0, @ai-dossier/core@1.0.0, @ai-dossier/mcp-server@0.1.0
-After:  @ai-dossier/cli@0.1.1, @ai-dossier/core@1.0.1, @ai-dossier/mcp-server@0.1.1
-
-- core, cli, and mcp-server bumped to the same version
-- CLI dependency updated: "@ai-dossier/core": "^1.0.1"
-- Commit: "chore: bump version to 0.1.1"
-- Tag: v0.1.1
-```
+**Stable versions are maintained in source control.** A stable release bumps all five publishable manifests as a cohort and keeps the root lockfile synchronized. The `next` workflow derives temporary prerelease versions without committing them to `main`.
 
 **Why bump these packages together?**
 - Keeps version numbers in sync
@@ -262,7 +196,7 @@ After:  @ai-dossier/cli@0.1.1, @ai-dossier/core@1.0.1, @ai-dossier/mcp-server@0.
 ### For Workflow Maintainers
 
 1. **Test workflows in fork first** before merging changes
-2. **Use path filters** to prevent unnecessary workflow runs
+2. **Keep the publishing guide aligned** with the workflow's channels, triggers, and OIDC publisher.
 3. **Keep secrets secure** - use OIDC, avoid static credentials
 4. **Document all changes** in this file
 5. **Version workflows** - commit history serves as changelog

@@ -1,6 +1,6 @@
 {
   "name": "@ai-dossier/sched",
-  "version": "0.68.1",
+  "version": "0.68.2",
   "description": "Deterministic scheduler for multi-agent coding workflows: queue work, orchestrate parallel agents, verify completion, and recover stalled runs.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

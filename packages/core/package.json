@@ -1,6 +1,6 @@
 {
   "name": "@ai-dossier/core",
-  "version": "1.14.3",
+  "version": "1.14.4",
   "description": "TypeScript library for parsing, signing, and verifying portable AI-agent skills and secure LLM workflows.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
