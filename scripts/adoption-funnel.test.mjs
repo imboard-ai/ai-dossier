@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  collectMetrics,
   divergence,
   fetchJson,
   parseLedgerComment,
@@ -44,6 +45,58 @@ describe('adoption funnel ledger', () => {
   it('flags npm growth when GitHub signals remain flat', () => {
     const prior = { ...current, packages: [{ ...current.packages[0], weekly_downloads: 100 }] };
     expect(divergence(current, prior)).toMatchObject({ flagged: true });
+  });
+
+  it('reports unknown instead of flagging when GitHub traffic is unavailable', () => {
+    const prior = {
+      ...current,
+      packages: [{ ...current.packages[0], weekly_downloads: 100 }],
+      github: { ...current.github, unique_clones_14d: null, unique_views_14d: null },
+    };
+    const latest = {
+      ...current,
+      github: { ...current.github, unique_clones_14d: null, unique_views_14d: null },
+    };
+
+    expect(divergence(latest, prior)).toEqual({
+      flagged: false,
+      reason: 'Unknown: GitHub traffic unavailable.',
+    });
+  });
+
+  it('renders failed npm searches as unavailable, not unranked', async () => {
+    const fetchImpl = async (url) => {
+      if (url.startsWith('https://api.npmjs.org/downloads/')) {
+        return { ok: true, json: async () => ({ downloads: 1 }) };
+      }
+      if (url.startsWith('https://registry.npm.org/')) {
+        return { ok: true, json: async () => ({ versions: {} }) };
+      }
+      if (url.startsWith('https://registry.npmjs.com/-/v1/search?')) {
+        if (url.includes('text=agent%20skills')) {
+          return { ok: false, status: 503, statusText: 'Service Unavailable' };
+        }
+        return { ok: true, json: async () => ({ objects: [] }) };
+      }
+      if (url === 'https://api.github.com/repos/imboard-ai/ai-dossier') {
+        return { ok: true, json: async () => ({ stargazers_count: 10 }) };
+      }
+      if (url.endsWith('/traffic/clones') || url.endsWith('/traffic/views')) {
+        return { ok: false, status: 403, statusText: 'Forbidden' };
+      }
+      if (url.endsWith('/releases?per_page=100')) {
+        return { ok: true, json: async () => [] };
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    };
+
+    const metrics = await collectMetrics({ repo: 'imboard-ai/ai-dossier', fetchImpl });
+    const body = renderLedger(metrics, null);
+
+    expect(metrics.ranks['agent skills']['@ai-dossier/cli']).toBe('unavailable');
+    expect(metrics.ranks['claude code skill']['@ai-dossier/cli']).toBeNull();
+    expect(body).toContain('@ai-dossier/cli: unavailable');
+    expect(body).toContain('@ai-dossier/cli: unranked');
   });
 
   it('renders a parseable structured ledger comment', () => {

@@ -65,9 +65,12 @@ async function npmRanks(options) {
       const result = await fetchJson(
         `https://registry.npmjs.com/-/v1/search?text=${encodeURIComponent(keyword)}&size=250`,
         options
-      ).catch(() => ({ objects: [] }));
+      ).catch(() => null);
       ranks[keyword] = Object.fromEntries(
-        PACKAGES.map((packageName) => [packageName, rankFor(result.objects ?? [], packageName)])
+        PACKAGES.map((packageName) => [
+          packageName,
+          result ? rankFor(result.objects ?? [], packageName) : 'unavailable',
+        ])
       );
     })
   );
@@ -127,6 +130,15 @@ export function divergence(current, previous) {
   const total = (metrics) =>
     metrics.packages.reduce((sum, item) => sum + (item.weekly_downloads ?? 0), 0);
   const npmDelta = total(current) - total(previous);
+  const hasTrafficMetrics = (metrics) =>
+    Number.isFinite(metrics.github?.unique_clones_14d) &&
+    Number.isFinite(metrics.github?.unique_views_14d);
+  if (!hasTrafficMetrics(current) || !hasTrafficMetrics(previous)) {
+    return { flagged: false, reason: 'Unknown: GitHub traffic unavailable.' };
+  }
+  if (!Number.isFinite(current.github?.stars) || !Number.isFinite(previous.github?.stars)) {
+    return { flagged: false, reason: 'Unknown: GitHub star data unavailable.' };
+  }
   const githubFlat =
     current.github.stars <= previous.github.stars &&
     current.github.unique_clones_14d <= previous.github.unique_clones_14d &&
