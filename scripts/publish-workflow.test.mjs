@@ -90,7 +90,7 @@ describe('promote-latest.yml dispatcher contract', () => {
     );
     expect(dispatch.env).toEqual({ GH_TOKEN: '${' + '{ github.token }}' });
     expect(dispatch.run).toBe(
-      'gh workflow run publish-packages.yml --ref main --field channel=stable'
+      'gh workflow run publish-packages.yml --repo imboard-ai/ai-dossier --ref main --field channel=stable'
     );
     expect(JSON.stringify(workflow)).not.toMatch(/NPM_TOKEN|NODE_AUTH_TOKEN|id-token/);
     expect(dispatch.run).not.toMatch(/(?:^|\s)npm publish\b|npm dist-tag add/);

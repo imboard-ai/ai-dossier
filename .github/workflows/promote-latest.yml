@@ -16,4 +16,4 @@ jobs:
       - name: Dispatch stable package publish through the trusted workflow
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh workflow run publish-packages.yml --ref main --field channel=stable
+        run: gh workflow run publish-packages.yml --repo imboard-ai/ai-dossier --ref main --field channel=stable
