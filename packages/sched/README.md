@@ -380,7 +380,51 @@ This applies to `issue:<n>` unit dispatch (`dispatchAssignments`). `batch:<id>` 
 through a separate pass with its own claim/reconcile logic — see
 [Batch dispatch (#523)](#batch-dispatch-523) below.
 
-### Supervised deployment (#679)
+### Supervised deployment (#679, #945)
+
+**The way to run the engine is `ai-dossier sched service install`** (run it from the project's
+checkout). The engine is safe to kill at any instant, but it cannot restart itself — the service is
+what makes it come back by itself, so no session ever has to start, stop or babysit it.
+
+```bash
+ai-dossier sched service install [--alert-issue <n>]   # systemd user unit; cron watchdog if no systemd
+ai-dossier sched service status                         # supervised? engine live? heartbeat?
+ai-dossier sched service uninstall
+```
+
+- **systemd** (default when a user manager is running): writes
+  `~/.config/systemd/user/dossier-sched-<project>.service` — `Restart=always` (a clean exit, such as
+  a graceful stop, comes back too) with **crash-loop bounds**: exponential `RestartSec` backoff
+  (10 s up to 300 s, systemd >= 254; older versions keep 10 s) and `StartLimitBurst=10` per
+  `StartLimitIntervalSec=600` — past that the unit is left `failed` for an operator
+  (`systemctl --user reset-failed <unit>`); `KillMode=process`, `WorkingDirectory` = the project's
+  **main checkout** (never a linked worktree; validated against `--project`, override with
+  `--repo-dir`), and the node/nvm `PATH` at install time (absolute entries only). Install refuses
+  node / entry-point / repo paths that are missing, relative, or under a temp or `worktrees/`
+  directory, and warns that an nvm node path must be re-pinned (re-run `install`) after a node
+  upgrade. It runs `sched start --auto-upgrade` (opt out with `--no-auto-upgrade`); **note that in
+  the continuous loop `--auto-upgrade` only journals `engine-stale` — the running engine keeps the
+  code it started with until it restarts** (the actual `npm i -g` is the cron/`--once` path).
+  Output goes to the journal (`journalctl --user -u <unit>`) and the durable trail is the
+  project's `events.jsonl`. Run `loginctl enable-linger $USER` once so it starts at boot without a
+  login. Re-running `install` is idempotent; a changed unit is restarted (agents keep running).
+- **cron fallback** (no systemd): a tagged crontab block with `@reboot` and a per-minute
+  `sched ensure-running` watchdog (`%` is escaped for cron). The watchdog starts a detached engine
+  (output to `<sched-dir>/engine.log`) when no live engine holds the lease, after raising the
+  once-per-episode stale-lease alert; a healthy minute does nothing (no `gh` call). Restarts back
+  off exponentially while the engine keeps dying: at a 60 s cadence the first restarts are
+  immediate, then gaps of 2, 4, 8 … minutes up to 30, and a live engine resets it. The existing
+  crontab is read strictly — only "no crontab for <user>" counts as empty; any other `crontab -l`
+  failure aborts the install and changes nothing. The engine takes the lease atomically, so two
+  watchdogs — or a watchdog plus the systemd unit — never run two engines. To stop the engine on
+  purpose under the watchdog: `sched ensure-running --disable` (`--enable` to resume).
+- **Crash alerts are deduplicated:** repeats of the same alert kind within an hour are ONE tracking
+  comment on `--alert-issue`, edited with a repeat count, not a comment per restart.
+- `install` / `uninstall` exit non-zero and print `✗` when anything failed (systemctl, crontab).
+  `--no-activate` renders the unit / cron block without calling `systemctl` or `crontab` and says
+  plainly that nothing is installed; `--print` prints it.
+
+The manual shapes below remain valid, and explain the rules the service encodes.
 
 Two supported shapes, one rule: **dispatched agents must outlive the tick or engine that
 spawned them.** Agents are spawned detached and unref'd precisely so they survive a sched
@@ -470,6 +514,7 @@ Only SIGINT had a handler, so a SIGTERM/SIGHUP (another session's restart, a clo
 terminal) killed the engine with no line and no lease release. That is now logged; if the
 2026-09-29 cause was SIGKILL/OOM, the missing `engine-exit` plus the stale lease is now the
 documented signature (`journalctl -k` for the OOM window).
+
 ### Restart never discards work (#945, #940)
 
 Before the engine respawns an agent onto a worktree that already exists — a batch **tail**, a
@@ -520,8 +565,8 @@ last pushed head while local work exists, the engine does **not** respawn. Rows 
 fields (the engine's own post-landing gate rows) and clean rows are never evidence; an older dirty
 row is superseded by a newer clean or failed one. It blocks the batch `tail-dirty-worktree`, with the evidence and the
 rescue ref in the journal and `sched status`. Commit or discard the work in the worktree, then
-`sched resume --batch <id>`. A tail that left only unpushed commits is respawned, told to resume
-from the rescue ref. `sched resume --batch` deliberately does NOT re-run this guard: by resuming, the operator has looked at the worktree.
+ `sched resume --batch <id>`. A tail that left only unpushed commits is respawned, told to resume
+ from the rescue ref. `sched resume --batch` deliberately does NOT re-run this guard: by resuming, the operator has looked at the worktree.
 
 ### Zombie-run fencing (#504)
 

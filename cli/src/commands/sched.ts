@@ -161,6 +161,7 @@ import {
 } from '../sched-run-stats';
 import { renderTable } from '../table';
 import { batchPrepTokens, currentSessionId, recordBatchPrep } from '../usage/batch-prep';
+import { registerSchedServiceCommands } from './sched-service';
 
 /**
  * Batch-worktree `ai-dossier cap run <id>` runner for the per-member
@@ -1549,8 +1550,9 @@ function registerStatusSubcommand(cmd: Command): void {
                 new Journal(store.dir),
                 createAlertNotifier(
                   project,
-                  resolveProjectRepo(project, defaultExec) ?? undefined,
-                  alertIssue
+                  () => resolveProjectRepo(project, defaultExec) ?? undefined,
+                  alertIssue,
+                  { stateDir: store.dir }
                 ),
                 new Date(),
                 {
@@ -2608,8 +2610,9 @@ function registerStartSubcommand(cmd: Command): void {
           acquisition.reclaimed,
           createAlertNotifier(
             project,
-            resolveProjectRepo(project, defaultExec) ?? undefined,
-            alertIssue
+            () => resolveProjectRepo(project, defaultExec) ?? undefined,
+            alertIssue,
+            { stateDir: store.dir }
           ),
           new Date(),
           previousStop !== null && previousStop.pid === acquisition.reclaimed.pid
@@ -2950,4 +2953,5 @@ export function registerSchedCommand(program: Command): void {
   registerReprioritizeSubcommand(schedCmd);
   registerStartSubcommand(schedCmd);
   registerStatsSubcommand(schedCmd);
+  registerSchedServiceCommands(schedCmd);
 }
