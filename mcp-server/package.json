@@ -1,6 +1,6 @@
 {
   "name": "@ai-dossier/mcp-server",
-  "version": "1.6.3",
+  "version": "1.6.4",
   "description": "Secure MCP server for discovering, verifying, and running portable AI-agent skills through the Model Context Protocol.",
   "main": "dist/index.js",
   "bin": {

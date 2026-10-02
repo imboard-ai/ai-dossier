@@ -11,6 +11,15 @@ on:
     types: [published]
 
   workflow_dispatch:
+    inputs:
+      channel:
+        description: Publish a prerelease cohort to next or committed stable versions to latest
+        type: choice
+        options:
+          - next
+          - stable
+        default: next
+        required: true
 
 concurrency:
   group: publish
@@ -135,6 +144,9 @@ jobs:
     needs: [test, smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      PUBLISH_CHANNEL: ${{ github.event_name == 'workflow_dispatch' && inputs.channel == 'stable' && 'stable' || 'next' }}
+      PUBLISH_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.channel == 'stable' && 'latest' || 'next' }}
     permissions:
       contents: write
       id-token: write
@@ -147,6 +159,12 @@ jobs:
           # Full history: scripts/publish-guard.mjs diffs HEAD against the commit
           # each already-published version was built from (npm's gitHead).
           fetch-depth: 0
+
+      - name: Require main for stable publishing
+        if: env.PUBLISH_CHANNEL == 'stable' && github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Stable publishing must be dispatched from main."
+          exit 1
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -174,25 +192,32 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # Keep the stable-baseline checks available to publish-reconcile. They do
-      # not gate this run: each next cohort must publish every package so the
-      # exact prerelease dependency pins can resolve from npm.
+      # Keep the stable-baseline checks available to publish-reconcile. The
+      # next channel publishes its complete prerelease cohort regardless of
+      # these outputs; the stable channel uses them to skip safe re-runs and
+      # report collisions/unavailable checks before completing.
       - name: Check @ai-dossier/core stable baseline
+        id: guard_core
         run: node scripts/publish-guard.mjs --dir packages/core --defer-collision "$RUNNER_TEMP/publish-collisions"
 
       - name: Check @ai-dossier/worktree-pool stable baseline
+        id: guard_worktree_pool
         run: node scripts/publish-guard.mjs --dir packages/worktree-pool --defer-collision "$RUNNER_TEMP/publish-collisions"
 
       - name: Check @ai-dossier/sched stable baseline
+        id: guard_sched
         run: node scripts/publish-guard.mjs --dir packages/sched --defer-collision "$RUNNER_TEMP/publish-collisions"
 
       - name: Check @ai-dossier/cli stable baseline
+        id: guard_cli
         run: node scripts/publish-guard.mjs --dir cli --defer-collision "$RUNNER_TEMP/publish-collisions"
 
       - name: Check @ai-dossier/mcp-server stable baseline
+        id: guard_mcp_server
         run: node scripts/publish-guard.mjs --dir mcp-server --defer-collision "$RUNNER_TEMP/publish-collisions"
 
       - name: Prepare next release cohort
+        if: env.PUBLISH_CHANNEL == 'next'
         run: |
           # GITHUB_RUN_ATTEMPT makes a manual re-run a distinct npm version.
           node scripts/prepare-next-release.mjs --run-number "$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT"
@@ -201,52 +226,93 @@ jobs:
         run: make build-all
 
       - name: Publish @ai-dossier/core
+        if: env.PUBLISH_CHANNEL == 'next' || steps.guard_core.outputs.skip != 'true'
         run: |
           cd packages/core
-          npm publish --provenance --access public --tag next
+          npm publish --provenance --access public --tag "$PUBLISH_TAG"
 
       # Before sched/cli: both depend on @ai-dossier/worktree-pool (#561), so
       # the registry must have it first or their installs break for users —
       # same reasoning as sched-before-cli below.
       - name: Publish @ai-dossier/worktree-pool
+        if: env.PUBLISH_CHANNEL == 'next' || steps.guard_worktree_pool.outputs.skip != 'true'
         run: |
           cd packages/worktree-pool
-          npm publish --provenance --access public --tag next
+          npm publish --provenance --access public --tag "$PUBLISH_TAG"
 
       # Before cli: a published cli tarball depends on @ai-dossier/sched, so
       # the registry must have it first or the cli install breaks for users.
       - name: Publish @ai-dossier/sched
+        if: env.PUBLISH_CHANNEL == 'next' || steps.guard_sched.outputs.skip != 'true'
         run: |
           cd packages/sched
-          npm publish --provenance --access public --tag next
+          npm publish --provenance --access public --tag "$PUBLISH_TAG"
 
       - name: Publish @ai-dossier/cli
+        if: env.PUBLISH_CHANNEL == 'next' || steps.guard_cli.outputs.skip != 'true'
         run: |
           cd cli
-          npm publish --provenance --access public --tag next
+          npm publish --provenance --access public --tag "$PUBLISH_TAG"
 
       - name: Publish @ai-dossier/mcp-server
+        if: env.PUBLISH_CHANNEL == 'next' || steps.guard_mcp_server.outputs.skip != 'true'
         run: |
           cd mcp-server
-          npm publish --provenance --access public --tag next
+          npm publish --provenance --access public --tag "$PUBLISH_TAG"
+
+      - name: Fail on stable publish guard problems
+        if: env.PUBLISH_CHANNEL == 'stable'
+        run: node scripts/publish-guard.mjs --report-collisions "$RUNNER_TEMP/publish-collisions"
 
   verify:
     needs: publish
     runs-on: ubuntu-latest
+    env:
+      PUBLISH_CHANNEL: ${{ github.event_name == 'workflow_dispatch' && inputs.channel == 'stable' && 'stable' || 'next' }}
+      PUBLISH_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.channel == 'stable' && 'latest' || 'next' }}
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Verify packages are available under next
+      - name: Verify packages are available under the selected channel
         run: |
-          echo "Verifying next packages..."
-          npm view @ai-dossier/core@next version
-          npm view @ai-dossier/sched@next version
-          npm view @ai-dossier/cli@next version
-          npm view @ai-dossier/mcp-server@next version
-          npm view @ai-dossier/worktree-pool@next version
+          echo "Verifying $PUBLISH_CHANNEL packages..."
+          for entry in \
+            "packages/core:@ai-dossier/core" \
+            "packages/worktree-pool:@ai-dossier/worktree-pool" \
+            "packages/sched:@ai-dossier/sched" \
+            "cli:@ai-dossier/cli" \
+            "mcp-server:@ai-dossier/mcp-server"; do
+            directory=${entry%%:*}
+            package=${entry#*:}
+            expected=$(node -p "require('./$directory/package.json').version")
+            verified=false
+
+            for attempt in 1 2 3 4 5; do
+              actual=$(npm view "$package@$PUBLISH_TAG" version --prefer-online 2>/dev/null) || actual=""
+              if [ -n "$actual" ] && { [ "$PUBLISH_CHANNEL" = "next" ] || [ "$actual" = "$expected" ]; }; then
+                echo "Verified $package@$PUBLISH_TAG at $actual"
+                verified=true
+                break
+              fi
+
+              if [ "$attempt" -eq 5 ]; then
+                echo "::error::$package@$PUBLISH_TAG did not resolve to the expected published version after 5 attempts."
+                exit 1
+              fi
+
+              delay=$((attempt * 5))
+              echo "Attempt $attempt/5 did not verify $package@$PUBLISH_TAG; retrying in ${delay}s."
+              sleep "$delay"
+            done
+
+            [ "$verified" = true ]
+          done
           # Behavioral smoke testing happens in the pre-publish `smoke` job
           # against the same tarball; this job only confirms registry publish.

@@ -1,6 +1,6 @@
 {
   "name": "@ai-dossier/worktree-pool",
-  "version": "0.7.4",
+  "version": "0.7.5",
   "description": "Pre-warmed Git worktree pool for coding agents and parallel development, with instant issue setup and dependency reuse.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
