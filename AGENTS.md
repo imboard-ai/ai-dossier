@@ -38,16 +38,20 @@ future agent should search for first.
 | `mcp-server/` | MCP server — tools/resources/prompts for LLM integration |
 | `registry/` | Vercel-deployed registry API |
 | `packages/worktree-pool/` | Pre-warmed git worktree management |
+| `packages/vscode/` | VS Code extension (private, not on npm) — bundles core; `.vsix` released via `vscode-release.yml` |
 
 ```bash
 make build-all    # build core → worktree-pool → sched → mcp-server + cli (skip lint)
 make build        # lint then build
 make test         # test all workspaces + repo scripts (scripts/*.test.mjs)
-make check        # biome format + lint with auto-fix
+make check        # biome format + lint with auto-fix; fails if a warning remains
+make lint         # exactly CI's lint gate, read-only: errors AND warnings fail
 ```
 
 - Node 20+ required (vitest v4 + vite v7 dropped Node 18)
-- Linter/formatter: **Biome** (not ESLint/Prettier) — `npx biome check --write .`
+- Linter/formatter: **Biome** (not ESLint/Prettier) — fix with `make check`, verify with `make lint`.
+  CI fails on Biome warnings, not just errors (#859); where a rule is wrong for a site, suppress
+  it with `// biome-ignore lint/<group>/<rule>: <why>`
 - Build order: core → worktree-pool → sched → mcp-server + cli (sched depends on core +
   worktree-pool; cli depends on core + sched)
 - Changing a publishable package's `src/`/`bin/` requires bumping that package's `package.json`

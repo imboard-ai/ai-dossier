@@ -102,7 +102,7 @@ describe('remove command', () => {
     const output = JSON.parse(jsonCall?.[0] as string);
     expect(output.verification).toBeDefined();
     expect(output.verification.verify_command).toBe('dossier info my-dossier');
-    expect(output.verification.cdn_delay_seconds).toBe(30);
+    expect(output.verification.cdn_delay_seconds).toBe(300);
   });
 
   it('should output JSON error on remove failure with --json flag', async () => {

@@ -23,6 +23,7 @@ import {
   MAX_GENERATION,
   MAX_VALUE_LENGTH,
   mintRunId,
+  mintSuccessorRunId,
   NEXT_VALUES,
   nextFenceGeneration,
   nowStamp,
@@ -345,6 +346,8 @@ describe('validateMilestone', () => {
       'none,none',
       '0,none',
       ',',
+      'prescreen',
+      'Prescreen,none',
     ])('rejects review done with agents_done=%s', (v) => {
       const errors = validateMilestone({
         phase: 'review',
@@ -365,6 +368,17 @@ describe('validateMilestone', () => {
           status: 'done',
           run: 'r-440-ab56',
           keys: reviewKeys('conformance'),
+        })
+      ).toEqual([]);
+    });
+
+    it('accepts prescreen alongside a real reviewer (#887)', () => {
+      expect(
+        validateMilestone({
+          phase: 'review',
+          status: 'done',
+          run: 'r-440-ab56',
+          keys: reviewKeys('prescreen,security'),
         })
       ).toEqual([]);
     });
@@ -623,6 +637,19 @@ describe('mintRunId', () => {
     expect(
       validateMilestone({ phase: 'gate', status: 'blocked', run, keys: [['reason', 'x']] })
     ).toEqual([]);
+  });
+});
+
+describe('mintSuccessorRunId (#889)', () => {
+  it('re-mints when the random suffix collides with the prior run', () => {
+    const minted = ['r-440-ab56', 'r-440-ab56', 'r-440-cd78'];
+    const mint = () => minted.shift() as string;
+    expect(mintSuccessorRunId(440, 'r-440-ab56', mint)).toBe('r-440-cd78');
+    expect(minted).toEqual([]);
+  });
+
+  it('returns the first mint when it already differs', () => {
+    expect(mintSuccessorRunId(440, 'r-440-ab56', () => 'r-440-0001')).toBe('r-440-0001');
   });
 });
 
@@ -1263,8 +1290,13 @@ describe('runstate spec table — classify and batch phases (#461)', () => {
       'est_diff',
       'est_files',
       'gen',
+      'live',
+      'live_flows',
+      'live_note',
+      'merge_mechanism',
       'mode',
       'risk',
+      'ship_mode',
       'takeover',
       'test_scope',
     ]);
@@ -2066,5 +2098,92 @@ describe('hasSlotModeLatestMilestone (#616 — slot-cycle Step 0 precondition 6)
     expect(hasSlotModeLatestMilestone(['chatter', classify, '<!-- plan:v1 head=abc1234 -->'])).toBe(
       true
     );
+  });
+});
+
+describe('KEY_VALUE_RULES — review live roll-up and ship-mode keys (#670, #921)', () => {
+  const reviewDone = (extra: Array<[string, string]>) => ({
+    phase: 'review',
+    status: 'done',
+    run: 'r-670-ab56',
+    keys: [
+      ['head', 'abc1234'],
+      ['fixed', '0'],
+      ['escalated', '0'],
+      ['agents_done', 'correctness'],
+      ['agents_pending', 'none'],
+      ...extra,
+    ] as Array<[string, string]>,
+  });
+  const shipAwaiting = (extra: Array<[string, string]>) => ({
+    phase: 'ship',
+    status: 'awaiting-merge',
+    run: 'r-921-ab56',
+    keys: [['pr', '921'], ['head', 'abc1234'], ['ci_fix_attempts', '0'], ...extra] as Array<
+      [string, string]
+    >,
+  });
+
+  // Every value a registry dossier (review-issue / ship-issue / full-cycle / fleet-cycle) or a
+  // real milestone comment on this repo posts today — the rules must never reject these.
+  it.each([
+    ['live', 'pass'],
+    ['live', 'fail'],
+    ['live', 'unverifiable'],
+    ['live', 'n/a'],
+    ['live_flows', '0'],
+    ['live_flows', '3'],
+    ['live_note', 'no-scratch-db'],
+    ['live_note', 'no-runtime'],
+    ['live_note', 'no-browser'],
+    ['live_note', 'stale-runtime'],
+    ['live_note', 'no-flows'],
+    ['live_note', 'no-second-view'],
+    ['live_note', 'no-plan-milestone'],
+    ['live_note', 'agent-incomplete'],
+    ['live_note', 'floor-violation'],
+  ])('accepts %s=%s on a review milestone', (key, value) => {
+    expect(validateMilestone(reviewDone([[key, value]]))).toEqual([]);
+  });
+
+  it.each([
+    ['live', 'banana'],
+    ['live', 'PASS'],
+    ['live_flows', '-3'],
+    ['live_flows', 'two'],
+    ['live_note', 'because'],
+    ['live_note', 'no_runtime'],
+  ])('rejects %s=%s with a readable expectation', (key, value) => {
+    const errors = validateMilestone(reviewDone([[key, value]]));
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain(key);
+    expect(errors[0]).toContain('expected');
+  });
+
+  it.each([
+    ['ship_mode', 'detached'],
+    ['ship_mode', 'attached'],
+    ['merge_mechanism', 'watcher'],
+    ['merge_mechanism', 'native'],
+    ['merge_mechanism', 'none'],
+    ['merge_mechanism', 'unknown'],
+    ['merge_mechanism', 'confirmed'],
+  ])('accepts %s=%s', (key, value) => {
+    expect(validateMilestone(shipAwaiting([[key, value]]))).toEqual([]);
+  });
+
+  it.each([
+    ['ship_mode', 'detatched'],
+    ['ship_mode', 'parked'],
+    ['merge_mechanism', 'auto'],
+    ['merge_mechanism', 'Watcher'],
+  ])('rejects %s=%s so a typo cannot silently disable the attached-not-parked rule', (key, value) => {
+    const errors = validateMilestone(shipAwaiting([[key, value]]));
+    expect(errors).toHaveLength(1);
+    expect(errors[0]).toContain(`expected one of`);
+  });
+
+  it('still validates a review milestone that omits live keys (presence is deferred — #670)', () => {
+    expect(validateMilestone(reviewDone([]))).toEqual([]);
   });
 });

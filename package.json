@@ -16,14 +16,14 @@
     "rebuild": "make rebuild",
     "test": "make test",
     "test:scripts": "vitest run --config vitest.scripts.config.mjs",
-    "lint": "biome check .",
-    "lint:fix": "biome check --write .",
+    "lint": "biome ci --error-on-warnings .",
+    "lint:fix": "npm run check",
     "format": "biome format --write .",
     "fleet:cli-audit": "bash scripts/fleet-cli-audit.sh",
     "fleet:tick": "bash scripts/sched-fleet/tick.sh",
     "fleet:probe-effort": "node scripts/sched-fleet/probe-effort.mjs",
     "scorecard": "node scripts/model-scorecard.mjs",
-    "check": "biome check --write .",
+    "check": "biome check --write --error-on-warnings .",
     "prepare": "husky",
     "publish:core": "cd packages/core && npm run build && npm publish",
     "publish:cli": "cd cli && npm run build && npm publish",
@@ -31,7 +31,7 @@
     "publish:all": "npm run publish:core && npm run publish:cli && npm run publish:mcp"
   },
   "lint-staged": {
-    "*.{ts,js,json}": "biome check --write --no-errors-on-unmatched"
+    "*.{ts,js,mjs,json}": "biome check --write --no-errors-on-unmatched --error-on-warnings"
   },
   "author": "Yuval Dimnik <yuval.dimnik@gmail.com>",
   "engines": {
@@ -45,8 +45,10 @@
   "devDependencies": {
     "@aws-sdk/client-kms": "^3.932.0",
     "@biomejs/biome": "^2.3.6",
+    "esbuild": "^0.27.7",
     "husky": "^9.1.7",
     "lint-staged": "^15.5.1",
+    "postject": "^1.0.0-alpha.6",
     "tsx": "^4.20.6",
     "vitest": "^4.0.9",
     "yaml": "^2.8.3"

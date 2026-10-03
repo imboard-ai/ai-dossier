@@ -455,7 +455,8 @@ function registerAddSubcommand(cmd: Command): void {
       const sidecarPath = siblingEvidencePath(file);
       const identity = deriveIdentity(file);
 
-      let record: EvidenceRecord = fs.existsSync(sidecarPath)
+      const sidecarExists = fs.existsSync(sidecarPath);
+      let record: EvidenceRecord = sidecarExists
         ? loadSidecar(sidecarPath)
         : createEvidenceRecord({
             dossier: `${resolveDossierNamespace(undefined, options.namespace)}/${identity.name}`,
@@ -508,6 +509,14 @@ function registerAddSubcommand(cmd: Command): void {
         ],
       };
       record = applyIdentity(record, identity, options.namespace);
+
+      if (!sidecarExists && !options.namespace) {
+        // #921: a brand-new sidecar only knows the account default — the registry path may have
+        // more segments (`imboard-ai/git/<name>`). `publish` normalises the namespace, but say so.
+        console.log(
+          `ℹ️  dossier namespace defaulted to "${record.dossier.slice(0, record.dossier.lastIndexOf('/'))}"; pass --namespace <ns> (e.g. imboard-ai/git) to record the full registry path`
+        );
+      }
 
       const errors = validateEvidence(record);
       if (errors.length > 0) {

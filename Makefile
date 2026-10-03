@@ -1,7 +1,7 @@
 # Dossier Build System
 # Handles build order dependencies across npm workspaces
 
-.PHONY: all build build-all clean test test-coverage install help lint format check build-pool build-sched
+.PHONY: all build build-all clean test test-coverage install help lint format check build-pool build-sched build-vscode build-binary
 .DEFAULT_GOAL := help
 
 ## help: Show this help message
@@ -29,7 +29,7 @@ install:
 build: lint build-all
 
 ## build-all: Build all packages in dependency order (no lint)
-build-all: build-core build-pool build-sched build-mcp build-cli
+build-all: build-core build-pool build-sched build-mcp build-cli build-vscode
 	@echo "✓ All packages built successfully"
 
 ## build-core: Build @ai-dossier/core package
@@ -50,6 +50,12 @@ build-cli: build-core build-sched
 	cd cli && npm run build
 	@echo "✓ cli built"
 
+## build-vscode: Typecheck and bundle the VS Code extension (depends on core)
+build-vscode: build-core
+	@echo "Building packages/vscode..."
+	cd packages/vscode && npm run typecheck && npm run build
+	@echo "✓ packages/vscode built"
+
 ## build-pool: Build @ai-dossier/worktree-pool package
 build-pool:
 	@echo "Building packages/worktree-pool..."
@@ -61,6 +67,10 @@ build-sched: build-core build-pool
 	@echo "Building packages/sched..."
 	cd packages/sched && npm run build
 	@echo "✓ packages/sched built"
+
+## build-binary: Build a standalone (no-Node) ai-dossier executable for this host into dist-binaries/
+build-binary: build-cli
+	node scripts/build-sea.mjs
 
 ## clean: Remove all build artifacts
 clean:
@@ -89,21 +99,21 @@ test-coverage:
 	npm run test:scripts
 	@echo "✓ Tests with coverage completed"
 
-## lint: Check code for linting issues (no changes)
+## lint: Check code for linting issues, warnings included, same as CI (no changes)
 lint:
 	@echo "Checking code with Biome..."
-	npx biome check .
+	npm run lint
 
 ## format: Format code with Biome
 format:
 	@echo "Formatting code with Biome..."
-	npx biome format --write .
+	npm run format
 	@echo "✓ Code formatted"
 
-## check: Format and lint code with auto-fix
+## check: Format and lint code with auto-fix; fails if a warning remains
 check:
 	@echo "Checking and fixing code with Biome..."
-	npx biome check --write .
+	npm run check
 	@echo "✓ Code checked and formatted"
 
 ## verify: Verify a dossier file (usage: make verify FILE=path/to/file.ds.md)

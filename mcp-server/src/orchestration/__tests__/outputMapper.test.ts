@@ -1,14 +1,20 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { logger } from '../../utils/logger';
 import {
   clearJourneyOutputs,
   collectOutputs,
   generateInjectedContext,
   getJourneyOutputs,
   initJourneyOutputs,
+  MAX_JOURNEYS,
   resolveStepInputs,
   validateGraphMappings,
 } from '../outputMapper';
 import type { DossierNode, ExecutionPlan, FromDossierDeclaration } from '../types';
+
+vi.mock('../../utils/logger', () => ({
+  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() },
+}));
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -60,9 +66,9 @@ describe('journey output store', () => {
   it('should merge additional outputs for the same dossier', () => {
     collectOutputs(jid, 'setup-infra', { cluster_arn: 'arn:1' });
     collectOutputs(jid, 'setup-infra', { vpc_id: 'vpc-123' });
-    const dossierOutputs = getJourneyOutputs(jid).get('setup-infra')!;
-    expect(dossierOutputs.get('cluster_arn')).toBe('arn:1');
-    expect(dossierOutputs.get('vpc_id')).toBe('vpc-123');
+    const dossierOutputs = getJourneyOutputs(jid).get('setup-infra');
+    expect(dossierOutputs?.get('cluster_arn')).toBe('arn:1');
+    expect(dossierOutputs?.get('vpc_id')).toBe('vpc-123');
   });
 
   it('should collect outputs for multiple dossiers independently', () => {
@@ -81,6 +87,25 @@ describe('journey output store', () => {
     collectOutputs(jid, 'step-a', { x: 1 });
     clearJourneyOutputs(jid);
     expect(getJourneyOutputs(jid).size).toBe(0);
+  });
+
+  it('should evict only the oldest journey once the store is at capacity', () => {
+    const ids = Array.from({ length: MAX_JOURNEYS + 1 }, (_, i) => `capacity-journey-${i}`);
+    vi.mocked(logger.warn).mockClear();
+    try {
+      for (const id of ids) collectOutputs(id, 'step', { id });
+
+      expect(getJourneyOutputs(ids[0]).size).toBe(0);
+      expect(getJourneyOutputs(ids[1]).get('step')?.get('id')).toBe(ids[1]);
+      expect(getJourneyOutputs(ids[MAX_JOURNEYS]).get('step')?.get('id')).toBe(ids[MAX_JOURNEYS]);
+      expect(logger.warn).toHaveBeenCalledTimes(1);
+      expect(logger.warn).toHaveBeenCalledWith(
+        'Journey output store at capacity, evicted oldest entry',
+        { evicted: ids[0], maxJourneys: MAX_JOURNEYS }
+      );
+    } finally {
+      for (const id of ids) clearJourneyOutputs(id);
+    }
   });
 });
 
@@ -178,6 +203,27 @@ describe('validateGraphMappings', () => {
 
     expect(validateGraphMappings(plan, nodes)).toHaveLength(0);
   });
+
+  it('should skip the ordering check for a consumer that is not in the plan', () => {
+    const nodes = new Map<string, DossierNode>([
+      ['a', makeNode('a')],
+      [
+        'orphan',
+        makeNode('orphan', {
+          fromDossiers: [
+            { source_dossier: 'a', output_name: 'some_key' },
+            { source_dossier: 'missing-dossier', output_name: 'other_key' },
+          ],
+        }),
+      ],
+    ]);
+    // 'orphan' has no phase, so only the missing-source warning can apply to it.
+    const plan = makePlan([{ phase: 1, names: ['a'] }]);
+
+    const warnings = validateGraphMappings(plan, nodes);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('"missing-dossier" is not in the execution graph');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -228,7 +274,7 @@ describe('resolveStepInputs', () => {
       'step-a.region': 'us-east-1',
       'step-b.region': 'eu-west-1',
     });
-    expect(result['region']).toBeUndefined();
+    expect(result.region).toBeUndefined();
   });
 });
 

@@ -35,6 +35,23 @@ export type {
   StepOutput,
 } from './coherence';
 export { validateCoherence, validateStepCoherence } from './coherence';
+// Dry-run (static preview) exports
+export type {
+  DryRunCommand,
+  DryRunEnv,
+  DryRunFile,
+  DryRunKind,
+  DryRunLevel,
+  DryRunNetwork,
+  DryRunPlan,
+  DryRunScoreComponent,
+} from './dry-run';
+export {
+  analyzeDryRun,
+  DRY_RUN_DISCLAIMER,
+  DRY_RUN_SCHEMA_VERSION,
+  levelForScore,
+} from './dry-run';
 // Evidence exports
 export type { EvidenceEntry, EvidenceRecord, EvidenceRef } from './evidence';
 export {
@@ -163,6 +180,8 @@ export type {
   TraceUpdate,
 } from './trace-recorder';
 export { createTraceRecorder, VALID_TRACE_STATUSES } from './trace-recorder';
+// Trusted comment-author check shared by every issue-artifact reader (#808)
+export { isTrustedAuthorAssociation, TRUSTED_AUTHOR_ASSOCIATIONS } from './trusted-author';
 // Type exports
 export * from './types';
 // Crypto utilities

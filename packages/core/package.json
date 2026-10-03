@@ -1,7 +1,7 @@
 {
   "name": "@ai-dossier/core",
-  "version": "1.11.0",
-  "description": "Parsing, verification, and signing for dossiers — portable, signed, versioned skills for any LLM tool.",
+  "version": "1.14.4",
+  "description": "TypeScript library for parsing, signing, and verifying portable AI-agent skills and secure LLM workflows.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
@@ -17,14 +17,13 @@
     "test:coverage": "vitest run --coverage"
   },
   "keywords": [
-    "dossier",
-    "skill",
-    "skills",
-    "parsing",
-    "verification",
-    "checksum",
-    "signature",
-    "security"
+    "agent-skill-verification",
+    "signature-verification",
+    "agent-security",
+    "llm-security",
+    "typescript",
+    "digital-signatures",
+    "workflow-validation"
   ],
   "author": "Yuval Dimnik <yuval.dimnik@gmail.com>",
   "license": "AGPL-3.0-only",
@@ -33,7 +32,7 @@
     "url": "https://github.com/imboard-ai/ai-dossier.git",
     "directory": "packages/core"
   },
-  "homepage": "https://github.com/imboard-ai/ai-dossier#readme",
+  "homepage": "https://ai-dossier.dev",
   "bugs": {
     "url": "https://github.com/imboard-ai/ai-dossier/issues"
   },

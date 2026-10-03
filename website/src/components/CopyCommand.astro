@@ -1,0 +1,44 @@
+---
+interface Props { command: string; label: string }
+const { command, label } = Astro.props;
+---
+<div class="cmd">
+  <span class="cmd-label">{label}</span>
+  <div class="box">
+    <pre tabindex="0"><code>{command}</code></pre>
+    <button type="button" class="copy" data-copy={command} aria-label={`Copy: ${label}`}>Copy</button>
+  </div>
+  <span class="sr-only" role="status" aria-live="polite"></span>
+</div>
+<script>
+  // Bundled once per page (not once per component instance).
+  document.addEventListener('click', (e) => {
+    const b = (e.target as Element | null)?.closest<HTMLButtonElement>('button.copy');
+    if (!b || !navigator.clipboard) return;
+    navigator.clipboard.writeText(b.dataset.copy ?? '').then(
+      () => {
+        const live = b.closest('.cmd')?.querySelector('[role=status]');
+        if (live) live.textContent = 'Copied to clipboard';
+        const t = b.dataset.label ?? b.textContent ?? 'Copy';
+        b.dataset.label = t;
+        b.textContent = 'Copied';
+        setTimeout(() => { b.textContent = t; if (live) live.textContent = ''; }, 1500);
+      },
+      () => {}
+    );
+  });
+</script>
+<style>
+  .cmd { margin: 14px 0; }
+  .box { position: relative; }
+  .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  .cmd-label { font-size: .8rem; font-weight: 500; color: var(--muted); display: block; margin-bottom: 6px; }
+  .cmd pre { margin: 0; padding: 14px 76px 14px 16px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .cmd pre::before { content: '$ '; color: var(--accent); user-select: none; }
+  .copy {
+    position: absolute; right: 8px; top: 10px; font: inherit; font-size: .78rem; font-weight: 600; padding: 4px 11px;
+    border: 1px solid var(--line-strong); border-radius: 6px; background: var(--bg-raised); color: var(--fg); cursor: pointer;
+    transition: background-color .15s, border-color .15s;
+  }
+  .copy:hover { border-color: var(--accent-line); background: var(--accent-soft); }
+</style>

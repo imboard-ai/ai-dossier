@@ -86,6 +86,7 @@ import {
   escalateTier,
   fileSizeOrZero,
   journalCmdModelFields,
+  killSlotAgent,
   priorWorkBranch,
   priorWorkInstruction,
   type ResolvedDispatch,
@@ -105,6 +106,7 @@ import {
   recordDispatchApiError,
   resetDispatchApiErrorStreak,
 } from './dispatch-health';
+import { worktreesDirFor } from './dossier-root';
 import type { RunFenceBinder, RunFenceReleaser, RunFencer } from './fence';
 import { takeoverLabelFor } from './fence';
 import {
@@ -117,7 +119,22 @@ import {
 } from './groundtruth';
 import { issueOfUnit, type Journal, unitEvent } from './journal';
 import { labelBlockReason, labelOfBlockReason, pickHardBlockLabel } from './labels';
+import {
+  advanceNoMergeMechanism,
+  type MergeMechanism,
+  NO_MERGE_MECHANISM_REASON,
+  parkedWithoutMerger,
+} from './merge-mechanism';
 import type { SchedStore } from './persist';
+import {
+  firstOccurrence,
+  type PreservedWork,
+  preservedWorkInstruction,
+  preserveWork,
+  pruneRescueRefs,
+  skippedSummary,
+  takeoverWorktreeRefusal,
+} from './preserve';
 import type { ExecFn } from './project';
 import { DISPATCHABLE_ISSUE_STATUSES, runnableUnits } from './readiness';
 import type { MemberResumeSeeder } from './resume-seed';
@@ -131,6 +148,7 @@ import {
 } from './run-log';
 import { assignToIdleSlot, computeAssignments, freeCapacity, setPaused } from './scheduler';
 import {
+  advanceStreak,
   CLEARED_ENTRY_DEDUP_MARKERS,
   findBatch,
   findEntry,
@@ -167,6 +185,13 @@ export interface EngineDeps {
   repoDir: string;
   /** Exec for teardown scripts (#468); injectable so tests never touch git/npx. */
   teardownExec: ExecFn;
+  /**
+   * Exec for `preserveWork` (#945) — git commit-tree + push from a dead
+   * agent's worktree. Takeover preservation is ON only when this is supplied
+   * (the CLI wires a bounded-timeout one); without it a takeover respawns
+   * exactly as before. It runs OUTSIDE the state lock: see `rescueBeforeTakeover`.
+   */
+  rescueExec?: ExecFn;
   /**
    * Writes the takeover record before a redispatch respawns (#504). Optional: an
    * engine constructed without one redispatches exactly as it did before fencing
@@ -364,6 +389,18 @@ interface TickCtx {
   config: SchedConfig;
   dispatch: ResolvedDispatch;
   result: TickResult;
+  /**
+   * The repo's merge mechanism (#887), fetched ONCE per tick before the state lock — a
+   * cache miss runs `gh api`, which must never happen under `store.withLock`.
+   */
+  mechanism: MergeMechanism | undefined;
+  /**
+   * #945: takeover rescues computed OUTSIDE the lock (`rescueBeforeTakeover`),
+   * keyed by unit; `null` = nothing to preserve. Undefined when preservation is
+   * off. A takeover whose unit is not here yet (it entered recovery during this
+   * very pass) is held until the next tick — never rescued under the lock.
+   */
+  rescued?: Map<string, PreservedWork | null>;
 }
 
 function journal(
@@ -447,13 +484,7 @@ function journalSlotReleased(
 /** Kill the agent holding `unit`'s slot, if it is alive. */
 function killUnitAgent(ctx: TickCtx, state: SchedState, unit: string): void {
   const slot = slotOf(state, unit);
-  if (
-    slot &&
-    slot.pid !== null &&
-    ctx.deps.spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)
-  ) {
-    ctx.deps.spawnDeps.kill(slot.pid, slot.pid_start ?? undefined);
-  }
+  if (slot) killSlotAgent(ctx.deps.spawnDeps, slot);
 }
 
 // --- Poll (outside the lock) ---
@@ -471,6 +502,26 @@ function pollUnits(deps: EngineDeps, state: SchedState): Map<string, UnitTruth> 
       // an already-flagged entry needs no further reads (the flag is sticky).
       const issue = issueOfUnit(slot.unit);
       if (issue === null || out.has(slot.unit) || isReportSlot(slot)) continue;
+      if ((findEntry(state, issue)?.stale_closed_at ?? null) !== null) continue;
+      out.set(slot.unit, {
+        reachable: true,
+        milestone: null,
+        closed: deps.groundTruth.issueClosed(issue),
+        head: null,
+        branch: slot.branch,
+      });
+      continue;
+    }
+    if (slot.status === 'assigned') {
+      // #778: a crash-left `assigned` slot is spawned fresh by
+      // `reconcileAssigned` — the same "resume after days" shape as
+      // `recovering`. A live pid is re-attached, never re-spawned, so it needs
+      // no read; report slots close their issue at merge, by design.
+      const issue = issueOfUnit(slot.unit);
+      if (issue === null || out.has(slot.unit) || isReportSlot(slot)) continue;
+      if (slot.pid !== null && deps.spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)) {
+        continue;
+      }
       if ((findEntry(state, issue)?.stale_closed_at ?? null) !== null) continue;
       out.set(slot.unit, {
         reachable: true,
@@ -655,6 +706,37 @@ function pollLabels(
   const labels = new Map<number, string[] | undefined>();
   for (const issue of watched) labels.set(issue, deps.groundTruth.issueLabels(issue));
   return { ran: true, labels };
+}
+
+/**
+ * #778: one `issueClosed` read per issue unit the dispatch pass could place
+ * this tick (the first `max_slots` runnable, unheld, unflagged issue units —
+ * the same ceiling as `pollLabels`) plus orphaned `dispatched` entries that
+ * `requeueOrphanedDispatches` is about to put back in that queue. A paused
+ * fleet dispatches nothing, so it reads nothing. `issueClosed` is false when
+ * gh is unreachable: an unreadable issue is never treated as closed.
+ */
+function pollClosed(
+  deps: EngineDeps,
+  state: SchedState,
+  config: SchedConfig
+): Map<number, boolean> {
+  const out = new Map<number, boolean>();
+  if (state.paused) return out;
+  const held = new Set(state.slots.map((slot) => slot.unit).filter((u): u is string => u !== null));
+  const unflagged = (issue: number) => findEntry(state, issue)?.stale_closed_at === null;
+  const candidates: number[] = state.entries
+    .filter((e) => e.status === 'dispatched' && !held.has(`issue:${e.issue}`))
+    .map((e) => e.issue);
+  for (const unit of runnableUnits(state)) {
+    if (unit.kind === 'issue' && !held.has(`issue:${unit.issue}`)) candidates.push(unit.issue);
+  }
+  for (const issue of candidates) {
+    if (out.size >= config.max_slots) break;
+    if (out.has(issue) || !unflagged(issue)) continue;
+    out.set(issue, deps.groundTruth.issueClosed(issue));
+  }
+  return out;
 }
 
 /**
@@ -897,6 +979,17 @@ function spawnUnit(ctx: TickCtx, state: SchedState, unit: string): SchedState {
   const seeded = slot.gen === 0 ? seedResumeTrail(ctx, state, issue) : { state, run: null };
   const seededState = seeded.state;
   const evidence = findEntry(seededState, issue)?.failure_evidence ?? null;
+  // #945: a takeover (gen > 0) lands on whatever the dead run left in its
+  // worktree — preserve it first and tell the respawn to resume from it.
+  let preserved: PreservedWork | null = null;
+  if (slot.gen > 0 && ctx.rescued !== undefined) {
+    if (!ctx.rescued.has(unit)) {
+      // Held: the rescue (git + gh) runs outside the lock before the NEXT tick's
+      // respawn. The slot stays `recovering`; `reconcileRecovering` retries it.
+      return state;
+    }
+    preserved = ctx.rescued.get(unit) ?? null;
+  }
 
   return spawnAndRecord(ctx, seededState, unit, slot, {
     tier: entry.tier,
@@ -906,25 +999,155 @@ function spawnUnit(ctx: TickCtx, state: SchedState, unit: string): SchedState {
     // replaced is refused. A first dispatch is generation 0 and reads as it always did.
     // The tier's own resolved prompt (#527) — falls back to the global
     // dispatch.prompt when the tier has no override.
-    prompt: withPriorWork(
-      buildPrompt(
-        dispatch.tiers[entry.tier].prompt,
-        issue,
-        slot.gen,
-        // #683 AC6: the takeover is told its slot identity alongside the generation —
-        // the same label the fence announced and the bind names (one spelling,
-        // `takeoverLabelFor`). Descriptive only: ownership is decided by run id +
-        // generation, never by matching this label (AC7).
-        slot.gen > 0 ? takeoverLabelFor(slot.id, slot.recoveries) : undefined
-      ),
-      // #810: a requeued parked batch member continues from its member branch —
-      // on the FIRST generation only: a takeover resumes its own run's pushed
-      // branch (the takeover instruction), which may already carry newer work.
-      slot.gen === 0 ? priorWorkInstruction(issue, evidence, evidence?.resume_run ?? null) : null
-    ),
+    prompt:
+      withPriorWork(
+        buildPrompt(
+          dispatch.tiers[entry.tier].prompt,
+          issue,
+          slot.gen,
+          // #683 AC6: the takeover is told its slot identity alongside the generation —
+          // the same label the fence announced and the bind names (one spelling,
+          // `takeoverLabelFor`). Descriptive only: ownership is decided by run id +
+          // generation, never by matching this label (AC7).
+          slot.gen > 0 ? takeoverLabelFor(slot.id, slot.recoveries) : undefined,
+          // #887: the repo's detected merge mechanism decides detached vs attached ship.
+          ctx.mechanism
+        ),
+        // #810: a requeued parked batch member continues from its member branch —
+        // on the FIRST generation only: a takeover resumes its own run's pushed
+        // branch (the takeover instruction), which may already carry newer work.
+        slot.gen === 0 ? priorWorkInstruction(issue, evidence, evidence?.resume_run ?? null) : null
+      ) + (preserved === null ? '' : `\n\n${preservedWorkInstruction(preserved)}`),
     phase: 'gate',
     ...(slot.gen > 0 ? { journalExtra: { detail: `takeover gen=${slot.gen}` } } : {}),
   });
+}
+
+/**
+ * #945: preserve what a superseded run left in its worktree before its takeover
+ * is spawned — for every slot ALREADY awaiting a takeover respawn, computed
+ * OUTSIDE the state lock (`gh` issue read, `git worktree list`, the rescue
+ * script and its push are all subprocesses). The worktree comes from the run's
+ * setup milestone (an issue COMMENT), so it is acted on only when it passes
+ * `takeoverWorktreeRefusal` (registered worktree of THIS repo, under the
+ * sanctioned roots, not the main checkout, not held by a batch). Journals
+ * `work-preserved` / `work-preserve-failed`; a refusal is journaled once per
+ * unit and yields `null`. Nothing here ever blocks the respawn.
+ */
+function rescueBeforeTakeover(
+  deps: EngineDeps,
+  state: SchedState
+): Map<string, PreservedWork | null> | undefined {
+  const exec = deps.rescueExec;
+  // A paused scheduler dispatches nothing: no gh/git calls for slots that cannot respawn.
+  if (exec === undefined) return undefined;
+  // Held slots: nothing to rescue for now — and nothing may respawn without a rescue either.
+  if (state.paused) return new Map();
+  const rescued = new Map<string, PreservedWork | null>();
+  for (const slot of state.slots) {
+    if (slot.unit === null || slot.gen <= 0) continue;
+    const awaiting =
+      slot.status === 'recovering' || (slot.status === 'assigned' && slot.pid === null);
+    const issue = slot.unit.startsWith('issue:') ? Number(slot.unit.slice('issue:'.length)) : NaN;
+    if (!awaiting || !Number.isInteger(issue)) continue;
+    rescued.set(slot.unit, preserveForTakeover(deps, exec, state, slot.unit, issue));
+  }
+  return rescued;
+}
+
+const RESCUE_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const lastRescuePrune = new WeakMap<object, number>();
+
+/**
+ * #945: rescue refs are disposable (14-day TTL) — prune once a day, OUTSIDE the state
+ * lock (it talks to origin), not only at `sched start`. The first tick only sets the
+ * baseline: the CLI already pruned at start. Never throws.
+ */
+function pruneRescueRefsDaily(deps: EngineDeps): void {
+  const exec = deps.rescueExec;
+  if (exec === undefined) return;
+  const now = deps.now();
+  const last = lastRescuePrune.get(deps.journal);
+  if (last === undefined) {
+    lastRescuePrune.set(deps.journal, now.getTime());
+    return;
+  }
+  if (now.getTime() - last < RESCUE_PRUNE_INTERVAL_MS) return;
+  lastRescuePrune.set(deps.journal, now.getTime());
+  try {
+    const pruned = pruneRescueRefs(exec, deps.repoDir, now);
+    if (pruned.length > 0) {
+      deps.journal.append(
+        {
+          event: 'rescue-pruned',
+          detail: `pruned ${pruned.length} expired rescue ref(s): ${pruned.join(', ')}`,
+        },
+        now
+      );
+    }
+  } catch {
+    // housekeeping only
+  }
+}
+
+function preserveForTakeover(
+  deps: EngineDeps,
+  exec: ExecFn,
+  state: SchedState,
+  unit: string,
+  issue: number
+): PreservedWork | null {
+  let info: ReturnType<EngineDeps['groundTruth']['setupInfo']>;
+  try {
+    info = deps.groundTruth.setupInfo(issue);
+  } catch {
+    return null;
+  }
+  if (info === null || info === undefined) return null;
+  const refusal = takeoverWorktreeRefusal(exec, {
+    repoDir: deps.repoDir,
+    worktree: info.worktree,
+    state,
+    unit,
+  });
+  if (refusal !== null) {
+    if (firstOccurrence(deps.journal, `${unit}|${refusal}`)) {
+      deps.journal.append(
+        unitEvent('work-preserve-failed', unit, {
+          worktree: info.worktree,
+          detail: `takeover rescue skipped: ${refusal} — the worktree is not touched`,
+        }),
+        deps.now()
+      );
+    }
+    return null;
+  }
+  const outcome = preserveWork(exec, { worktree: info.worktree, unit, now: deps.now() });
+  if (outcome.kind === 'preserved') {
+    const w = outcome.work;
+    if (!w.reused) {
+      const skipped = skippedSummary(w.skipped);
+      deps.journal.append(
+        unitEvent('work-preserved', unit, {
+          branch: w.ref,
+          worktree: info.worktree,
+          detail: `${w.dirty_files} uncommitted file(s) + ${w.unpushed_commits} unpushed commit(s) on head ${w.head} preserved as ${w.sha} at ${w.ref} (${w.pushed ? 'pushed' : w.local_only ? 'local only — includes untracked files, never pushed' : 'NOT pushed — local ref only'})${skipped ? `; ${skipped}` : ''}; the takeover is told to resume from it`,
+        }),
+        deps.now()
+      );
+    }
+    return w;
+  }
+  if (outcome.kind === 'failed' && firstOccurrence(deps.journal, `${unit}|${outcome.reason}`)) {
+    deps.journal.append(
+      unitEvent('work-preserve-failed', unit, {
+        worktree: info.worktree,
+        detail: `${outcome.reason} — ${outcome.probe.dirty_files} uncommitted file(s), ${outcome.probe.unpushed_commits} unpushed commit(s) left in place in the worktree`,
+      }),
+      deps.now()
+    );
+  }
+  return null;
 }
 
 /**
@@ -966,7 +1189,10 @@ function seedResumeTrail(
     branch,
     baseBranch,
     batch: evidence.batch,
-    worktree: path.join(ctx.deps.repoDir, 'worktrees', branch.replaceAll('/', '-')),
+    // #890: the same project-root resolution batch worktrees use, so a nested
+    // layout (`.dossier/` above the checkout) lands slot + batch trees in one root.
+    worktree: path.join(worktreesDirFor(ctx.deps.repoDir), branch.replaceAll('/', '-')),
+    revertedCommits: evidence.reverted_commits,
   });
   if (!outcome.ok) {
     journal(ctx, 'resume-seed-failed', unit, {
@@ -1856,6 +2082,26 @@ function effectiveClosedSignal(slot: SlotEntry, truth: UnitTruth): boolean {
 }
 
 /**
+ * The `QueueEntry` fields backing each entry-rail dedup event (#638): one
+ * descriptor per event instead of accessor lambdas, so `journalConditionIfDue`
+ * and `clearCondition` are single bodies. `condition` names the streak
+ * discriminator field (#637), or `null` for a presence-only streak.
+ */
+const ENTRY_DEDUP_MARKERS = {
+  'ground-truth-unreachable': {
+    since: 'ground_truth_unreachable_since',
+    ticks: 'ground_truth_unreachable_ticks',
+    condition: 'ground_truth_unreachable_condition',
+  },
+  'pr-watch-waiting': {
+    since: 'pr_watch_waiting_since',
+    ticks: 'pr_watch_waiting_ticks',
+    condition: null,
+  },
+} as const;
+type EntryDedupEvent = keyof typeof ENTRY_DEDUP_MARKERS;
+
+/**
  * Journal `event` for `unit` on the first tick of a new streak, then again
  * only every `JOURNAL_DEDUP_REANNOUNCE_TICKS` ticks while it persists (#632).
  * That window is a TICK count, not a duration: the sites reached every
@@ -1888,10 +2134,8 @@ function journalConditionIfDue(
   ctx: TickCtx,
   state: SchedState,
   unit: string,
-  event: 'ground-truth-unreachable' | 'pr-watch-waiting',
-  sinceOf: (entry: QueueEntry) => string | null,
-  ticksOf: (entry: QueueEntry) => number,
-  withMarker: (since: string | null, ticks: number) => Partial<QueueEntry>,
+  event: EntryDedupEvent,
+  condition: string | null,
   extra: Record<string, unknown>
 ): SchedState {
   const issue = issueOfUnit(unit);
@@ -1900,16 +2144,24 @@ function journalConditionIfDue(
     journal(ctx, event, unit, extra);
     return state;
   }
-  const isNewStreak = sinceOf(entry) === null;
-  const ticks = isNewStreak ? 1 : ticksOf(entry) + 1;
+  const marker = ENTRY_DEDUP_MARKERS[event];
   const now = ctx.deps.now();
-  const since = isNewStreak ? now.toISOString() : (sinceOf(entry) as string);
-  if (isNewStreak || ticks % JOURNAL_DEDUP_REANNOUNCE_TICKS === 0) {
+  // #637: identity is the condition key + presence — a different key on the
+  // same unit starts a new streak. Events without a discriminator
+  // (`pr-watch-waiting`) are presence-only.
+  const changed = marker.condition !== null && entry[marker.condition] !== condition;
+  const { since, ticks, announce } = advanceStreak(
+    { since: entry[marker.since], ticks: entry[marker.ticks] },
+    changed,
+    now
+  );
+  if (announce) {
     // `at` is the decision clock (AC3); `since` is the streak's onset. Both
     // are needed: `ticks_persisted` is a TICK count, and the two rails tick at
     // different, operator-tunable rates, so it maps to no fixed wall-clock.
     journal(ctx, event, unit, {
       ...extra,
+      ...(condition !== null ? { condition } : {}),
       at: now.toISOString(),
       since,
       ticks_persisted: ticks,
@@ -1920,80 +2172,43 @@ function journalConditionIfDue(
   // elsewhere (`isStaleFailedPark`'s window, `status.ts`'s "since" display,
   // `readiness.ts`'s dispatch tiebreak) as a clock that must not reset on a
   // silent tick.
-  return patchEntry(state, issue, withMarker(since, ticks), now, false);
-}
-
-function journalGroundTruthUnreachableIfDue(
-  ctx: TickCtx,
-  state: SchedState,
-  unit: string,
-  extra: Record<string, unknown>
-): SchedState {
-  return journalConditionIfDue(
-    ctx,
-    state,
-    unit,
-    'ground-truth-unreachable',
-    (e) => e.ground_truth_unreachable_since,
-    (e) => e.ground_truth_unreachable_ticks,
-    (since, ticks) => ({
-      ground_truth_unreachable_since: since,
-      ground_truth_unreachable_ticks: ticks,
-    }),
-    extra
-  );
-}
-
-function journalPrWatchWaitingIfDue(
-  ctx: TickCtx,
-  state: SchedState,
-  unit: string,
-  extra: Record<string, unknown>
-): SchedState {
-  return journalConditionIfDue(
-    ctx,
-    state,
-    unit,
-    'pr-watch-waiting',
-    (e) => e.pr_watch_waiting_since,
-    (e) => e.pr_watch_waiting_ticks,
-    (since, ticks) => ({ pr_watch_waiting_since: since, pr_watch_waiting_ticks: ticks }),
-    extra
-  );
-}
-
-/**
- * Clear a `QueueEntry`'s `ground-truth-unreachable` marker once truth
- * answers again (#632) — a no-op when nothing was set, so callers can call
- * this unconditionally on every tick truth is healthy without churning
- * `updated_at` for entries that were never in a streak.
- */
-function clearGroundTruthUnreachable(state: SchedState, unit: string, now: Date): SchedState {
-  const issue = issueOfUnit(unit);
-  const entry = issue === null ? undefined : findEntry(state, issue);
-  if (issue === null || entry === undefined || entry.ground_truth_unreachable_since === null) {
-    return state;
-  }
   return patchEntry(
     state,
     issue,
-    { ground_truth_unreachable_since: null, ground_truth_unreachable_ticks: 0 },
+    {
+      [marker.since]: since,
+      [marker.ticks]: ticks,
+      ...(marker.condition !== null ? { [marker.condition]: condition } : {}),
+    },
     now,
     false
   );
 }
 
-/** Same as `clearGroundTruthUnreachable`, for the `pr-watch-waiting` marker. */
-function clearPrWatchWaiting(state: SchedState, unit: string, now: Date): SchedState {
+/**
+ * Clear a `QueueEntry`'s `event` dedup marker once the condition resolves
+ * (#632) — a no-op when nothing was set, so callers can call this
+ * unconditionally on every tick the condition is healthy without churning
+ * `updated_at` for entries that were never in a streak.
+ */
+function clearCondition(
+  state: SchedState,
+  unit: string,
+  event: EntryDedupEvent,
+  now: Date
+): SchedState {
   const issue = issueOfUnit(unit);
   const entry = issue === null ? undefined : findEntry(state, issue);
-  if (issue === null || entry === undefined || entry.pr_watch_waiting_since === null) {
-    return state;
-  }
+  const marker = ENTRY_DEDUP_MARKERS[event];
+  if (issue === null || entry === undefined || entry[marker.since] === null) return state;
   return patchEntry(
     state,
     issue,
-    { pr_watch_waiting_since: null, pr_watch_waiting_ticks: 0 },
+    {
+      [marker.since]: null,
+      [marker.ticks]: 0,
+      ...(marker.condition !== null ? { [marker.condition]: null } : {}),
+    },
     now,
     false
   );
@@ -2321,7 +2536,7 @@ function reconcileRunning(
   // this unit until truth returns. The dead-pid rail above still ran — local
   // truth needs no network.
   if (!truth.reachable) {
-    return journalGroundTruthUnreachableIfDue(ctx, state, unit, {
+    return journalConditionIfDue(ctx, state, unit, 'ground-truth-unreachable', 'poll-unreachable', {
       slot: slot.id,
       detail: 'stall/advance decisions paused until truth returns',
     });
@@ -2330,7 +2545,7 @@ function reconcileRunning(
   // a PREVIOUS tick is over.
   // Named for what it holds — a SchedState with the streak cleared — not for
   // `truth.reachable`, the boolean five lines up.
-  const cleared = clearGroundTruthUnreachable(state, unit, now);
+  const cleared = clearCondition(state, unit, 'ground-truth-unreachable', now);
 
   // Ground truth says the unit is DONE while the agent still holds the slot —
   // externally-advanced state (AC3): reclaim the slot, kill the leftover agent.
@@ -2496,7 +2711,7 @@ function completeUnitOrRecover(
   // hold the exit in `verifying` until truth returns, then decide. The agent
   // is already gone; no slot work is lost by waiting.
   if (!truth.reachable) {
-    return journalGroundTruthUnreachableIfDue(ctx, next, unit, {
+    return journalConditionIfDue(ctx, next, unit, 'ground-truth-unreachable', 'poll-unreachable', {
       slot: slot.id,
       detail: 'exit verification paused until truth returns',
     });
@@ -2522,24 +2737,31 @@ function completeUnitOrRecover(
       // against an empty trail. Return the recorded state (the pre-#596 form
       // did — `parkUnit`'s internal guard returned the state it was handed),
       // not the un-recorded `next`. #632: dedup like the sibling check above
-      // — same marker, since only one of the two can be live for this unit
-      // on a given tick (this branch is reached only after `truth.reachable`
-      // already held).
-      return journalGroundTruthUnreachableIfDue(ctx, parked, unit, {
-        slot: slot.id,
-        detail: `parked milestone (run=${truth.milestone?.run ?? 'unknown'}) carries no parseable pr= key — holding in verifying`,
-      });
+      // — same marker, but a distinct condition key (#637): this branch is
+      // reached only after `truth.reachable` held, so an unreachable-poll
+      // streak from the previous tick must not swallow this line.
+      return journalConditionIfDue(
+        ctx,
+        parked,
+        unit,
+        'ground-truth-unreachable',
+        'parked-milestone-no-pr',
+        {
+          slot: slot.id,
+          detail: `parked milestone (run=${truth.milestone?.run ?? 'unknown'}) carries no parseable pr= key — holding in verifying`,
+        }
+      );
     }
     // #632: a pr= key was found — both flavors of this unit's
     // ground-truth-unreachable streak (unreachable poll, unparseable pr=)
     // are resolved.
-    return parkUnit(ctx, clearGroundTruthUnreachable(parked, unit, now), unit, pr);
+    return parkUnit(ctx, clearCondition(parked, unit, 'ground-truth-unreachable', now), unit, pr);
   }
 
   // #632: truth answered this tick and this unit isn't stuck on the
   // missing-pr= edge above — any streak recorded against a PREVIOUS tick
   // (either flavor) is over.
-  next = clearGroundTruthUnreachable(next, unit, now);
+  next = clearCondition(next, unit, 'ground-truth-unreachable', now);
 
   // #575: fence to THIS dispatch's `spawned_at` — an agent that exited having
   // posted nothing new must not read as complete against the issue's
@@ -2691,12 +2913,45 @@ function completeUnitOrRecover(
   );
 }
 
+/**
+ * The stale-closed guard shared by every slot rail that would spawn a fresh
+ * agent (#776 `recovering`, #778 `assigned`). Returns the state to keep (the
+ * unit must NOT be spawned this tick) or `null` when the spawn may proceed.
+ *
+ * The flag is sticky and the slot stays held: releasing it is an operator
+ * decision (`sched stop --issue N`), which `sched status` names. `truth.closed`
+ * is false when gh is unreachable, so an unreachable poll never flags a unit
+ * (no work is killed on a network blip) — and an already-flagged unit stays
+ * held without any read, so a blip cannot un-hold it either.
+ */
+function holdIfIssueClosed(
+  ctx: TickCtx,
+  state: SchedState,
+  slot: SlotEntry,
+  unit: string,
+  truth: UnitTruth
+): SchedState | null {
+  const issue = issueOfUnit(unit);
+  const entry = issue === null ? undefined : findEntry(state, issue);
+  if (!entry || issue === null || isReportSlot(slot)) return null;
+  if (entry.stale_closed_at !== null) return state;
+  if (!truth.closed) return null;
+  const now = ctx.deps.now();
+  journal(ctx, 'stale-closed', unit, {
+    slot: slot.id,
+    detail: `issue #${issue} is closed — recovery will not re-dispatch it; release the slot with \`sched stop --issue ${issue}\``,
+  });
+  // Not an activity bump: `updated_at` keeps meaning "last state change".
+  return patchEntry(state, issue, { stale_closed_at: now.toISOString() }, now, false);
+}
+
 /** Re-attach or spawn a slot left `assigned` by a crash between assign and spawn. */
 function reconcileAssigned(
   ctx: TickCtx,
   state: SchedState,
   slot: SlotEntry,
-  unit: string
+  unit: string,
+  truth: UnitTruth
 ): SchedState {
   if (slot.pid !== null && ctx.deps.spawnDeps.isAlive(slot.pid)) {
     // Crash after spawn, before the running transition: re-attach by pid.
@@ -2707,6 +2962,10 @@ function reconcileAssigned(
     });
     return transitionSlot(state, slot.id, 'running', {}, ctx.deps.now());
   }
+  // #778: never spawn fresh for an issue that is closed on GitHub. Same model
+  // as `reconcileRecovering` (#776): flag, journal, hold the slot.
+  const held = holdIfIssueClosed(ctx, state, slot, unit, truth);
+  if (held !== null) return held;
   if (state.paused) return state;
   journal(ctx, 'assigned', unit, { slot: slot.id, detail: 'crash-recovery spawn' });
   return spawnUnit(ctx, state, unit);
@@ -2723,23 +2982,9 @@ function reconcileRecovering(
   // #776: never re-dispatch a unit whose issue is closed. Checked BEFORE the
   // pause guard so a paused scheduler still flags it (the incident shape:
   // paused for days with a recovering slot on an issue shipped elsewhere —
-  // `sched resume` would have re-run finished work). The flag is sticky and
-  // the slot stays held: releasing it is an operator decision
-  // (`sched stop --issue N`), which `sched status` names.
-  const issue = issueOfUnit(unit);
-  const entry = issue === null ? undefined : findEntry(state, issue);
-  if (entry && issue !== null && !isReportSlot(slot)) {
-    if (entry.stale_closed_at !== null) return state;
-    if (truth.closed) {
-      const now = ctx.deps.now();
-      journal(ctx, 'stale-closed', unit, {
-        slot: slot.id,
-        detail: `issue #${issue} is closed — recovery will not re-dispatch it; release the slot with \`sched stop --issue ${issue}\``,
-      });
-      // Not an activity bump: `updated_at` keeps meaning "last state change".
-      return patchEntry(state, issue, { stale_closed_at: now.toISOString() }, now, false);
-    }
-  }
+  // `sched resume` would have re-run finished work).
+  const held = holdIfIssueClosed(ctx, state, slot, unit, truth);
+  if (held !== null) return held;
   // #629: while paused, do not resume a `recovering` slot's respawn — this is
   // the crash-recovery rail (a sched restart caught a slot between
   // `enterRecovery`'s transition and its own `spawnUnit` call, OR `enterRecovery`
@@ -2781,7 +3026,7 @@ function reconcileSlots(
     };
     switch (slot.status) {
       case 'assigned':
-        next = reconcileAssigned(ctx, next, slot, unit);
+        next = reconcileAssigned(ctx, next, slot, unit, truth);
         break;
       case 'running':
         next = reconcileRunning(ctx, next, slot, truth, unit);
@@ -2828,7 +3073,15 @@ function requeueOrphanedDispatches(ctx: TickCtx, state: SchedState): SchedState 
       next,
       entry.issue,
       'queued',
-      { reason: null, ...CLEARED_ENTRY_DEDUP_MARKERS },
+      {
+        reason: null,
+        ...CLEARED_ENTRY_DEDUP_MARKERS,
+        // #778: a stale-closed flag survives the requeue — clearing it would
+        // let one unreachable-gh tick re-dispatch a shipped issue. Unflagged
+        // orphans are read by `pollClosed` and flagged in the dispatch pass.
+        stale_closed_at: entry.stale_closed_at,
+        stale_closed_ticks: entry.stale_closed_ticks,
+      },
       now
     );
     journal(ctx, 'requeued', `issue:${entry.issue}`, {
@@ -2866,19 +3119,24 @@ function reconcileParked(ctx: TickCtx, state: SchedState, prPoll: PrPoll): Sched
       if (!prPoll.truths.has(issue)) {
         continue; // parked AFTER the poll ran (this tick) — next cadence picks it up
       }
-      next = journalGroundTruthUnreachableIfDue(ctx, next, unit, {
+      next = journalConditionIfDue(ctx, next, unit, 'ground-truth-unreachable', 'pr-watch-paused', {
         detail: 'pr watch paused until truth returns',
       });
       continue;
     }
     // #632: truth answered this tick — any unreachable streak recorded
     // against a PREVIOUS tick is over.
-    next = clearGroundTruthUnreachable(next, unit, ctx.deps.now());
+    next = clearCondition(next, unit, 'ground-truth-unreachable', ctx.deps.now());
 
     const failWatch = (reason: string): SchedState => {
       journal(ctx, 'pr-watch-failed', unit, { reason, pr: entry.pr });
       // #632: the watch is ending (terminal failure) — no more "waiting".
-      return clearPrWatchWaiting(failUnit(ctx, next, unit, reason), unit, ctx.deps.now());
+      return clearCondition(
+        failUnit(ctx, next, unit, reason),
+        unit,
+        'pr-watch-waiting',
+        ctx.deps.now()
+      );
     };
 
     // #501: MERGED is checked FIRST, before any failure rail. A PR that is
@@ -2893,7 +3151,7 @@ function reconcileParked(ctx: TickCtx, state: SchedState, prPoll: PrPoll): Sched
       // AC1: the issue must ALSO be closed (a merged PR auto-closes it) —
       // until GitHub propagates, the unit stays parked and keeps watching.
       if (prPoll.closed.get(issue) !== true) {
-        next = journalPrWatchWaitingIfDue(ctx, next, unit, {
+        next = journalConditionIfDue(ctx, next, unit, 'pr-watch-waiting', null, {
           pr: entry.pr,
           mergedAt: truth.mergedAt,
           detail: 'merge seen but issue not closed — keep watching',
@@ -2901,7 +3159,7 @@ function reconcileParked(ctx: TickCtx, state: SchedState, prPoll: PrPoll): Sched
         continue;
       }
       next = transitionIssue(next, issue, 'shipped', { reason: null }, ctx.deps.now());
-      next = clearPrWatchWaiting(next, unit, ctx.deps.now());
+      next = clearCondition(next, unit, 'pr-watch-waiting', ctx.deps.now());
       journal(ctx, 'merge-accepted', unit, { pr: entry.pr, mergedAt: truth.mergedAt });
       ctx.result.mergeAccepted.push(unit);
       continue;
@@ -2916,11 +3174,25 @@ function reconcileParked(ctx: TickCtx, state: SchedState, prPoll: PrPoll): Sched
     }
     if (truth.state === 'CLOSED' && truth.mergedAt === null) {
       next = failWatch('pr-closed-unmerged');
+    } else if (parkedWithoutMerger(truth, ctx.mechanism)) {
+      // #887: parked on a label nothing acts on — GitHub holds no auto-merge request and no
+      // watcher exists. sched's watch only waits, so once this has persisted past the grace
+      // window (marker keyed by PR number, so a re-park on another PR starts fresh), block.
+      const now = ctx.deps.now();
+      const step = advanceNoMergeMechanism(entry.no_merge_mechanism_since, entry.pr, now);
+      if (step.due) {
+        next = failWatch(NO_MERGE_MECHANISM_REASON);
+      } else if (step.arm !== null) {
+        next = patchEntry(next, issue, { no_merge_mechanism_since: step.arm }, now, false);
+      }
     } else {
+      if (entry.no_merge_mechanism_since != null) {
+        next = patchEntry(next, issue, { no_merge_mechanism_since: null }, ctx.deps.now(), false);
+      }
       // OPEN (or mergeable UNKNOWN) — keep watching. #632: this tick's truth
       // is NOT "merge seen but not closed", so a waiting streak from an
       // earlier tick's merge-then-reverted flicker is over.
-      next = clearPrWatchWaiting(next, unit, ctx.deps.now());
+      next = clearCondition(next, unit, 'pr-watch-waiting', ctx.deps.now());
     }
   }
   return next;
@@ -2958,25 +3230,32 @@ function reconcileStaleFailedParks(ctx: TickCtx, state: SchedState, prPoll: PrPo
       if (!prPoll.truths.has(issue)) {
         continue; // failed AFTER the poll ran this tick — next cadence picks it up
       }
-      next = journalGroundTruthUnreachableIfDue(ctx, next, unit, {
-        detail: 'stale-failure reconcile paused until truth returns',
-      });
+      next = journalConditionIfDue(
+        ctx,
+        next,
+        unit,
+        'ground-truth-unreachable',
+        'stale-failure-paused',
+        {
+          detail: 'stale-failure reconcile paused until truth returns',
+        }
+      );
       continue;
     }
     // #632: truth answered this tick — any unreachable streak recorded
     // against a PREVIOUS tick is over.
-    next = clearGroundTruthUnreachable(next, unit, ctx.deps.now());
+    next = clearCondition(next, unit, 'ground-truth-unreachable', ctx.deps.now());
 
     if (!isPrMerged(truth)) {
       // Still blocked/open/conflicting — stays failed. #632: not "merge seen
       // but not closed" either, so a waiting streak from an earlier tick's
       // merge-then-reverted flicker is over.
-      next = clearPrWatchWaiting(next, unit, ctx.deps.now());
+      next = clearCondition(next, unit, 'pr-watch-waiting', ctx.deps.now());
       continue;
     }
 
     if (prPoll.closed.get(issue) !== true) {
-      next = journalPrWatchWaitingIfDue(ctx, next, unit, {
+      next = journalConditionIfDue(ctx, next, unit, 'pr-watch-waiting', null, {
         pr: entry.pr,
         mergedAt: truth.mergedAt,
         reason: entry.reason,
@@ -2987,7 +3266,7 @@ function reconcileStaleFailedParks(ctx: TickCtx, state: SchedState, prPoll: PrPo
 
     const failedAt = entry.updated_at;
     next = transitionIssue(next, issue, 'shipped', { reason: null }, ctx.deps.now());
-    next = clearPrWatchWaiting(next, unit, ctx.deps.now());
+    next = clearCondition(next, unit, 'pr-watch-waiting', ctx.deps.now());
     journal(ctx, 'stale-failure-reconciled', unit, {
       pr: entry.pr,
       mergedAt: truth.mergedAt,
@@ -3095,32 +3374,14 @@ function dispatchReportAgents(ctx: TickCtx, state: SchedState, config: SchedConf
 
 /**
  * Run the teardown script for one merged unit OUTSIDE the state lock (#468
- * AC2). Returns null when teardown must be retried next tick (setup info
- * unreachable — a transient outage, never a failure).
+ * AC2). Returns `'unreachable'` when teardown must be retried next tick
+ * (setup info unreachable — a transient outage, never a failure); the caller
+ * journals it through the dedup idiom in its second lock pass (#636), since
+ * this function has no `SchedState` to patch.
  */
-function runTeardownFor(deps: EngineDeps, issue: number): TeardownResult | null {
+function runTeardownFor(deps: EngineDeps, issue: number): TeardownResult | 'unreachable' {
   const info = deps.groundTruth.setupInfo(issue);
-  const unit = `issue:${issue}`;
-  if (info === undefined) {
-    // #633: AUDITED, NOT DEDUPED. This is a tenth site with #632's shape —
-    // `teardownPendingIssues` reaches it every tick and a `null` return leaves
-    // `cleanup` unset, so an unreachable `setupInfo` re-emits this line once
-    // per reconcile interval for as long as the outage lasts.
-    //
-    // Left as-is deliberately: #632 enumerated nine sites and its plan makes
-    // the boundary load-bearing ("a site outside the table is a NEW issue, not
-    // a reason to widen this one") — widening is what dissolved b-07. The fix
-    // is tracked in #636, and is not a one-liner here: `runTeardownFor` runs
-    // OUTSIDE the store lock and has no `SchedState` to patch, so the marker
-    // has to be threaded through the caller's second lock pass.
-    deps.journal.append(
-      unitEvent('ground-truth-unreachable', unit, {
-        detail: 'teardown paused until truth returns',
-      }),
-      deps.now()
-    );
-    return null;
-  }
+  if (info === undefined) return 'unreachable';
   if (info === null) {
     return {
       cleanup: 'failed-missing-setup-info',
@@ -3135,7 +3396,8 @@ function dispatchAssignments(
   ctx: TickCtx,
   state: SchedState,
   config: SchedConfig,
-  labelVerifiedIssues: ReadonlySet<number>
+  labelVerifiedIssues: ReadonlySet<number>,
+  closedPoll: ReadonlyMap<number, boolean>
 ): SchedState {
   const now = ctx.deps.now();
   // #544: `pollLabels` reads only the first `max_slots` runnable units — the
@@ -3158,6 +3420,11 @@ function dispatchAssignments(
             .map((entry) => `issue:${entry.issue}`)
         )
       : new Set<string>();
+  // #778: a stale-closed entry is never dispatched (the flag is sticky; only
+  // `sched stop` / a requeue-elsewhere resolves it).
+  for (const entry of state.entries) {
+    if (entry.stale_closed_at !== null) exclude.add(`issue:${entry.issue}`);
+  }
   // #565: decide who wins each free slot over BOTH kinds — a ready batch
   // outranking a same-readiness issue (priority desc → readiness age → issue
   // number, `runnableUnits`) must not lose its capacity to an issue dispatch
@@ -3187,6 +3454,20 @@ function dispatchAssignments(
     const unit = `issue:${assignment.issue}`;
     const entry = findEntry(next, assignment.issue);
     if (!entry) continue;
+    // #778: queued/classified entries (and requeued orphans) whose issue was
+    // closed while they waited are flagged, not dispatched.
+    // Unread (unblocked mid-tick by the label pass, or slid into the window)
+    // falls back to one bounded read here: assignments never exceed free
+    // capacity, and a same-tick refill (#525 AC5) must not be deferred.
+    const closed =
+      closedPoll.get(assignment.issue) ?? ctx.deps.groundTruth.issueClosed(assignment.issue);
+    if (closed) {
+      journal(ctx, 'stale-closed', unit, {
+        detail: `issue #${assignment.issue} is closed — will not dispatch it; drop it with \`sched stop --issue ${assignment.issue}\``,
+      });
+      next = patchEntry(next, assignment.issue, { stale_closed_at: now.toISOString() }, now, false);
+      continue;
+    }
     const { state: withSlot, slotId } = assignToIdleSlot(next, unit, null, now);
     next = withSlot;
     journal(ctx, 'assigned', unit, { slot: slotId, priority: entry.priority });
@@ -3247,9 +3528,14 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
   const prPoll = pollParkedPrs(deps, state0, dispatch);
   const labelPoll = pollLabels(deps, state0, config, dispatch);
   const labelVerifiedIssues = labelVerified(labelPoll);
+  const closedPoll = pollClosed(deps, state0, config);
+  const mechanism = deps.groundTruth.mergeMechanism?.();
+  // #945: takeover rescues (git/gh/push) — outside the lock, like every poll above.
+  const rescued = rescueBeforeTakeover(deps, state0);
+  pruneRescueRefsDaily(deps);
 
   const pass1 = deps.store.withLock((state) => {
-    const ctx: TickCtx = { deps, config, dispatch, result: emptyResult() };
+    const ctx: TickCtx = { deps, config, dispatch, result: emptyResult(), mechanism, rescued };
     let next = reconcileSlots(ctx, state, polled);
     next = reconcileParked(ctx, next, prPoll);
     next = reconcileStaleFailedParks(ctx, next, prPoll);
@@ -3258,7 +3544,7 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
     // #544: immediately before the dispatch pass, so a cleared label can be
     // dispatched this same tick and a fresh one can never be dispatched over.
     next = reconcileLabelBlocks(ctx, next, labelPoll);
-    next = dispatchAssignments(ctx, next, config, labelVerifiedIssues);
+    next = dispatchAssignments(ctx, next, config, labelVerifiedIssues, closedPoll);
     return {
       state: next,
       result: { tick: ctx.result, teardownPending: teardownPendingIssues(next) },
@@ -3272,14 +3558,31 @@ export function tick(deps: EngineDeps, config: SchedConfig): TickResult {
     // lock; results land in a second short lock pass together with the report
     // dispatch (AC2: teardown, THEN the cheap-tier report agent).
     const results = new Map<number, TeardownResult>();
+    const unreachable: number[] = [];
     for (const issue of pass1.teardownPending) {
       const teardownResult = runTeardownFor(deps, issue);
-      if (teardownResult !== null) results.set(issue, teardownResult);
+      if (teardownResult === 'unreachable') unreachable.push(issue);
+      else results.set(issue, teardownResult);
     }
-    if (results.size > 0) {
+    if (results.size > 0 || unreachable.length > 0) {
       result = deps.store.withLock((state) => {
-        const ctx: TickCtx = { deps, config, dispatch, result };
-        const next = recordTeardowns(ctx, state, results);
+        const ctx: TickCtx = { deps, config, dispatch, result, mechanism, rescued };
+        let next = state;
+        // #636: `setupInfo` answered for these — any unreachable streak is over.
+        for (const issue of results.keys()) {
+          next = clearCondition(next, `issue:${issue}`, 'ground-truth-unreachable', deps.now());
+        }
+        for (const issue of unreachable) {
+          next = journalConditionIfDue(
+            ctx,
+            next,
+            `issue:${issue}`,
+            'ground-truth-unreachable',
+            'teardown-paused',
+            { detail: 'teardown paused until truth returns' }
+          );
+        }
+        next = recordTeardowns(ctx, next, results);
         const withReport = dispatchReportAgents(ctx, next, config);
         return { state: withReport, result: ctx.result };
       });
@@ -3372,19 +3675,39 @@ function mergeBatchResult(result: TickResult, batch: BatchTickResult): TickResul
  * journaled (`tick-failed`, with the error name — `LockTimeoutError` and
  * `CorruptStateError` demand different operator actions) and reported on
  * stderr, and the loop continues — one bad tick (e.g. a transient gh
- * failure) never stops the scheduler.
+ * failure) never stops the scheduler. The post-tick callback may be async; it
+ * runs after the tick has fully persisted and can return `true` to stop before
+ * the next tick (used for a supervised CLI upgrade handoff).
  */
-export async function runLoop(
+export function runLoop(
   deps: EngineDeps,
-  config: SchedConfig,
+  configSource: SchedConfig | (() => SchedConfig),
   shouldStop: () => boolean,
   onTick?: (result: TickResult) => void
+): Promise<void>;
+export function runLoop(
+  deps: EngineDeps,
+  configSource: SchedConfig | (() => SchedConfig),
+  shouldStop: () => boolean,
+  onTick: (result: TickResult) => Promise<void>
+): Promise<void>;
+export async function runLoop(
+  deps: EngineDeps,
+  configSource: SchedConfig | (() => SchedConfig),
+  shouldStop: () => boolean,
+  onTick?: (result: TickResult) => unknown
 ): Promise<void> {
-  const interval = resolveDispatch(config).reconcileIntervalMs;
+  // #883: a function source is consulted at the top of EVERY tick, so a config
+  // edit applies from the next tick on. The sleep interval is fixed at start.
+  const resolveConfig = typeof configSource === 'function' ? configSource : () => configSource;
+  const interval = resolveDispatch(resolveConfig()).reconcileIntervalMs;
   while (!shouldStop()) {
+    // #945: heartbeat every tick, before the work — a wedged tick then shows as
+    // a stale `updated_at` on a live pid, and an idle one as a fresh one.
+    deps.store.touchEngineLease?.(deps.now());
     try {
-      const result = tick(deps, config);
-      onTick?.(result);
+      const result = tick(deps, resolveConfig());
+      await onTick?.(result);
     } catch (err) {
       const detail = `${(err as Error).name}: ${(err as Error).message}`;
       process.stderr.write(`⚠ sched tick failed: ${detail}\n`);

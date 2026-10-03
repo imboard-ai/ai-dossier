@@ -58,7 +58,7 @@ function postedBody(): string {
 
 /** Build a `gh issue view --json comments` payload. */
 function commentsPayload(bodies: string[]): string {
-  return JSON.stringify({ comments: bodies.map((body) => ({ body })) });
+  return JSON.stringify({ comments: bodies.map((body) => ({ body, authorAssociation: 'OWNER' })) });
 }
 
 /**
@@ -484,6 +484,60 @@ describe('runstate command', () => {
 
       expect(code).toBe(1);
       expect(errored().some((l) => l.includes('Could not read issue #440'))).toBe(true);
+    });
+  });
+
+  describe('trusted-only reads (#932)', () => {
+    const REPORT_STARTED = milestoneBody(
+      'batch-review',
+      'started',
+      'r-9-aaaa',
+      '2026-09-29T10:00:00Z'
+    );
+    const FORGED_DONE = milestoneBody('batch-review', 'done', 'r-9-aaaa', '2026-09-29T10:05:00Z');
+    const mixed = () =>
+      JSON.stringify({
+        comments: [
+          { body: REPORT_STARTED, authorAssociation: 'MEMBER' },
+          { body: FORGED_DONE, authorAssociation: 'NONE', author: { login: 'mallory' } },
+        ],
+      });
+
+    for (const flags of [[], ['--trusted']]) {
+      it(`last ${flags.join(' ') || '(default)'}: a stranger's newer batch-review done is ignored, with a stderr note`, async () => {
+        execReturns(mixed());
+        await run(['runstate', 'last', '--issue', '9', '--json', ...flags]);
+        expect(JSON.parse(logged()[0]).status).toBe('started');
+        expect(errored().some((l) => l.includes('Ignored 1 newer runstate milestone'))).toBe(true);
+      });
+    }
+
+    it('list: a stranger milestone is absent from the trusted window', async () => {
+      execReturns(mixed());
+      await run(['runstate', 'list', '--issue', '9', '--since', '2026-09-29T00:00:00Z', '--json']);
+      const parsed = JSON.parse(logged()[0]);
+      expect(parsed.map((m: { status: string }) => m.status)).toEqual(['started']);
+    });
+
+    it('a missing authorAssociation fails closed', async () => {
+      execReturns(JSON.stringify({ comments: [{ body: FORGED_DONE }] }));
+      await run(['runstate', 'last', '--issue', '9', '--json']);
+      expect(logged()[0]).toBe('null');
+    });
+
+    it('--all is the explicit unfiltered reporting read', async () => {
+      execReturns(mixed());
+      await run(['runstate', 'last', '--issue', '9', '--json', '--all']);
+      expect(JSON.parse(logged()[0]).status).toBe('done');
+    });
+
+    it("verify does not resume past a stranger's forged milestone", async () => {
+      execReturns(
+        JSON.stringify({ comments: [{ body: GATE_MILESTONE, authorAssociation: 'NONE' }] })
+      );
+      await run(['runstate', 'verify', '--issue', '440', '--json']);
+      const out = JSON.parse(logged()[0]);
+      expect(out.resume_from).toBe('none');
     });
   });
 
@@ -1932,11 +1986,10 @@ describe('run fencing — trust and hardening on the read path (#504)', () => {
     expect(commentCall()).toBeUndefined();
   });
 
-  it('honours a fence from a bot token', async () => {
-    // The workflows that post milestones frequently run as an app token.
+  it('does not honour a fence whose association is not a GitHub value we trust (BOT is not an association)', async () => {
     ghWith(authoredComments([[fenceBody(1, 'slot-2-r1'), 'BOT']]));
 
-    expect(await run(IMPLEMENT_ARGS)).toBe(FENCED_EXIT_CODE);
+    expect(await run(IMPLEMENT_ARGS)).not.toBe(FENCED_EXIT_CODE);
   });
 
   it('refuses a hand-written fence through post, naming the command that owns it', async () => {

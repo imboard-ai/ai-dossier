@@ -5,7 +5,15 @@
 
 import { readFileSync } from 'node:fs';
 import { hostname } from 'node:os';
-import { type DossierFrontmatter, parseDossierContent } from '@ai-dossier/core';
+import {
+  analyzeDryRun,
+  type DossierFrontmatter,
+  DRY_RUN_DISCLAIMER,
+  type DryRunLevel,
+  type DryRunPlan,
+  levelForScore,
+  parseDossierContent,
+} from '@ai-dossier/core';
 import { extractDossierTraceInfo } from '../orchestration/dossier-trace-info';
 import { getRecorder } from '../orchestration/recorder';
 import { createSession, stepsFromPhases, updateSession } from '../orchestration/session';
@@ -15,6 +23,28 @@ import { logger } from '../utils/logger';
 
 export interface StartJourneyInput {
   graph_id: string;
+  /** Preview every step statically; creates no session and returns no step bodies. */
+  dry_run?: boolean;
+}
+
+export interface DryRunStep {
+  index: number;
+  dossier: string;
+  /** null when the dossier content is not available locally (registry steps). */
+  plan: DryRunPlan | null;
+  note?: string;
+}
+
+export interface StartJourneyDryRunOutput {
+  dry_run: true;
+  /** Always true: never a record of what actually ran. */
+  static_preview: true;
+  disclaimer: string;
+  total_steps: number;
+  /** Highest step score; steps are executed by an LLM so this is a heuristic, not a guarantee. */
+  risk_score: number;
+  level: DryRunLevel;
+  steps: DryRunStep[];
 }
 
 export interface StepPayload {
@@ -86,8 +116,8 @@ function flattenPhases(plan: { phases: Array<{ dossiers: PhaseEntry[] }> }): Pha
 
 export async function startJourney(
   input: StartJourneyInput
-): Promise<StartJourneyOutput | StartJourneyError> {
-  const { graph_id } = input;
+): Promise<StartJourneyOutput | StartJourneyDryRunOutput | StartJourneyError> {
+  const { graph_id, dry_run } = input;
 
   if (!graph_id) {
     return { error: { type: 'unknown', message: 'graph_id is required' } };
@@ -101,6 +131,31 @@ export async function startJourney(
   const entries = flattenPhases(plan);
   if (entries.length === 0) {
     return { error: { type: 'empty_graph', message: 'Graph has no steps to execute' } };
+  }
+
+  if (dry_run) {
+    const steps: DryRunStep[] = entries.map((entry, index) => {
+      const { body, frontmatter } = fetchDossierContent(entry);
+      if (!frontmatter) {
+        return {
+          index,
+          dossier: entry.name,
+          plan: null,
+          note: 'Dossier content is not available locally; no static preview possible.',
+        };
+      }
+      return { index, dossier: entry.name, plan: analyzeDryRun({ frontmatter, body }) };
+    });
+    const risk_score = Math.max(0, ...steps.map((s) => s.plan?.risk_score ?? 0));
+    return {
+      dry_run: true,
+      static_preview: true,
+      disclaimer: DRY_RUN_DISCLAIMER,
+      total_steps: steps.length,
+      risk_score,
+      level: levelForScore(risk_score),
+      steps,
+    };
   }
 
   const steps = stepsFromPhases(entries);

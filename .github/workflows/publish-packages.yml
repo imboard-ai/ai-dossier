@@ -12,16 +12,14 @@ on:
 
   workflow_dispatch:
     inputs:
-      version:
-        description: 'Version bump (patch, minor, major, or skip)'
-        required: false
-        default: 'skip'
+      channel:
+        description: Publish a prerelease cohort to next or committed stable versions to latest
         type: choice
         options:
-          - skip
-          - patch
-          - minor
-          - major
+          - next
+          - stable
+        default: next
+        required: true
 
 concurrency:
   group: publish
@@ -146,6 +144,9 @@ jobs:
     needs: [test, smoke]
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      PUBLISH_CHANNEL: ${{ github.event_name == 'workflow_dispatch' && inputs.channel == 'stable' && 'stable' || 'next' }}
+      PUBLISH_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.channel == 'stable' && 'latest' || 'next' }}
     permissions:
       contents: write
       id-token: write
@@ -158,6 +159,12 @@ jobs:
           # Full history: scripts/publish-guard.mjs diffs HEAD against the commit
           # each already-published version was built from (npm's gitHead).
           fetch-depth: 0
+
+      - name: Require main for stable publishing
+        if: env.PUBLISH_CHANNEL == 'stable' && github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Stable publishing must be dispatched from main."
+          exit 1
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -185,125 +192,139 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Bump version (manual dispatch only)
-        if: github.event_name == 'workflow_dispatch' && github.event.inputs.version != 'skip'
+      # Keep the stable-baseline checks available to publish-reconcile. The
+      # next channel publishes its complete prerelease cohort regardless of
+      # these outputs; the stable channel uses them to skip safe re-runs and
+      # report collisions/unavailable checks before completing.
+      - name: Check @ai-dossier/core stable baseline
+        id: guard_core
+        run: node scripts/publish-guard.mjs --dir packages/core --defer-collision "$RUNNER_TEMP/publish-collisions"
+
+      - name: Check @ai-dossier/worktree-pool stable baseline
+        id: guard_worktree_pool
+        run: node scripts/publish-guard.mjs --dir packages/worktree-pool --defer-collision "$RUNNER_TEMP/publish-collisions"
+
+      - name: Check @ai-dossier/sched stable baseline
+        id: guard_sched
+        run: node scripts/publish-guard.mjs --dir packages/sched --defer-collision "$RUNNER_TEMP/publish-collisions"
+
+      - name: Check @ai-dossier/cli stable baseline
+        id: guard_cli
+        run: node scripts/publish-guard.mjs --dir cli --defer-collision "$RUNNER_TEMP/publish-collisions"
+
+      - name: Check @ai-dossier/mcp-server stable baseline
+        id: guard_mcp_server
+        run: node scripts/publish-guard.mjs --dir mcp-server --defer-collision "$RUNNER_TEMP/publish-collisions"
+
+      - name: Prepare next release cohort
+        if: env.PUBLISH_CHANNEL == 'next'
         run: |
-          # Bump core version
-          cd packages/core
-          npm version ${{ github.event.inputs.version }} --no-git-tag-version
-          CORE_VERSION=$(node -p "require('./package.json').version")
-          echo "CORE_VERSION=$CORE_VERSION" >> $GITHUB_ENV
-
-          # Bump CLI version
-          cd ../../cli
-          npm version ${{ github.event.inputs.version }} --no-git-tag-version
-          npm pkg set "dependencies.@ai-dossier/core=^$CORE_VERSION"
-
-          # Bump MCP server version
-          cd ../mcp-server
-          npm version ${{ github.event.inputs.version }} --no-git-tag-version
-
-      - name: Commit and tag version bump
-        if: github.event_name == 'workflow_dispatch' && github.event.inputs.version != 'skip'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add packages/core/package.json cli/package.json mcp-server/package.json
-          VERSION=$(cd cli && node -p "require('./package.json').version")
-          git commit -m "chore: bump version to $VERSION"
-          git tag "v$VERSION"
-          git push
-          git push origin "v$VERSION"
+          # GITHUB_RUN_ATTEMPT makes a manual re-run a distinct npm version.
+          node scripts/prepare-next-release.mjs --run-number "$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT"
 
       - name: Build all packages
         run: make build-all
 
-      - name: Check if @ai-dossier/core needs publishing
-        id: check-core
-        run: node scripts/publish-guard.mjs --dir packages/core --defer-collision "$RUNNER_TEMP/publish-collisions"
-
       - name: Publish @ai-dossier/core
-        if: steps.check-core.outputs.skip == 'false'
+        if: env.PUBLISH_CHANNEL == 'next' || steps.guard_core.outputs.skip != 'true'
         run: |
           cd packages/core
-          npm publish --provenance --access public
+          npm publish --provenance --access public --tag "$PUBLISH_TAG"
 
       # Before sched/cli: both depend on @ai-dossier/worktree-pool (#561), so
       # the registry must have it first or their installs break for users —
       # same reasoning as sched-before-cli below.
-      - name: Check if @ai-dossier/worktree-pool needs publishing
-        id: check-pool
-        run: node scripts/publish-guard.mjs --dir packages/worktree-pool --defer-collision "$RUNNER_TEMP/publish-collisions"
-
       - name: Publish @ai-dossier/worktree-pool
-        if: steps.check-pool.outputs.skip == 'false'
+        if: env.PUBLISH_CHANNEL == 'next' || steps.guard_worktree_pool.outputs.skip != 'true'
         run: |
           cd packages/worktree-pool
-          npm publish --provenance --access public
-
-      - name: Check if @ai-dossier/sched needs publishing
-        id: check-sched
-        run: node scripts/publish-guard.mjs --dir packages/sched --defer-collision "$RUNNER_TEMP/publish-collisions"
+          npm publish --provenance --access public --tag "$PUBLISH_TAG"
 
       # Before cli: a published cli tarball depends on @ai-dossier/sched, so
       # the registry must have it first or the cli install breaks for users.
       - name: Publish @ai-dossier/sched
-        if: steps.check-sched.outputs.skip == 'false'
+        if: env.PUBLISH_CHANNEL == 'next' || steps.guard_sched.outputs.skip != 'true'
         run: |
           cd packages/sched
-          npm publish --provenance --access public
-
-      - name: Check if @ai-dossier/cli needs publishing
-        id: check-cli
-        run: node scripts/publish-guard.mjs --dir cli --defer-collision "$RUNNER_TEMP/publish-collisions"
+          npm publish --provenance --access public --tag "$PUBLISH_TAG"
 
       - name: Publish @ai-dossier/cli
-        if: steps.check-cli.outputs.skip == 'false'
+        if: env.PUBLISH_CHANNEL == 'next' || steps.guard_cli.outputs.skip != 'true'
         run: |
           cd cli
-          npm publish --provenance --access public
-
-      - name: Check if @ai-dossier/mcp-server needs publishing
-        id: check-mcp
-        run: node scripts/publish-guard.mjs --dir mcp-server --defer-collision "$RUNNER_TEMP/publish-collisions"
+          npm publish --provenance --access public --tag "$PUBLISH_TAG"
 
       - name: Publish @ai-dossier/mcp-server
-        if: steps.check-mcp.outputs.skip == 'false'
+        if: env.PUBLISH_CHANNEL == 'next' || steps.guard_mcp_server.outputs.skip != 'true'
         run: |
           cd mcp-server
-          npm publish --provenance --access public
+          npm publish --provenance --access public --tag "$PUBLISH_TAG"
 
-      # Each check step records a collision (version already on npm, built from
-      # different source) or an unavailable package (the guard could not decide:
-      # registry error, missing/unfetchable gitHead) in a shared ledger instead of
-      # failing, so unaffected packages still publish; a package whose dependency
-      # collided, was unavailable or was held is itself held (skip=true) by the
-      # guard. Publish steps run only on an explicit skip == 'false', so a check
-      # that wrote no output never publishes. This step then fails the job naming
-      # every collided and unavailable package — the ledger is the list, nothing
-      # hand-maintained here (#826). `!cancelled()` so a failed publish step
-      # above cannot hide it.
-      - name: Fail on version collisions
-        if: ${{ !cancelled() }}
+      - name: Fail on stable publish guard problems
+        if: env.PUBLISH_CHANNEL == 'stable'
         run: node scripts/publish-guard.mjs --report-collisions "$RUNNER_TEMP/publish-collisions"
 
   verify:
     needs: publish
     runs-on: ubuntu-latest
+    env:
+      PUBLISH_CHANNEL: ${{ github.event_name == 'workflow_dispatch' && inputs.channel == 'stable' && 'stable' || 'next' }}
+      PUBLISH_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.channel == 'stable' && 'latest' || 'next' }}
     steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Verify packages are available on npm
+      - name: Verify packages are available under the selected channel
         run: |
-          echo "Verifying published packages..."
-          npm view @ai-dossier/core version
-          npm view @ai-dossier/sched version
-          npm view @ai-dossier/cli version
-          npm view @ai-dossier/mcp-server version
-          npm view @ai-dossier/worktree-pool version
+          echo "Verifying $PUBLISH_CHANNEL packages..."
+          for entry in \
+            "packages/core:@ai-dossier/core" \
+            "packages/worktree-pool:@ai-dossier/worktree-pool" \
+            "packages/sched:@ai-dossier/sched" \
+            "cli:@ai-dossier/cli" \
+            "mcp-server:@ai-dossier/mcp-server"; do
+            directory=${entry%%:*}
+            package=${entry#*:}
+            expected=$(node -p "require('./$directory/package.json').version")
+            verified=false
+            error_file="$RUNNER_TEMP/npm-view-error"
+
+            for attempt in 1 2 3 4 5; do
+              : > "$error_file"
+              actual=$(npm view "$package@$PUBLISH_TAG" version --prefer-online 2>"$error_file") || actual=""
+              if [ -n "$actual" ] && { [ "$PUBLISH_CHANNEL" = "next" ] || [ "$actual" = "$expected" ]; }; then
+                echo "Verified $package@$PUBLISH_TAG at $actual"
+                verified=true
+                break
+              fi
+
+              actual_log=$(printf '%s' "$actual" | tr '\r\n' '  ' | sed 's/::/: :/g' | cut -c1-120)
+              error_detail=$(tr '\r\n' '  ' < "$error_file" | sed 's/::/: :/g' | cut -c1-240)
+              if [ -n "$actual_log" ]; then
+                reason="resolved $actual_log"
+              elif [ -n "$error_detail" ]; then
+                reason="$error_detail"
+              else
+                reason="no version returned"
+              fi
+
+              if [ "$attempt" -eq 5 ]; then
+                echo "::error::$package@$PUBLISH_TAG failed verification after 5 attempts ($reason)."
+                exit 1
+              fi
+
+              delay=$((15 * (2 ** (attempt - 1))))
+              echo "Attempt $attempt/5 did not verify $package@$PUBLISH_TAG ($reason); retrying in ${delay}s."
+              sleep "$delay"
+            done
+
+            [ "$verified" = true ]
+          done
           # Behavioral smoke testing happens in the pre-publish `smoke` job
           # against the same tarball; this job only confirms registry publish.

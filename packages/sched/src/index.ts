@@ -29,6 +29,7 @@ export {
   orphanAnchorListArgs,
   parseOrphanAnchorBody,
   renderAnchorCloseComment,
+  type ShippingEvidence,
   shippingEvidence,
   sweepAnchors,
   sweepOrphanAnchors,
@@ -73,6 +74,12 @@ export {
 } from './batch-stats';
 export { type BisectOptions, type BisectOutcome, runAttributionBisect } from './bisect';
 export {
+  type ConfigReloader,
+  type ConfigReloaderOptions,
+  createConfigReloader,
+  dispatchDiff,
+} from './config-reload';
+export {
   buildAgentCommand,
   buildBatchReportPrompt,
   buildBatchTailPrompt,
@@ -104,6 +111,7 @@ export {
   journalCmdModelFields,
   KILL_ESCALATION_MS,
   type KillSignal,
+  killSlotAgent,
   memberDispatchTier,
   NO_BACKGROUND_EXIT_INSTRUCTION,
   OPENCODE_DISPATCH_COMMAND,
@@ -128,7 +136,25 @@ export {
   WRONG_PROCEDURE_MARKER,
   wrongProcedureDirective,
 } from './dispatch';
+export { findDossierRoot, projectRootFor, worktreesDirFor } from './dossier-root';
 export { type EngineDeps, recordTickFailure, runLoop, type TickResult, tick } from './engine';
+export {
+  type AlertNotifier,
+  checkStaleLeaseAlert,
+  type EngineAlert,
+  reportCrashRestart,
+  type StaleLeaseAlertOutcome,
+} from './engine-alert';
+export {
+  clearStoppingMarker,
+  DEFAULT_STOP_TIMEOUT_MS,
+  type EngineExitLogger,
+  type ExitProcess,
+  installEngineExitLogging,
+  readStoppingMarker,
+  type StoppingMarker,
+  writeStoppingMarker,
+} from './engine-exit';
 export {
   assertNoDependencyCycle,
   EnqueueError,
@@ -210,6 +236,12 @@ export {
   pickHardBlockLabel,
 } from './labels';
 export {
+  type MergeMechanism,
+  type MergeMechanismVerdict,
+  mergeMechanismVerdict,
+  shipModeClause,
+} from './merge-mechanism';
+export {
   CorruptStateError,
   type EngineLease,
   type EngineLeaseAcquisition,
@@ -219,6 +251,25 @@ export {
   SchedStore,
   writeAtomic,
 } from './persist';
+export {
+  findGatedWorkEvidence,
+  firstOccurrence,
+  isRegisteredWorktree,
+  type PreservedWork,
+  type PreserveOutcome,
+  preservedWorkInstruction,
+  preserveWork,
+  probeWorktree,
+  pruneRescueRefs,
+  pushedHeadDate,
+  RESCUE_REF_TTL_MS,
+  rescueRefName,
+  rescueUnitSlug,
+  selectRescuableUntracked,
+  skippedSummary,
+  takeoverWorktreeRefusal,
+  type WorktreeProbe,
+} from './preserve';
 export {
   createExecFn,
   defaultExec,
@@ -343,13 +394,17 @@ export {
   buildKeptWorktreeWarnings,
   buildStatusReport,
   buildStatusWarnings,
+  countUnfinishedWork,
   defaultKeptWorktreeReader,
+  engineHungForMs,
+  HUNG_INTERVALS_ENV,
   KEPT_WORKTREE_PROBE_LIMIT,
   type KeptWorktreeCandidate,
   type KeptWorktreeReader,
   keptWorktreeCandidates,
   type ParkedItem,
   type ParkedMemberItem,
+  resolveHungAfterMs,
   STATUS_HEALTH_WARNING_AGE_MS,
   type StatusReport,
   type StatusWarning,

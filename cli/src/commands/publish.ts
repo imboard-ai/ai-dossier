@@ -12,7 +12,7 @@ import {
   validateFrontmatter,
 } from '@ai-dossier/core';
 import type { Command } from 'commander';
-import { collectRepeatable, siblingEvidencePath } from '../helpers';
+import { collectRepeatable, formatPublishedBy, siblingEvidencePath } from '../helpers';
 import { getClientForRegistry } from '../registry-client';
 import { handleRegistryWriteError, requireWriteAuth } from '../write-auth';
 
@@ -133,13 +133,28 @@ function resolveEvidenceForPublish(
     return null;
   }
 
-  const rawEvidence = fs.readFileSync(evidencePath, 'utf8');
+  let rawEvidence = fs.readFileSync(evidencePath, 'utf8');
   let evidenceRecord: EvidenceRecord;
   try {
     evidenceRecord = parseEvidence(rawEvidence);
   } catch (err: unknown) {
     console.error(`\n❌ Invalid evidence file: ${(err as Error).message}\n`);
     process.exit(1);
+  }
+
+  // #921: `evidence add` cannot know the registry path a dossier is published under (e.g.
+  // `imboard-ai/git/<name>`) and stamps its default namespace (`imboard-ai/<name>`). The
+  // namespace is where THIS publish goes, so it is authoritative: when only the namespace
+  // differs, normalise the sidecar to the real id instead of failing. A different NAME (or a
+  // stale version/checksum) is still a genuine mismatch and still fails below.
+  const publishedName = fullPath.slice(fullPath.lastIndexOf('/') + 1);
+  const recordedName = evidenceRecord.dossier.slice(evidenceRecord.dossier.lastIndexOf('/') + 1);
+  if (evidenceRecord.dossier !== fullPath && recordedName === publishedName) {
+    console.log(
+      `\nℹ️  Evidence sidecar named "${evidenceRecord.dossier}"; attaching it as "${fullPath}" (the namespace you are publishing to)\n`
+    );
+    evidenceRecord = { ...evidenceRecord, dossier: fullPath };
+    rawEvidence = `${JSON.stringify(evidenceRecord, null, 2)}\n`;
   }
 
   const mismatches = evidenceMatchesDossier(evidenceRecord, frontmatter, fullPath);
@@ -436,7 +451,8 @@ export function registerPublishCommand(program: Command): void {
           );
 
           const verifyCommand = `dossier info ${fullPath}@${version}`;
-          const cdnDelaySeconds = 30;
+          // list/search read index.json via raw.githubusercontent.com, cached ~5 min.
+          const cdnDelaySeconds = 300;
 
           if (options.json) {
             console.log(
@@ -447,6 +463,7 @@ export function registerPublishCommand(program: Command): void {
                   version,
                   registry: targetRegistry.name,
                   content_url: result.content_url || null,
+                  published_by: result.published_by || null,
                   evidence_url: result.evidence_url || null,
                   evidence_check: evidenceCheck,
                   verification: {
@@ -469,8 +486,11 @@ export function registerPublishCommand(program: Command): void {
             if (result.evidence_url) {
               console.log(`   Evidence: ${result.evidence_url}`);
             }
+            if (result.published_by) {
+              console.log(`   Published by: ${formatPublishedBy(result.published_by)}`);
+            }
             console.log(
-              `\n   ⏳ CDN propagation may take up to ${cdnDelaySeconds}s. Verify with:\n   $ ${verifyCommand}\n`
+              `\n   ⏳ CDN propagation: list, search and install-skill --all may lag up to ${cdnDelaySeconds / 60} min. Verify with:\n   $ ${verifyCommand}\n`
             );
           }
         } catch (err: unknown) {

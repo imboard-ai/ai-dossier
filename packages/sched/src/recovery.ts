@@ -1898,6 +1898,11 @@ export function handlePrConflict(
   // earlier step) would otherwise rewrite the wrong ref and "re-ship" something
   // that is not this batch.
   if (batch.branch !== null) {
+    // Persisted state reaches git argv below. A batch recovery may only rewrite
+    // its own date-suffixed integration branch, never an arbitrary valid ref.
+    if (!SAFE_REF_RE.test(batch.branch) || !batch.branch.startsWith(`batch/${batch.id}-`)) {
+      return bailToHalves(next, 'invalid-integration-branch');
+    }
     const head = git(deps, ['symbolic-ref', '--quiet', '--short', 'HEAD'], batchId, now);
     if (head !== batch.branch) {
       journal(
@@ -1917,7 +1922,9 @@ export function handlePrConflict(
   if (git(deps, ['fetch', 'origin', '--', base], batchId, now) === null) {
     return bailToHalves(next, 'fetch-failed');
   }
-  if (git(deps, ['rebase', `origin/${base}`], batchId, now) === null) {
+  // Rebase the commit just fetched rather than trusting an old remote-tracking
+  // ref left behind by a prior scheduler tick.
+  if (git(deps, ['rebase', 'FETCH_HEAD'], batchId, now) === null) {
     // Never leave the worktree mid-rebase.
     git(deps, ['rebase', '--abort'], batchId, now);
     return bailToHalves(next, 'rebase-conflict');
@@ -1972,7 +1979,7 @@ export function handlePrConflict(
  *   close that PR and `sched resume --batch` (which refuses while a PR is
  *   recorded), or `sched abandon --batch`.
  *
- * Library behaviour: the engine does not yet route a conflicting batch PR
+ * `reconcilePrWatch` routes conflicting and auto-merge-blocked batch PRs
  * here (#867).
  */
 function keepLandedAndSplit(

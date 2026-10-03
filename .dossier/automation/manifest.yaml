@@ -2,23 +2,29 @@
 #
 # `test.full` exists so the batch scheduler's aggregate-suite runner
 # (cli/src/batch-suite-runner.ts, #562) has a trustworthy tier-1 command for
-# this repo: the root `test` script delegates to `make test`, which aborts on
-# an unrecognized `--reporter=json` flag — declaring the real command here,
-# with no flags appended, is what lets `cap run test.full` report the suite's
-# TRUE exit status instead of a wrapper's flag-parsing error.
+# this repo. Its command is `scripts/test-report.mjs` (#893), NOT `make test`:
+# the runner attributes a red suite to batch members by parsing ONE vitest JSON
+# document out of the capability's stdout, and `make test` prints only human
+# text — so every red run read as `suite-unreadable` and stranded the batch.
+# test-report.mjs runs the same suites (every workspace with a `test` script,
+# then the repo-script tests) one at a time, and prints a merged
+# `{ testResults: [...] }` report on stdout (human output goes to stderr).
+# It takes no flags, so nothing is forwarded through a wrapper (#562).
 version: 1
 
 capabilities:
   test.full:
-    command: make test
+    command: node scripts/test-report.mjs
     lifecycle: active
-    description: Full workspace test suite (all workspaces + repo scripts)
+    description: >-
+      Full workspace test suite (all workspaces + repo scripts), emitting one
+      merged vitest-JSON report on stdout so a red run is attributable
     # This is the active capability command's own budget. The aggregate runner
     # gives its outer cap-run watchdog bounded setup grace, then treats this
     # timeout as terminal rather than guessing with a fallback command.
     timeout_ms: 600000
     assumptions:
-      - file-exists: Makefile
+      - file-exists: scripts/test-report.mjs
       - tool-version: node>=20
 
   # --- The batch incremental member gate (#594 dogfood) ------------------
@@ -58,26 +64,45 @@ capabilities:
       - tool-version: node>=20
 
   test.focused:
-    command: make test
+    command: node scripts/test-report.mjs --changed
     lifecycle: active
     description: >-
-      Per-member gate suite. Deliberately the FULL suite, not a diff-scoped
-      one, and deliberately NOT a bespoke shell script.
-    # Why not diff-scoped: imboard-monorepo's `scripts/cap-test-focused.sh`
-    # is the single defect that killed every batch member across pilot
-    # attempts 2-4 (five members for five). Its `tee /dev/stderr` under
-    # `set -o pipefail` fabricated exit 1 out of a green run AND emptied the
-    # buffer its own no-projects-matched retry greps (imboard-monorepo#3996,
-    # fixed 2026-09-03 in imboard#4009). The scope-narrowing machinery — a
-    # pnpm --filter over a merge-base diff — is what needed the script in
-    # the first place. This repo's suite is small enough that scoping buys
-    # seconds and costs a class of bug that has already cost four pilot
-    # attempts, so the honest full suite runs instead: a slower gate that
-    # cannot lie about its own exit status.
-    # Budget: the suite's own worst case here is the worktree-pool CLI tests
-    # (~50 s, they create real worktrees), inside a total well under 5 min;
-    # 10 min matches test.full above rather than inventing a second number.
+      Per-member gate suite: only the workspaces the member's diff touches
+      (plus their dependents), emitting the same one-document JSON report as
+      `test.full` so a red run is attributable (#919).
+    # The gate calls this with (worktree, id) only — no changed-paths reach a
+    # capability — so `--changed` derives them from `git diff` against the
+    # merge-base with $TEST_REPORT_BASE / origin/main (plus uncommitted and
+    # untracked files) and maps path -> workspace. A workspace also pulls in
+    # every workspace that depends on it (a core change runs cli/sched/...);
+    # scripts/, docs/ and root markdown run just the repo-script tests; ANY
+    # path that maps to nothing (root package.json/lockfile, test-support/,
+    # Makefile, .dossier/...) or an unusable git diff falls back to the FULL run,
+    # so the failure mode of the mapping is a slow gate, never a lenient one.
+    # Suites run sequentially (registry tests are load-sensitive, #893).
+    #
+    # History: this was `make test` (#594) because imboard's diff-scoped
+    # `scripts/cap-test-focused.sh` (`tee /dev/stderr` under `set -o pipefail`)
+    # fabricated exit 1 from green runs (imboard-monorepo#3996). The scoping here
+    # is plain node with no pipes, and the exit code is the report's `success`.
     timeout_ms: 600000
     assumptions:
-      - file-exists: Makefile
+      - file-exists: scripts/test-report.mjs
+      - tool-version: node>=20
+
+  # --- Lint, exactly as CI runs it (#859) ---------------------------------
+  #
+  # NOT part of the member gate above (that pair is fixed in code). Declared for
+  # the member workflows' own lint step (`ai-dossier cap run lint.run`), whose
+  # fallback without it is a bare `biome check --write`, which exits 0 on the
+  # warnings CI's lint job fails on.
+  lint.run:
+    command: npm run lint
+    lifecycle: active
+    description: >-
+      Biome exactly as CI's lint job runs it (`biome ci --error-on-warnings .`):
+      format drift, lint errors and lint warnings fail. Repo-wide; the tree has
+      been warning-free since #859, so a failure belongs to the change under test.
+    assumptions:
+      - file-exists: biome.json
       - tool-version: node>=20

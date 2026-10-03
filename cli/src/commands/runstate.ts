@@ -8,6 +8,7 @@
  */
 
 import fs from 'node:fs';
+import { isTrustedAuthorAssociation } from '@ai-dossier/core';
 import { procStartTime } from '@ai-dossier/sched';
 import type { Command } from 'commander';
 import { formatDurationCell } from '../duration';
@@ -29,6 +30,11 @@ import {
   tryFetchComments,
 } from '../gh';
 import { parseIssueSelection } from '../issue-selection';
+import {
+  ignoredMilestoneWarning,
+  readTrustedMilestones,
+  trustedCommentBodies,
+} from '../plan-artifact';
 import {
   activeFence,
   BATCH_PHASES,
@@ -127,6 +133,10 @@ interface ReadOptions {
   issue: string;
   repo?: string;
   json?: boolean;
+  /** #932: accepted for explicitness; trusted-only is the DEFAULT. */
+  trusted?: boolean;
+  /** #932: opt out of the trusted-only filter (operator reporting reads). */
+  all?: boolean;
 }
 
 /** `runstate list` — every milestone, optionally bounded to one dispatch (#622). */
@@ -147,6 +157,8 @@ interface StatsOptions {
   issues?: string;
   repo?: string;
   json?: boolean;
+  /** #932: include milestones from ANY author (default: trusted authors only). */
+  all?: boolean;
 }
 
 /** Characters kept in a `verify` warning, which is one line among several. */
@@ -242,6 +254,23 @@ function tryFetchMilestones(issue: string, repo?: string): TrailResult {
   if (!result.ok) return { ok: false, error: result.error };
   const bodies = result.comments.map((c) => (typeof c?.body === 'string' ? c.body : ''));
   return { ok: true, milestones: parseMilestones(bodies) };
+}
+
+/**
+ * The trusted-only trail (#932) — what a scheduler that ACTS on a milestone must read.
+ * Same rule as {@link tryFetchTrustedMilestones} (fails closed on a missing association),
+ * plus a stderr note when a NEWER milestone from an untrusted author was passed over, so
+ * the operator can see a forged `batch-review done` was ignored rather than wonder why
+ * nothing advanced.
+ */
+function fetchTrustedMilestones(issue: string, repo?: string): ParsedMilestone[] {
+  const result = tryFetchComments(issue, repo);
+  if (!result.ok) fail([result.error]);
+  const { milestones, ignored } = readTrustedMilestones(result.comments);
+  if (ignored.length > 0) {
+    console.error(`⚠ Issue #${issue}: ${ignoredMilestoneWarning(ignored)}`);
+  }
+  return milestones;
 }
 
 /** Fetch every runstate milestone on an issue, oldest first, or exit 1 explaining why. */
@@ -540,14 +569,7 @@ function requirePostableBody(body: string, pairs: Array<[string, string]>): void
 export const FENCED_EXIT_CODE = 3;
 
 /**
- * Author associations GitHub reports for an account with write access to the repository.
- *
- * `BOT` is included: the workflows that post milestones frequently run as an app token.
- */
-const WRITE_ACCESS_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR', 'BOT']);
-
-/**
- * The trail read the FENCE decisions use: only comments from accounts with write access.
+ * The trail read the FENCE decisions use: only comments from a repo owner / org member / collaborator.
  *
  * A milestone is an issue comment, and on a public repository anyone can leave one.
  * Without this filter a single forged `status=superseded` comment from a stranger fences
@@ -556,22 +578,15 @@ const WRITE_ACCESS_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR', 'B
  * the issue. `groundtruth.ts`'s `parseSetupInfo` already applies exactly this rule for
  * the same reason, and `gh issue view --json comments` already returns the field.
  *
- * Reporting reads (`last`, `verify`, `stats`) deliberately stay unfiltered — they
+ * `verify` is filtered too (#932): its `resume_from` decides which phases a resumed run
+ * skips. Reporting reads that opt out with `--all` (`last`/`list`/`stats`) stay unfiltered — they
  * describe the trail rather than act on it, and hiding comments there would make an
  * operator's picture disagree with the issue they are looking at.
  */
 function tryFetchTrustedMilestones(issue: string, repo?: string): TrailResult {
   const result = tryFetchComments(issue, repo);
   if (!result.ok) return { ok: false, error: result.error };
-  const bodies = result.comments
-    .filter(
-      (c) =>
-        // An older gh does not report the field at all; trusting it then matches
-        // `parseSetupInfo` and keeps the guard from failing closed on a tooling gap.
-        c?.authorAssociation === undefined ||
-        WRITE_ACCESS_ASSOCIATIONS.has(String(c.authorAssociation))
-    )
-    .map((c) => (typeof c?.body === 'string' ? c.body : ''));
+  const bodies = trustedCommentBodies(result.comments);
   return { ok: true, milestones: parseMilestones(bodies) };
 }
 
@@ -954,9 +969,20 @@ function registerReadSubcommands(cmd: Command): void {
       "Only milestones at or after this ISO-8601 timestamp — e.g. a dispatch's spawned_at"
     )
     .option('--json', 'Output the parsed milestones as a JSON array')
+    .option(
+      '--trusted',
+      'Only count milestones from a repo owner / org member / collaborator (#932) — the default; accepted so a supervisor can state it (an older CLI rejects it, failing closed)'
+    )
+    .option(
+      '--all',
+      'Include milestones from ANY author (operator reporting only; never act on this)'
+    )
     .action((options: ListOptions) => {
       requireIssueTarget(options);
-      let milestones = fetchMilestones(options.issue, options.repo);
+      let milestones =
+        options.all && !options.trusted
+          ? fetchMilestones(options.issue, options.repo)
+          : fetchTrustedMilestones(options.issue, options.repo);
 
       // #622: `last` is not enough for a consumer that must decide what a
       // DISPATCH produced. A member posting `review done` and then a
@@ -1009,9 +1035,20 @@ function registerReadSubcommands(cmd: Command): void {
     .requiredOption('--issue <number>', 'GitHub issue number')
     .option('--repo <owner/name>', 'Target repository (defaults to the current one)')
     .option('--json', 'Output the parsed milestone as JSON')
+    .option(
+      '--trusted',
+      'Only count milestones from a repo owner / org member / collaborator (#932) — the default; accepted so a supervisor can state it (an older CLI rejects it, failing closed)'
+    )
+    .option(
+      '--all',
+      'Include milestones from ANY author (operator reporting only; never act on this)'
+    )
     .action((options: ReadOptions) => {
       requireIssueTarget(options);
-      const milestones = fetchMilestones(options.issue, options.repo);
+      const milestones =
+        options.all && !options.trusted
+          ? fetchMilestones(options.issue, options.repo)
+          : fetchTrustedMilestones(options.issue, options.repo);
 
       if (milestones.length === 0) {
         if (options.json) {
@@ -1055,7 +1092,7 @@ function registerVerifySubcommand(cmd: Command): void {
     .action((options: VerifyOptions) => {
       requireIssueTarget(options);
       const dispatchedAt = requireDispatchedAt(options.dispatchedAt);
-      const milestones = fetchMilestones(options.issue, options.repo);
+      const milestones = fetchTrustedMilestones(options.issue, options.repo);
       const warnings: string[] = [];
       const result = computeResume(
         milestones,
@@ -1389,7 +1426,8 @@ function printStatsHuman(report: StatsReport, multiIssue: boolean): void {
  */
 function readTrails(
   issues: number[],
-  repo: string | undefined
+  repo: string | undefined,
+  all = false
 ): { trails: IssueTrail[]; failed: FailedIssue[] } {
   const trails: IssueTrail[] = [];
   const failed: FailedIssue[] = [];
@@ -1404,7 +1442,9 @@ function readTrails(
     if (showProgress) {
       process.stderr.write(`\rstats: reading issue #${issue} (${i + 1}/${issues.length})…`);
     }
-    const result = tryFetchMilestones(String(issue), repo);
+    const result = all
+      ? tryFetchMilestones(String(issue), repo)
+      : tryFetchTrustedMilestones(String(issue), repo);
     if (result.ok) trails.push({ issue, milestones: result.milestones });
     else failed.push({ issue, error: result.error });
   });
@@ -1428,9 +1468,13 @@ function registerStatsSubcommand(cmd: Command): void {
     .option('--issues <list>', 'Issue list or range to aggregate, e.g. 1,2,5..8')
     .option('--repo <owner/name>', 'Target repository (defaults to the current one)')
     .option('--json', 'Output the report as JSON')
+    .option(
+      '--all',
+      'Include milestones from ANY author (default: repo owner / org member / collaborator only)'
+    )
     .action((options: StatsOptions) => {
       const issues = resolveStatsIssues(options);
-      const { trails, failed } = readTrails(issues, options.repo);
+      const { trails, failed } = readTrails(issues, options.repo, options.all === true);
 
       // Every issue unreadable is a genuine failure, not a degraded read — there is no
       // report to hand back, so say why rather than printing an empty one and exiting 0.
@@ -1784,7 +1828,13 @@ function abortCommentBody(
  */
 function alreadyAborted(issue: string, repo: string | undefined, marker: string): boolean {
   const comments = tryFetchComments(issue, repo);
-  return comments.ok && comments.comments.some((c) => String(c?.body ?? '').includes(marker));
+  return (
+    comments.ok &&
+    comments.comments.some(
+      (c) =>
+        isTrustedAuthorAssociation(c?.authorAssociation) && String(c?.body ?? '').includes(marker)
+    )
+  );
 }
 
 /**

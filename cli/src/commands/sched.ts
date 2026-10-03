@@ -35,6 +35,9 @@ import {
   buildStatusReport,
   type CommitInBase,
   CorruptStateError,
+  checkStaleLeaseAlert,
+  clearStoppingMarker,
+  createConfigReloader,
   createExecFn,
   createExecGroundTruth,
   createExecResumeSeeder,
@@ -59,11 +62,12 @@ import {
   formatBatchStatus,
   GIT_OID_RE,
   IllegalTransitionError,
+  installEngineExitLogging,
   isLandedResumableBlock,
   issueCloseReader,
   Journal,
   type KeptWorktreeReader,
-  LIVE_SLOT_STATUSES,
+  killSlotAgent,
   LockTimeoutError,
   labelBlockReason,
   labelOfBlockReason,
@@ -74,12 +78,16 @@ import {
   orphanAnchorListArgs,
   parseManifest,
   pruneMemberBranches,
+  pruneRescueRefs,
   readJsonl,
+  readStoppingMarker,
   recordTickFailure,
+  reportCrashRestart,
   reprioritizeBatch,
   reprioritizeIssue,
   requeueParkedMember,
   resolveDispatch,
+  resolveHungAfterMs,
   resolveProfiledDispatch,
   resolveProjectRepo,
   resolveProjectSlug,
@@ -100,6 +108,7 @@ import {
   tick,
   tierExecutors,
   unitEvent,
+  writeStoppingMarker,
 } from '@ai-dossier/sched';
 import { WARM_COMMAND_TIMEOUT_MS } from '@ai-dossier/worktree-pool';
 import type { Command } from 'commander';
@@ -109,13 +118,16 @@ import {
   createBatchSuiteRunner,
 } from '../batch-suite-runner';
 import { envelopeFields, spawnCapRun } from '../cap-envelope';
-import { loadCapabilityManifest, timeoutReasonSpent } from '../capability';
+import { gateGapWarning, SKIP_GATE_CHECK_ENV } from '../cap-init';
+import { type CapabilityManifest, loadCapabilityManifest, timeoutReasonSpent } from '../capability';
 import { formatCost, formatCount } from '../cost-format';
 import { detectDispatchProfile, type ProfileCandidate } from '../dispatch-detect';
 import { formatAge, formatDurationMs } from '../duration';
 import {
+  checkCliStaleness,
   checkEngineStaleness,
   type EngineStalenessCheck,
+  formatCliStaleWarning,
   formatEngineStaleWarning,
 } from '../engine-version';
 import {
@@ -128,10 +140,16 @@ import {
 import { pickHardBlockLabel } from '../hard-block-labels';
 import { detectLlm, fail } from '../helpers';
 import { MAX_ISSUE_SELECTION, parseIssueSelection } from '../issue-selection';
-import { findLatestPlan } from '../plan-artifact';
+import {
+  findLatestTrustedPlan,
+  ignoredPlanWarning,
+  toAuthoredComments,
+  trustedCommentBodies,
+} from '../plan-artifact';
 import { LOG_FILE as RUNS_LOG_FILE, readRunLog } from '../run-log';
 import { hasSlotModeLatestMilestone } from '../runstate';
 import { renderValue } from '../runstate-stats';
+import { createAlertNotifier, parseAlertIssue } from '../sched-alert';
 import {
   aggregateRunLogEntries,
   type BatchAmortizationSummary,
@@ -143,6 +161,8 @@ import {
   summarizeBatchJournal,
 } from '../sched-run-stats';
 import { renderTable } from '../table';
+import { batchPrepTokens, currentSessionId, recordBatchPrep } from '../usage/batch-prep';
+import { registerSchedServiceCommands } from './sched-service';
 
 /**
  * Batch-worktree `ai-dossier cap run <id>` runner for the per-member
@@ -230,6 +250,7 @@ interface SchedOptions {
 }
 
 interface EnqueueOptions extends SchedOptions {
+  prepSession?: string;
   issues?: string;
   mode?: string;
   batch?: string;
@@ -239,10 +260,13 @@ interface EnqueueOptions extends SchedOptions {
   review?: string;
   fromManifest?: string;
   repo?: string;
+  /** #895: local checkout of `--repo`, for the gate-gap warning. */
+  repoDir?: string;
   moreMembersExpected?: boolean;
   priority?: string;
   /** #603: bypass the slot-member plan:v1 pre-screen. */
   skipPlanCheck?: boolean;
+  skipGateCheck?: boolean;
   /** #707: the dispatch profile the batch records — overrides detection. */
   dispatch?: string;
 }
@@ -266,6 +290,7 @@ interface ReprioritizeOptions extends SchedOptions {
 }
 
 interface StartOptions extends SchedOptions {
+  alertIssue?: string;
   interval?: number;
   once?: boolean;
   autoUpgrade?: boolean;
@@ -351,7 +376,9 @@ function renderReport(report: StatusReport, staleness?: EngineStalenessCheck): s
   );
   if (report.engine_lease) {
     lines.push(
-      `Engine lease: pid ${report.engine_lease.pid} (${report.engine_lease.alive ? 'live' : 'stale'})`
+      `Engine lease: pid ${report.engine_lease.pid} (${report.engine_lease.alive ? 'live' : 'stale'})${
+        report.engine_lease.updated_at ? `, last heartbeat ${report.engine_lease.updated_at}` : ''
+      }`
     );
   }
   if (report.last_tick_failure) {
@@ -957,10 +984,13 @@ function screenSlotPreconditions(inputs: EnqueueInput[], repo?: string): void {
           );
           checked.set(input.issue, { plan: true, classify: true });
         } else {
-          const bodies = result.comments.map((c) => (typeof c?.body === 'string' ? c.body : ''));
+          const plan = findLatestTrustedPlan(toAuthoredComments(result.comments));
+          if (plan.ignored.length > 0) {
+            console.error(`⚠ #${input.issue}: ${ignoredPlanWarning(plan.ignored)}`);
+          }
           checked.set(input.issue, {
-            plan: findLatestPlan(bodies) !== null,
-            classify: hasSlotModeLatestMilestone(bodies),
+            plan: plan.latest !== null,
+            classify: hasSlotModeLatestMilestone(trustedCommentBodies(result.comments)),
           });
         }
       }
@@ -999,15 +1029,18 @@ function screenSlotPreconditions(inputs: EnqueueInput[], repo?: string): void {
 /**
  * #777: refuse to CREATE a batch in a repo whose only full gate declares
  * itself timeout-prone (see `batchGateRefusal`). Reads the capability
- * manifest of the directory `enqueue` runs in — skipped when `--repo` names
- * the GitHub repo explicitly (the flag exists for enqueueing into a project
- * whose checkout is NOT the cwd, so the cwd's manifest would be the wrong
- * one), and degrade-not-crash on a malformed manifest (`cap run` reports that
+ * manifest of the directory `enqueue` runs in — or, with `--repo`, of that
+ * repo's checkout (#895: `--repo-dir`, or the cwd when its origin is that
+ * repo; unresolvable → the check is skipped with a notice, never the wrong
+ * repo's manifest). Degrade-not-crash on a malformed manifest (`cap run` reports that
  * itself at gate time). Only batches this call creates are screened: a
  * member joining an existing batch cannot un-form it.
+ *
+ * #645: the same manifest also feeds a non-blocking warning naming any
+ * undeclared member-gate capability ids (`gateGapWarning`), opt-out via
+ * `--skip-gate-check`.
  */
 function screenBatchGate(store: SchedStore, opts: EnqueueOptions, inputs: EnqueueInput[]): void {
-  if (opts.repo !== undefined) return;
   const existing = new Set(store.load().batches.map((b) => b.id));
   const born = [
     ...new Set(
@@ -1018,14 +1051,66 @@ function screenBatchGate(store: SchedStore, opts: EnqueueOptions, inputs: Enqueu
     ),
   ];
   if (born.length === 0) return;
-  let refusal: string | null;
+  // #895: `--repo` names a repo whose checkout may not be the cwd — resolve
+  // THAT repo's manifest (via `findDossierRoot` inside `loadCapabilityManifest`)
+  // or say the check was skipped; never read the cwd's manifest for another repo.
+  const manifestDir = opts.repo === undefined ? process.cwd() : resolveRepoCheckout(opts);
+  if (manifestDir === null) {
+    if (!opts.skipGateCheck && !process.env[SKIP_GATE_CHECK_ENV]) {
+      console.error(
+        `⚠ Batch gate check skipped: no local checkout of ${opts.repo} found (cwd is another repo) — pass --repo-dir <path> to check its manifest.`
+      );
+    }
+    return;
+  }
+  let manifest: CapabilityManifest;
   try {
-    refusal = batchGateRefusal(loadCapabilityManifest(process.cwd()));
+    manifest = loadCapabilityManifest(manifestDir);
   } catch {
     return;
   }
-  if (refusal === null) return;
-  fail([`Cannot form batch ${born.join(', ')}: ${refusal}`]);
+  const refusal = batchGateRefusal(manifest);
+  if (refusal !== null) fail([`Cannot form batch ${born.join(', ')}: ${refusal}`]);
+  // #645: a warning, never a block (#625) — the gate skip is legal, the silence is the bug.
+  if (!opts.skipGateCheck && !process.env[SKIP_GATE_CHECK_ENV]) {
+    const warning = gateGapWarning(manifest);
+    if (warning !== null) console.error(warning);
+  }
+}
+
+/**
+ * #895: the local checkout of the `--repo` an enqueue targets — `--repo-dir`
+ * when given, else the cwd when its `origin` remote IS that repo; `null` when
+ * neither holds (an unverifiable cwd is not assumed to be the target).
+ */
+function resolveRepoCheckout(opts: EnqueueOptions): string | null {
+  if (opts.repoDir !== undefined) return path.resolve(opts.repoDir);
+  const cwd = process.cwd();
+  const remote = defaultExec('git', ['remote', 'get-url', 'origin'], cwd);
+  const slug = remote?.trim().match(/[:/]([^/:]+\/[^/]+?)(?:\.git)?$/)?.[1];
+  return slug !== undefined && slug.toLowerCase() === opts.repo?.toLowerCase() ? cwd : null;
+}
+
+/**
+ * #796: tie the enqueuing session — batch-issues-preparation's — to every
+ * batch this call touched, so the usage ledger can attribute its classifier
+ * spend to `batch:<id>`. Code-side and deterministic: no reliance on the
+ * agent remembering to write a key. Silent when no session is knowable.
+ */
+function recordPrepSession(
+  store: SchedStore,
+  inputs: readonly EnqueueInput[],
+  flag: string | undefined
+): void {
+  const batches = inputs.map((i) => i.batch).filter((b): b is string => typeof b === 'string');
+  if (batches.length === 0) return;
+  const sessionId = flag ?? currentSessionId();
+  if (!sessionId) return;
+  const members = new Map<string, number>();
+  for (const i of inputs) {
+    if (typeof i.batch === 'string') members.set(i.batch, (members.get(i.batch) ?? 0) + 1);
+  }
+  recordBatchPrep(store.dir, batches, sessionId, flag ? 'flag' : 'env', new Date(), members);
 }
 
 /** Append one `label-blocked`/`label-check-failed` journal event per outcome (#507 AC3). */
@@ -1242,6 +1327,10 @@ function registerEnqueueSubcommand(cmd: Command): void {
     )
     .option('--from-manifest <path>', 'JSON file of entries (batch-prep output)')
     .option(
+      '--prep-session <id>',
+      "Session that did this batch's prep (#796; default: the calling Claude Code session from CLAUDE_CODE_SESSION_ID) — its tokens are attributed to the batch"
+    )
+    .option(
       '--more-members-expected',
       "With --batch: don't seal this batch yet — more members are coming in a later enqueue call"
     )
@@ -1254,6 +1343,10 @@ function registerEnqueueSubcommand(cmd: Command): void {
       'Enqueue slot members even when they carry no plan:v1 artifact (they will hand back with reason=no-plan-artifact unless a plan is posted before dispatch)'
     )
     .option(
+      '--skip-gate-check',
+      'Suppress the warning that the batch member gate capabilities (typecheck.run, test.focused) are undeclared — for repos that deliberately declare nothing (or set DOSSIER_SKIP_GATE_CHECK=1)'
+    )
+    .option(
       '--dispatch <profile>',
       'Name the dispatch profile for every enqueued entry (a dispatch_profiles key) — overrides CLAUDECODE/parent-chain detection; with no flag and inconclusive detection the enqueue FAILS rather than guessing the default'
     )
@@ -1261,6 +1354,10 @@ function registerEnqueueSubcommand(cmd: Command): void {
     .option(
       '--repo <owner/name>',
       "GitHub repo to screen hard-block labels against (default: current directory's repo — required when --project targets a different repo)"
+    )
+    .option(
+      '--repo-dir <path>',
+      'Local checkout of --repo — where its capability manifest is read for the undeclared-gate warning (default: the cwd, when its origin remote is --repo)'
     )
     .option('--json', 'Output the result as JSON')
     .action((opts: EnqueueOptions) => {
@@ -1410,6 +1507,8 @@ function registerEnqueueSubcommand(cmd: Command): void {
         handleKnownError(err);
       }
 
+      recordPrepSession(store, inputs, opts.prepSession);
+
       const blocked = inputs.filter((input) => input.blocked_label);
       journalLabelScreen(store, blocked, failed);
       reportEnqueue(opts, project, inputs, blocked, failed, queueDepth);
@@ -1423,35 +1522,76 @@ function registerStatusSubcommand(cmd: Command): void {
     .option('--project <slug>', 'Project slug (default: owner-repo of the current directory)')
     .option('--json', 'Output the report as JSON')
     .option(
+      '--alert',
+      'Also raise the engine-down alert (once per stale episode) when the lease is stale with unfinished work — cron-able (#945); comments on --alert-issue / $DOSSIER_SCHED_ALERT_ISSUE if set'
+    )
+    .option('--alert-issue <n>', 'Tracking issue for --alert comments')
+    .option(
       '--anchors',
       "Also sweep open batch anchors — ledger-tracked (#768) and orphaned (#790, batches no longer in state.batches) — reads issue state from GitHub; run from the project's repository"
     )
-    .action(async (opts: SchedOptions & { anchors?: boolean }) => {
-      const { store, project } = resolveStore(opts);
-      try {
-        const report = buildStatusReport(
-          store.load(),
-          store.loadConfig(),
-          project,
-          store.engineLeaseStatus(),
-          new Date(),
-          opts.anchors === true ? anchorSweepFor(project) : undefined,
-          // #791: local git only, no network — runs by default, unlike --anchors.
-          keptWorktreeReaderFor()
-        );
-        // Cache-only (#537): `status` is a fast, offline-friendly diagnostic
-        // — it reads whatever `sched start` last cached rather than risking
-        // a multi-second hang on an unreachable npm registry.
-        const staleness = await checkEngineStaleness({ noFetch: true });
-        if (opts.json) {
-          console.log(JSON.stringify({ ...report, engine_staleness: staleness }, null, 2));
-        } else {
-          console.log(renderReport(report, staleness));
+    .action(
+      async (opts: SchedOptions & { anchors?: boolean; alert?: boolean; alertIssue?: string }) => {
+        const { store, project } = resolveStore(opts);
+        try {
+          if (opts.alert) {
+            // A watcher must never crash on its own input: a bad --alert-issue
+            // downgrades to stderr-only alerting.
+            let alertIssue: number | undefined;
+            try {
+              alertIssue = parseAlertIssue(opts.alertIssue);
+            } catch (err) {
+              process.stderr.write(
+                `⚠ sched status --alert: ${(err as Error).message} — alerting on stderr/journal only\n`
+              );
+            }
+            try {
+              checkStaleLeaseAlert(
+                store,
+                new Journal(store.dir),
+                createAlertNotifier(
+                  project,
+                  () => resolveProjectRepo(project, defaultExec) ?? undefined,
+                  alertIssue,
+                  { stateDir: store.dir }
+                ),
+                new Date(),
+                {
+                  hungAfterMs: resolveHungAfterMs(
+                    resolveDispatch(store.loadConfig()).reconcileIntervalMs
+                  ),
+                }
+              );
+            } catch (err) {
+              process.stderr.write(
+                `⚠ sched status --alert: alert check failed: ${(err as Error).message}\n`
+              );
+            }
+          }
+          const report = buildStatusReport(
+            store.load(),
+            store.loadConfig(),
+            project,
+            store.engineLeaseStatus(),
+            new Date(),
+            opts.anchors === true ? anchorSweepFor(project) : undefined,
+            // #791: local git only, no network — runs by default, unlike --anchors.
+            keptWorktreeReaderFor()
+          );
+          // Cache-only (#537): `status` is a fast, offline-friendly diagnostic
+          // — it reads whatever `sched start` last cached rather than risking
+          // a multi-second hang on an unreachable npm registry.
+          const staleness = await checkEngineStaleness({ noFetch: true });
+          if (opts.json) {
+            console.log(JSON.stringify({ ...report, engine_staleness: staleness }, null, 2));
+          } else {
+            console.log(renderReport(report, staleness));
+          }
+        } catch (err) {
+          handleKnownError(err);
         }
-      } catch (err) {
-        handleKnownError(err);
       }
-    });
+    );
 }
 
 interface PauseResumeOptions extends SchedOptions {
@@ -1719,6 +1859,13 @@ function runBatchStats(opts: StatsOptions & { batch: string }): void {
   const overhead = entries.filter((e) => e.unit === `batch:${opts.batch}`);
   const overheadTotals = aggregateRunLogEntries(overhead);
   const amortization = batchAmortization(store, opts.batch, entries);
+  // #796: prep spend runs in the operator session; joined via `sched enqueue`'s recorded session.
+  // Null when this host recorded no prep session for the batch (e.g. formed before #796).
+  const prep = batchPrepTokens(store.dir, [opts.batch]).get(opts.batch) ?? null;
+  amortization.prep_tokens = prep?.billable_tokens ?? null;
+  amortization.prep_sessions = prep?.sessions ?? 0;
+  amortization.prep_basis = prep?.basis ?? null;
+  amortization.prep_split = prep?.split ?? false;
 
   if (opts.json) {
     console.log(
@@ -1891,9 +2038,7 @@ function registerAbandonSubcommand(cmd: Command): void {
             // running in one of the batch's slots (a parallel member holds its
             // own) would keep working a unit the engine is about to redispatch.
             for (const slot of slotsForBatch(state, opts.batch as string)) {
-              if (slot.pid !== null && spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)) {
-                spawnDeps.kill(slot.pid, slot.pid_start ?? undefined);
-              }
+              killSlotAgent(spawnDeps, slot);
             }
             const r = abandonBatch(state, opts.batch as string, reason);
             return { state: r.state, result: { requeued: r.requeued, anchor } };
@@ -2166,9 +2311,7 @@ function registerStopSubcommand(cmd: Command): void {
             : state.slots.filter((candidate) => candidate.unit === unit);
           let terminated = false;
           for (const slot of slots) {
-            if (slot.pid !== null && spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)) {
-              terminated = spawnDeps.kill(slot.pid, slot.pid_start ?? undefined) || terminated;
-            }
+            terminated = killSlotAgent(spawnDeps, slot) || terminated;
           }
           const stopped = opts.batch
             ? stopBatch(state, opts.batch, opts.reason)
@@ -2269,8 +2412,13 @@ function registerReprioritizeSubcommand(cmd: Command): void {
     });
 }
 
+/** #945: rescue commit + push of a dead agent's worktree. */
+const RESCUE_TIMEOUT_MS = 120_000;
+
 /** `npm i -g @ai-dossier/cli@latest` can take a while (network + install). */
 const UPGRADE_TIMEOUT_MS = 120_000;
+/** Supervisor restart request used when the runtime has no `process.execve`. */
+export const UPGRADE_RESTART_EXIT_CODE = 75;
 
 /**
  * A local `ExecFn` built directly on this file's own `execFileSync` import,
@@ -2304,78 +2452,95 @@ function createUpgradeExec(): ExecFn {
 }
 
 /**
- * #537: after a tick, compare the installed engine against npm latest;
- * when behind, journal `engine-stale` once per distinct (installed, latest)
- * pair (not every tick — a long-running loop would otherwise spam the
- * journal every reconcile) and warn on stderr. When `autoUpgradeEnabled`
- * and nothing is mid-dispatch (`LIVE_SLOT_STATUSES` against freshly
- * re-read state — must reflect what the tick that just ran actually did),
- * self-upgrade via `upgradeExec`.
+ * #537/#945: after a tick, compare the installed scheduler library and CLI
+ * executable against npm latest. Each stale package is journaled once per
+ * distinct (installed, latest) pair and warned on stderr. When auto-upgrade is
+ * enabled, either stale package requests an install of the latest CLI. The
+ * caller awaits this AFTER a completed tick and stops the old loop on success;
+ * live agents are detached and the restarted engine reattaches to their pids.
  */
 async function checkAndHandleEngineStaleness(
-  store: SchedStore,
   journal: Journal,
   autoUpgradeEnabled: boolean,
   upgradeExec: ExecFn
-): Promise<void> {
-  const staleness = await checkEngineStaleness();
-  if (!staleness.stale) return;
-  const { installed, latest } = staleness;
-  if (installed === null || latest === null) return; // unreachable when stale=true; keeps TS honest
-
+): Promise<boolean> {
+  const [engine, cli] = await Promise.all([checkEngineStaleness(), checkCliStaleness()]);
   const events = journal.read();
-  const lastStale = [...events].reverse().find((e) => e.event === 'engine-stale');
-  const alreadyJournaled =
-    lastStale?.installed_version === installed && lastStale?.latest_version === latest;
-
-  if (!alreadyJournaled) {
-    journal.append({
-      event: 'engine-stale',
-      installed_version: installed,
-      latest_version: latest,
-      detail: `installed @ai-dossier/sched@${installed} behind npm latest ${latest}`,
-    });
-    process.stderr.write(`${formatEngineStaleWarning(installed, latest)}\n`);
+  const stalePackages: string[] = [];
+  for (const [check, eventName, packageName, warning] of [
+    [engine, 'engine-stale', '@ai-dossier/sched', formatEngineStaleWarning] as const,
+    [cli, 'engine-cli-stale', '@ai-dossier/cli', formatCliStaleWarning] as const,
+  ]) {
+    if (!check.stale || check.installed === null || check.latest === null) continue;
+    const lastStale = [...events].reverse().find((event) => event.event === eventName);
+    const alreadyJournaled =
+      lastStale?.installed_version === check.installed &&
+      lastStale?.latest_version === check.latest;
+    if (!alreadyJournaled) {
+      journal.append({
+        event: eventName,
+        installed_version: check.installed,
+        latest_version: check.latest,
+        detail: `installed ${packageName}@${check.installed} behind npm latest ${check.latest}`,
+      });
+      process.stderr.write(`${warning(check.installed, check.latest)}\n`);
+    }
+    stalePackages.push(`${packageName}@${check.installed}->${check.latest}`);
   }
-
-  if (!autoUpgradeEnabled) return;
-
-  // Re-read fresh — must reflect what the tick that just ran left behind,
-  // not a pre-tick snapshot (AC2: "only while no unit is mid-dispatch").
-  // Best-effort like the rest of this function: a failure here (state became
-  // unreadable between the tick that just succeeded and this re-check) must
-  // not crash the `--once` cron path after the tick itself already
-  // completed successfully — never surface as an unhandled rejection.
-  let busy: boolean;
-  try {
-    const state = store.load();
-    busy = state.slots.some((s) => LIVE_SLOT_STATUSES.has(s.status));
-  } catch (err) {
-    process.stderr.write(
-      `⚠ sched auto-upgrade: could not re-read state to confirm no unit is mid-dispatch, skipping upgrade: ${(err as Error).message}\n`
-    );
-    return;
-  }
-  if (busy) return;
+  if (stalePackages.length === 0 || !autoUpgradeEnabled) return false;
 
   process.stderr.write('⚠ sched: auto-upgrading (npm i -g @ai-dossier/cli@latest)…\n');
+  // Record the attempt before npm can replace this CLI. After a successful
+  // install, the old engine performs no more state writes and hands off.
+  journal.append({
+    event: 'engine-auto-upgrade-attempted',
+    installed_version: cli.installed ?? engine.installed ?? undefined,
+    latest_version: cli.latest ?? engine.latest ?? undefined,
+    detail: `npm i -g @ai-dossier/cli@latest started after a completed tick (${stalePackages.join('; ')})`,
+  });
   const output = upgradeExec('npm', ['i', '-g', '@ai-dossier/cli@latest']);
   if (output === null) {
     journal.append({
       event: 'engine-auto-upgrade-failed',
-      installed_version: installed,
-      latest_version: latest,
+      installed_version: cli.installed ?? engine.installed ?? undefined,
+      latest_version: cli.latest ?? engine.latest ?? undefined,
       detail: 'npm i -g @ai-dossier/cli@latest failed — see stderr for the npm error',
     });
     process.stderr.write('⚠ sched: auto-upgrade failed — see above\n');
+    return false;
   } else {
-    journal.append({
-      event: 'engine-auto-upgrade-attempted',
-      installed_version: installed,
-      latest_version: latest,
-      detail: 'npm i -g @ai-dossier/cli@latest completed',
-    });
     process.stderr.write('✓ sched: auto-upgrade completed\n');
+    return true;
+  }
+}
+
+type ExecveFn = (file: string, args: string[], env: NodeJS.ProcessEnv) => never;
+
+/** Replace this process with the updated CLI, preserving its invocation. */
+export function reexecUpdatedCli(execveOverride?: ExecveFn | null): boolean {
+  const execve =
+    execveOverride === undefined
+      ? (process as unknown as { execve?: ExecveFn }).execve
+      : execveOverride;
+  if (typeof execve !== 'function') {
+    process.stderr.write(
+      `⚠ sched auto-upgrade: process.execve is unavailable; requesting supervisor restart (${UPGRADE_RESTART_EXIT_CODE})\n`
+    );
+    return false;
+  }
+  try {
+    execve.call(
+      process,
+      process.execPath,
+      [process.execPath, ...process.argv.slice(1)],
+      process.env
+    );
+    return true;
+  } catch (err) {
+    process.stderr.write(
+      `⚠ sched auto-upgrade: re-exec failed; requesting supervisor restart (${UPGRADE_RESTART_EXIT_CODE}): ${(err as Error).message}\n`
+    );
+    return false;
   }
 }
 
@@ -2383,7 +2548,8 @@ function registerStartSubcommand(cmd: Command): void {
   cmd
     .command('start')
     .description(
-      'Run the dispatch engine: spawn agents, verify completion, escalate stalls, watch parked PRs, tear down merged worktrees, dispatch report agents (Ctrl-C stops the engine; agents keep running)'
+      'Run the dispatch engine: spawn agents, verify completion, escalate stalls, watch parked PRs, tear down merged worktrees, dispatch report agents (Ctrl-C stops the engine; agents keep running). ' +
+        'Config edits (config.json, user dispatch_profiles) are re-read every tick (#883); ONLY these are startup-only: the tick interval, --auto-upgrade / auto_upgrade, and the dispatch.tiers auto-detect warning'
     )
     .option(
       '--interval <seconds>',
@@ -2393,12 +2559,24 @@ function registerStartSubcommand(cmd: Command): void {
     .option('--once', 'Run a single reconcile+refill tick and exit (cron-style)')
     .option(
       '--auto-upgrade',
-      'Self-upgrade (npm i -g @ai-dossier/cli@latest) when the installed engine is behind npm latest and no unit is mid-dispatch'
+      'After a completed tick, install and re-exec @ai-dossier/cli@latest when this engine is stale'
+    )
+    .option(
+      '--alert-issue <n>',
+      'Comment on this issue when the engine restarts after a crash (#945); default $DOSSIER_SCHED_ALERT_ISSUE. The alert is always journaled and printed to stderr'
     )
     .option('--project <slug>', 'Project slug (default: owner-repo of the current directory)')
     .option('--json', 'Output tick results as JSON')
     .action(async (opts: StartOptions) => {
       const { store, project } = resolveStore(opts);
+      // #945: a bad --alert-issue / $DOSSIER_SCHED_ALERT_ISSUE fails at startup,
+      // before any lease is taken — not hours later at the first crash alert.
+      let alertIssue: number | undefined;
+      try {
+        alertIssue = parseAlertIssue(opts.alertIssue);
+      } catch (err) {
+        fail([`--alert-issue: ${(err as Error).message}`]);
+      }
       const acquisition = store.acquireEngineLease();
       if (!acquisition.acquired) {
         // Timer overlap is expected: --once must produce no human or JSON noise.
@@ -2411,8 +2589,60 @@ function registerStartSubcommand(cmd: Command): void {
         }
         return;
       }
+      // #779: fail()/handleKnownError call process.exit inside the try, which
+      // skips the `finally` below — release on the synchronous 'exit' event too
+      // so no failed start/tick leaves a dead holder.json (false
+      // stale-engine-lease warning). Release is idempotent (id-checked).
+      // #945: EXCEPT after a crash — the lease left behind is the crash marker
+      // the next start / watcher turns into an alert.
+      let exitLogger: ReturnType<typeof installEngineExitLogging> | undefined;
+      const releaseLease = () => {
+        if (exitLogger?.shouldReleaseLease() ?? true) store.releaseEngineLease(acquisition.lease);
+      };
+      process.once('exit', releaseLease);
+      const journalAtStart = new Journal(store.dir);
+      // #945/#920: installed IMMEDIATELY after the lease is taken so no later
+      // startup step can exit unlogged. SIGTERM/SIGINT request a graceful stop
+      // (bounded by a hard deadline); SIGHUP is journaled and ignored.
+      let stopping = false;
+      exitLogger = installEngineExitLogging({
+        journal: journalAtStart,
+        requestStop: () => {
+          stopping = true;
+          if (!opts.once) console.log('\n⏹ Stopping engine (spawned agents keep running)…');
+        },
+        markStopping: (signal) =>
+          writeStoppingMarker(store.dir, {
+            pid: process.pid,
+            signal,
+            at: new Date().toISOString(),
+          }),
+      });
+      const previousStop = readStoppingMarker(store.dir);
+      clearStoppingMarker(store.dir);
+      // `--once` runs from a timer: an engine-started line per run is spam.
+      if (!opts.once) {
+        journalAtStart.append({ event: 'engine-started', pid: process.pid, detail: 'loop' });
+      }
+      if (acquisition.reclaimed) {
+        reportCrashRestart(
+          journalAtStart,
+          acquisition.reclaimed,
+          createAlertNotifier(
+            project,
+            () => resolveProjectRepo(project, defaultExec) ?? undefined,
+            alertIssue,
+            { stateDir: store.dir }
+          ),
+          new Date(),
+          previousStop !== null && previousStop.pid === acquisition.reclaimed.pid
+            ? previousStop
+            : null
+        );
+      }
       try {
         let config: SchedConfig;
+        const startFingerprint = store.configFingerprint();
         try {
           config = store.loadConfig();
         } catch (err) {
@@ -2458,6 +2688,52 @@ function registerStartSubcommand(cmd: Command): void {
           ? { ...config, dispatch: { ...config.dispatch, command: dispatchCommand } }
           : config;
 
+        // #883: the engine re-reads config.json (and the user-level profiles)
+        // whenever its mtime/size moves — a profile edit applies from the next
+        // tick instead of silently waiting for a restart while `sched status`
+        // (which reads the file) shows the new values. The startup-only
+        // overrides above are re-applied to every reloaded config; an INVALID
+        // edit keeps the last good config and journals `config-reload-failed`.
+        const deriveEngineConfig = (cfg: SchedConfig): SchedConfig => {
+          const withInterval =
+            opts.interval !== undefined
+              ? { ...cfg, reconcile_interval_ms: opts.interval * 1000 }
+              : cfg;
+          const command =
+            withInterval.dispatch?.tiers !== undefined
+              ? undefined
+              : (withInterval.dispatch?.command ??
+                (detectLlm('auto', true) === 'opencode'
+                  ? [...OPENCODE_DISPATCH_COMMAND]
+                  : undefined));
+          return command
+            ? { ...withInterval, dispatch: { ...withInterval.dispatch, command } }
+            : withInterval;
+        };
+        const engineJournal = new Journal(store.dir);
+        let tickConfig: SchedConfig = engineConfig;
+        const configReloader = createConfigReloader({
+          initial: engineConfig,
+          initialFingerprint: startFingerprint,
+          load: () =>
+            store.loadConfigStrict((message) => {
+              engineJournal.append({ event: 'config-reload-failed', detail: message }, new Date());
+              process.stderr.write(`⚠ sched config reload: ${message}\n`);
+            }),
+          fingerprint: () => store.configFingerprint(),
+          derive: deriveEngineConfig,
+          onReload: (_next, changes) => {
+            const detail = changes.length > 0 ? changes.join('; ') : 'no dispatch change';
+            engineJournal.append({ event: 'config-reloaded', detail }, new Date());
+            if (!(opts.once && opts.json)) console.log(`▶ sched config reloaded: ${detail}`);
+          },
+          onInvalid: (err) => {
+            const detail = `${err.message} — keeping the last good config`;
+            engineJournal.append({ event: 'config-reload-failed', detail }, new Date());
+            process.stderr.write(`⚠ sched config reload failed: ${detail}\n`);
+          },
+        });
+
         // #680: log the executor the engine will actually use — agent + model
         // per tier, resolved AFTER the auto-detect above so the banner matches
         // real spawns. Once per start (both --once and the continuous loop):
@@ -2488,7 +2764,7 @@ function registerStartSubcommand(cmd: Command): void {
         }
         const deps: EngineDeps = {
           store,
-          journal: new Journal(store.dir),
+          journal: engineJournal,
           groundTruth: createExecGroundTruth(undefined, {
             repoDir: process.cwd(),
             ...(anchorRepo !== undefined ? { repo: anchorRepo } : {}),
@@ -2501,6 +2777,17 @@ function registerStartSubcommand(cmd: Command): void {
             onError: (file, args, err) =>
               process.stderr.write(
                 `⚠ sched teardown: '${file} ${args.join(' ')}' failed: ${err.message}\n`
+              ),
+          }),
+          // #945: takeover rescue (git commit-tree + push of a dead agent's WIP), run
+          // OUTSIDE the state lock. Bounded like every other engine exec; failures
+          // are per-call diagnostics — a failed rescue never blocks the respawn.
+          rescueExec: createExecFn(RESCUE_TIMEOUT_MS, {
+            // A push that wants credentials must fail, never hang on a prompt.
+            env: { GIT_TERMINAL_PROMPT: '0' },
+            onError: (file, args, err) =>
+              process.stderr.write(
+                `⚠ sched rescue: '${file} ${args.slice(0, 2).join(' ')}…' failed: ${err.message}\n`
               ),
           }),
           // #504: the ladder fences a superseded run before respawning its takeover.
@@ -2551,7 +2838,8 @@ function registerStartSubcommand(cmd: Command): void {
                 `⚠ sched batch warm-up: '${file} ${args.join(' ')}' failed: ${err.message}\n`
               ),
           }),
-          runBatchSuite: createBatchSuiteRunner(config),
+          // One config per tick: the suite runner reads the snapshot the tick started with.
+          runBatchSuite: createBatchSuiteRunner(() => tickConfig),
           runBatchCapability: createBatchCapabilityRunner(),
         };
 
@@ -2590,6 +2878,25 @@ function registerStartSubcommand(cmd: Command): void {
           return parts.length > 0 ? parts.join(' · ') : 'nothing to do';
         };
 
+        // #945: rescue refs (`refs/sched-rescue/*`) are disposable — delete those past
+        // their 14-day TTL, locally and on origin, once per start. Never blocks a start.
+        if (deps.rescueExec) {
+          try {
+            const pruned = pruneRescueRefs(deps.rescueExec, deps.repoDir, new Date());
+            if (pruned.length > 0) {
+              deps.journal.append(
+                {
+                  event: 'rescue-pruned',
+                  detail: `pruned ${pruned.length} expired rescue ref(s): ${pruned.join(', ')}`,
+                },
+                new Date()
+              );
+            }
+          } catch {
+            // best effort
+          }
+        }
+
         if (opts.once) {
           let result: TickResult;
           try {
@@ -2602,12 +2909,23 @@ function registerStartSubcommand(cmd: Command): void {
             handleKnownError(err);
             fail([`sched tick failed: ${(err as Error).name}: ${(err as Error).message}`]);
           }
-          await checkAndHandleEngineStaleness(store, deps.journal, autoUpgradeEnabled, upgradeExec);
+          const upgradeHandoff = await checkAndHandleEngineStaleness(
+            deps.journal,
+            autoUpgradeEnabled && !stopping,
+            upgradeExec
+          );
+          if (upgradeHandoff) {
+            exitLogger.logNormalExit('auto-upgrade handoff');
+            releaseLease();
+            if (!reexecUpdatedCli()) process.exitCode = UPGRADE_RESTART_EXIT_CODE;
+            return;
+          }
           if (opts.json) {
             console.log(JSON.stringify(result, null, 2));
           } else {
             console.log(`✓ [${project}] tick: ${describe(result)}`);
           }
+          exitLogger.logNormalExit('once tick complete');
           return;
         }
 
@@ -2616,33 +2934,46 @@ function registerStartSubcommand(cmd: Command): void {
         console.log(
           `▶ Scheduler engine running for ${project} (tick every ${interval}s, Ctrl-C to stop)`
         );
-        let stopping = false;
-        process.on('SIGINT', () => {
-          if (stopping) process.exit(130);
-          stopping = true;
-          console.log('\n⏹ Stopping engine (spawned agents keep running)…');
-        });
+        let upgradeHandoff = false;
         await runLoop(
           deps,
-          engineConfig,
+          () => {
+            tickConfig = configReloader.current();
+            return tickConfig;
+          },
           () => stopping,
-          (result) => {
+          async (result) => {
             if (!opts.json) console.log(`✓ [${new Date().toISOString()}] ${describe(result)}`);
             else console.log(JSON.stringify({ ts: new Date().toISOString(), ...result }));
-            // #537: journal/warn only in the continuous loop — the actual
-            // `npm i -g` shell-out (up to UPGRADE_TIMEOUT_MS) only runs from
-            // the cron-driven --once path below; running it here would stall
-            // reconciliation for however long the install takes. Fire-and-
-            // forget: bounded by the check's own short network timeout, never
-            // blocks the next tick (onTick is synchronous by contract).
-            void checkAndHandleEngineStaleness(store, deps.journal, false, upgradeExec).catch(
-              () => {}
-            );
+            if (!autoUpgradeEnabled || stopping) {
+              // Preserve the non-blocking advisory check when upgrades are
+              // disabled (or shutdown was requested during the tick).
+              void checkAndHandleEngineStaleness(deps.journal, false, upgradeExec).catch(() => {});
+              return;
+            }
+            // #945: await the complete upgrade after this tick. On success,
+            // `shouldStop` becomes true before `runLoop` can start another tick,
+            // so the old package cannot write state after the install lands.
+            const requested = await checkAndHandleEngineStaleness(deps.journal, true, upgradeExec);
+            if (requested) {
+              upgradeHandoff = true;
+              stopping = true;
+            }
           }
         );
+        if (upgradeHandoff) {
+          exitLogger.logNormalExit('auto-upgrade handoff');
+          releaseLease();
+          if (!reexecUpdatedCli()) process.exitCode = UPGRADE_RESTART_EXIT_CODE;
+          return;
+        }
+        exitLogger.logNormalExit('loop returned after a stop request');
+        clearStoppingMarker(store.dir);
         console.log('⏹ Engine stopped');
       } finally {
-        store.releaseEngineLease(acquisition.lease);
+        process.removeListener('exit', releaseLease);
+        releaseLease();
+        exitLogger.dispose();
       }
     });
 }
@@ -2665,4 +2996,5 @@ export function registerSchedCommand(program: Command): void {
   registerReprioritizeSubcommand(schedCmd);
   registerStartSubcommand(schedCmd);
   registerStatsSubcommand(schedCmd);
+  registerSchedServiceCommands(schedCmd);
 }

@@ -3,12 +3,12 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { RunLogEntry } from '@ai-dossier/core';
-import { patchBatch, SchedStore } from '@ai-dossier/sched';
+import { CorruptStateError, patchBatch, SchedStore } from '@ai-dossier/sched';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { withBlockedBatch } from '../../../../packages/sched/src/__tests__/helpers/blocked-batch';
 import { graphqlIssueResponse } from '../../../../packages/sched/src/__tests__/helpers/graphql-fixtures';
-import { registerSchedCommand } from '../../commands/sched';
-import { checkEngineStaleness } from '../../engine-version';
+import { reexecUpdatedCli, registerSchedCommand } from '../../commands/sched';
+import { checkCliStaleness, checkEngineStaleness } from '../../engine-version';
 import { readRunLog } from '../../run-log';
 import { createTestProgram, type ExecStub, execHandles, execReturns } from '../helpers/test-utils';
 
@@ -29,7 +29,7 @@ vi.mock('../../run-log');
 // without this comment as the tripwire).
 vi.mock('../../engine-version', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../engine-version')>();
-  return { ...actual, checkEngineStaleness: vi.fn() };
+  return { ...actual, checkEngineStaleness: vi.fn(), checkCliStaleness: vi.fn() };
 });
 
 let home: string;
@@ -41,6 +41,54 @@ async function runSched(args: string[]): Promise<void> {
   registerSchedCommand(program);
   await program.parseAsync(['node', 'dossier', ...args]);
 }
+
+function stubProcessExecve() {
+  const target = process as unknown as Record<string, unknown>;
+  const descriptor = Object.getOwnPropertyDescriptor(target, 'execve');
+  const calls: Array<{ file: string; args: string[]; env: NodeJS.ProcessEnv }> = [];
+  Object.defineProperty(target, 'execve', {
+    configurable: true,
+    writable: true,
+    value: (file: string, args: string[], env: NodeJS.ProcessEnv) => {
+      calls.push({ file, args, env });
+    },
+  });
+  return {
+    calls,
+    restore: () => {
+      if (descriptor) Object.defineProperty(target, 'execve', descriptor);
+      else delete target.execve;
+    },
+  };
+}
+
+describe('reexecUpdatedCli', () => {
+  it('replaces the process with the same Node executable, CLI args, and environment', () => {
+    const previousArgv = process.argv;
+    process.argv = ['/node', '/global/bin/ai-dossier', 'sched', 'start', '--auto-upgrade'];
+    const calls: Array<{ file: string; args: string[]; env: NodeJS.ProcessEnv }> = [];
+    const execve = (file: string, args: string[], env: NodeJS.ProcessEnv) => {
+      calls.push({ file, args, env });
+      return undefined as never;
+    };
+    try {
+      expect(reexecUpdatedCli(execve)).toBe(true);
+    } finally {
+      process.argv = previousArgv;
+    }
+    expect(calls).toEqual([
+      {
+        file: process.execPath,
+        args: [process.execPath, '/global/bin/ai-dossier', 'sched', 'start', '--auto-upgrade'],
+        env: process.env,
+      },
+    ]);
+  });
+
+  it('returns false when process replacement is unavailable so the caller can request supervisor restart', () => {
+    expect(reexecUpdatedCli(null)).toBe(false);
+  });
+});
 
 beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-cli-test-home-'));
@@ -56,6 +104,11 @@ beforeEach(() => {
   // unchanged (no warning line, no journal entry, no auto-upgrade attempt).
   vi.mocked(checkEngineStaleness).mockResolvedValue({
     installed: '0.12.1',
+    latest: null,
+    stale: false,
+  });
+  vi.mocked(checkCliStaleness).mockResolvedValue({
+    installed: '0.89.6',
     latest: null,
     stale: false,
   });
@@ -556,6 +609,38 @@ describe('ai-dossier sched start (#537: engine-stale detection)', () => {
     expect(logs.join('\n')).toContain(`Engine lease: pid ${process.pid} (live)`);
   });
 
+  it('#779: a failed --once tick releases the engine lease before the process exits', async () => {
+    const leaseDir = path.join(home, '.dossier', 'sched', 'test-proj', '.sched-engine-lease');
+    // The lease is taken before the tick runs, so a throw from the tick's first
+    // state read is a genuine failed tick (not a pre-lease failure).
+    const realLoad = SchedStore.prototype.load;
+    let failed = false;
+    vi.spyOn(SchedStore.prototype, 'load').mockImplementation(function (this: SchedStore) {
+      if (!fs.existsSync(leaseDir) || failed) return realLoad.call(this);
+      failed = true;
+      throw new CorruptStateError(statePath(), new Error('boom'));
+    });
+    // process.exit(1) skips `finally` in production; the shared test setup's
+    // throwing exit hides that by unwinding. Emit the real 'exit' event first
+    // (what node does) and observe the lease right then.
+    const testExit = process.exit;
+    let leasePresentAtExit: boolean | null = null;
+    process.exit = ((code?: number) => {
+      process.emit('exit', code ?? 0);
+      leasePresentAtExit ??= fs.existsSync(leaseDir);
+      return testExit(code);
+    }) as typeof process.exit;
+    try {
+      await expect(
+        runSched(['sched', 'start', '--once', '--project', 'test-proj'])
+      ).rejects.toThrow('process.exit(1)');
+    } finally {
+      process.exit = testExit;
+    }
+    expect(leasePresentAtExit).toBe(false);
+    expect(fs.existsSync(leaseDir)).toBe(false);
+  });
+
   it('runs a tick cleanly and journals nothing when the engine is not stale', async () => {
     await runSched(['sched', 'start', '--once', '--project', 'test-proj']);
     expect(journalEvents().some((e) => e.event === 'engine-stale')).toBe(false);
@@ -610,21 +695,56 @@ describe('ai-dossier sched start (#537: engine-stale detection)', () => {
     expect(staleEvents[1]).toMatchObject({ latest_version: '0.14.0' });
   });
 
-  it('--auto-upgrade self-upgrades when stale and no unit is mid-dispatch', async () => {
+  it('--once installs the new CLI after the tick and re-execs with the same argv', async () => {
     vi.mocked(checkEngineStaleness).mockResolvedValue({
       installed: '0.12.1',
       latest: '0.13.0',
       stale: true,
     });
     vi.mocked(execFileSync).mockClear();
-
-    await runSched(['sched', 'start', '--once', '--auto-upgrade', '--project', 'test-proj']);
+    const execve = stubProcessExecve();
+    const previousArgv = process.argv;
+    process.argv = [
+      process.execPath,
+      '/tmp/global/ai-dossier',
+      'sched',
+      'start',
+      '--once',
+      '--auto-upgrade',
+      '--project',
+      'test-proj',
+    ];
+    try {
+      await runSched(['sched', 'start', '--once', '--auto-upgrade', '--project', 'test-proj']);
+    } finally {
+      process.argv = previousArgv;
+      execve.restore();
+    }
 
     const upgradeCalls = vi
       .mocked(execFileSync)
       .mock.calls.filter(([file, args]) => file === 'npm' && (args as string[])[0] === 'i');
     expect(upgradeCalls).toHaveLength(1);
     expect(upgradeCalls[0][1]).toEqual(['i', '-g', '@ai-dossier/cli@latest']);
+    expect(execve.calls).toEqual([
+      {
+        file: process.execPath,
+        args: [
+          process.execPath,
+          '/tmp/global/ai-dossier',
+          'sched',
+          'start',
+          '--once',
+          '--auto-upgrade',
+          '--project',
+          'test-proj',
+        ],
+        env: process.env,
+      },
+    ]);
+    expect(
+      fs.existsSync(path.join(home, '.dossier', 'sched', 'test-proj', '.sched-engine-lease'))
+    ).toBe(false);
   });
 
   it('without --auto-upgrade, stale never triggers an upgrade', async () => {
@@ -643,7 +763,34 @@ describe('ai-dossier sched start (#537: engine-stale detection)', () => {
     expect(upgradeCalls).toHaveLength(0);
   });
 
-  it('--auto-upgrade does NOT self-upgrade while a unit is mid-dispatch', async () => {
+  it('auto-upgrades when the CLI is stale even if the scheduler package is current', async () => {
+    vi.mocked(checkEngineStaleness).mockResolvedValue({
+      installed: '0.68.3',
+      latest: '0.68.3',
+      stale: false,
+    });
+    vi.mocked(checkCliStaleness).mockResolvedValue({
+      installed: '0.89.5',
+      latest: '0.89.6',
+      stale: true,
+    });
+    vi.mocked(execFileSync).mockClear();
+    const execve = stubProcessExecve();
+    try {
+      await runSched(['sched', 'start', '--once', '--auto-upgrade', '--project', 'test-proj']);
+    } finally {
+      execve.restore();
+    }
+
+    const upgradeCalls = vi
+      .mocked(execFileSync)
+      .mock.calls.filter(([file, args]) => file === 'npm' && (args as string[])[0] === 'i');
+    expect(upgradeCalls).toHaveLength(1);
+    expect(journalEvents().some((event) => event.event === 'engine-cli-stale')).toBe(true);
+    expect(execve.calls).toHaveLength(1);
+  });
+
+  it('the continuous service loop upgrades at a tick boundary even with a live unit', async () => {
     await runSched(['sched', 'enqueue', '--issues', '101', '--project', 'test-proj']);
     const state = readState() as Record<string, unknown>;
     fs.writeFileSync(
@@ -697,17 +844,20 @@ describe('ai-dossier sched start (#537: engine-stale detection)', () => {
       return '{"labels":[]}';
     });
     vi.mocked(execFileSync).mockClear();
-
-    await runSched(['sched', 'start', '--once', '--auto-upgrade', '--project', 'test-proj']);
+    const execve = stubProcessExecve();
+    try {
+      await runSched(['sched', 'start', '--auto-upgrade', '--project', 'test-proj']);
+    } finally {
+      execve.restore();
+    }
 
     const upgradeCalls = vi
       .mocked(execFileSync)
       .mock.calls.filter(([file, args]) => file === 'npm' && (args as string[])[0] === 'i');
-    expect(upgradeCalls).toHaveLength(0);
-    // The stale signal is still journaled — only the upgrade itself is gated.
+    expect(upgradeCalls).toHaveLength(1);
+    expect(execve.calls).toHaveLength(1);
+    // The live agent remains recorded; the restarted engine will reconcile its pid.
     expect(journalEvents().some((e) => e.event === 'engine-stale')).toBe(true);
-    // And the mid-dispatch slot really is what gated it — not a slot the
-    // tick's ground-truth reconciliation quietly cleared out from under us.
     const finalState = readState() as { slots: Array<Record<string, unknown>> };
     expect(finalState.slots[0]).toMatchObject({ status: 'running', unit: 'issue:101' });
   });
@@ -1154,6 +1304,120 @@ describe('#777: sched enqueue refuses a batch whose only full gate is timeout-pr
       'test-proj',
     ]);
     expect((readState() as { entries: unknown[] }).entries).toHaveLength(1);
+  });
+});
+
+describe('#645: sched enqueue warns when the member gate capabilities are undeclared', () => {
+  let repoDir: string;
+  let errors: string[];
+  const enqueueBatch = (extra: string[] = []) =>
+    runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '1,2',
+      '--mode',
+      'slot',
+      '--batch',
+      'b1',
+      '--skip-plan-check',
+      '--project',
+      'test-proj',
+      ...extra,
+    ]);
+
+  beforeEach(() => {
+    repoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-645-repo-'));
+    vi.spyOn(process, 'cwd').mockReturnValue(repoDir);
+    errors = [];
+    vi.spyOn(console, 'error').mockImplementation((msg) => {
+      errors.push(String(msg));
+    });
+  });
+  afterEach(() => fs.rmSync(repoDir, { recursive: true, force: true }));
+
+  it('warns (naming the ids and cap init) on a manifest-less repo, but still enqueues without dispatching', async () => {
+    await enqueueBatch();
+    const out = errors.join('\n');
+    expect(out).toContain('typecheck.run, test.focused');
+    expect(out).toContain('ai-dossier cap init');
+    const state = readState() as { batches: Array<Record<string, unknown>> };
+    expect(state.batches[0]).toMatchObject({ id: 'b1', members: [1, 2] });
+    // enqueue only records state: no agent process was launched.
+    expect(vi.mocked(execFileSync).mock.calls.some(([cmd]) => String(cmd).includes('claude'))).toBe(
+      false
+    );
+  });
+
+  it('--skip-gate-check silences the warning', async () => {
+    await enqueueBatch(['--skip-gate-check']);
+    expect(errors.join('\n')).not.toContain('gate capabilities undeclared');
+  });
+
+  it('DOSSIER_SKIP_GATE_CHECK=1 silences the warning', async () => {
+    vi.stubEnv('DOSSIER_SKIP_GATE_CHECK', '1');
+    await enqueueBatch();
+    expect(errors.join('\n')).not.toContain('gate capabilities undeclared');
+  });
+
+  it('#895: `gates: none-declared-on-purpose` in the manifest silences the warning durably', async () => {
+    fs.mkdirSync(path.join(repoDir, '.dossier', 'automation'), { recursive: true });
+    fs.writeFileSync(
+      path.join(repoDir, '.dossier', 'automation', 'manifest.yaml'),
+      'version: 1\ngates: none-declared-on-purpose\ncapabilities: {}\n'
+    );
+    await enqueueBatch();
+    expect(errors.join('\n')).not.toContain('gate capabilities undeclared');
+    expect((readState() as { batches: unknown[] }).batches).toHaveLength(1);
+  });
+
+  describe('#895: --repo enqueues', () => {
+    let targetDir: string;
+    beforeEach(() => {
+      targetDir = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-895-target-'));
+    });
+    afterEach(() => fs.rmSync(targetDir, { recursive: true, force: true }));
+    const writeTargetManifest = (yaml: string) => {
+      fs.mkdirSync(path.join(targetDir, '.dossier', 'automation'), { recursive: true });
+      fs.writeFileSync(path.join(targetDir, '.dossier', 'automation', 'manifest.yaml'), yaml);
+    };
+    it("warns from the TARGET repo's manifest (found via findDossierRoot), not the cwd's", async () => {
+      // The cwd's manifest declares both gates; the target's does not.
+      fs.mkdirSync(path.join(repoDir, '.dossier', 'automation'), { recursive: true });
+      fs.writeFileSync(
+        path.join(repoDir, '.dossier', 'automation', 'manifest.yaml'),
+        'version: 1\ncapabilities:\n  typecheck.run:\n    command: tsc\n  test.focused:\n    command: vitest\n'
+      );
+      writeTargetManifest('version: 1\ncapabilities:\n  build:\n    command: make\n');
+      const nested = path.join(targetDir, 'main');
+      fs.mkdirSync(nested);
+      await enqueueBatch(['--repo', 'acme/widgets', '--repo-dir', nested]);
+      expect(errors.join('\n')).toContain('typecheck.run, test.focused');
+    });
+
+    it('the manifest opt-out silences a --repo enqueue too', async () => {
+      writeTargetManifest('version: 1\ngates: none-declared-on-purpose\ncapabilities: {}\n');
+      await enqueueBatch(['--repo', 'acme/widgets', '--repo-dir', targetDir]);
+      expect(errors.join('\n')).not.toContain('gate capabilities undeclared');
+    });
+
+    it('says the check was skipped when no checkout of the repo can be verified (never reads the cwd for another repo)', async () => {
+      await enqueueBatch(['--repo', 'acme/widgets']);
+      const out = errors.join('\n');
+      expect(out).toContain('gate check skipped');
+      expect(out).toContain('--repo-dir');
+      expect(out).not.toContain('gate capabilities undeclared');
+    });
+  });
+
+  it('stays silent once both ids are declared', async () => {
+    fs.mkdirSync(path.join(repoDir, '.dossier', 'automation'), { recursive: true });
+    fs.writeFileSync(
+      path.join(repoDir, '.dossier', 'automation', 'manifest.yaml'),
+      'version: 1\ncapabilities:\n  typecheck.run:\n    command: tsc\n  test.focused:\n    command: vitest\n'
+    );
+    await enqueueBatch();
+    expect(errors.join('\n')).not.toContain('gate capabilities undeclared');
   });
 });
 
@@ -2475,5 +2739,86 @@ describe('#824: sched attach-pr', () => {
       runSched(['sched', 'attach-pr', '42x', '--batch', 'b824', '--project', 'test-proj'])
     ).rejects.toThrow('process.exit(1)');
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe('#603/#808: sched enqueue slot pre-screen reads only trusted authors', () => {
+  const PLAN =
+    '<!-- plan:v1 head=abc1234 -->\n\n## Problem\np\n\n## Acceptance Criteria\n- a\n\n## Predicted Files\n- `cli/src/a.ts` — a\n\n## Approach\nx\n\n## Test Scope\ny\n';
+  const CLASSIFY =
+    '<!-- runstate:v1 -->\nphase=classify status=done run=r-1-aaaa at=2026-09-29T10:00:00Z\nmode=slot\nnext=plan';
+  const NON_SLOT =
+    '<!-- runstate:v1 -->\nphase=gate status=done run=r-1-aaaa at=2026-09-29T11:00:00Z\nnext=setup';
+
+  const serve = (comments: Array<{ body: string; authorAssociation?: string }>) =>
+    execHandles((_file, args) =>
+      args.includes('comments') ? JSON.stringify({ comments }) : '{"labels":[]}'
+    );
+  const enqueue = () =>
+    runSched([
+      'sched',
+      'enqueue',
+      '--issues',
+      '1',
+      '--mode',
+      'slot',
+      '--batch',
+      'b1',
+      '--project',
+      'test-proj',
+    ]);
+  const captureErrors = (): string[] => {
+    const errors: string[] = [];
+    vi.spyOn(console, 'error').mockImplementation((msg) => {
+      errors.push(String(msg));
+    });
+    return errors;
+  };
+
+  it('accepts a member whose plan and classify record come from trusted authors', async () => {
+    serve([
+      { body: PLAN, authorAssociation: 'MEMBER' },
+      { body: CLASSIFY, authorAssociation: 'OWNER' },
+    ]);
+    await enqueue();
+    expect(fs.existsSync(statePath())).toBe(true);
+  });
+
+  it('rejects a member whose only plan:v1 was posted by a stranger', async () => {
+    serve([
+      { body: PLAN, authorAssociation: 'NONE' },
+      { body: CLASSIFY, authorAssociation: 'OWNER' },
+    ]);
+    const errors = captureErrors();
+    await expect(enqueue()).rejects.toThrow('process.exit(1)');
+    expect(errors.join('\n')).toContain('no-plan-artifact');
+    expect(fs.existsSync(statePath())).toBe(false);
+  });
+
+  it("a stranger's newer non-slot milestone does not un-classify a member", async () => {
+    serve([
+      { body: PLAN, authorAssociation: 'MEMBER' },
+      { body: CLASSIFY, authorAssociation: 'OWNER' },
+      { body: NON_SLOT, authorAssociation: 'NONE' },
+    ]);
+    await enqueue();
+    expect(fs.existsSync(statePath())).toBe(true);
+  });
+
+  it("a stranger's mode=slot milestone does not satisfy the classify precondition", async () => {
+    serve([
+      { body: PLAN, authorAssociation: 'MEMBER' },
+      { body: CLASSIFY, authorAssociation: 'NONE' },
+    ]);
+    const errors = captureErrors();
+    await expect(enqueue()).rejects.toThrow('process.exit(1)');
+    expect(errors.join('\n')).toContain('no-classify-record');
+  });
+
+  it('fails closed when gh reports no association (plan not trusted)', async () => {
+    serve([{ body: PLAN }, { body: CLASSIFY, authorAssociation: 'OWNER' }]);
+    const errors = captureErrors();
+    await expect(enqueue()).rejects.toThrow('process.exit(1)');
+    expect(errors.join('\n')).toContain('no-plan-artifact');
   });
 });

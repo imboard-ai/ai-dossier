@@ -52,6 +52,16 @@ import type {
 } from './types';
 import { LIVE_SLOT_STATUSES, SATISFIED_ISSUE_STATUSES, TERMINAL_ISSUE_STATUSES } from './types';
 
+/** Batch statuses that no longer wait on their members (#900). */
+const BATCH_HOLD_EXEMPT_STATUSES: ReadonlySet<string> = new Set([
+  'merged',
+  'deployed',
+  'reported',
+  'done',
+  'dissolving',
+  'dissolved',
+]);
+
 /** An entry that cannot progress, with the human reason. */
 export interface BlockedItem {
   issue: number;
@@ -172,7 +182,9 @@ function tailBlockNote(state: SchedState, batch: BatchEntry): string {
   const evidence =
     reason === 'respawn-cap:tail'
       ? 'the tail agent exited without a verdict every time — read its log (`sched stats --batch` names it)'
-      : `read the blocked milestone on anchor #${batch.anchor ?? '?'}`;
+      : reason === 'tail-dirty-worktree'
+        ? `the batch worktree ${batch.worktree ?? '?'} holds uncommitted or post-gate work from the dead tail (its content is also under the \`refs/sched-rescue/batch-${batch.id}-*\` ref, see the \`work-preserved\` journal line) — commit or discard it`
+        : `read the blocked milestone on anchor #${batch.anchor ?? '?'}`;
   return (
     `; ${evidence}; landed member(s) ${list} are on ${branch} — fix the cause, then ` +
     `\`ai-dossier sched resume --batch ${batch.id}\` (re-runs the gate and the tail over them, #822) ` +
@@ -189,10 +201,46 @@ function tailBlockNote(state: SchedState, batch: BatchEntry): string {
  */
 export const STATUS_HEALTH_WARNING_AGE_MS = 24 * 60 * 60 * 1000;
 
+/** Env override for how many reconcile intervals of silence make a live engine "hung" (#945). */
+export const HUNG_INTERVALS_ENV = 'DOSSIER_SCHED_HUNG_INTERVALS';
+const DEFAULT_HUNG_INTERVALS = 10;
+/** Floor: a tick legitimately runs sync gh/git calls for a while. */
+const MIN_HUNG_AFTER_MS = 5 * 60 * 1000;
+
+/**
+ * How stale a live engine's heartbeat may get before it counts as hung (#945):
+ * N x the reconcile interval (default N=10, `$DOSSIER_SCHED_HUNG_INTERVALS`),
+ * never below 5 minutes.
+ */
+export function resolveHungAfterMs(
+  reconcileIntervalMs: number,
+  env: NodeJS.ProcessEnv = process.env
+): number {
+  const n = Number(env[HUNG_INTERVALS_ENV]);
+  const intervals = Number.isFinite(n) && n > 0 ? n : DEFAULT_HUNG_INTERVALS;
+  return Math.max(MIN_HUNG_AFTER_MS, intervals * reconcileIntervalMs);
+}
+
+/**
+ * Milliseconds since the last heartbeat when the pid is ALIVE but the heartbeat
+ * is older than `hungAfterMs` (a wedged tick), else null. Leases without
+ * `updated_at` (older engine) can never be judged hung.
+ */
+export function engineHungForMs(
+  lease: EngineLeaseStatus | null,
+  now: Date,
+  hungAfterMs: number
+): number | null {
+  if (lease === null || !lease.alive || !lease.updated_at) return null;
+  const age = now.getTime() - Date.parse(lease.updated_at);
+  return Number.isFinite(age) && age > hungAfterMs ? age : null;
+}
+
 /** The kinds of health warning `sched status` raises (#776, plus #791's `kept-worktree`). */
 export type StatusWarningKind =
   | 'long-pause'
   | 'stale-engine-lease'
+  | 'engine-hung'
   | 'stuck-slot'
   | 'stale-closed'
   | 'kept-worktree';
@@ -339,6 +387,15 @@ function stopRemedy(unit: string): string {
     : `sched stop --issue ${unit.slice('issue:'.length)}`;
 }
 
+/** Queue entries not yet terminal/satisfied, and slots mid-work — "is anything waiting on an engine?" (#776, #945). */
+export function countUnfinishedWork(state: SchedState): { unfinished: number; liveSlots: number } {
+  const unfinished = state.entries.filter(
+    (e) => !TERMINAL_ISSUE_STATUSES.has(e.status) && !SATISFIED_ISSUE_STATUSES.has(e.status)
+  ).length;
+  const liveSlots = state.slots.filter((s) => LIVE_SLOT_STATUSES.has(s.status)).length;
+  return { unfinished, liveSlots };
+}
+
 /**
  * #776: the health warnings — pure over state + lease + clock, so every
  * warning is unit-testable without a live engine.
@@ -346,7 +403,8 @@ function stopRemedy(unit: string): string {
 export function buildStatusWarnings(
   state: SchedState,
   engineLease: EngineLeaseStatus | null,
-  now: Date
+  now: Date,
+  hungAfterMs: number = MIN_HUNG_AFTER_MS
 ): StatusWarning[] {
   const warnings: StatusWarning[] = [];
   const nowMs = now.getTime();
@@ -370,15 +428,22 @@ export function buildStatusWarnings(
     }
   }
 
-  const unfinished = state.entries.filter(
-    (e) => !TERMINAL_ISSUE_STATUSES.has(e.status) && !SATISFIED_ISSUE_STATUSES.has(e.status)
-  ).length;
-  const liveSlots = state.slots.filter((s) => LIVE_SLOT_STATUSES.has(s.status)).length;
+  const { unfinished, liveSlots } = countUnfinishedWork(state);
   if (engineLease !== null && !engineLease.alive && (unfinished > 0 || liveSlots > 0)) {
     warnings.push({
       kind: 'stale-engine-lease',
       message: `engine lease is stale (pid ${engineLease.pid} is not running) while ${unfinished} queue entr${unfinished === 1 ? 'y is' : 'ies are'} unfinished and ${liveSlots} slot(s) live — nothing is ticking`,
       remedy: 'start an engine with `sched start`',
+    });
+  }
+
+  const hungFor = engineHungForMs(engineLease, now, hungAfterMs);
+  if (hungFor !== null && (unfinished > 0 || liveSlots > 0)) {
+    warnings.push({
+      kind: 'engine-hung',
+      message: `engine pid ${engineLease?.pid} is alive but its heartbeat is ${Math.round(hungFor / 60_000)} min old (last ${engineLease?.updated_at}) while ${unfinished} queue entr${unfinished === 1 ? 'y is' : 'ies are'} unfinished — a tick looks wedged`,
+      remedy:
+        'check the engine log for the last tick line, then stop the engine (SIGTERM) and `sched start` again',
     });
   }
 
@@ -838,6 +903,28 @@ export function buildStatusReport(
     });
   }
 
+  // #900: a batch held by a stale-closed member (#778's flag-not-evict guard)
+  // waits until an operator releases the member — list it here, with the exact
+  // release command, so the stall is visible without reading the journal.
+  for (const batch of state.batches) {
+    if (BATCH_HOLD_EXEMPT_STATUSES.has(batch.status)) continue;
+    for (const issue of batch.members) {
+      const member = state.entries.find((e) => e.issue === issue);
+      if (
+        !member ||
+        member.stale_closed_at === null ||
+        TERMINAL_ISSUE_STATUSES.has(member.status)
+      ) {
+        continue;
+      }
+      blocked.push({
+        issue,
+        status: 'batch-held',
+        reason: `member-stale-closed #${issue} — batch ${batch.id} is held (flagged ${member.stale_closed_at}); release: sched stop --issue ${issue}`,
+      });
+    }
+  }
+
   const units = state.paused ? [] : runnableUnits(state);
 
   // #680: resolve the dispatch config the way the engine does, so the report
@@ -893,7 +980,12 @@ export function buildStatusReport(
     failed,
     stopped,
     warnings: [
-      ...buildStatusWarnings(state, engineLease, now),
+      ...buildStatusWarnings(
+        state,
+        engineLease,
+        now,
+        resolveHungAfterMs(resolved.reconcileIntervalMs)
+      ),
       // #791: omitted unless the caller supplies a reader — same opt-in-by-
       // omission shape as the anchor sweep below, so every pre-existing
       // caller/test sees zero behavior change.

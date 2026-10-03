@@ -1,0 +1,36 @@
+---
+import Logo from './Logo.astro';
+
+const path = Astro.url.pathname;
+const links = [
+  { href: '/docs/', label: 'Docs' },
+  { href: '/registry/', label: 'Registry' },
+  { href: '/case-study/', label: 'Case study' },
+];
+---
+<header>
+  <div class="bar">
+    <a class="brand" href="/"><Logo />AI Dossier</a>
+    <nav aria-label="Primary">
+      {links.map((l) => (
+        <a href={l.href} aria-current={path.startsWith(l.href) ? 'page' : undefined}>{l.label}</a>
+      ))}
+      <a class="gh" href="https://github.com/imboard-ai/ai-dossier">GitHub</a>
+    </nav>
+  </div>
+</header>
+<style>
+  header {
+    border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 10;
+    background: color-mix(in srgb, var(--bg) 82%, transparent);
+    -webkit-backdrop-filter: saturate(160%) blur(14px); backdrop-filter: saturate(160%) blur(14px);
+  }
+  .bar { max-width: var(--page); margin: 0 auto; padding: 10px 20px; display: flex; gap: 8px 16px; align-items: center; justify-content: space-between; flex-wrap: wrap; min-height: 56px; }
+  .brand { display: inline-flex; align-items: center; gap: 10px; font-weight: 650; font-size: 1.02rem; letter-spacing: -0.01em; color: var(--fg); text-decoration: none; }
+  .brand:hover { text-decoration: none; }
+  nav { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+  nav a { color: var(--muted); text-decoration: none; font-weight: 500; font-size: .92rem; padding: 6px 12px; border-radius: 999px; transition: color .15s, background-color .15s; }
+  nav a:hover { color: var(--fg); background: var(--bg-raised); text-decoration: none; }
+  nav a[aria-current='page'] { color: var(--fg); background: var(--bg-raised); }
+  nav a.gh { border: 1px solid var(--line-strong); color: var(--fg); margin-left: 6px; }
+</style>

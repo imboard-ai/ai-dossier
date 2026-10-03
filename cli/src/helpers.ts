@@ -552,7 +552,7 @@ export async function runVerification(
       results.stages.push({ stage: 1, name: 'Integrity', passed: true });
     } else {
       console.log('   ❌ FAILED: Verification failed');
-      console.log(`   Run "dossier verify ${file}" for details\n`);
+      console.log(`   Run "ai-dossier verify ${file}" for details\n`);
       results.passed = false;
       results.stages.push({ stage: 1, name: 'Integrity', passed: false });
       return results;
@@ -907,6 +907,21 @@ export function printRegistryNotFoundError(
   }
   printRegistryErrors(errors);
   console.error('');
+}
+
+// biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — stripping terminal escapes
+const TERMINAL_CONTROL_CHARS = /[\x00-\x1f\x7f-\x9f]/g;
+
+/**
+ * Render the registry's `published_by` for display. Versions published before the registry
+ * recorded publishers (#971) carry no value (null/absent) and render as "N/A" — they are never
+ * backfilled. Control characters are stripped so a third-party registry cannot inject terminal
+ * escape sequences.
+ */
+export function formatPublishedBy(publishedBy: unknown): string {
+  const login =
+    typeof publishedBy === 'string' ? publishedBy.replace(TERMINAL_CONTROL_CHARS, '').trim() : '';
+  return login || 'N/A';
 }
 
 /**

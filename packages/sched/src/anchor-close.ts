@@ -23,7 +23,7 @@
  */
 
 import { SAFE_REF_RE } from './attribution';
-import type { ClosingPr, IssueCloseTruth } from './groundtruth';
+import { type ClosingPr, type IssueCloseTruth, timestampMs } from './groundtruth';
 import { BATCH_ANCHOR_LABEL, DECISION_PENDING_LABEL, hasLabel } from './labels';
 import type { ExecFn } from './project';
 import {
@@ -145,18 +145,45 @@ export interface AnchorMemberReport {
 /**
  * The anchor-close predicate's answer. Every open-anchor verdict carries
  * `reasons` (empty for `closable`; for `unknown`, which read failed — ground
- * truth unreachable, so nothing is decided this pass).
+ * truth unreachable — or, #850, which member GitHub answered for without
+ * settling it; either way nothing is decided this pass).
  */
 export type AnchorVerdict =
   | { kind: 'anchor-closed' }
   | {
-      kind: 'closable' | 'needs-operator' | 'unknown';
+      kind: 'closable' | 'needs-operator';
       reasons: string[];
       members: AnchorMemberReport[];
+    }
+  | {
+      kind: 'unknown';
+      reasons: string[];
+      members: AnchorMemberReport[];
+      /**
+       * #850: `true` when a FAILED read produced it (ground truth unreachable
+       * — a sweep stops reading); `false` when GitHub answered but could not
+       * settle a member (a truncated closing-reference list — a sweep reads
+       * on). Required, so no `unknown` can leave the question open.
+       */
+      unreachable: boolean;
     };
 
 /** The verdict of an anchor that is still open. */
 export type OpenAnchorVerdict = Exclude<AnchorVerdict, { kind: 'anchor-closed' }>;
+
+/**
+ * {@link shippingEvidence}'s answer: `shipped` (by what), `refused` (why), or —
+ * #850 — `unknown` (why GitHub's answer could not settle it).
+ */
+export type ShippingEvidence = { shipped: string } | { refused: string } | { unknown: string };
+
+/**
+ * #850: the evidence reason for a hand close whose closing-reference list is
+ * longer than the page read and holds no vouching reference on it — `unknown`,
+ * never a refusal. A re-read does not clear it (the README's anchor section
+ * gives the operator's remedy).
+ */
+export const REFS_TRUNCATED_REASON = 'closed-by-hand-refs-truncated';
 
 /**
  * The verified shipping evidence for a member closed as completed, or the
@@ -166,14 +193,16 @@ export type OpenAnchorVerdict = Exclude<AnchorVerdict, { kind: 'anchor-closed' }
  * ({@link closingReferenceEvidence}) — or a commit reachable from it. A hand
  * close with no qualifying reference, an unmerged or other-base PR, and an
  * unverifiable commit are all refusals — anyone who can close the issue could
- * otherwise mint "shipped".
+ * otherwise mint "shipped". `unknown` (#850) is neither: GitHub answered, but
+ * only with the first page of a longer closing-reference list, none of which
+ * vouches — so a refusal could be wrong, and nothing is decided.
  */
 export function shippingEvidence(
   truth: IssueCloseTruth,
   baseBranch: string,
   repo: string | undefined,
   commitInBase: CommitInBase | undefined
-): { shipped: string } | { refused: string } {
+): ShippingEvidence {
   const closer = truth.closer;
   if (closer === null) return closingReferenceEvidence(truth, baseBranch, repo);
   if (closer.kind === 'pr') {
@@ -198,21 +227,41 @@ export function shippingEvidence(
  * A hand close (no closer on the close event) is still shipped when a PR of
  * the pinned repo, MERGED into the base, names the issue as closed
  * (`Closes #N` — GitHub parsed it, then did not act: the imboard#4116 shape).
- * A merge needs write access, so an author's self-close alone never counts.
+ * Only a merged PR counts, and a merge needs write access, so an author's
+ * self-close alone never counts.
  *
- * #799: the reference must also have merged AFTER the member's last reopen.
- * One merged before it did not finish the issue — that is why it was
- * reopened — so it cannot vouch for the later hand close. An unreadable
- * reopen time, or an unreadable merge time after a reopen, is not evidence
- * either way: fail closed, naming the rejected PRs so the operator can see
- * which reference was stale. The remedy is a new PR or commit that closes
- * the member, or an operator closing the anchor by hand.
+ * The reference must also have merged inside the member's last open stretch
+ * ({@link refBound}): strictly AFTER its start — the last reopen (#799; one
+ * merged before it did not finish the issue, that is why it was reopened), or
+ * the issue's creation when it was never reopened (#850 review; a PR merged
+ * before the issue existed can only have been linked by an edit made after
+ * the fact) — and no later than its close (#850; one merged after the close
+ * did not back it). Every bound applies to every hand close; a time that
+ * cannot be read is not evidence either way: fail closed. An unreadable
+ * reopen, creation or close time refuses outright; otherwise the refusal
+ * names only the PRs failing the first bound that applies — merge time
+ * unreadable, then merged after the close, then merged before the stretch
+ * began — so a mixed list does not name every rejected PR. The remedy is a
+ * new PR or commit that closes the member, or an operator closing the anchor
+ * by hand; reopening and re-closing the member does not help (the reference
+ * then predates the reopen).
+ *
+ * The bounds are on when the PR MERGED, not on when its `Closes #N` was
+ * written: a reference edited into a PR that merged inside the stretch still
+ * vouches (#850 chose the time bound over reading when the link was made).
+ *
+ * #850: `closingPrs` is one page. With more on the next
+ * (`closingPrsTruncated`), no vouching reference on this page is `unknown`
+ * ({@link REFS_TRUNCATED_REASON}), not a refusal — one may be on the next page.
+ * A definite answer still stands: a reference on this page that vouches is
+ * shipped, and an unreadable reopen, creation or close time refuses whatever
+ * the next page holds.
  */
 function closingReferenceEvidence(
   truth: IssueCloseTruth,
   baseBranch: string,
   repo: string | undefined
-): { shipped: string } | { refused: string } {
+): ShippingEvidence {
   const refs = truth.closingPrs.filter(
     (pr) =>
       pr.merged &&
@@ -220,21 +269,61 @@ function closingReferenceEvidence(
       repo !== undefined &&
       pr.repo?.toLowerCase() === repo.toLowerCase()
   );
-  if (refs.length === 0) return { refused: 'closed-by-hand' };
-  const reopenedAt = truth.lastReopenedAt;
-  if (reopenedAt === undefined) return { refused: 'closed-by-hand-reopen-unreadable' };
-  const ref =
-    reopenedAt === null
-      ? refs[0]
-      : refs.find((pr) => pr.mergedAt !== null && Date.parse(pr.mergedAt) > Date.parse(reopenedAt));
-  if (ref !== undefined) {
-    return { shipped: `PR #${ref.number} (closing reference; issue closed by hand)` };
+  const truncated = truth.closingPrsTruncated === true;
+  if (refs.length === 0 && !truncated) return { refused: 'closed-by-hand' };
+  // `undefined` (an unreadable reopen timeline) parses to NaN, like garbage.
+  const reopened = truth.lastReopenedAt !== null;
+  const reopenedMs = reopened ? timestampMs(truth.lastReopenedAt) : Number.NEGATIVE_INFINITY;
+  if (Number.isNaN(reopenedMs)) return { refused: 'closed-by-hand-reopen-unreadable' };
+  const createdMs = timestampMs(truth.createdAt);
+  if (Number.isNaN(createdMs)) return { refused: 'closed-by-hand-created-time-unreadable' };
+  const closedMs = timestampMs(truth.closedAt);
+  if (Number.isNaN(closedMs)) return { refused: 'closed-by-hand-close-time-unreadable' };
+  const stretch = { openedMs: Math.max(createdMs, reopenedMs), closedMs };
+  const bounds = refs.map((pr) => ({ pr, bound: refBound(pr, stretch) }));
+  const vouching = bounds.find((b) => b.bound === 'vouches');
+  if (vouching !== undefined) {
+    return { shipped: `PR #${vouching.pr.number} (closing reference; issue closed by hand)` };
   }
-  const prs = (list: ClosingPr[]) => list.map((pr) => pr.number).join('+');
-  const untimed = refs.filter((pr) => pr.mergedAt === null);
-  return untimed.length > 0
-    ? { refused: `closed-by-hand-ref-pr-${prs(untimed)}-merge-time-unreadable` }
-    : { refused: `closed-by-hand-ref-pr-${prs(refs)}-predates-reopen` };
+  if (truncated) return { unknown: REFS_TRUNCATED_REASON };
+  // `refs` is non-empty here and none vouches, so some refusal bound applies;
+  // the `??` only satisfies the type checker.
+  const failed =
+    REFUSAL_BOUND_ORDER.find((o) => bounds.some((b) => b.bound === o)) ?? 'predates-open';
+  const prs = bounds
+    .filter((b) => b.bound === failed)
+    .map((b) => b.pr.number)
+    .join('+');
+  const why =
+    failed !== 'predates-open'
+      ? failed
+      : reopenedMs > createdMs
+        ? 'predates-reopen'
+        : 'predates-issue';
+  return { refused: `closed-by-hand-ref-pr-${prs}-${why}` };
+}
+
+/** How one closing reference relates to the member's last open stretch (#850 review: classified once). */
+type RefBound = 'vouches' | 'merge-time-unreadable' | 'postdates-close' | 'predates-open';
+
+/** The refusal bounds in the order {@link closingReferenceEvidence} names them. */
+const REFUSAL_BOUND_ORDER: ReadonlyArray<Exclude<RefBound, 'vouches'>> = [
+  'merge-time-unreadable',
+  'postdates-close',
+  'predates-open',
+];
+
+/**
+ * Whether `pr` merged inside the stretch `(openedMs, closedMs]`, or which
+ * bound it fails. The merge time goes through the ground truth's one
+ * timestamp rule ({@link timestampMs}), so a missing or loose time can never
+ * pass a bound — even from an `IssueCloseTruth` the parser did not build.
+ */
+function refBound(pr: ClosingPr, stretch: { openedMs: number; closedMs: number }): RefBound {
+  const mergedMs = timestampMs(pr.mergedAt);
+  if (Number.isNaN(mergedMs)) return 'merge-time-unreadable';
+  if (mergedMs > stretch.closedMs) return 'postdates-close';
+  return mergedMs > stretch.openedMs ? 'vouches' : 'predates-open';
 }
 
 export interface MembersVerdictOptions {
@@ -261,9 +350,15 @@ export type OrphanShippingCheckOptions = ShippingCheckOptions & { expectedBaseBr
 /** {@link readMembersShipping}'s answer: the GitHub-side half only, no ledger. */
 interface MembersShippingResult {
   reasons: string[];
+  /**
+   * #850: why a member GitHub DID answer for is still undecided (its
+   * shipping evidence came back `unknown`) — never a disqualifier, never an
+   * outage.
+   */
+  undecided: string[];
   members: AnchorMemberReport[];
   /** The member whose read failed, stopping the reads; `null` when every read that ran succeeded. */
-  unreachable: number | null;
+  unreachableIssue: number | null;
 }
 
 /**
@@ -298,7 +393,8 @@ function unreadMemberReports(
  * can reuse the identical shipping-evidence logic for a batch that, by
  * definition, has no ledger entry to consult.
  *
- * `exhaustive: false` stops at the first disqualifying fact; `exhaustive:
+ * `exhaustive: false` stops at the first disqualifying fact — or undecided
+ * member (#850): either way the batch is not closable this pass; `exhaustive:
  * true` reads every member so the operator sees each one's state. Either way
  * a failed read stops the reads: GitHub being unreachable is not worth N
  * more timeouts.
@@ -312,11 +408,12 @@ function readMembersShipping(
 ): MembersShippingResult {
   const reports: AnchorMemberReport[] = unreadMemberReports(members, ledgerStatus);
   const reasons: string[] = [];
-  let unreachable: number | null = null;
+  const undecided: string[] = [];
+  let unreachableIssue: number | null = null;
   for (const member of reports) {
     const truth = read(member.issue);
     if (truth === undefined) {
-      unreachable = member.issue;
+      unreachableIssue = member.issue;
       break;
     }
     if (truth.state === 'MISSING') {
@@ -336,14 +433,15 @@ function readMembersShipping(
     } else {
       const evidence = shippingEvidence(truth, baseBranch, opts.repo, opts.commitInBase);
       if ('shipped' in evidence) member.shipped_by = evidence.shipped;
-      else reasons.push(`member-${evidence.refused}:#${member.issue}`);
+      else if ('refused' in evidence) reasons.push(`member-${evidence.refused}:#${member.issue}`);
+      else undecided.push(`member-${evidence.unknown}:#${member.issue}`);
     }
     if (hasLabel(truth.labels, DECISION_PENDING_LABEL)) {
       reasons.push(`member-handed-back:#${member.issue}`);
     }
-    if (reasons.length > 0 && !opts.exhaustive) break;
+    if ((reasons.length > 0 || undecided.length > 0) && !opts.exhaustive) break;
   }
-  return { reasons, members: reports, unreachable };
+  return { reasons, undecided, members: reports, unreachableIssue };
 }
 
 /**
@@ -353,9 +451,10 @@ function readMembersShipping(
  * members-closed evidence, so the two can never disagree about what
  * "shipped" means.
  *
- * `exhaustive: false` (the engine) stops at the first disqualifying fact and
- * skips GitHub entirely when the ledger already disqualifies — a batch that
- * stays blocked is re-checked every tick, so the cheap answer matters there.
+ * `exhaustive: false` (the engine) stops at the first disqualifying fact or
+ * undecided member (#850) and skips GitHub entirely when the ledger already
+ * disqualifies — a batch that stays blocked is re-checked every tick, so the
+ * cheap answer matters there.
  * `exhaustive: true` (the `sched status --anchors` sweep) reads every member
  * so the operator sees each one's state. Either way a failed read stops the
  * reads: GitHub being unreachable is not worth N more timeouts.
@@ -384,8 +483,9 @@ export function membersShippedVerdict(
     { exhaustive, repo: opts.repo, commitInBase: opts.commitInBase },
     ledgerStatus
   );
-  // A known disqualifier outranks an unreachable read: whatever the missing
-  // poll would have said, the batch is not closable on this pass.
+  // A known disqualifier outranks an unreachable read or an undecided member
+  // (#850): whatever the missing poll or the unread reference page would have
+  // said, the batch is not closable on this pass.
   return foldMembersVerdict(ledgerReasons, gh, {
     needsOperator: 'needs-operator',
     unknown: 'unknown',
@@ -412,11 +512,16 @@ interface FoldVerdictKinds<
  * {@link classifyOrphanAnchor} (#830): both fold `prefixReasons` (reasons
  * already known before {@link readMembersShipping} ran — ledger blockers for
  * one, the anchor's own handed-back check for the other) together with `gh`'s
- * per-member reasons and unreachable-read signal into the SAME three-way
- * verdict shape — differing only in which kind-name vocabulary each caller
- * uses (`needs-operator`/`unknown`/`closable` vs the ledger-less orphan
- * sweep's own `orphan-*` names, kept deliberately distinct — see
- * {@link OrphanAnchorVerdict}).
+ * per-member reasons, undecided members and unreachable-read signal into the
+ * SAME three-way verdict shape — differing only in which kind-name vocabulary
+ * each caller uses (`needs-operator`/`unknown`/`closable` vs the ledger-less
+ * orphan sweep's own `orphan-*` names, kept deliberately distinct — see
+ * {@link OrphanAnchorVerdict}). A known disqualifier outranks both kinds of
+ * `unknown`, but what could not be settled still rides along after it — each
+ * undecided member, then a failed read — so an exhaustive sweep's row names
+ * every member it could not settle. Only an `unknown` a failed read produced
+ * is `unreachable` (#850); a needs-operator verdict never is, so a sweep
+ * reads on past it (the #790 ruling).
  */
 function foldMembersVerdict<
   NeedsOperator extends string,
@@ -428,16 +533,29 @@ function foldMembersVerdict<
   kinds: FoldVerdictKinds<NeedsOperator, Unknown, Closable>
 ):
   | { kind: NeedsOperator; reasons: string[]; members: AnchorMemberReport[] }
-  | { kind: Unknown; reasons: string[]; members: AnchorMemberReport[] }
+  | { kind: Unknown; reasons: string[]; members: AnchorMemberReport[]; unreachable: boolean }
   | { kind: Closable; reasons: string[]; members: AnchorMemberReport[] } {
   const reasons = [...prefixReasons, ...gh.reasons];
-  if (reasons.length > 0) return { kind: kinds.needsOperator, reasons, members: gh.members };
-  if (gh.unreachable !== null) {
+  const failedRead =
+    gh.unreachableIssue === null ? [] : [`issue #${gh.unreachableIssue} unreachable`];
+  if (reasons.length > 0) {
     return {
-      kind: kinds.unknown,
-      reasons: [`issue #${gh.unreachable} unreachable`],
+      kind: kinds.needsOperator,
+      reasons: [...reasons, ...gh.undecided, ...failedRead],
       members: gh.members,
     };
+  }
+  if (failedRead.length > 0) {
+    return {
+      kind: kinds.unknown,
+      reasons: [...gh.undecided, ...failedRead],
+      members: gh.members,
+      unreachable: true,
+    };
+  }
+  // #850: every read answered, but not every answer settled its member.
+  if (gh.undecided.length > 0) {
+    return { kind: kinds.unknown, reasons: gh.undecided, members: gh.members, unreachable: false };
   }
   return { kind: kinds.closable, reasons: [], members: gh.members };
 }
@@ -478,7 +596,9 @@ export function classifyAnchor(
   if (ground.kind === 'anchor-missing') {
     return { kind: 'needs-operator', reasons: ['anchor-missing'], members: [] };
   }
-  if (ground.kind === 'unknown') return { kind: 'unknown', reasons: ground.reasons, members: [] };
+  if (ground.kind === 'unknown') {
+    return { kind: 'unknown', reasons: ground.reasons, members: [], unreachable: true };
+  }
   const extraReasons = ground.handedBack ? ['anchor-handed-back'] : [];
   return membersShippedVerdict(state, batch, read, { ...opts, extraReasons });
 }
@@ -584,23 +704,32 @@ export interface AnchorReportItem {
   members: AnchorMemberReport[];
 }
 
+/** The reason on every candidate a sweep reports without reading, after a failed read. */
+const SWEEP_ABORTED_REASON = 'GitHub unreachable — sweep aborted';
+
 /**
  * The fail-closed sweep loop shared by {@link sweepAnchors} and
  * {@link sweepOrphanAnchors} (#830): classify each candidate in order via
  * `classify`, which returns `null` to SKIP a candidate entirely (both sweeps
  * hit this on the same list-then-read race — the anchor closed between the
- * list and this read). Once a classified verdict's `kind` is `unknownKind`,
- * every LATER candidate is reported `abortedVerdict` WITHOUT calling
+ * list and this read). Once a classified verdict is `unreachable` (a read
+ * failed), every LATER candidate is reported `abortedVerdict` WITHOUT calling
  * `classify` again — GitHub being unreachable is not worth N more timeouts,
- * and a partial outage must never look like "the rest are clean".
+ * and a partial outage must never look like "the rest are clean". An
+ * `unknown` GitHub answered but could not settle (#850) is no outage: the
+ * sweep reads on, so it never reports later batches as unreachable.
  */
 function sweepFailClosed<
   Candidate,
-  Verdict extends { kind: string; reasons: string[]; members: AnchorMemberReport[] },
+  Verdict extends {
+    kind: string;
+    reasons: string[];
+    members: AnchorMemberReport[];
+    unreachable?: boolean;
+  },
   Item,
 >(
   candidates: readonly Candidate[],
-  unknownKind: Verdict['kind'],
   abortedVerdict: Verdict,
   classify: (candidate: Candidate) => Verdict | null,
   toItem: (candidate: Candidate, verdict: Verdict) => Item
@@ -610,7 +739,7 @@ function sweepFailClosed<
   for (const candidate of candidates) {
     const verdict = aborted ? abortedVerdict : classify(candidate);
     if (verdict === null) continue;
-    if (verdict.kind === unknownKind) aborted = true;
+    if (verdict.unreachable === true) aborted = true;
     items.push(toItem(candidate, verdict));
   }
   return items;
@@ -620,10 +749,11 @@ function sweepFailClosed<
  * `sched status --anchors`' sweep (#768): every still-open anchor of a batch
  * that is no longer in flight, marked `closable` (the strict condition holds —
  * the engine will close it, within its 7-day window), `needs-operator`
- * (anything else), or `unknown` (a GitHub read failed — nothing decided),
- * with each member's state. Report-only by construction: it takes no exec for
- * writes and has no way to close anything. The first failed read stops the
- * sweep's reads; every later batch is reported `unknown` without a call.
+ * (anything else), or `unknown` (a GitHub read failed, or — #850 — a member's
+ * closing-reference list was truncated; nothing decided), with each member's
+ * state. Report-only by construction: it takes no exec for writes and has no
+ * way to close anything. The first FAILED read stops the sweep's reads; every
+ * later batch is reported `unknown` without a call.
  */
 export function sweepAnchors(
   state: SchedState,
@@ -632,8 +762,7 @@ export function sweepAnchors(
 ): AnchorReportItem[] {
   return sweepFailClosed(
     openAnchorBatches(state, SWEEP_BATCH_STATUSES),
-    'unknown',
-    { kind: 'unknown', reasons: ['GitHub unreachable — sweep aborted'], members: [] },
+    { kind: 'unknown', reasons: [SWEEP_ABORTED_REASON], members: [], unreachable: true },
     (batch) => {
       const verdict = classifyAnchor(state, batch, read, { exhaustive: true, ...opts });
       return verdict.kind === 'anchor-closed' ? null : verdict;
@@ -755,11 +884,19 @@ export interface OrphanAnchorCandidate {
  * verdict with zero disqualifying reasons is a CANDIDATE for a human to
  * confirm, not the ledger-backed `sweepAnchors`' stronger `closable`.
  */
-export type OrphanAnchorVerdict = {
-  kind: 'orphan-closable-candidate' | 'orphan-needs-operator' | 'orphan-unknown';
-  reasons: string[];
-  members: AnchorMemberReport[];
-};
+export type OrphanAnchorVerdict =
+  | {
+      kind: 'orphan-closable-candidate' | 'orphan-needs-operator';
+      reasons: string[];
+      members: AnchorMemberReport[];
+    }
+  | {
+      kind: 'orphan-unknown';
+      reasons: string[];
+      members: AnchorMemberReport[];
+      /** #850: as on {@link AnchorVerdict}'s `unknown` — `true` only when a FAILED read produced it. */
+      unreachable: boolean;
+    };
 
 /**
  * Classify one orphan anchor candidate, or `null` when it turns out not to be
@@ -795,7 +932,7 @@ export function classifyOrphanAnchor(
     return { kind: 'orphan-needs-operator', reasons: ['anchor-missing'], members: [] };
   }
   if (ground.kind === 'unknown') {
-    return { kind: 'orphan-unknown', reasons: ground.reasons, members: [] };
+    return { kind: 'orphan-unknown', reasons: ground.reasons, members: [], unreachable: true };
   }
   if (candidate.members.length === 0) {
     return { kind: 'orphan-needs-operator', reasons: ['no-members-recovered'], members: [] };
@@ -918,7 +1055,8 @@ export interface OrphanAnchorSweepResult {
  * left real orphan candidates unprobed. Classifying stops at the first
  * failed member/anchor read (the same fail-closed posture as
  * `sweepAnchors`): every anchor after that point is reported `orphan-unknown`
- * without a further call.
+ * without a further call. An `orphan-unknown` from a truncated
+ * closing-reference list (#850) is not a failed read and stops nothing.
  */
 export function sweepOrphanAnchors(
   state: SchedState,
@@ -935,8 +1073,7 @@ export function sweepOrphanAnchors(
   const truncated = orphanCandidates.length > ORPHAN_SWEEP_MAX_ANCHORS;
   const items = sweepFailClosed(
     orphanCandidates.slice(0, ORPHAN_SWEEP_MAX_ANCHORS),
-    'orphan-unknown',
-    { kind: 'orphan-unknown', reasons: ['GitHub unreachable — sweep aborted'], members: [] },
+    { kind: 'orphan-unknown', reasons: [SWEEP_ABORTED_REASON], members: [], unreachable: true },
     (issue) => {
       const { members, base_branch, members_over_cap } = parseOrphanAnchorBody(issue.body);
       return classifyOrphanAnchor(

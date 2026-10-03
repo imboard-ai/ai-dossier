@@ -1190,7 +1190,7 @@ describe('handlePrConflict', () => {
     expect(h.suiteRuns).toBe(1);
     expect(findBatch(result.state, 'b1')?.status).toBe('shipping');
     expect(findBatch(result.state, 'b1')?.rebase_attempts).toBe(1);
-    expect(calls).toContainEqual(['git', 'rebase', 'origin/main']);
+    expect(calls).toContainEqual(['git', 'rebase', 'FETCH_HEAD']);
     expect(eventNames(h.events)).toContain('batch-rebased');
   });
 
@@ -1570,7 +1570,7 @@ describe('PR conflict integrity (regressions)', () => {
     const state = batchState([201, 202], 'awaiting-merge');
     const withBranch = {
       ...state,
-      batches: state.batches.map((b) => ({ ...b, branch: 'feature/batch-b1' })),
+      batches: state.batches.map((b) => ({ ...b, branch: 'batch/b1-20260928' })),
     };
     const calls: string[][] = [];
     const h = harness({
@@ -1584,6 +1584,29 @@ describe('PR conflict integrity (regressions)', () => {
     expect(result.action).toBe('dissolved');
     expect(calls.some((c) => c.includes('rebase'))).toBe(false);
     expect(h.milestones.at(-1)?.milestone.kv).toMatchObject({ reason: 'wrong-branch-checked-out' });
+  });
+
+  it('refuses to rebase an integration branch outside the batch namespace', () => {
+    const state = batchState([201, 202], 'awaiting-merge');
+    const unsafe = {
+      ...state,
+      batches: state.batches.map((b) => ({ ...b, branch: 'main' })),
+    };
+    const calls: string[][] = [];
+    const h = harness({
+      exec: (file, args) => {
+        calls.push([file, ...args]);
+        return '';
+      },
+    });
+
+    const result = handlePrConflict(unsafe, 'b1', h.deps);
+
+    expect(result.action).toBe('dissolved');
+    expect(calls.some((call) => call.includes('fetch') || call.includes('rebase'))).toBe(false);
+    expect(h.milestones.at(-1)?.milestone.kv).toMatchObject({
+      reason: 'invalid-integration-branch',
+    });
   });
 });
 

@@ -8,7 +8,7 @@
 
 ## Abstract
 
-This document defines the **Dossier standard** - a universal format for portable, verifiable, versioned skills. A dossier is a skill — a reusable instruction set an AI executes — with trust, versioning, and cross-tool portability built in. Dossiers provide structured guidance that AI agents interpret and execute intelligently, adapting to project-specific contexts while maintaining consistency and safety.
+This document defines the **Dossier standard** - a universal format for portable, verifiable, versioned skills. A dossier is an agent skill with a version and a signature (a `.ds.md` file), so everyone installs the same thing and can verify who wrote it and that it wasn't changed. Dossiers provide structured guidance that AI agents interpret and execute intelligently, adapting to project-specific contexts while staying consistent across runs. Signatures prove integrity and origin; they do not make a dossier safe to run.
 
 ---
 
@@ -16,11 +16,11 @@ This document defines the **Dossier standard** - a universal format for portable
 
 ### 1.1 Purpose
 
-The Dossier specification establishes a standard format for creating automation instructions that:
+The Dossier specification establishes a standard format for creating versioned, verifiable agent skills that:
 - LLM agents can execute reliably across different implementations
 - Adapt to project-specific contexts rather than hardcoding assumptions
 - Improve continuously through structured feedback
-- Maintain safety and validation standards
+- Can be integrity-checked and validated
 
 ### 1.2 Scope
 
@@ -44,7 +44,7 @@ This specification covers:
 
 ### 2.1 Definition
 
-A **dossier** is a skill — a reusable instruction set an AI executes — expressed as a structured markdown document, with the trust, versioning, and portability needed to share it safely across tools. It is the same kind of artifact as a Claude Code `SKILL.md`, plus a cryptographic signature, a pinnable version, and a registry path.
+A **dossier** is an agent skill with a version and a signature, expressed as a structured markdown document (a `.ds.md` file). In this specification, "skill" and "dossier" refer to the same artifact: a skill plus metadata (version, checksum, signature, registry path) that makes it versioned and verifiable, analogous to a Claude Code `SKILL.md`. A signature is optional in the format but expected for shared skills.
 
 ### 2.2 Key Characteristics
 

@@ -4,9 +4,11 @@
 [![npm downloads](https://img.shields.io/npm/dm/@ai-dossier/cli)](https://www.npmjs.com/package/@ai-dossier/cli)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](https://github.com/imboard-ai/ai-dossier/blob/main/LICENSE)
 
-**Install, verify, and publish dossiers — portable, signed, versioned skills — for any LLM tool.**
+**Use one portable AI-agent skill across Claude Code, Codex, OpenCode, and MCP-compatible workflows.**
 
-A dossier is a skill with trust built in. This CLI is how you author them, verify their signatures, publish them to a registry, and install them as Claude Code skills (`install-skill` / `skill-export`).
+`@ai-dossier/cli` is for developers and AI-agent teams that need to create, verify, sign, publish, and install reusable skills. A dossier is a portable, versioned skill with trust built in: it can be hosted anywhere, verified before use, and installed as a Claude Code skill with `install-skill` or `skill-export`.
+
+> **Part of the ai-dossier ecosystem**: pair this CLI with [`@ai-dossier/core`](../packages/core/README.md) for verification, [`@ai-dossier/mcp-server`](../mcp-server/README.md) for MCP clients, and the [ai-dossier project](https://github.com/imboard-ai/ai-dossier) for the complete platform.
 
 ## The Problem This Solves
 
@@ -35,7 +37,23 @@ Or use without installing:
 npx @ai-dossier/cli <file-or-url>
 ```
 
-### Option 2: From Source (Development)
+### Option 2: Standalone binary (no Node.js)
+
+Prebuilt single-file executables for Linux (x64, arm64), macOS (x64, arm64) and Windows (x64) are attached to each `cli-v<version>` [GitHub Release](https://github.com/imboard-ai/ai-dossier/releases) together with a `SHA256SUMS` file.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/imboard-ai/ai-dossier/main/install.sh | sh
+# pin a version / choose the directory:
+curl -fsSL https://raw.githubusercontent.com/imboard-ai/ai-dossier/main/install.sh | sh -s -- --version X.Y.Z --dir /usr/local/bin
+```
+
+The script detects your OS and CPU, downloads the binary, verifies its SHA256 against `SHA256SUMS`, and installs it to `~/.local/bin` (or `--dir` / `$AI_DOSSIER_INSTALL_DIR`). On Windows, download `ai-dossier-win32-x64.exe` from the release page (or run the script from Git Bash) and verify it with `certutil -hashfile ai-dossier-win32-x64.exe SHA256`.
+
+**macOS Gatekeeper.** The binaries are ad-hoc signed but not notarized. Downloaded through `install.sh` (curl) they run without a prompt; downloaded through a browser, macOS quarantines them and reports the app cannot be verified. Clear it with `xattr -d com.apple.quarantine ./ai-dossier-darwin-arm64` (or right-click, Open). **Windows SmartScreen** may warn on first run of the unsigned `.exe`: choose "More info", then "Run anyway".
+
+The binary is a Node Single Executable Application (the Node runtime plus the bundled CLI, roughly 120 MB), built by `node scripts/build-sea.mjs` (`make build-binary`). Behaviour is identical to the npm install.
+
+### Option 3: From Source (Development)
 
 ```bash
 cd cli
@@ -171,6 +189,64 @@ Unsupported flag combinations print a clear per-flag warning; they are never sil
 
 - **Headless** (`--headless`): `claude -p --output-format json` or `opencode run --format json`, dossier content piped via stdin. Usage (tokens/cost) is mined from the captured output and recorded in the run log.
 - **Interactive**: `claude <file>` or `opencode run -i -- <prompt>` (a seeded session; the `--` separator keeps the `---` frontmatter from being parsed as flags). Prefer `--headless` for large dossiers — interactive opencode passes the prompt as one argv element (~128KB OS limit).
+
+### Dry-run preview (`--dry-run`, `--plan-out`)
+
+`ai-dossier run <dossier> --dry-run` verifies the dossier, then prints a **static preview** instead of executing it:
+the files, commands, remote calls and environment variables it declares or contains, a 0-100 risk score, and the
+LLM command that *would* run.
+
+> **This is a static preview, not a guarantee.** Dossiers are executed by an LLM. The preview is derived from the
+> dossier's declared metadata (`risk_level`, `risk_factors`, `destructive_operations`, `tools_required`) and a
+> pattern match over its shell / script code blocks. The executing agent may take other actions, and the risk
+> score is a triage heuristic, not a safety guarantee. Unlabeled code blocks are only analysed for lines that
+> start with a well-known tool (`git`, `gh`, `curl`, ...), and executables the analyzer does not recognise are
+> reported as local writes with an `(unrecognized executable)` note.
+
+Output is grouped and color-coded (colors follow `NO_COLOR` / `FORCE_COLOR`):
+
+| Color | Group | Examples |
+|---|---|---|
+| green | read-only | `ls`, `grep`, `git status`, `echo` |
+| yellow | local writes | `> file`, `tee`, `mv`, `cp`, `git commit`, `npm run build`, unrecognised executables |
+| red | remote / destructive | `gh pr create`, `git push`, `curl`, `aws`, `kubectl`, `rm`, `git push --force`, `curl ... \| sh` |
+
+**Risk score.** The sum of the components below, capped at 100 (the `--dry-run` output prints the breakdown):
+
+| Component | Points |
+|---|---|
+| declared `risk_level` | low 5, medium 25, high 50, critical 75 |
+| each declared `risk_factors` entry | 4 each, max 20 |
+| each declared `destructive_operations` entry | 3 each, max 15 |
+| detected local-write commands | 1 each, max 5 |
+| detected remote commands | 2 each, max 15 |
+| detected destructive commands | 5 each, max 15 |
+
+Level bands: `low` 0-24, `medium` 25-49, `high` 50-74, `critical` 75-100.
+
+`--plan-out <file>` (requires `--dry-run`) also writes the plan as JSON (`schema_version: 1`):
+
+```jsonc
+{
+  "schema_version": 1,
+  "static_preview": true,                 // always true - never a record of what actually ran
+  "disclaimer": "Static preview - ...",
+  "dossier": { "title": "...", "version": "...", "declared_risk_level": "low|medium|high|critical|null" },
+  "declared": { "risk_factors": [], "destructive_operations": [], "tools_required": [], "requires_approval": false },
+  "files":    [{ "path": "out.txt", "operation": "write|delete|move", "command": "...", "line": 12 }],
+  "commands": [{ "command": "gh pr create ...", "kind": "read|local_write|remote|destructive", "recognized": true, "line": 30 }],
+  "network":  [{ "tool": "gh", "target": "pr create", "mutates": true, "command": "...", "line": 30 }],
+  "env":      [{ "name": "GITHUB_TOKEN", "line": 8 }],
+  "risk_score": 23,                       // 0-100 heuristic
+  "level": "low|medium|high|critical",
+  "score_breakdown": [{ "component": "declared risk_level: low", "points": 5 }],
+  "execution": { "file": "...", "llm": "claude", "command": "claude <file> | null" }
+}
+```
+
+`line` is the 1-based line within the dossier body (after the frontmatter). Only variables the dossier does not
+assign itself count as `env` reads. The same analysis is exposed to library users as `analyzeDryRun()` in
+`@ai-dossier/core` and to MCP clients via `dry_run` on `start_journey` / `read_dossier`.
 
 ---
 
@@ -1162,7 +1238,7 @@ ai-dossier batch compose --backlog [--label backend]... [--search "no:assignee"]
 |---|---|---|
 | `--issues <selection>` | — | Operator picks (fleet grammar: `1,2,5..8`, ≤ 200) |
 | `--backlog` | off | Draw candidates from the open backlog (`gh issue list`, one call) |
-| `--no-backfill` | backfill on | With `--issues`: never query the backlog, even when picks fall below `--min-members` |
+| `--no-backfill` | backfill on | With `--issues`: never query the backlog, even when picks fall below the target (below) or a held pick's slot is empty |
 | `--label <name>` (repeatable), `--search <q>`, `--limit <n>` | —, —, 100 (max 500) | Backlog filters, passed to `gh issue list` |
 | `--base <branch>` | `main` | The base branch every member shares |
 | `--min-members <n>` / `--max-members <n>` | 3 / 6 | Minimum viable batch / member ceiling (≤ 6) |
@@ -1171,8 +1247,12 @@ ai-dossier batch compose --backlog [--label backend]... [--search "no:assignee"]
 | `--repo`, `--project` | cwd repo, `owner-name` | Target repo; sched project whose queue/config is read |
 
 At least one of `--issues` / `--backlog` is required. With `--issues` alone, the backlog is
-read **only** when the picks by themselves compose fewer than `--min-members` members — counted
-after the caps, so five admissible `review=full` picks (cap 2) still trigger backfill.
+read **only** when the picks by themselves compose fewer members than the target —
+`--min-members`, raised to the number of admissible picks (never past `--max-members`) so a pick
+held over the `review=full` cap gets its slot refilled (#951). Counted after the caps, so five
+admissible `review=full` picks (cap 2) still trigger backfill.
+
+**Workspace packages (#801).** "Shares a package" ranking uses the target repo's own workspace config — `pnpm-workspace.yaml`, `package.json` `workspaces`, or `lerna.json`, at the repo root or (imboard's `main/`) in a top-level directory — read via `gh api repos/<r>/contents/…` with `--repo`, or from the local checkout without it. Paths outside every declared workspace belong to no package. Only when no config is found does compose fall back to the path heuristic (`…/packages/<x>/…`, else the first path segment) and say so in a warning; `--json` reports `workspace.source` (`workspace-config` | `heuristic`).
 
 **Admission.** An issue is excluded — with every reason recorded, not just the first — on:
 
@@ -1185,6 +1265,7 @@ after the caps, so five admissible `review=full` picks (cap 2) still trigger bac
 | `hard-block-label` | `decision-pending`, `needs-clarification`, `epic`, `decomposed` |
 | `batch-anchor` | Carries `batch-epic` |
 | `not-a-unit` | Tracker / decision / research / parked: labels `tracker` `decision` `question` `discussion` `research` `parked` `on-hold` `wontfix` `duplicate`; titles like `[PARKED] …`, `research: …`, `epic(x): …`; a `## Decision needed` section |
+| `not-ready` | **Backlog candidates only** (#802; an explicit `--issues` pick only gets a warning; not under `--rules legacy`). No model call — labels, title and body: a tracker/initiative shape (`initiative`/`umbrella`/`roadmap`/`punch-list` labels, a punch-list/umbrella/roadmap title, an `audit`/`triage` title with a findings list, a checklist of ≥ 10 task items, ≥ 3 task items linking sub-issues, ≥ 3 `Phase N` headings, ≥ 2 strategy/metrics/kill-criteria headings, declared sub-issues), a feature (`enhancement`/`feature` label or `feat:` title) with no acceptance-criteria section, an empty body, or a readiness score below the floor (2: AC section +3, checklist of 1–9 items +2, bounded type `bug`/`chore`/`refactor`/`engineering-ready`/`ready:*`/`fix:` title +2, named code path +1). The message names every signal; survivors are ranked by score (`ready=` in the output) |
 | `in-flight` | Latest runstate milestone is any phase other than `classify` |
 | `sched-active` | A non-terminal, not-yet-merged sched queue entry exists |
 | `open-dependency` | `Depends on #N` with N open and not among the picks; N a pick that is itself excluded; or N whose state could not be read (fails closed) |
@@ -1204,8 +1285,10 @@ provenance clauses and quoted spans removed).
 
 **Composition** (deterministic): every admissible pick joins, bounded by `--max-members` and
 the `review=full` cap; the overflow is listed under `held` (`review-full-cap` / `max-members`).
-Then, while the set is below its target — `--min-members` with picks, `--max-members` with
-`--backlog` alone — admissible backlog issues are added greedily, ranked: shares a workspace
+Then, while the set is below its target — with picks, `--min-members` raised to the number of
+admissible picks (never past `--max-members`), so a pick held over the `review=full` cap has its
+slot refilled, `light` while the cap is full (#951 — the held pick waits for the next batch-prep
+run; no extra small batch is opened for it); `--max-members` with `--backlog` alone — admissible backlog issues are added greedily, ranked: shares a workspace
 package with the current members → `light` before `full` → more shared packages → lower issue
 number. Packages come from a plan:v1 artifact's predicted files when present, else from paths
 named in the issue body (`…/packages/<x>/…` → `packages/<x>`, else the first path segment).
@@ -1264,7 +1347,11 @@ branch on `status`, take `manifest_entries`, and report `excluded`:
   `jq '{entries: [.manifest_entries[] | . + {batch: $b, anchor: $a}]}' --arg b b-20260924-02 --argjson a 4410`.
 - `backfill` is present only with `--issues`: every admissible backlog candidate, ranked
   against the admitted picks, `selected: true` on the ones the composition took.
-- `held` lists admissible issues left out (`review-full-cap`, `max-members`).
+- `held` lists admissible issues left out: `reason` (`review-full-cap`, `max-members`),
+  `review_reasons` (as on `members`), and a `note` saying where the issue goes next (a pick:
+  submit it again in the next batch-prep run; a backlog issue: stays in the backlog). The
+  `recommendation` names held picks (#951), e.g.
+  `{ "issue": 3549, "title": "…", "review": "full", "source": "pick", "packages": [], "readiness": 2, "reason": "review-full-cap", "review_reasons": ["Title/body/labels match 'rule4-deploy-pipeline' (keyword: 'cicd')."], "note": "Held for the next batch-prep run — the ≤ 2 review=full cap is taken by higher-ranked members; submit #3549 again then (no extra small batch is opened for it)." }`.
 - `degraded`/`warnings` name any lookup that did not complete (an unreadable pick, the backlog
   list, a dependency's state, the sched queue/config); the result reflects what did complete.
 - `model_calls` is always `0`.
@@ -1324,8 +1411,10 @@ respectively; `get --json` includes the comment's `author`.
 ```bash
 ai-dossier sched enqueue --issues 101,105..109 [--mode full|slot] [--batch b1] [--more-members-expected] [--deps 100,104] [--tier mechanical|mid|strong] [--priority <n>] [--repo owner/name]
 ai-dossier sched enqueue --from-manifest batch-prep.json [--repo owner/name]
-ai-dossier sched start [--interval <seconds>] [--once] [--auto-upgrade] [--json]
-ai-dossier sched status [--json] [--anchors]   # ⚠ health warnings: long pause, stale lease, stuck / stale-closed slots (#776), kept worktrees on done batches (#791)
+ai-dossier sched start [--interval <seconds>] [--once] [--auto-upgrade] [--alert-issue <n>] [--json]
+ai-dossier sched service install [--mode systemd|cron] [--alert-issue <n>] [--no-auto-upgrade] | uninstall | status   # THE way to run the engine (#945): systemd user unit or cron watchdog, restarts it by itself
+ai-dossier sched ensure-running [--disable|--enable]   # the cron watchdog: start the engine if no live one holds the lease
+ai-dossier sched status [--json] [--anchors] [--alert]   # ⚠ health warnings: long pause, stale lease, stuck / stale-closed slots (#776), kept worktrees on done batches (#791)
 ai-dossier sched pause | resume
 ai-dossier sched resume --batch <id>   # gate-inconclusive: re-run the gate (#583); blocked over landed work (dissolve-refused / tail-blocked / members-mismatch / respawn-cap:tail): re-run gate + tail over the landed members (#822)
 ai-dossier sched stop (--issue 42 | --batch b1) [--reason "..."]
@@ -1335,6 +1424,17 @@ ai-dossier sched attach-pr --batch b1 <pr> [--json]   # record a blocked batch's
 ai-dossier sched reprioritize --issue 42 --priority 20 | --batch b1 --priority 20 [--json]
 ai-dossier sched stats [--issues 4,5|4..9] [--batch b1 --project owner-repo] [--json]
 ```
+
+Batch-prep cost (#796): `sched enqueue` records the calling Claude Code session
+(`CLAUDE_CODE_SESSION_ID`, or `--prep-session <id>`) per batch in
+`~/.dossier/sched/<project>/batch-prep.jsonl`. The usage ledger attributes that session's tokens
+(subagents included) to `batch:<id>`, and `sched stats --batch` / the model scorecard report them
+as `prep_tokens` — separate from, never inside, the per-member figures. The window (#899) starts at
+the session's first `ai-dossier run …/batch-issues-preparation` after its previous enqueue (read
+from `runs.jsonl`; `basis: marker` — exact start) and ends at the enqueue; with no such run it falls
+back to the previous enqueue, then to a 6h cap, and says so (`upper bound`). One enqueue that
+creates several batches splits its window's tokens across them by member count, so per-batch
+figures sum to the window total. Batches formed before #796 read `n/a`.
 
 The deterministic core of batch cycles (RFC-0001): a queue, worker slots, typed
 issue/batch/slot state machines persisted to `~/.dossier/sched/<project>/state.json`
@@ -1433,7 +1533,9 @@ per running parallel member) and stops unfinished members atomically. `abandon` 
   positive evidence: every member issue CLOSED as completed BY SHIPPED CODE (a
   PR merged into the batch's base, or a commit reachable from it — a hand close
   counts only when a merged same-repo PR into the base lists the issue as a
-  closing reference AND merged after the issue's last reopen, #799), and no member evicted, handed back (`decision-pending`, any
+  closing reference AND merged inside the issue's last open stretch: after its
+  last reopen, #799, or — never reopened — its creation, and no later than its
+  close, #850), and no member evicted, handed back (`decision-pending`, any
   case), requeued, or failed. The engine then comments on the anchor with each
   member's shipping PR or commit (marker `batch-close:v1`, honoured only on its
   own comments, so a rerun never double-posts) and closes it — journaled
@@ -1442,7 +1544,10 @@ per running parallel member) and stops unfinished members atomically. `abandon` 
   when the current directory is verified to be the project's repository (every
   `gh` call names it with `-R`). Any other shape leaves the anchor open;
   `status --anchors` lists every still-open anchor under
-  `== Open batch anchors ==` as `closable`, `needs-operator`, or `unknown`
+  `== Open batch anchors ==` as `closable`, `needs-operator`, or `unknown` (a
+  failed read, which stops the sweep's reads — or, #850, a member whose
+  closing-reference list is longer than the page read and holds no vouching
+  reference on it, `member-closed-by-hand-refs-truncated`, which stops nothing)
   (report-only and opt-in — without `--anchors`, `status` makes no GitHub call).
   That ledger sweep only ever walks `state.batches` — an anchor whose batch
   fell out of the ledger entirely (a lost or reset `state.json`; imboard#4244/
@@ -1457,7 +1562,8 @@ per running parallel member) and stops unfinished members atomically. `abandon` 
   `--json`; `null` when the sweep did not run OR the GitHub list call itself
   failed — see the stderr note either way) as `orphan-closable-candidate`,
   `orphan-needs-operator`, or `orphan-unknown` (a failed anchor/member read —
-  the sweep stops classifying at the first one) — deliberately never the
+  the sweep stops classifying at the first one — or, #850, a member whose
+  closing-reference list was truncated, which stops nothing) — deliberately never the
   ledger sweep's bare `closable`: without a ledger there is no
   eviction/requeue trail to rule out, so even a clean read is a candidate for
   a human to confirm, not an engine-actionable verdict. Classifies at most 20
@@ -1503,14 +1609,20 @@ per running parallel member) and stops unfinished members atomically. `abandon` 
   `label blocked <units>` / `label check unreachable <units>`. Since #537, every tick
   also checks the installed `@ai-dossier/sched` against npm registry latest (best-effort,
   cached — `cache.engineVersionTtlSeconds`, default 300s — and non-blocking, never stalls
-  a tick): when behind, it journals `engine-stale` once per distinct (installed, latest)
-  pair and warns on stderr, surfaced again in `status` below. `--auto-upgrade` (or
-  `auto_upgrade: true` in `config.json`, the flag wins when both are set) lets a
-  cron-driven `--once` self-upgrade (`npm i -g @ai-dossier/cli@latest`) once behind, but
-  only after re-confirming no slot is mid-dispatch on a fresh post-tick state read; the
-  continuous (non-`--once`) loop only ever journals/warns, never self-upgrades, since a
-  multi-minute install must not stall reconciliation. The attempt's outcome is journaled
-  too (`engine-auto-upgrade-attempted` / `engine-auto-upgrade-failed`).
+  a tick): when the installed `@ai-dossier/sched` is behind, it journals `engine-stale`
+  once per distinct (installed, latest) pair and warns on stderr, surfaced again in
+  `status` below. It also checks the installed CLI version and journals
+  `engine-cli-stale` for CLI-only releases; with `--auto-upgrade` enabled, either stale
+  package triggers the same handoff. `--auto-upgrade` (or
+  `auto_upgrade: true` in `config.json`, the flag wins when both are set) lets either
+  `sched start --once` or the continuous engine install `@ai-dossier/cli@latest` after a
+  completed tick. On success, the old loop stops before another state write and replaces
+  itself with the updated CLI, preserving its arguments, environment, and working directory;
+  detached agents continue running and the new engine reattaches by pid. State is migrated
+  by the new version on load, and an older engine refuses a newer schema. If the Node runtime
+  cannot replace the process directly, the engine exits with code 75 so the service/watchdog
+  restarts the updated entry point. Install failures are journaled as
+  `engine-auto-upgrade-failed`; attempts are recorded before installation begins.
 - **`status`** renders the queue (with `priority`, `pr`, and `cleanup` columns — a
   slot-mode member's own `priority` cell reads `-`, since the scheduler never reads it;
   the BATCH's `priority` in the batches table below is what governs assignment, #565),
@@ -1647,9 +1759,9 @@ repo's `test` script delegates to something that cannot take a reporter flag and
 unverified exit — set `[]` to opt out, never applied when the command's binary isn't
 `claude` (an `opencode` tier has no such flag) or already carries the flag itself;
 `pr_poll_interval_ms` (default 150 000) sets the
-parked-PR poll cadence; `auto_upgrade` (default false, #537) lets a cron-driven
-`sched start --once` self-upgrade when behind npm latest — the `--auto-upgrade` CLI flag
-overrides this when passed; `dissolve_policy` — `{ fraction, min_evictions_before_dissolve }`,
+parked-PR poll cadence; `auto_upgrade` (default false, #537) lets either
+`sched start --once` or the continuous service self-upgrade at a completed tick when behind
+npm latest — the `--auto-upgrade` CLI flag overrides this when passed; `dissolve_policy` — `{ fraction, min_evictions_before_dissolve }`,
 #563, overrides the batch dissolve threshold `max(ceil(N × fraction),
 min_evictions_before_dissolve)` (default `{ fraction: 1/3, min_evictions_before_dissolve: 1 }`);
 both fields are required when the key is present, and an invalid value degrades the WHOLE
@@ -1668,12 +1780,26 @@ Library consumers: see [`@ai-dossier/sched`](../packages/sched/README.md).
 ## Capabilities (`cap`)
 
 ```bash
+ai-dossier cap init [--print]      # scaffold .dossier/automation/manifest.yaml from the detected project (idempotent)
 ai-dossier cap list [--json]       # inspect .dossier/automation/manifest.yaml
 ai-dossier cap run test.focused    # execute one capability
 ai-dossier cap run test.focused -- --grep auth   # extra args are shell-quoted and appended
 ai-dossier cap run test.focused --tail-bytes 4096   # bytes of output captured on a non-ok outcome (default 8192)
 ai-dossier cap run test.focused --envelope-file /tmp/env.json   # also write the envelope atomically to a file (or set $DOSSIER_CAP_ENVELOPE_FILE)
 ```
+
+`cap init` (#645) writes a commented starter manifest from the detected package manager and
+`package.json` scripts (`typecheck.run` ← `typecheck`/build script, `test.focused` and
+`test.full` ← `test`, plus `dependencies.install` and `lint.run`). Nothing detectable becomes
+a commented `TODO` stub, not a guessed command. It never overwrites: an existing manifest is
+left untouched (it only reports which member-gate ids are undeclared). `--print` emits the
+scaffold to stdout.
+
+`sched enqueue` **warns** (stderr, never blocks) when it creates a batch in a repo whose
+manifest does not declare `typecheck.run` and `test.focused` — otherwise every member lands
+with the gate silently skipped. The warning names the missing ids and points at `cap init`.
+Repos that deliberately declare nothing opt out with `--skip-gate-check` or
+`DOSSIER_SKIP_GATE_CHECK=1`.
 
 A repo declares its deterministic, recurring operations — tests, lint, build, deps
 install, worktree prep — in `.dossier/automation/manifest.yaml` so agents execute them
@@ -1725,10 +1851,14 @@ to `~/.dossier/caps.jsonl`. Full spec and the capability id vocabulary:
 ai-dossier usage window [--last 5h] [--until <iso>] [--provider anthropic] [--source claude-code,opencode] [--top 10] [--limit-window 5h] [--json]
 ai-dossier usage --batch <id> | --issue <n> [--since 30d] [--json]
 ai-dossier usage watch [--last 1h] [--interval 30s] [--iterations N]
+ai-dossier usage sync [--hosts hcc,hcc2] [--since <when>] [--no-push|--no-pull] [--json]
+ai-dossier usage export [--all] [--since <when>] [--out <file>] | usage import <file|-> | usage hosts
+# window / --batch / --issue / watch also take: --hosts all|local|a,b   (merged multi-host ledger)
 ```
 
 One ledger over every place tokens are recorded on this host (#769), read on demand and
-**read-only** (nothing is written; `opencode.db` is opened `readOnly`):
+**read-only** (the views write nothing; `opencode.db` is opened `readOnly`; only `usage
+sync`/`export`/`import` write the persisted ledger below):
 
 | Store | What it contributes |
 |---|---|
@@ -1746,8 +1876,25 @@ shown as `×N`). "model attributed" is the share of tokens carrying a concrete m
 attributed from sched dispatch logs when a session was dispatched, else heuristically from the
 git branch / worktree name (`issue_source: "branch"` in `--json`).
 
-Not yet: a persisted ledger and multi-host merge (`usage sync`) — rows carry `host` so they can
-be merged later.
+### Persisted ledger + multi-host merge (#782)
+
+Claude Max / OpenAI quotas are per account, not per host, and Claude Code purges old
+transcripts — so `usage sync` persists this host's rows under `~/.dossier/usage/hosts/<host>.jsonl`
+(`$DOSSIER_USAGE_DIR`; host id = `os.hostname()`, or `$DOSSIER_USAGE_HOST`). **One file per host**, so
+merging never conflicts: a host's file is written only from that host's own collection, or by
+importing that same host's bundle. Each line is `{"k":"row","key":<stable hash of host+source+
+session+ts+model+tokens>,"row":{…UsageRow}}` (or `"k":"limit"`); re-collecting or re-importing
+upserts by key, so everything is idempotent, and later attribution refinements replace the row in place.
+`sync` resumes from the ledger's newest row (minus a 1-day overlap; first run 30d).
+
+Transport is the ssh the fleet already uses — no new secrets or services: `usage sync --hosts
+hcc,hcc2`, run from **wls** (the only host with ssh reach), pulls each host's bundle
+(`ssh <h> ai-dossier usage export --all`), merges it, then pushes every other host's rows back
+(`ssh <h> ai-dossier usage import -`), so one run leaves every host with all hosts. Bundles also move
+by hand: `usage export --out f.jsonl` → `usage import f.jsonl`. `scripts/refresh-fleet.sh --usage-sync`
+runs it after the CLI refresh. Reports opt in with `--hosts all|local|a,b` (default stays live-local)
+and gain a **By host** table; a purged transcript still reports from the persisted rows. Batch-prep
+tokens stay host-local (a batch is prepared and enqueued on one host).
 
 ---
 
@@ -2022,6 +2169,22 @@ Project registries are merged with user registries. User-configured registries t
 - ❌ Invalid → Signature failed → **BLOCK**
 - ⚠️ No signature → Unsigned (warn for high-risk)
 
+#### When verification fails
+
+A checksum failure prints the `Expected` and `Actual` hashes, the likely causes and a
+`Fix` (re-fetch with `ai-dossier pull --force <name>` / `run --fresh`, or for your own
+dossier `ai-dossier checksum <file> --update` then `ai-dossier sign <file>`). A
+signature failure gets the same causes/fix block; an untrusted signer prints the
+`ai-dossier keys add ...` command to trust it. Output is colorized on a TTY and
+plain when piped or when `NO_COLOR` is set (`FORCE_COLOR=1` forces color).
+
+#### High-risk confirmation in `run`
+
+When a dossier declares `risk_level: high` or `critical`, `run` lists its
+`risk_factors` and asks `Continue? [y/N]` on an interactive terminal. It proceeds
+without asking (and says why) with `--force`, `--no-prompt`, `--headless`,
+`--dry-run`, or whenever stdin/stdout is not a TTY, so CI never hangs.
+
 #### Managing trusted keys
 
 Trust is a local decision: a valid signature from a key you have not added is
@@ -2032,7 +2195,18 @@ one `<public-key> <identifier>` per line.
 ai-dossier keys generate --name my-key   # new Ed25519 pair in ~/.dossier/
 ai-dossier keys list                     # what is trusted right now
 ai-dossier keys add <public-key> <identifier>
+ai-dossier keys export <key-id>          # print a PUBLIC key in the form `keys add` accepts
+ai-dossier keys revoke <key-id>          # stop trusting a key on this machine
 ```
+
+`keys export` looks the id up in your trusted keys, then among generated pairs
+(`~/.dossier/<name>.pub`), and prints only the raw base64 public key on stdout so
+it can be piped to a teammate's `keys add`. It only ever reads public material.
+
+`keys revoke` is **local**: it removes the entry from `~/.dossier/trusted-keys.txt`
+(keeping the previous file as `trusted-keys.txt.bak`), so `verify` and `run` on this
+machine then reject dossiers signed with that key. It does not contact the registry,
+does not affect other machines, and does not delete your private key.
 
 `keys add` accepts a raw 44-char base64 key, an SPKI PEM block, or a legacy
 minisign `RWT...` key, and stores the **canonical raw base64** form regardless —

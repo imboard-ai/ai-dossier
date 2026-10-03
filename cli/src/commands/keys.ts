@@ -302,4 +302,104 @@ export function registerKeysCommand(program: Command): void {
 
       process.exit(0);
     });
+
+  keysCmd
+    .command('revoke')
+    .description('Stop trusting a signing key (removes it from your local trusted-keys file)')
+    .argument('<key-id>', 'Identifier the key was added under (see `ai-dossier keys list`)')
+    .addHelpText(
+      'after',
+      '\nRevoking is LOCAL: the entry is removed from ~/.dossier/trusted-keys.txt (a\n' +
+        'backup is kept as trusted-keys.txt.bak), so `ai-dossier verify` and `run` on this\n' +
+        'machine reject dossiers signed with it. It does not tell the registry or other\n' +
+        'machines, and it does not delete your private key.\n'
+    )
+    .action((keyId: string) => {
+      const trustedKeysPath = path.join(os.homedir(), '.dossier', 'trusted-keys.txt');
+      if (!fs.existsSync(trustedKeysPath)) {
+        console.error(`❌ No trusted keys file at ${trustedKeysPath} — nothing to revoke\n`);
+        process.exit(1);
+      }
+
+      const original = fs.readFileSync(trustedKeysPath, 'utf8');
+      const { entries } = parseTrustedKeys(original);
+      const wanted = keyId.trim();
+      const canonicalWanted = normalizePublicKey(wanted);
+      const isMatch = (entry: TrustedKeyEntry) =>
+        entry.keyId === wanted || normalizePublicKey(entry.publicKey) === canonicalWanted;
+
+      const revoked = entries.filter(isMatch);
+      if (revoked.length === 0) {
+        console.error(`❌ No trusted key with identifier "${wanted}" — nothing was revoked`);
+        console.error('   List trusted keys with: ai-dossier keys list\n');
+        process.exit(1);
+      }
+
+      // Drop matching lines in place so comments and ordering survive; a legacy
+      // multi-line PEM entry has no single line to drop, so rebuild from the
+      // parsed entries in that case.
+      const lines = original.split('\n');
+      const kept = lines.filter((line) => {
+        const [first, ...rest] = line.trim().split(/\s+/);
+        if (!first || rest.length === 0) return true;
+        return !isMatch({ publicKey: first, keyId: rest.join(' ') });
+      });
+      const stillTrusted = parseTrustedKeys(kept.join('\n')).entries.filter(isMatch);
+      const next =
+        stillTrusted.length === 0
+          ? kept.join('\n')
+          : `${entries
+              .filter((e) => !isMatch(e))
+              .map((e) => `${normalizePublicKey(e.publicKey)} ${e.keyId}`)
+              .join('\n')}\n`;
+
+      fs.writeFileSync(`${trustedKeysPath}.bak`, original, 'utf8');
+      fs.writeFileSync(trustedKeysPath, next, 'utf8');
+
+      console.log(`\n✅ Revoked ${revoked.length} key(s) locally`);
+      for (const entry of revoked) console.log(`   ${entry.keyId}`);
+      console.log(`   Location: ${trustedKeysPath} (previous version: trusted-keys.txt.bak)`);
+      console.log('\nDossiers signed with this key will now fail verification on this machine.');
+      console.log('This does not notify the registry or other machines.\n');
+      process.exit(0);
+    });
+
+  keysCmd
+    .command('export')
+    .description('Print a PUBLIC key in the form `ai-dossier keys add` accepts')
+    .argument('<key-id>', 'Trusted-key identifier, or the name of a generated key pair')
+    .action((keyId: string) => {
+      const dossierDir = path.join(os.homedir(), '.dossier');
+      const trustedKeysPath = path.join(dossierDir, 'trusted-keys.txt');
+      const wanted = keyId.trim();
+
+      let publicKey: string | undefined;
+      if (fs.existsSync(trustedKeysPath)) {
+        publicKey = parseTrustedKeys(fs.readFileSync(trustedKeysPath, 'utf8')).entries.find(
+          (entry) => entry.keyId === wanted
+        )?.publicKey;
+      }
+      // Only the .pub half of a generated pair is ever read — never the .pem.
+      const publicPath = path.join(dossierDir, `${path.basename(wanted)}.pub`);
+      if (!publicKey && fs.existsSync(publicPath)) {
+        publicKey = fs.readFileSync(publicPath, 'utf8');
+      }
+
+      if (!publicKey) {
+        console.error(`❌ No public key named "${wanted}" — nothing exported`);
+        console.error('   List keys with: ai-dossier keys list\n');
+        process.exit(1);
+      }
+
+      const canonical = normalizePublicKey(publicKey);
+      if (!isSupportedPublicKey(canonical) && !isKmsKeyIdentifier(canonical)) {
+        console.error(`❌ "${wanted}" does not hold a usable public key — nothing exported\n`);
+        process.exit(1);
+      }
+
+      // stdout carries only the key so it can be piped or captured.
+      console.log(canonical);
+      console.error(`\nTo trust it elsewhere: ai-dossier keys add ${canonical} "${wanted}"`);
+      process.exit(0);
+    });
 }

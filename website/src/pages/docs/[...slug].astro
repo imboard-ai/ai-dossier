@@ -1,0 +1,93 @@
+---
+import { getCollection, render } from 'astro:content';
+import Base from '../../layouts/Base.astro';
+import { docsNav, titleOf } from '../../lib/docs-nav';
+
+export async function getStaticPaths() {
+  const entries = await getCollection('docs');
+  return entries.map((entry) => ({
+    params: { slug: entry.id === 'index' ? undefined : entry.id },
+    props: { entry },
+  }));
+}
+
+const { entry } = Astro.props;
+const { Content, headings } = await render(entry);
+const toc = headings.filter((h) => h.depth === 2 || h.depth === 3);
+const nav = await docsNav();
+const title = titleOf(entry.id, entry.body);
+const current = entry.id === 'index' ? '' : entry.id;
+const source = `docs/${entry.filePath?.replace(/^.*?docs\//, '') ?? ''}`;
+const editUrl = `https://github.com/imboard-ai/ai-dossier/blob/main/${source}`;
+---
+<Base title={title} description={`${title}: AI Dossier documentation.`} wide>
+  <div class="layout">
+    <nav class="side" aria-label="Documentation">
+      <a href="/docs/" aria-current={current === '' ? 'page' : undefined}><strong>Overview</strong></a>
+      {nav.map((g) => (
+        <details open={current.startsWith(g.key)}>
+          <summary>{g.label}</summary>
+          <ul>
+            {g.items.map((i) => (
+              <li><a href={`/docs/${i.id}/`} aria-current={i.id === current ? 'page' : undefined}>{i.title}</a></li>
+            ))}
+          </ul>
+        </details>
+      ))}
+    </nav>
+    <article class="doc">
+      <Content />
+      <hr />
+      <p class="muted">Rendered from <a href={editUrl}><code>{source}</code></a> in the repository. Edit it there.</p>
+    </article>
+    {toc.length > 1 && (
+      <nav class="toc" aria-label="On this page">
+        <p>On this page</p>
+        <ul>
+          {toc.map((h) => (
+            <li class={`d${h.depth}`}><a href={`#${h.slug}`}>{h.text}</a></li>
+          ))}
+        </ul>
+      </nav>
+    )}
+  </div>
+</Base>
+
+<style>
+  .layout { display: grid; gap: 40px; grid-template-columns: 240px minmax(0, 1fr) 200px; align-items: start; }
+  .side, .toc { position: sticky; top: 76px; max-height: calc(100vh - 92px); overflow-y: auto; font-size: .9rem; overscroll-behavior: contain; }
+  .side { padding-right: 8px; }
+  .side > a { display: block; padding: 4px 10px; color: var(--fg); text-decoration: none; border-radius: 6px; }
+  .side ul { list-style: none; padding: 0; margin: 2px 0 12px; border-left: 1px solid var(--line); margin-left: 10px; }
+  .side li { margin: 0; }
+  .side li a { display: block; padding: 4px 12px; margin-left: -1px; border-left: 1px solid transparent; color: var(--muted); text-decoration: none; line-height: 1.4; }
+  .side li a:hover { color: var(--fg); border-left-color: var(--line-strong); }
+  .side summary { cursor: pointer; font-weight: 600; font-size: .78rem; letter-spacing: .06em; text-transform: uppercase; color: var(--fg); padding: 8px 10px 4px; list-style-position: inside; }
+  .side a[aria-current='page'] { color: var(--accent); font-weight: 600; border-left-color: var(--accent); background: var(--accent-soft); }
+  .side > a[aria-current='page'] { border-left: 0; }
+  .toc p { margin: 0 0 8px; font-size: .78rem; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+  .toc ul { list-style: none; padding: 0; margin: 0; border-left: 1px solid var(--line); }
+  .toc a { display: block; padding: 3px 12px; color: var(--muted); text-decoration: none; line-height: 1.4; }
+  .toc a:hover { color: var(--fg); }
+  .toc .d3 a { padding-left: 24px; font-size: .86rem; }
+
+  .doc { min-width: 0; max-width: var(--measure); }
+  .doc :global(h1) { margin-top: 0; font-size: var(--step-3); }
+  .doc :global(h2) { margin-top: 2.6rem; padding-top: 1.4rem; border-top: 1px solid var(--line); }
+  .doc :global(h1 + h2), .doc :global(h1 + p + h2), .doc :global(hr + h2) { border-top: 0; padding-top: 0; }
+  .doc :global(hr) { margin: 2rem 0 0; }
+  .doc :global(h2), .doc :global(h3), .doc :global(h4) { scroll-margin-top: 76px; }
+  .doc :global(li) { margin: .3rem 0; }
+  .doc :global(li > ul), .doc :global(li > ol) { margin: .3rem 0; }
+  .doc :global(a) { text-decoration-color: var(--accent-line); }
+  .doc :global(a:hover) { text-decoration-color: currentColor; }
+
+  @media (max-width: 1200px) {
+    .layout { grid-template-columns: 240px minmax(0, 1fr); }
+    .toc { display: none; }
+  }
+  @media (max-width: 800px) {
+    .layout { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+    .side { position: static; max-height: 260px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-soft); }
+  }
+</style>

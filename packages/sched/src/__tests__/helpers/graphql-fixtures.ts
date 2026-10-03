@@ -16,9 +16,15 @@
 export function graphqlIssueResponse(opts: {
   state: 'OPEN' | 'CLOSED';
   stateReason?: string;
+  /** The issue's `createdAt` (#850 review). Default: early in the fixtures' timeline (`2026-09-01T10:00:00Z`). */
+  createdAt?: string | null;
+  /** The issue's `closedAt` (#850). Default `null` — no readable close time, so no closing reference can vouch. */
+  closedAt?: string | null;
   closer?: unknown;
   /** `closedByPullRequestsReferences.nodes` — raw wire nodes (#799). */
   closingRefs?: unknown[];
+  /** `closedByPullRequestsReferences.pageInfo.hasNextPage` (#850). Default `false`: the page is the whole list. */
+  closingRefsHasNextPage?: boolean;
   /** The aliased `reopens` connection (#799); `null` omits it from the payload. Default: never reopened. */
   reopens?: unknown;
 }): unknown {
@@ -28,10 +34,15 @@ export function graphqlIssueResponse(opts: {
         issue: {
           state: opts.state,
           stateReason: opts.stateReason ?? null,
+          createdAt: opts.createdAt === undefined ? '2026-09-01T10:00:00Z' : opts.createdAt,
+          closedAt: opts.closedAt ?? null,
           labels: { nodes: [], pageInfo: { hasNextPage: false } },
           timelineItems: { nodes: opts.closer !== undefined ? [{ closer: opts.closer }] : [] },
           ...(opts.reopens === null ? {} : { reopens: opts.reopens ?? { nodes: [] } }),
-          closedByPullRequestsReferences: { nodes: opts.closingRefs ?? [] },
+          closedByPullRequestsReferences: {
+            pageInfo: { hasNextPage: opts.closingRefsHasNextPage ?? false },
+            nodes: opts.closingRefs ?? [],
+          },
         },
       },
     },

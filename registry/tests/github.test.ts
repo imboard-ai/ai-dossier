@@ -137,7 +137,7 @@ describe('publishDossier', () => {
       .mockResolvedValueOnce(jsonResponse({ content: { sha: 'manifest-sha' } })); // PUT index.json
 
     const evidence = '{"evidence_schema_version":"1.0.0"}';
-    await publishDossier('ns/test-dossier', '# content', metadata, 'changelog', evidence);
+    await publishDossier('ns/test-dossier', '# content', metadata, 'changelog', { evidence });
 
     const puts = mockFetch.mock.calls
       .map((call, i) => ({
@@ -169,7 +169,7 @@ describe('publishDossier', () => {
       .mockResolvedValueOnce(NOT_FOUND) // GET index.json
       .mockResolvedValueOnce(jsonResponse({ content: { sha: 'manifest-sha' } })); // PUT index.json
 
-    await publishDossier('ns/test-dossier', '# content', metadata, 'changelog', null);
+    await publishDossier('ns/test-dossier', '# content', metadata, 'changelog', { evidence: null });
 
     const methods = mockFetch.mock.calls.map((call) => (call[1]?.method as string) || 'GET');
     expect(methods).toEqual(['GET', 'PUT', 'GET', 'DELETE', 'GET', 'PUT']);
@@ -187,7 +187,7 @@ describe('publishDossier', () => {
       .mockResolvedValueOnce(NOT_FOUND) // GET index.json
       .mockResolvedValueOnce(jsonResponse({ content: { sha: 'manifest-sha' } })); // PUT index.json
 
-    await publishDossier('ns/test-dossier', '# content', metadata, 'changelog', null);
+    await publishDossier('ns/test-dossier', '# content', metadata, 'changelog', { evidence: null });
 
     const methods = mockFetch.mock.calls.map((call) => (call[1]?.method as string) || 'GET');
     expect(methods).toEqual(['GET', 'PUT', 'GET', 'GET', 'PUT']);
@@ -208,7 +208,9 @@ describe('publishDossier', () => {
       }); // PUT sidecar fails
 
     await expect(
-      publishDossier('ns/test-dossier', '# content', metadata, 'changelog', '{"entries":[]}')
+      publishDossier('ns/test-dossier', '# content', metadata, 'changelog', {
+        evidence: '{"entries":[]}',
+      })
     ).rejects.toThrow(/500.*internal error/);
 
     const methods = mockFetch.mock.calls.map((call) => (call[1]?.method as string) || 'GET');
@@ -331,5 +333,128 @@ describe('deleteFile - non-JSON error response', () => {
     await expect(deleteFile('valid/path', 'msg', 'sha')).rejects.toThrow(
       /GitHub API error: 500 - plain text error/
     );
+  });
+});
+
+describe('publisher recording (#971)', () => {
+  const metadata = { name: 'test-dossier', title: 'Test', version: '1.0.0' } as never;
+
+  function writeMessages() {
+    return mockFetch.mock.calls
+      .filter((call) => ['PUT', 'DELETE'].includes(call[1]?.method as string))
+      .map((call) => JSON.parse(call[1].body as string).message as string);
+  }
+
+  it('withActorTrailer appends a trailer, strips control chars, and is a no-op without a login', async () => {
+    const { withActorTrailer } = await import('../lib/github');
+    expect(withActorTrailer('Publish x v1', 'Published-By', 'alice')).toBe(
+      'Publish x v1\n\nPublished-By: alice'
+    );
+    expect(withActorTrailer('Publish x v1', 'Published-By', null)).toBe('Publish x v1');
+    expect(withActorTrailer('Publish x v1', 'Published-By', '\n\x07 ')).toBe('Publish x v1');
+    expect(withActorTrailer('Publish x v1', 'Published-By', 'eve\nPublished-By: mallory')).toBe(
+      'Publish x v1\n\nPublished-By: evePublished-By: mallory'
+    );
+  });
+
+  it('content, evidence and manifest commits carry Published-By; manifest entry records the publisher', async () => {
+    const { publishDossier } = await import('../lib/github');
+    mockFetch
+      .mockResolvedValueOnce(NOT_FOUND) // GET content
+      .mockResolvedValueOnce(jsonResponse({ content: { sha: 'file-sha' } })) // PUT content
+      .mockResolvedValueOnce(NOT_FOUND) // GET sidecar
+      .mockResolvedValueOnce(jsonResponse({ content: { sha: 'evidence-sha' } })) // PUT sidecar
+      .mockResolvedValueOnce(NOT_FOUND) // GET index.json
+      .mockResolvedValueOnce(jsonResponse({ content: { sha: 'manifest-sha' } })); // PUT index.json
+
+    await publishDossier('ns/test-dossier', '# content', metadata, 'changelog', {
+      evidence: '{"evidence_schema_version":"1.0.0"}',
+      publishedBy: 'alice',
+      publishedAt: '2026-09-29T00:00:00.000Z',
+    });
+
+    const messages = writeMessages();
+    expect(messages).toHaveLength(3);
+    for (const message of messages) {
+      expect(message.endsWith('\n\nPublished-By: alice')).toBe(true);
+    }
+    expect(messages[0]).toMatch(
+      /^Publish test-dossier v1\.0\.0: changelog\n\nPublished-By: alice$/
+    );
+
+    const manifestBody = bodyOf(5);
+    const manifest = JSON.parse(Buffer.from(manifestBody.content, 'base64').toString('utf-8'));
+    expect(manifest.dossiers[0]).toMatchObject({
+      name: 'ns/test-dossier',
+      published_by: 'alice',
+      published_at: '2026-09-29T00:00:00.000Z',
+    });
+  });
+
+  it('frontmatter cannot supply published_by; an injected login is sanitized in commit and manifest', async () => {
+    const { publishDossier } = await import('../lib/github');
+    mockFetch
+      .mockResolvedValueOnce(NOT_FOUND) // GET content
+      .mockResolvedValueOnce(jsonResponse({ content: { sha: 'file-sha' } })) // PUT content
+      .mockResolvedValueOnce(NOT_FOUND) // GET sidecar
+      .mockResolvedValueOnce(NOT_FOUND) // GET index.json
+      .mockResolvedValueOnce(jsonResponse({ content: { sha: 'manifest-sha' } })); // PUT index.json
+
+    const spoofing = { ...(metadata as object), published_by: 'mallory' } as never;
+    await publishDossier('ns/test-dossier', '# content', spoofing, 'changelog', {
+      publishedBy: 'eve\r\nSigned-off-by: mallory',
+    });
+
+    const [contentMessage] = writeMessages();
+    expect(contentMessage.split('\n')).toEqual([
+      'Publish test-dossier v1.0.0: changelog',
+      '',
+      'Published-By: eveSigned-off-by: mallory',
+    ]);
+    const manifest = JSON.parse(Buffer.from(bodyOf(4).content, 'base64').toString('utf-8'));
+    expect(manifest.dossiers[0].published_by).toBe('eveSigned-off-by: mallory');
+  });
+
+  it('without a login: no trailer and no published_by on the entry', async () => {
+    const { publishDossier } = await import('../lib/github');
+    mockFetch
+      .mockResolvedValueOnce(NOT_FOUND)
+      .mockResolvedValueOnce(jsonResponse({ content: { sha: 'file-sha' } }))
+      .mockResolvedValueOnce(NOT_FOUND)
+      .mockResolvedValueOnce(NOT_FOUND)
+      .mockResolvedValueOnce(jsonResponse({ content: { sha: 'manifest-sha' } }));
+
+    await publishDossier('ns/test-dossier', '# content', metadata, 'changelog', { evidence: null });
+
+    for (const message of writeMessages()) {
+      expect(message).not.toMatch(/Published-By/);
+    }
+    const manifest = JSON.parse(Buffer.from(bodyOf(4).content, 'base64').toString('utf-8'));
+    expect(manifest.dossiers[0]).not.toHaveProperty('published_by');
+  });
+
+  it('delete commits (content, sidecar, manifest) carry Removed-By', async () => {
+    const { deleteDossier } = await import('../lib/github');
+    const manifestJson = JSON.stringify({
+      dossiers: [
+        { name: 'ns/test-dossier', title: 'Test', version: '1.0.0', path: 'ns/test-dossier.ds.md' },
+      ],
+    });
+    mockFetch
+      .mockResolvedValueOnce(contentResponse('---\nname: test-dossier\n---', 'content-sha'))
+      .mockResolvedValueOnce(contentResponse(manifestJson, 'manifest-sha'))
+      .mockResolvedValueOnce(jsonResponse({ commit: { sha: 'delete-content-sha' } }))
+      .mockResolvedValueOnce(contentResponse('{}', 'evidence-sha'))
+      .mockResolvedValueOnce(jsonResponse({ commit: { sha: 'delete-evidence-sha' } }))
+      .mockResolvedValueOnce(jsonResponse({ content: { sha: 'manifest-sha-2' } }));
+
+    await deleteDossier('ns/test-dossier', { removedBy: 'bob' });
+
+    const messages = writeMessages();
+    expect(messages).toEqual([
+      'Delete ns/test-dossier v1.0.0\n\nRemoved-By: bob',
+      'Delete evidence for ns/test-dossier\n\nRemoved-By: bob',
+      'Remove from manifest: ns/test-dossier\n\nRemoved-By: bob',
+    ]);
   });
 });

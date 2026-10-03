@@ -1,13 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerConfigCommand } from '../../commands/config-cmd';
 import * as config from '../../config';
-import { createTestProgram } from '../helpers/test-utils';
+import { createTestProgram, runCommandTree } from '../helpers/test-utils';
 
 vi.mock('../../config');
 
 describe('config command', () => {
   beforeEach(() => {
-    // Mocks are reset by global afterEach (setup.ts)
+    // setup.ts's global afterEach only restores spies; the automocked ../../config
+    // functions keep their call history across tests unless it is cleared here.
+    vi.clearAllMocks();
     vi.mocked(config.loadConfig).mockReturnValue({
       defaultLlm: 'auto',
       theme: 'auto',
@@ -173,6 +175,116 @@ describe('config command', () => {
 
       expect(config.saveConfig).toHaveBeenCalled();
       expect(console.log).toHaveBeenCalledWith(expect.stringContaining("Added registry 'secure'"));
+    });
+  });
+
+  describe('registry add/remove by name', () => {
+    beforeEach(() => {
+      vi.mocked(config.saveConfig).mockReturnValue(true);
+    });
+
+    function configWithRegistries(): config.DossierConfig {
+      return {
+        defaultLlm: 'auto',
+        theme: 'auto',
+        auditLog: true,
+        schedTelemetry: true,
+        registries: {
+          internal: { url: 'https://dossier.example.com' },
+          public: { url: 'https://dossier-registry.vercel.app' },
+        },
+        defaultRegistry: 'internal',
+      };
+    }
+
+    it('should store an added registry under its name and make it the default', async () => {
+      const code = await runCommandTree(registerConfigCommand, [
+        'config',
+        '--add-registry',
+        'internal',
+        '--url',
+        'https://dossier.example.com',
+        '--default',
+      ]);
+
+      expect(code).toBe(0);
+      const saved = vi.mocked(config.saveConfig).mock.lastCall?.[0];
+      expect(saved?.registries).toEqual({
+        internal: { url: 'https://dossier.example.com', default: true },
+      });
+      expect(saved?.defaultRegistry).toBe('internal');
+    });
+
+    it('should reject a registry name inherited from Object.prototype', async () => {
+      const code = await runCommandTree(registerConfigCommand, [
+        'config',
+        '--add-registry',
+        '__proto__',
+        '--url',
+        'https://dossier.example.com',
+        '--default',
+      ]);
+
+      expect(code).toBe(1);
+      expect(console.error).toHaveBeenCalledWith(
+        expect.stringContaining("Invalid registry name '__proto__'")
+      );
+      expect(config.saveConfig).not.toHaveBeenCalled();
+    });
+
+    it('should remove a registry and clear it as the default', async () => {
+      vi.mocked(config.loadConfig).mockReturnValue(configWithRegistries());
+
+      const code = await runCommandTree(registerConfigCommand, [
+        'config',
+        '--remove-registry',
+        'internal',
+      ]);
+
+      expect(code).toBe(0);
+      const saved = vi.mocked(config.saveConfig).mock.lastCall?.[0];
+      expect(saved?.registries).toEqual({
+        public: { url: 'https://dossier-registry.vercel.app' },
+      });
+      expect(saved).not.toHaveProperty('defaultRegistry');
+      expect(console.log).toHaveBeenCalledWith(
+        expect.stringContaining("Removed registry 'internal'")
+      );
+    });
+
+    it('should exit 1 without saving when the registry to remove is not configured', async () => {
+      vi.mocked(config.loadConfig).mockReturnValue(configWithRegistries());
+
+      const code = await runCommandTree(registerConfigCommand, [
+        'config',
+        '--remove-registry',
+        'missing',
+      ]);
+
+      expect(code).toBe(1);
+      expect(console.error).toHaveBeenCalledWith(
+        expect.stringContaining("Registry 'missing' not found")
+      );
+      expect(console.error).toHaveBeenCalledWith(
+        expect.stringContaining('Removable: internal, public')
+      );
+      expect(config.saveConfig).not.toHaveBeenCalled();
+    });
+
+    it('should not treat an inherited property name as a configured registry', async () => {
+      vi.mocked(config.loadConfig).mockReturnValue(configWithRegistries());
+
+      const code = await runCommandTree(registerConfigCommand, [
+        'config',
+        '--remove-registry',
+        'toString',
+      ]);
+
+      expect(code).toBe(1);
+      expect(console.error).toHaveBeenCalledWith(
+        expect.stringContaining("Registry 'toString' not found")
+      );
+      expect(config.saveConfig).not.toHaveBeenCalled();
     });
   });
 });

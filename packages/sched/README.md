@@ -2,6 +2,12 @@
 
 [![npm](https://img.shields.io/npm/v/@ai-dossier/sched.svg)](https://www.npmjs.com/package/@ai-dossier/sched)
 
+**Use one portable AI-agent skill across Claude Code, Codex, OpenCode, and MCP-compatible workflows.**
+
+`@ai-dossier/sched` is for engineering teams running parallel coding agents. It is a deterministic scheduler that queues work, manages worker slots, verifies completion, watches PRs, and recovers stalled multi-agent workflows without invoking an LLM itself.
+
+> **Part of the ai-dossier ecosystem**: use [`@ai-dossier/cli`](../../cli/README.md) to run workflows, [`@ai-dossier/worktree-pool`](../worktree-pool/README.md) for ready worktrees, and the [ai-dossier project](https://github.com/imboard-ai/ai-dossier) for the complete platform.
+
 Deterministic scheduler core for dossier batch cycles — queue, worker slots, typed state
 machines, crash-safe persistence, the **dispatch engine** (#464: spawning agent
 processes, verifying their completion against ground truth, mechanizing the
@@ -374,7 +380,54 @@ This applies to `issue:<n>` unit dispatch (`dispatchAssignments`). `batch:<id>` 
 through a separate pass with its own claim/reconcile logic — see
 [Batch dispatch (#523)](#batch-dispatch-523) below.
 
-### Supervised deployment (#679)
+### Supervised deployment (#679, #945)
+
+**The way to run the engine is `ai-dossier sched service install`** (run it from the project's
+checkout). The engine is safe to kill at any instant, but it cannot restart itself — the service is
+what makes it come back by itself, so no session ever has to start, stop or babysit it.
+
+```bash
+ai-dossier sched service install [--alert-issue <n>]   # systemd user unit; cron watchdog if no systemd
+ai-dossier sched service status                         # supervised? engine live? heartbeat?
+ai-dossier sched service uninstall
+```
+
+- **systemd** (default when a user manager is running): writes
+  `~/.config/systemd/user/dossier-sched-<project>.service` — `Restart=always` (a clean exit, such as
+  a graceful stop, comes back too) with **crash-loop bounds**: exponential `RestartSec` backoff
+  (10 s up to 300 s, systemd >= 254; older versions keep 10 s) and `StartLimitBurst=10` per
+  `StartLimitIntervalSec=600` — past that the unit is left `failed` for an operator
+  (`systemctl --user reset-failed <unit>`); `KillMode=process`, `WorkingDirectory` = the project's
+  **main checkout** (never a linked worktree; validated against `--project`, override with
+  `--repo-dir`), and the node/nvm `PATH` at install time (absolute entries only). Install refuses
+  node / entry-point / repo paths that are missing, relative, or under a temp or `worktrees/`
+  directory, and warns that an nvm node path must be re-pinned (re-run `install`) after a node
+  upgrade. It runs `sched start --auto-upgrade` (opt out with `--no-auto-upgrade`); after a
+  completed tick, a stale engine installs the latest CLI and re-execs the same command before
+  another state write. Detached agents keep running and the new engine reattaches by pid. The
+  new version migrates state on load; older engines reject newer schemas. If the Node runtime
+  cannot replace the process directly, exit code 75 asks systemd/the watchdog to restart the
+  updated entry point.
+  Output goes to the journal (`journalctl --user -u <unit>`) and the durable trail is the
+  project's `events.jsonl`. Run `loginctl enable-linger $USER` once so it starts at boot without a
+  login. Re-running `install` is idempotent; a changed unit is restarted (agents keep running).
+- **cron fallback** (no systemd): a tagged crontab block with `@reboot` and a per-minute
+  `sched ensure-running` watchdog (`%` is escaped for cron). The watchdog starts a detached engine
+  (output to `<sched-dir>/engine.log`) when no live engine holds the lease, after raising the
+  once-per-episode stale-lease alert; a healthy minute does nothing (no `gh` call). Restarts back
+  off exponentially while the engine keeps dying: at a 60 s cadence the first restarts are
+  immediate, then gaps of 2, 4, 8 … minutes up to 30, and a live engine resets it. The existing
+  crontab is read strictly — only "no crontab for <user>" counts as empty; any other `crontab -l`
+  failure aborts the install and changes nothing. The engine takes the lease atomically, so two
+  watchdogs — or a watchdog plus the systemd unit — never run two engines. To stop the engine on
+  purpose under the watchdog: `sched ensure-running --disable` (`--enable` to resume).
+- **Crash alerts are deduplicated:** repeats of the same alert kind within an hour are ONE tracking
+  comment on `--alert-issue`, edited with a repeat count, not a comment per restart.
+- `install` / `uninstall` exit non-zero and print `✗` when anything failed (systemctl, crontab).
+  `--no-activate` renders the unit / cron block without calling `systemctl` or `crontab` and says
+  plainly that nothing is installed; `--print` prints it.
+
+The manual shapes below remain valid, and explain the rules the service encodes.
 
 Two supported shapes, one rule: **dispatched agents must outlive the tick or engine that
 spawned them.** Agents are spawned detached and unref'd precisely so they survive a sched
@@ -422,6 +475,101 @@ when a tick does nothing (`nothing to do`) — a log that stops growing while
 `systemctl status` still says `active (running)` means the loop died silently, which is
 the failure mode #679 fixed: the engine exited cleanly after its first tick because its
 inter-tick sleep handles were unref'd.
+
+### Engine exit logging, heartbeat and crash alerts (#945)
+
+The engine must never die silently. Every exit the process can observe writes a final
+`engine-exit` journal line with its `reason` (every cause is kept: a crash during a stop
+adds a second line with its stack):
+
+| reason | cause | lease |
+|---|---|---|
+| `signal:SIGTERM` / `SIGINT` | graceful stop: finish the tick, agents keep running. A `engine-stopping.json` marker is written first; a second signal exits at once (`signal-repeat`); a hard deadline (120 s) forces `stop-timeout` if the stop never completes | released |
+| `signal-ignored:SIGHUP` | SIGHUP never stops the engine (nohup / a closing terminal must not kill an unattended engine); journaled, engine keeps running | kept |
+| `normal` | the loop returned after a stop request (or `--once` finished its tick) | released |
+| `stop-timeout` | a requested stop was still running at the deadline; forced exit | released |
+| `uncaught-exception` / `unhandled-rejection` | crash, stack in `detail`, exit code 70 | **kept** as the crash marker |
+| `process-exit` | a bare `process.exit()` nothing else logged | released |
+| *(no line)* | SIGKILL / OOM killer — unobservable | left stale |
+
+The exit logger is installed immediately after the lease is acquired, so no later startup
+step can exit unlogged. A tick that is blocked in a synchronous call cannot run signal
+handlers, so every synchronous exec on the tick path is timeout-bounded (`defaultExec`: 120 s;
+the engine's own execs have explicit budgets) and the stop is therefore bounded too.
+
+The lease's `updated_at` is a heartbeat rewritten (compare-and-swap on the lease id) every
+tick; `sched status` shows it. A live pid whose heartbeat is older than the hung threshold
+(10 x the reconcile interval, never under 5 min; `$DOSSIER_SCHED_HUNG_INTERVALS` overrides
+the multiplier) with unfinished work is an `engine-hung` warning/alert. Visible alerts are
+journaled, printed to stderr, and posted as a comment when a tracking issue is given
+(`--alert-issue <n>` or `$DOSSIER_SCHED_ALERT_ISSUE`; validated at `sched start` startup):
+
+- `engine-restarted-after-crash`: a `sched start` reclaimed a lease whose holder died without
+  releasing it (crash, SIGKILL, OOM). If the previous engine had begun a stop (marker for the
+  same pid) it is reported as `stop-interrupted` (a wedged stop), not a crash.
+- `stale-engine-lease-alert`: the lease holder is dead (`reason=stale-lease`) or alive but
+  hung (`reason=engine-hung`) while work is unfinished. Once per episode (an `O_EXCL` marker
+  file, so racing watchers cannot double-alert); raised by a watcher — `sched status --alert`
+  (cron-able). An unwritable store never makes the watcher throw.
+
+**#920's silent exit:** the log ended in `nothing to do`, which is just an idle tick's line.
+Only SIGINT had a handler, so a SIGTERM/SIGHUP (another session's restart, a closing
+terminal) killed the engine with no line and no lease release. That is now logged; if the
+2026-09-29 cause was SIGKILL/OOM, the missing `engine-exit` plus the stale lease is now the
+documented signature (`journalctl -k` for the OOM window).
+
+### Restart never discards work (#945, #940)
+
+Before the engine respawns an agent onto a worktree that already exists — a batch **tail**, a
+batch **member** reusing its worktree, an issue **takeover** — it preserves whatever the dead
+agent left there (`preserve.ts`):
+
+- a WIP commit under the **non-branch** ref `refs/sched-rescue/<unit>-<timestamp>` (adds no branch,
+  triggers no CI), holding every tracked change (`git add -u`, deletions and staged renames
+  included), the unpushed commits, and those untracked / staged-new files that pass the **secret
+  and size filter**, journaled as `work-preserved` (`branch` = the ref). **Only tracked changes and
+  unpushed commits are ever pushed.** A rescue whose tree also holds untracked / staged-new files
+  stays **local** (the ref lives in the local repo; the worktree and its `.git` survive a respawn
+  anyway) and says `local only` in the journal and the respawn prompt. The final tree is filtered
+  once more: any path new relative to HEAD (a rename into a secret name, `git add -N`, staged-new)
+  matching `.env*`, `*.env.*`, `*.pem`/`*.key` (and `*.pem.*`/`*.key.*`), `id_rsa*`, `id_ed25519*`,
+  `*credentials*`, `*secret*`, `*token*`, `*.p12`, `*.pfx`, `*.tfstate*`, `*.tfvars`, `kubeconfig`,
+  `.kube/`, `.docker/config.json`, `.pypirc`, `.vault-token`, `.htpasswd`, `.s3cfg`, `.npmrc`,
+  `.netrc`, `.ssh/` … is dropped. Untracked files over 1 MiB, past 500 files / 16 MiB, tracked
+  changes over 50 MiB and submodule/nested-repo contents are not captured; they stay in the
+  worktree and the journal / prompt count what was skipped and why. This filter is
+  defence-in-depth: the rescue bypasses the pre-commit secret scan;
+- **TTL is housekeeping, not privacy.** A pushed rescue ref is **world-readable on a public
+  repository, and deleting a ref does NOT unpublish it** (GitHub keeps objects reachable by SHA).
+  Rescue refs older than 14 days (by the timestamp in the ref name) are deleted locally and on
+  origin (listed with `git ls-remote`, so refs pushed from other clones are covered) together with
+  their `sched-rescue-pushed-<sha>` markers: at `sched start` and then daily outside the state
+  lock. A ref whose remote deletion fails for any reason but "already gone" is kept and retried.
+  Find live ones with `git for-each-ref refs/sched-rescue`;
+- built with a throwaway index, so the worktree, its index and its HEAD are untouched — the
+  respawned agent still finds the files in place, and preservation cannot itself lose work;
+- idempotent: an unchanged tree reuses its existing rescue ref instead of minting one per tick;
+- the respawned agent's prompt gets a `PRESERVED WORK` instruction naming the ref and forbidding a
+  reset to the last pushed head. A failed push is journaled (`pushed: false` in the detail) and is
+  not fatal; an unpreservable worktree journals `work-preserve-failed` and is left as it is.
+
+A takeover's worktree path comes from a setup milestone (an issue comment), so it is acted on only
+when `git worktree list` registers it in this repository, it is under the sanctioned `worktrees/`
+roots, it is not the main checkout, and no batch holds it (`takeoverWorktreeRefusal`; a refusal is
+journaled `work-preserve-failed` and never blocks the respawn). **The takeover rescue runs outside
+the state lock** (it shells out to `gh`, `git` and `git push`): a stalled unit enters recovery on
+one tick and its takeover is spawned on the next, after the rescue. Takeover preservation is on
+only when the engine is given a `rescueExec` (the CLI wires one, 120 s per call).
+
+**Batch tail, respawn only:** when the previous tail exited unverified and its worktree holds
+uncommitted files, or the NEWEST `gate.batch` row in `caps.jsonl` for that worktree (matched by realpath of `cwd`) is a
+passing run on a **dirty** tree (`dirty: true` or `git_probe` set — #941's fields) newer than the
+last pushed head while local work exists, the engine does **not** respawn. Rows without #941's
+fields (the engine's own post-landing gate rows) and clean rows are never evidence; an older dirty
+row is superseded by a newer clean or failed one. It blocks the batch `tail-dirty-worktree`, with the evidence and the
+rescue ref in the journal and `sched status`. Commit or discard the work in the worktree, then
+ `sched resume --batch <id>`. A tail that left only unpushed commits is respawned, told to resume
+ from the rescue ref. `sched resume --batch` deliberately does NOT re-run this guard: by resuming, the operator has looked at the worktree.
 
 ### Zombie-run fencing (#504)
 
@@ -536,8 +684,10 @@ validating → attributing → fixing (ONE bounded attempt) → validating
   suite report unreadable, after the fallback retry when one applied
                          → blocked → validating (nothing requeued/reverted; #562)
 awaiting-merge (CONFLICTING | auto-merge-blocked)
-                         → rebasing → re-validating → shipping
-                         → (2nd occurrence) dissolving into two half-batches
+                          → rebasing → re-validating → shipping
+                          → (2nd occurrence) dissolving into two half-batches
+                          #840: with VALIDATED members, keep them landed;
+                          #867: the PR watch automatically enters this rail
 ```
 
 1. **Attribution (AC1)** — `attributeByOverlap` maps each failing test to a member by
@@ -602,10 +752,14 @@ awaiting-merge (CONFLICTING | auto-merge-blocked)
    batch branch is simply left behind unmerged, since sched deletes nothing. Every dissolve
    decision — all three strategies — journals its policy inputs (`N=`, `evictions=`,
    `threshold=`), so it is explainable without re-deriving the formula.
-5. **PR conflict (AC4)** — `handlePrConflict` rebases the batch branch, re-runs the suite
-   and re-ships ONCE. A second occurrence, a conflicting rebase, a failed fetch, an
-   unusable `base_branch`, a checkout that is not on the batch branch, or a red suite
-   after a clean rebase dissolves into two half-batches.
+5. **PR conflict (AC4)** — the PR watch routes a CONFLICTING or auto-merge-blocked batch
+   into `handlePrConflict`, which rebases the integration branch, re-runs the suite, and
+   force-pushes the rewritten branch with a lease before resuming the existing PR watch. A second occurrence,
+   a conflicting rebase, a failed fetch, an unusable branch, a checkout that is not on the
+   batch branch, or a red suite after a clean rebase dissolves into two half-batches when no
+   member is validated. With validated members, #840 keeps their landed work: a clean rebase
+   and red suite re-gates the retained batch; every other give-up case blocks it as
+   `dissolve-refused:<reason>`.
 6. **Milestones (AC5)** — every eviction and dissolve posts a `batch-validate` /
    `batch-ship` milestone to the batch ANCHOR issue via `ai-dossier runstate post`, with
    the reason, the evicted/requeued/preserved members and the attribution method (a
@@ -1029,9 +1183,9 @@ Dissolve never throws validated work away:
   `batch-regate`, `executing_member` pinned to the end — the shape of `sched resume
   --batch`); anything else blocks `dissolve-refused:<reason>` (milestone `batch-ship`,
   `validated=`; the recorded PR can be resolved by hand, or closed before `sched resume
-  --batch`). With no validated member it still dissolves into halves. **Library behaviour
-  only:** the engine does not yet route a CONFLICTING batch PR into `handlePrConflict`
-  (#867).
+   --batch`). With no validated member it still dissolves into halves. Since #867,
+   `reconcilePrWatch` routes a CONFLICTING or auto-merge-blocked batch PR into this recovery
+   path automatically.
 
 #### Member branches live until the batch ends; a requeue resumes on them (#840)
 
@@ -1271,7 +1425,7 @@ import {
   dissolveBatch,         // full | halved | partial (#563); preserves everything green
   blockBatch,            // #562: unreadable suite report → blocked; no requeue, no revert
   type BlockOptions,     // { reason, milestonePhase? } for blockBatch
-  handlePrConflict,      // rebase + re-ship once, then dissolve into halves
+  handlePrConflict,      // reship | dissolve; #840: regate | block over validated work
   createExecMilestonePoster, // batch milestones via `ai-dossier runstate post`
   expandEvictionGroups,  // members that must revert together (§E.4 eviction groups)
   requeueMember,         // the one requeue path (abandon, aggregate eviction, dissolve, sched requeue)
@@ -1493,7 +1647,7 @@ after-the-fact recovery, not a missing-data bug.
   queue data.
 - **Schema**: state/config files from #460 (schema 1.0.0), #464 (1.1.0), #468 (1.2.0),
   #472 (1.3.0), #500 (1.4.0), #505 (1.5.0), #504 (1.6.0), #523 (1.7.0) and #524 (1.8.0)
-  load and migrate to the current schema (1.29.0 — 1.24.0 was #810: no backfill,
+  load and migrate to the current schema (1.30.0 — 1.24.0 was #810: no backfill,
   `kind`/`branch` optional, absent = an `evicted` record with no branch) automatically
   (slot `branch`/`last_head`/`pid_start`, slot `role` (inferred from the
   unit's queue entry, with the persisted `phase` as a fallback — #500), entry
@@ -1523,6 +1677,9 @@ after-the-fact recovery, not a missing-data bug.
   Schema 1.29.0 (#844): `SlotEntry` gains `kill_sent_at`/`kill_escalated_at` (the
   SIGTERM → SIGKILL escalation anchor and its journal dedup marker; `null`/`null`
   backfilled, cleared when the slot goes idle).
+  Schema 1.30.0 (#637): `QueueEntry` gains `ground_truth_unreachable_condition` (the
+  `ground-truth-unreachable` streak's stable per-site key — a changed key starts a new
+  streak; `null` backfilled, cleared with the other entry dedup markers).
 - **`max_slots`** bounds live units (`assigned | running | recovering`); dependency
   edges gate readiness — an issue with an unmerged dependency, and a batch behind an
   unmerged batch, are never runnable.
@@ -1597,14 +1754,32 @@ predicate in `anchor-close.ts`) over `blocked`/`done` batches touched within the
   issue's author can close their own issue. One more path counts for a hand close: a
   PR of the project's repository, MERGED into the base, that GitHub lists as closing
   the issue (`closedByPullRequestsReferences` — `Closes #N` parsed but not acted on,
-  the imboard#4116 shape); that still needs a merge, i.e. write access. That reference must
-  also have merged AFTER the member's last reopen (#799): one merged before it did not finish
-  the issue — that is why it was reopened — so it reads `member-closed-by-hand-ref-pr-<n>-predates-reopen`
-  (or `…-merge-time-unreadable`), and a reopen timeline that cannot be read reads
-  `member-closed-by-hand-reopen-unreadable` — needs-operator either way, never closable. A member
-  never reopened is unaffected. Remedy: a new PR or commit that closes the member, or close the
-  anchor by hand. A member issue that no longer resolves
-  (deleted/transferred) reads `member-missing` — needs-operator, not an outage.
+  the imboard#4116 shape); that still needs a PR merged by someone with write access — though
+  not necessarily by whoever wrote its `Closes #N`. That reference must also have merged inside
+  the member's last open stretch, on every hand close: strictly AFTER the stretch began — the
+  last reopen (#799; one merged before it did not finish the issue, that is why it was
+  reopened: `member-closed-by-hand-ref-pr-<n>-predates-reopen`), or, never reopened, the
+  issue's creation (#850; a PR merged before the issue existed can only have been linked by an
+  edit made after the fact: `…-predates-issue`) — and no later than its close (#850; one merged
+  after the close did not back it: `…-postdates-close`). The bounds are on when the PR merged,
+  not on when its `Closes #N` was written: a reference edited into a PR that merged inside the
+  stretch still vouches (#850 chose the time bound over reading when the link was made). A
+  reopen, creation or close time that cannot be read refuses outright, however long the
+  reference list (`member-closed-by-hand-reopen-unreadable`, `…-created-time-unreadable`,
+  `…-close-time-unreadable`); a reference whose merge time cannot be read never vouches
+  (`…-merge-time-unreadable`). A refusal names only the PRs failing the first bound that
+  applies — merge time unreadable, then merged after the close, then merged before the
+  stretch — so a mixed list does not name every rejected PR. The reference list is read one
+  page (100) deep: a longer list whose first page holds no reference that vouches reads
+  `unknown` (`member-closed-by-hand-refs-truncated`, #850), not a refusal — one may be on a
+  later page — unless another member already makes the anchor needs-operator (the truncated
+  member is then named among its reasons). It does not clear on a re-read: list every reference
+  with `gh api graphql --paginate -f query='query($endCursor:String){repository(owner:"<owner>",name:"<name>"){issue(number:<n>){closedByPullRequestsReferences(first:100,after:$endCursor,includeClosedPrs:true){pageInfo{hasNextPage endCursor} nodes{number merged mergedAt baseRefName}}}}}'`
+  and close the anchor by hand if one merged into the base inside the stretch. Remedy for a
+  refusal: a new PR or commit that closes the member, or close the anchor by hand — reopening
+  and re-closing the member does not help (the reference then predates the reopen). A member
+  issue that no longer resolves (deleted/transferred) reads `member-missing` — needs-operator,
+  not an outage.
 - **Never over a failure trail.** Any evicted member, any member in a failure status
   (`ISSUE_UNIVERSAL_FAILURE_EDGES` + `evicted`/`handed-back`/`requeued`), any member requeued out of
   the batch, a dissolved/stopped batch, or a `decision-pending` label on the anchor or a
@@ -1682,7 +1857,8 @@ predicate in `anchor-close.ts`) over `blocked`/`done` batches touched within the
 Everything else is surfaced, never closed: `sched status --anchors` (opt-in; `status`
 makes no GitHub call without it) lists each still-open anchor of a batch no longer in
 flight as `closable`, `needs-operator` or `unknown`, with every member's GitHub and
-ledger state, stopping its reads at the first failed one. A blocked batch milestone now
+ledger state, stopping its reads at the first failed one (a truncated reference list's
+`unknown` is not a failed read and stops nothing, #850). A blocked batch milestone now
 reads `next=operator`, not `next=done`.
 
 Journal: `anchor-closed` (including "found already closed") and `anchor-close-failed`
@@ -1786,8 +1962,21 @@ re-screened at all — but neither is closed by it.
 
 ## The PR watcher + tail work (#468)
 
-Dispatched runs park their PR on `auto-merge` (detached ship mode — the default
-prompt instructs it) and exit. The engine owns everything after the park:
+Dispatched runs park their PR on `auto-merge` (detached ship mode) and exit — **only where
+a merge mechanism is confirmed** (#887). sched's watch only WAITS for a merge; it never merges,
+so the default prompts render `{ship_clause}` from `GroundTruth.mergeMechanism()` (`gh api
+repos/<r>` `allow_auto_merge` + allowed methods, and a scan of the remote default branch's
+`.github/workflows` for a label watcher, both read through the GitHub API so a stale local
+`origin/*` ref can never hide a newly added watcher — #921; cached 10 min). A confirmed mechanism still parks only
+after `gh pr view --json autoMergeRequest` reads back non-null (the label is not proof); with no
+confirmed mechanism — or an unknown one — the run ships **attached** (waits for checks, merges
+with an allowed method) and blocks `no-merge-mechanism` if it cannot. A batch tail needs a
+confirmed *watcher* (native auto-merge alone never confirms a detached batch ship). An
+`awaiting-merge` milestone carrying `ship_mode=attached` is not a park. Backstop for custom
+prompts: a parked, OPEN PR with no auto-merge request and no watcher (positively read absent —
+unknown never counts) that persists past 10 minutes fails `no-merge-mechanism`; the batch PR
+watch has the same backstop (#921): the batch blocks `no-merge-mechanism`, and the onset marker
+(`BatchEntry.no_merge_mechanism_since`) resets when a request lands. The engine owns everything after the park:
 
 1. **Park detection (AC1)** — an agent exit whose latest milestone is the ship
    phase's `awaiting-merge` (with `pr=`) is a VERIFIED park, not an unverified

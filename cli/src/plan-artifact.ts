@@ -12,7 +12,8 @@
  * command layer (`commands/plan.ts`).
  */
 
-import { MAX_BODY_LENGTH, RUNSTATE_MARKER } from './runstate';
+import { isTrustedAuthorAssociation } from '@ai-dossier/core';
+import { MAX_BODY_LENGTH, type ParsedMilestone, parseMilestone, RUNSTATE_MARKER } from './runstate';
 
 /**
  * Opens every plan artifact comment. Unlike the runstate marker, it carries `head=` — the
@@ -244,6 +245,99 @@ export function findLatestPlan(commentBodies: string[]): LatestPlan | null {
   return latest;
 }
 
+/** A comment as the trusted-plan read needs it: body plus who wrote it. */
+export interface AuthoredComment {
+  body: string;
+  /** `authorAssociation` as gh reports it; `undefined` when gh did not report the field. */
+  authorAssociation?: string;
+  /** The author's login, for naming an ignored artifact. */
+  author?: string;
+}
+
+/** A plan:v1 artifact skipped because its author is not owner/member/collaborator (#808). */
+export interface IgnoredPlan {
+  /** Index into the comments array that was passed in. */
+  index: number;
+  author: string;
+  /** `authorAssociation` as reported, or `'unreported'` when gh omitted the field. */
+  association: string;
+}
+
+/** The latest TRUSTED plan, plus every newer untrusted artifact that was passed over. */
+export interface TrustedPlanRead {
+  latest: LatestPlan | null;
+  /** Untrusted plan:v1 artifacts, oldest first — only those NEWER than `latest` matter to a caller. */
+  ignored: IgnoredPlan[];
+}
+
+/**
+ * The latest plan artifact whose author is a repo owner / org member / collaborator (#808).
+ *
+ * A plan:v1 artifact is an issue comment anyone can post, and the deterministic
+ * pre-screen acts on its predicted files (the `file-count` exclusion and `path-floor`
+ * review reasons). Reading the LATEST artifact regardless of author lets a stranger post a
+ * benign artifact over a legitimate one and dodge both. This read walks the comments and
+ * only considers an artifact from a trusted author association (`isTrustedAuthorAssociation`), falling back to the
+ * latest trusted one. Untrusted artifacts NEWER than the chosen one are reported in
+ * `ignored` so the caller can surface them; older untrusted ones are noise and dropped.
+ *
+ * Fails closed: an absent or non-string `authorAssociation` is untrusted.
+ */
+export function findLatestTrustedPlan(comments: readonly AuthoredComment[]): TrustedPlanRead {
+  let latest: LatestPlan | null = null;
+  const untrusted: IgnoredPlan[] = [];
+  comments.forEach((c, index) => {
+    const parsed = parsePlanArtifact(c.body);
+    if (parsed === null) return;
+    if (isTrustedAuthorAssociation(c.authorAssociation)) {
+      latest = { artifact: parsed, index };
+    } else {
+      untrusted.push({
+        index,
+        author: c.author && c.author !== '' ? c.author : 'unknown',
+        association: c.authorAssociation ?? 'unreported',
+      });
+    }
+  });
+  const floor = (latest as LatestPlan | null)?.index ?? -1;
+  return { latest, ignored: untrusted.filter((u) => u.index > floor) };
+}
+
+/**
+ * Bodies of only the comments a trusted author posted — the input for every milestone
+ * (`runstate:v1`) read that ACTS on a comment. Fails closed like {@link findLatestTrustedPlan}.
+ */
+export function trustedCommentBodies(
+  raw: ReadonlyArray<{ body?: unknown; authorAssociation?: unknown }>
+): string[] {
+  return raw
+    .filter((c) => isTrustedAuthorAssociation(c?.authorAssociation))
+    .map((c) => (typeof c?.body === 'string' ? c.body : ''));
+}
+
+/** Project gh comments (`GhComment`-shaped, every field optional) into {@link AuthoredComment}s. */
+export function toAuthoredComments(
+  raw: ReadonlyArray<{
+    body?: unknown;
+    authorAssociation?: unknown;
+    author?: { login?: unknown } | null;
+  }>
+): AuthoredComment[] {
+  return raw.map((c) => ({
+    body: typeof c?.body === 'string' ? c.body : '',
+    authorAssociation: typeof c?.authorAssociation === 'string' ? c.authorAssociation : undefined,
+    author: typeof c?.author?.login === 'string' ? c.author.login : undefined,
+  }));
+}
+
+/** One-line warning naming the untrusted plan artifacts a trusted read skipped. */
+export function ignoredPlanWarning(ignored: readonly IgnoredPlan[]): string {
+  const who = ignored
+    .map((u) => `${JSON.stringify(u.author.slice(0, 40))} (${u.association})`)
+    .join(', ');
+  return `Ignored ${ignored.length} newer plan:v1 artifact(s) from author(s) who are not repo owner / org member / collaborator: ${who} — only their artifacts feed predicted files.`;
+}
+
 /**
  * Deterministic risk-floor patterns for the Predicted Files scan (#462 AC3).
  *
@@ -388,4 +482,57 @@ export function newestTimestamp(comments: readonly TimestampedComment[]): string
     if (newest === null || time > newest.time) newest = { at: comment.createdAt, time };
   }
   return newest?.at ?? null;
+}
+
+/** An untrusted-author milestone a trusted read skipped. */
+export interface IgnoredMilestone {
+  author: string;
+  association: string;
+  phase: string;
+  status: string;
+}
+
+/**
+ * The runstate trail restricted to trusted authors (#932), plus the untrusted milestones
+ * NEWER than the latest trusted one (older untrusted ones are noise). Fails closed: an
+ * absent or non-string `authorAssociation` is untrusted.
+ */
+export function readTrustedMilestones(
+  raw: ReadonlyArray<{
+    body?: unknown;
+    authorAssociation?: unknown;
+    author?: { login?: unknown } | null;
+  }>
+): { milestones: ParsedMilestone[]; ignored: IgnoredMilestone[] } {
+  const milestones: ParsedMilestone[] = [];
+  const untrusted: Array<IgnoredMilestone & { index: number }> = [];
+  let floor = -1;
+  raw.forEach((c, index) => {
+    const parsed = parseMilestone(typeof c?.body === 'string' ? c.body : '');
+    if (parsed === null) return;
+    if (isTrustedAuthorAssociation(c?.authorAssociation)) {
+      milestones.push(parsed);
+      floor = index;
+    } else {
+      untrusted.push({
+        index,
+        author: typeof c?.author?.login === 'string' ? c.author.login : 'unknown',
+        association: typeof c?.authorAssociation === 'string' ? c.authorAssociation : 'unreported',
+        phase: parsed.phase,
+        status: parsed.status,
+      });
+    }
+  });
+  return { milestones, ignored: untrusted.filter((u) => u.index > floor) };
+}
+
+/** One-line warning naming the untrusted milestones a trusted read skipped. */
+export function ignoredMilestoneWarning(ignored: readonly IgnoredMilestone[]): string {
+  const who = ignored
+    .map(
+      (u) =>
+        `${JSON.stringify(u.author.slice(0, 40))} (${u.association}) phase=${JSON.stringify(u.phase.slice(0, 40))} status=${JSON.stringify(u.status.slice(0, 40))}`
+    )
+    .join(', ');
+  return `Ignored ${ignored.length} newer runstate milestone(s) from author(s) who are not repo owner / org member / collaborator: ${who} — only trusted milestones drive the scheduler.`;
 }

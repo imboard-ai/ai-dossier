@@ -144,15 +144,6 @@ export async function verifyGraph(
 ): Promise<VerifyGraphOutput | VerifyGraphError> {
   const { graph_id, dossier } = input;
 
-  if (!graph_id && !dossier) {
-    return {
-      error: {
-        type: 'validation',
-        message: 'Either graph_id or dossier parameter is required',
-      },
-    };
-  }
-
   let plan: ExecutionPlan;
 
   if (graph_id) {
@@ -167,10 +158,10 @@ export async function verifyGraph(
     }
     plan = stored;
     logger.info('Verifying graph from store', { graphId: graph_id });
-  } else {
+  } else if (dossier) {
     logger.info('Resolving and verifying graph', { dossier });
     try {
-      plan = await resolvePlan(dossier!);
+      plan = await resolvePlan(dossier);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logger.error('Graph resolution failed during verify', { dossier, error: message });
@@ -178,6 +169,13 @@ export async function verifyGraph(
         error: { type: 'resolve', message },
       };
     }
+  } else {
+    return {
+      error: {
+        type: 'validation',
+        message: 'Either graph_id or dossier parameter is required',
+      },
+    };
   }
 
   const entries = extractDossiers(plan);

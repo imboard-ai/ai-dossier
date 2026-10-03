@@ -3,10 +3,10 @@
   "dossier_schema_version": "1.0.0",
   "name": "member-cycle",
   "title": "Member Cycle — One Issue Inside a Batch, Verified Only Where It Is Cheap",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "protocol_version": "1.0",
   "status": "Draft",
-  "last_updated": "2026-09-24",
+  "last_updated": "2026-09-29",
   "objective": "Implement ONE issue in its own worktree off a shared integration branch, test it by relevance, review it at the level the scheduler assigned (review=full: full-cycle-grade, security included; review=light: at least the correctness reviewer — never zero agents), and hand over to a parent orchestrator that owns all expensive verification",
   "category": [
     "development"
@@ -57,7 +57,7 @@
     "optional": [
       {
         "name": "review",
-        "description": "Review level the scheduler assigned this member (#771): light (default) or full. full = a risk-floor issue riding the batch — full-cycle-grade review (all review-issue agents, security included). The scheduler passes it via the {review} prompt placeholder or its review=full directive.",
+        "description": "Review level the scheduler assigned this member (#771): light (default) or full. full = the member hit an E.2 review floor (risk-floor area, deploy pipeline, > 8 files, > 400 lines, broad/unknown test scope) and gets full-cycle-grade review (all review-issue agents, security included). The scheduler passes it via the {review} prompt placeholder or its review=full directive.",
         "type": "string",
         "default": "light"
       }
@@ -71,13 +71,13 @@
   "content_scope": "self-contained",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "d7eec3bcf9d6349552ee86ee395c6012332233fdedfc2339319951f9e88340cd"
+    "hash": "b71bb8454b5dddad85bffa7964b289a40c8ee12c198dfb5e62a317b8f52925ee"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "FF6L0xndB/DRVn9lpjOuXOmC1MiLt8Fj5aPVGtW+Odpa0XGNV6H3MX1dvRERuNLlNVzZaRenhJKnyfyBa8l2AQ==",
+    "signature": "3hpQuqKfJogYSOYQtMQ4sVfzU6nImtN5EpwEhrnU9TamkAriCahcPB+hYqnWIWInNn4FqATWG3nQloWeqromAA==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-24T09:21:21.057Z",
+    "signed_at": "2026-09-29T19:06:52.152Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -228,7 +228,7 @@ ai-dossier run imboard-ai/git/review-issue --pull
 
 | Level | Agents that MUST run | Notes |
 |---|---|---|
-| `review=full` | review-issue tier **`full`** — every dimension agent (DRY, **Security**, Supportability, Maintainability, Documentation, Convention/Contract) **plus Conformance** — forced regardless of what the diff's paths would select | this member is a risk-floor issue (auth, billing, security, migrations, deploy) riding the batch; its review is what full-cycle would have given it. review-issue's time floor applies (full tier < 5 min = not performed → redo once). |
+| `review=full` | review-issue tier **`full`** — every dimension agent (DRY, **Security**, Supportability, Maintainability, Documentation, Convention/Contract) **plus Conformance** — forced regardless of what the diff's paths would select | this member rides the batch as `review=full` (E.2 rules 1, 4, 5, 6 or a broad/unknown test scope: risk-floor area, deploy pipeline, > 8 files, > 400 lines, `test_scope=broad`/`unknown`) — not necessarily a risk-floor issue; its review is what full-cycle would have given it. review-issue's time floor applies (full tier < 5 min = not performed → redo once). |
 | `review=light` | review-issue's own Stage 1 + Stage 2 selection, **with a floor of the correctness reviewer: Conformance** (Agent 7) | when the issue has no AC list, Conformance still runs against the issue body's stated fix/requirements instead of dropping out. A Stage 1 risk-floor path in your diff promotes you to `full` — say so. |
 
 Visual Conformance (Agent 8) does not run here — a member has no runtime (review-issue's own batch note). If your change is visual, say so in the handover for the parent's single browser pass.
@@ -297,5 +297,5 @@ Every rule above is here because its absence was measured in a real batch.
 - **Commit before claiming verified** — a repair verified against an uncommitted working tree shipped a branch that did not contain it; CI found it, at the cost of a cycle.
 - **Prove a pre-existing failure** — one member did exactly this, and it is the reason the parent did not chase a failure that was not the batch's.
 - **Handing back is valued** — a member found its issue depended on unmerged work, declined to copy that work forward, and handed back in four minutes. Forcing it would have cost far more and produced a divergent duplicate.
-- **Never zero review agents** — imboard#4178's member (run `r-4178-928b`, batch `b-20260924-01`) posted `phase=review status=done agents_done=0`: nothing looked at the diff, and the parent had to review it by hand before the batch PR. With risk-floor issues now admitted into batches as `review=full` members (#770 Option A), the member review is load-bearing.
+- **Never zero review agents** — imboard#4178's member (run `r-4178-928b`, batch `b-20260924-01`) posted `phase=review status=done agents_done=0`: nothing looked at the diff, and the parent had to review it by hand before the batch PR. With review-floor issues (risk-floor area, deploy pipeline, > 8 files, > 400 lines, broad/unknown test scope) now admitted into batches as `review=full` members (#770 Option A, #818, #927, #939), the member review is load-bearing.
 - **A member's own tests can pin a bug.** One asserted grammatically wrong copy; a repo-wide guard caught what the member's expectations encoded. Your tests are necessary, not sufficient — which is why the shared gates exist and why you must not route around them.

@@ -1,0 +1,97 @@
+---
+import Base from '../layouts/Base.astro';
+
+const repo = 'https://github.com/imboard-ai/ai-dossier';
+const log = `${repo}/issues/880`;
+const pr = (n: number) => `${repo}/pull/${n}`;
+---
+<Base title="Internal case study: an autopilot day on our own repo" description="Internal case study (dogfooding): what a supervised AI autopilot loop shipped on the ai-dossier repository on 2026-09-29, what it caught, and what broke.">
+  <p class="banner" role="note">
+    <strong>Internal case study (dogfooding).</strong> This describes the project team using its own tooling on its
+    own repository. It is not a customer story, and nobody outside the project is quoted or implied.
+  </p>
+
+  <h1>One autopilot day on our own repo</h1>
+  <p class="muted">Snapshot: 2026-09-29, taken while the run was still in progress. Figures cite their source: the #880 log, GitHub pull requests and releases, or the <code>gh</code> query shown.</p>
+
+  <h2>What we did</h2>
+  <p>
+    On 2026-09-29 the owner set a charter for a self-paced loop on the ai-dossier repository: work on
+    <em>automation</em>, <em>product quality</em> and <em>observability</em>, with full autonomy to merge and release once CI is
+    green and the orchestrator has reviewed the diff. The loop's persistent log is a single GitHub issue,
+    <a href={log}>#880</a>, so a dead session can be resumed from the last cycle comment.
+  </p>
+  <ul>
+    <li><strong>Orchestrator:</strong> one Claude Code session (Opus 5.5) that picks work, reviews and merges.</li>
+    <li><strong>Workers:</strong> Sonnet 5.5 subagents, one per issue or small batch, each in its own git worktree, running the repo's own <code>full-cycle-issue</code> dossier (plan, implement, test, review, PR).</li>
+    <li><strong>Guardrails:</strong> workers stop at a green-CI pull request and never merge; a budget gate stops the loop at 40% weekly Claude usage; issues claimed by another session, or labeled <code>in-progress</code> or <code>blocked</code>, are skipped; product decisions are written up as options for the owner rather than guessed.</li>
+  </ul>
+
+  <h2>What came out</h2>
+  <table>
+    <thead><tr><th>Figure</th><th>Value</th><th>Source</th></tr></thead>
+    <tbody>
+      <tr><td>Cycles completed</td><td>10 (an 11th was in progress)</td><td><a href={log}>#880</a> cycle comments</td></tr>
+      <tr><td>Pull requests merged from the loop's cycles</td><td>25 (from Cycle 1 to Cycle 10)</td><td>PR numbers named in the #880 cycle comments</td></tr>
+      <tr><td>All PRs merged to <code>main</code> in the same window</td><td>29, including 4 from a parallel scheduler session; +17,076 / −1,563 lines</td><td><a href={`${repo}/pulls?q=is%3Apr+is%3Amerged+merged%3A%3E%3D2026-09-29`}>GitHub search: merged since 2026-09-29</a>, counting those after the 08:28 UTC start</td></tr>
+      <tr><td>Releases published</td><td>11 GitHub releases: CLI <code>cli-v0.72.0</code> to <code>cli-v0.80.0</code> (10, including 0.76.1) and <code>vscode-v0.1.0</code></td><td><a href={`${repo}/releases`}>Releases</a> page, <code>gh release list</code></td></tr>
+      <tr><td>Registry dossiers republished</td><td>3: <code>ship-issue</code> 1.18.0, <code>full-cycle-issue</code> 3.17.0, <code>fleet-cycle</code> 1.9.0</td><td>Cycle 9 comment in <a href={log}>#880</a></td></tr>
+      <tr><td>Weekly Claude usage</td><td>6% at start, 20% at the end of Cycle 9 (account-wide, so other sessions count)</td><td>Usage readings in the #880 cycle comments; the usage API returned HTTP 503 at Cycle 10 close</td></tr>
+    </tbody>
+  </table>
+  <p>Shipped items, all adopter-facing or reliability work:</p>
+  <ul>
+    <li><a href={pr(901)}>#901</a>: standalone no-Node CLI binaries (Node SEA) with <code>install.sh</code>, released for 5 platforms; verified end to end on a host with no Node on PATH.</li>
+    <li><a href={pr(914)}>#914</a>: VS Code extension MVP (inline diagnostics, completion, dry-run preview), released as <code>vscode-v0.1.0</code>.</li>
+    <li><a href={pr(909)}>#909</a>: deep static dry-run preview with a 0-100 risk score, also exposed through the MCP server. Every surface says it is a preview, not a safety guarantee.</li>
+    <li><a href={pr(903)}>#903</a>: actionable checksum and signature failure messages, a confirmation prompt for high-risk dossiers, key export and revoke.</li>
+    <li><a href={pr(916)}>#916</a>: only OWNER, MEMBER and COLLABORATOR authors are trusted for <code>plan:v1</code> artifacts posted as issue comments (a partial fix; see the open gaps below).</li>
+    <li>Scheduler fixes: <a href={pr(886)}>#886</a>, <a href={pr(898)}>#898</a>, <a href={pr(917)}>#917</a>, <a href={pr(918)}>#918</a>, <a href={pr(923)}>#923</a>; and a publish safety net, <a href={pr(881)}>#881</a>, because GitHub most likely dropped a push event and skipped a release (a hypothesis in the log, supported by the evidence, not proven).</li>
+  </ul>
+
+  <h2>How quality was controlled</h2>
+  <p>Two independent review layers ran on the workers' pull requests: a review agent spawned by each worker (one Cycle 2 worker skipped this phase), then the orchestrator reading the diff, CI results and acceptance criteria before merging. The orchestrator's own small PRs (#906, #910) had no worker review. The orchestrator also held merges. Defects caught before they shipped, as recorded in #880:</p>
+  <ul>
+    <li><a href={pr(917)}>#917</a> (merge-mode detection): the worker's review agent reported <strong>3 HIGH and 7 MEDIUM</strong> findings, including that the fix did not work on this very repository. All were addressed with tests before merge (3 further findings were withdrawn as false positives).</li>
+    <li><a href={pr(916)}>#916</a> (author trust): the worker's adversarial review said "merge", but its HIGH finding described the core attack, and other readers still trusted any commenter. The orchestrator held the merge until those paths, a duplicated trust set and a bogus association value were fixed.</li>
+    <li><a href={pr(922)}>#922</a> (focused test gate): review found that a renamed file hid its source workspace, so a red change could pass the gate. Fixed by diffing without rename detection.</li>
+    <li><a href={pr(914)}>#914</a> (VS Code extension): the worker's review agent found 4 real bugs (an off-by-one line in YAML errors, extension tests that never ran in CI, completion breaking on wide JSON indents, stale diagnostics after closing a file).</li>
+    <li><a href={pr(909)}>#909</a> (dry-run): the worker's final commit never landed because a commit hook failed with its output suppressed, yet the worker reported it done. The orchestrator noticed in review and shipped it as <a href={pr(911)}>#911</a>. Process change: the orchestrator now checks <code>git status</code> and unpushed commits in the worker's worktree before merging.</li>
+  </ul>
+
+  <h2>What failed, and what we did about it</h2>
+  <ul>
+    <li><strong>Flaky tests were partly a product bug.</strong> A runstate flake in <a href={pr(894)}>#894</a> was a run-id collision (2 random bytes, about 1 in 65,536); fixed and covered by a deterministic test. Honest caveat from the log: neither flake reproduced locally in 90 and 60 attempts, so those fixes rest on code reading.</li>
+    <li><strong>Release automation needed two orchestrator fixes and is still not clean.</strong> The binaries build fired before npm's listing had caught up, and two runs raced to create the same release (HTTP 403). Fixes: <a href={pr(906)}>#906</a> and <a href={pr(910)}>#910</a>. The 403s then recurred in two serialized runs, so "race" did not explain them; the log had mis-diagnosed it. Root cause is open in <a href={`${repo}/issues/937`}>#937</a>.</li>
+    <li><strong>Workers did not always follow their own procedure.</strong> One Cycle 2 worker skipped the review phase, and after a merge one worker kept editing (#922 then #925).</li>
+    <li><strong>Review reports were not delivered.</strong> Review agents in Cycles 9 and 10, and all four sub-reviewers of the later audit, finished without their report reaching the requester. This was harness behavior, not worker behavior, and prompt changes could not fix it; the orchestrator now owns relaying reports.</li>
+    <li><strong>Reviewers trusted a stale snapshot.</strong> Reviewers read <code>examples/</code>, which lags the registry, and raised 3 false findings. Reviewers are now told to read the registry or <code>packages/</code>.</li>
+    <li><strong>The most common failure was "done but never committed".</strong> Besides #909 (above), another session had 16 files stranded in a worktree. The stated missing invariant: commit and push before any long wait.</li>
+    <li><strong>Reviewed and merged does not mean finished.</strong> A later independent 6-hour audit of the day's riskiest PRs found HIGH-severity gaps in two shipped changes; fixes were in progress at the snapshot: <a href={`${repo}/issues/932`}>#932</a> (the scheduler still acts on runstate milestones posted by any commenter, so the author-trust work in #916 covers only part of the surface) and <a href={`${repo}/issues/933`}>#933</a> (the dry-run analyzer from #909 under-reports some dangerous dossiers as low risk)</li>
+    <li><strong>Tooling friction.</strong> Harness worktree isolation fails on this repo's nested <code>main/.git</code> layout, so workers create worktrees by hand; the permission classifier blocked unreviewed subagent merges until a scoped rule was added; a PR's CI did not start for about 25 minutes because of a merge conflict.</li>
+  </ul>
+
+  <h2>What stayed with humans</h2>
+  <p>
+    Product and spending decisions (website hosting, telemetry, JetBrains plugin, monetization SDK, Marketplace
+    publishing) were posted as options with a recommendation and resolved by the owner. Accounts and secrets for
+    signing and the VS Code Marketplace remain owner-only.
+  </p>
+
+  <h2>Limits of this evidence</h2>
+  <ul>
+    <li>One repository, one day, one team, and the team is the tool's author. It is an existence proof, not a benchmark.</li>
+    <li>We did not measure how long a human would have taken, so we make no time-saved claim.</li>
+    <li>Lines changed and PR counts measure activity, not value. Several PRs were fixes to the automation itself.</li>
+    <li>Some fixes could not be reproduced against a failing case, as noted above.</li>
+  </ul>
+  <p>Source log: <a href={log}>issue #880</a>. Related reports in <a href={`${repo}/tree/main/docs/reports`}><code>docs/reports</code></a>.</p>
+</Base>
+
+<style>
+  .banner { border: 1px solid var(--warn); border-left-width: 4px; border-radius: var(--radius-sm); padding: 14px 18px; background: var(--bg-soft); margin: 0 0 32px; }
+  td:first-child { min-width: 11em; }
+  h1 { font-size: var(--step-3); }
+  h2 { padding-top: 1.2rem; border-top: 1px solid var(--line); }
+  li { margin: .5rem 0; }
+</style>

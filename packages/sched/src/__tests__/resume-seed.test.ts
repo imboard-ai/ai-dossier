@@ -8,6 +8,7 @@ describe('createExecResumeSeeder', () => {
     baseBranch: 'main',
     batch: 'b-840',
     worktree: '/repo/worktrees/batch-b-840-m1-840',
+    revertedCommits: ['abcdef1234567890abcdef1234567890abcdef12'],
   };
 
   it('mints a run, then posts a setup-done milestone on the member branch', () => {
@@ -21,8 +22,28 @@ describe('createExecResumeSeeder', () => {
     );
 
     expect(seeder(840, seed)).toEqual({ ok: true, run: 'r-840-abc123' });
-    expect(calls[0]).toEqual(['ai-dossier', 'runstate', 'mint', '--issue', '840']);
-    const post = calls[1] ?? [];
+    expect(calls.slice(0, 4)).toEqual([
+      ['git', '-C', '/repo/worktrees/batch-b-840-m1-840', 'fetch', 'origin', 'main'],
+      ['git', '-C', '/repo/worktrees/batch-b-840-m1-840', 'reset', '--hard', 'origin/main'],
+      [
+        'git',
+        '-C',
+        '/repo/worktrees/batch-b-840-m1-840',
+        'cherry-pick',
+        'abcdef1234567890abcdef1234567890abcdef12',
+      ],
+      [
+        'git',
+        '-C',
+        '/repo/worktrees/batch-b-840-m1-840',
+        'push',
+        '--force-with-lease',
+        'origin',
+        'batch/b-840-m1-840',
+      ],
+    ]);
+    expect(calls[4]).toEqual(['ai-dossier', 'runstate', 'mint', '--issue', '840']);
+    const post = calls[5] ?? [];
     expect(post.slice(0, 11)).toEqual([
       'ai-dossier',
       'runstate',

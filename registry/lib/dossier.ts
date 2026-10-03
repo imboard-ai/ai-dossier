@@ -9,6 +9,26 @@ import {
 } from './constants';
 import type { DossierValidation, NamespaceValidation } from './types';
 
+// biome-ignore lint/suspicious/noControlCharactersInRegex: intentional — stripping dangerous chars
+const CONTROL_CHARS = /[\x00-\x1f\x7f]/g;
+
+/**
+ * Strip control characters (newlines included) and surrounding whitespace from text that is
+ * interpolated into a git commit message — the changelog and the publisher login. Without it a
+ * `\n` in the value could forge extra commit-message lines, including trailers.
+ */
+export function sanitizeCommitText(text: string): string {
+  return text.replace(CONTROL_CHARS, '').trim();
+}
+
+/**
+ * Normalize an actor login (publisher / remover) for commit trailers and the manifest:
+ * sanitized like commit text; empty after sanitizing → null (nothing is recorded).
+ */
+export function sanitizeActor(login: string | null | undefined): string | null {
+  return login ? sanitizeCommitText(login) || null : null;
+}
+
 /**
  * Parse frontmatter from dossier content.
  * Delegates to @ai-dossier/core's parseDossierContent.

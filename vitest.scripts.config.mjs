@@ -11,6 +11,7 @@ import { defineConfig } from 'vitest/config';
 // package list that already lives in the root `workspaces` field.
 export default defineConfig({
   test: {
+    globalSetup: ['./test-support/isolated-home.mjs'],
     include: ['scripts/**/*.test.mjs'],
     exclude: ['**/node_modules/**'],
     environment: 'node',

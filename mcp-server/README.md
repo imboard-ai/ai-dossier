@@ -4,7 +4,11 @@
 [![npm downloads](https://img.shields.io/npm/dm/@ai-dossier/mcp-server)](https://www.npmjs.com/package/@ai-dossier/mcp-server)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](https://github.com/imboard-ai/ai-dossier/blob/main/LICENSE)
 
-MCP server that lets any MCP-capable LLM discover, verify, and run dossiers — portable, signed skills — through the [Model Context Protocol](https://modelcontextprotocol.io/). If you've used Claude Code skills, dossiers will feel familiar: they're skills you can verify, version, and pull from a registry.
+**Use one portable AI-agent skill across Claude Code, Codex, OpenCode, and MCP-compatible workflows.**
+
+`@ai-dossier/mcp-server` is for teams that want their MCP clients to discover, verify, and run trusted skills through the [Model Context Protocol](https://modelcontextprotocol.io/). Dossiers are portable, signed, versioned skills: familiar to Claude Code users, but verifiable and registry-backed for any compatible LLM tool.
+
+> **Part of the ai-dossier ecosystem**: use [`@ai-dossier/cli`](../cli/README.md) to author and install skills, [`@ai-dossier/core`](../packages/core/README.md) for verification, and the [ai-dossier project](https://github.com/imboard-ai/ai-dossier) for the complete platform.
 
 ## Installation
 
@@ -63,7 +67,7 @@ Then try:
 | Tool | Description |
 |------|-------------|
 | `list_dossiers` | Discover available dossiers in a directory. Scans for `*.ds.md` files and returns metadata. |
-| `read_dossier` | Read and parse a dossier file. Returns metadata and content. Should be called after `verify_dossier` passes. |
+| `read_dossier` | Read and parse a dossier file. Returns metadata and content. Should be called after `verify_dossier` passes. Pass `dry_run: true` to also get `dry_run_plan` (static preview). |
 | `search_dossiers` | Search the dossier registry for available dossiers by keyword and optional category filter. |
 
 ### Security Verification
@@ -78,7 +82,7 @@ Then try:
 | Tool | Description |
 |------|-------------|
 | `resolve_graph` | Resolve a dossier dependency graph into an execution plan. Produces a DAG with ordered phases, parallel groups, and conflict detection. |
-| `start_journey` | Start a journey session from a resolved and verified graph. Returns the first step's dossier content with injected context. |
+| `start_journey` | Start a journey session from a resolved and verified graph. Returns the first step's dossier content with injected context. With `dry_run: true` no session is created and a static per-step preview (files, commands, network, env, risk score) is returned instead. The preview is derived from declared metadata and code blocks; the executing agent may take other actions and the score is a heuristic, not a safety guarantee. |
 | `step_complete` | Mark the current journey step as complete or failed. Advances to the next step with context from previous outputs. |
 | `get_journey_status` | Get the current state of a journey: completed steps, current step, remaining steps, and collected outputs. |
 | `cancel_journey` | Cancel an active journey session. Returns a summary of what completed before cancellation. |

@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# refresh-fleet.sh — push the latest CLI, dossiers and skills to every machine.
+# refresh-fleet.sh — push the latest CLI, dossiers and every imboard-ai skill to every machine.
 #
 # Run this from **wls**, which is the only host with ssh reach to the others.
 #
-#   bash scripts/refresh-fleet.sh                    # CLI + default dossier/skill set
+#   bash scripts/refresh-fleet.sh                    # CLI + dispatch profiles + default dossiers + every imboard-ai registry skill
 #   bash scripts/refresh-fleet.sh --cli-only         # just bump the CLI everywhere
 #   bash scripts/refresh-fleet.sh --hosts wls,hcc    # subset of machines
 #   bash scripts/refresh-fleet.sh --profiles-file path # use a different profile source
-#   bash scripts/refresh-fleet.sh imboard-ai/git/ship-issue   # extra targets, appended
+#   bash scripts/refresh-fleet.sh --profile-projects a,b # also sync per-project scheduler profile maps
+#   bash scripts/refresh-fleet.sh --usage-sync       # afterwards merge the per-host token ledgers (#782)
+#   bash scripts/refresh-fleet.sh imboard-ai/git/ship-issue   # extra dossiers to pull, appended
 #
 # WHY THIS EXISTS
 # `ai-dossier run <name> --pull` resolves the newest version at call time, but three things
@@ -16,12 +18,28 @@
 #   2. the local dossier cache
 #   3. installed Claude Code skills and their opencode wrappers
 #
+# SKILLS ARE NOT LISTED HERE
+# Skill refresh is `ai-dossier install-skill --all --owner imboard-ai --fresh` on each host
+# (CLI >= 0.82.0, #955/#956): it installs every registry skill the owner publishes (a
+# dossier named *-skill or tagged `skill`), so a newly published skill needs no edit to this
+# script. It also writes the opencode wrapper for each skill it installs (on hosts where opencode
+# is installed); it does NOT prune
+# orphaned wrappers or wrap skills from other owners (the old separate `sync-skills` step
+# did) — run `ai-dossier sync-skills` by hand if that is needed. Hosts with an older CLI fail
+# that step with a clear message. A skill-level failure fails the host; a collision (two
+# registry skills sharing a basename, or a skills dir holding a different dossier) is never
+# overwritten — it is printed as a WARN line, flagged in the per-host summary and the final
+# line, but does not fail the run, because refreshing again cannot fix it. `--force` is
+# deliberately NOT passed, so a collision can never be silently overwritten. An install that
+# reports zero skills is treated as a failure (registry unreachable or owner filter wrong).
+#
 # TRAPS THIS AVOIDS (each one cost real time before)
 # - A repo-local `node_modules/.bin/ai-dossier` or stray `~/node_modules` SHADOWS the global
 #   install. We resolve the global binary explicitly and print the version we actually used.
 # - Remote non-login shells have no nvm on PATH, so `ssh host 'ai-dossier …'` fails with
 #   "command not found". Every remote command sources nvm first.
-# - A step that prints nothing is NOT a step that succeeded. Every step reports ok/FAIL, and
+# - A step that prints nothing is NOT a step that succeeded. Every step reports ok/WARN/FAIL
+#   (a WARN on the skill step is a collision, which does not fail the run), and
 #   the script exits non-zero if any host had any failure.
 # - An `ok` on the install step does NOT mean the host is current (#696): a host can
 #   install "successfully" and still resolve the previous release. The version step
@@ -33,6 +51,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOSTS_DEFAULT="wls,hcc,hcc2"
 HOSTS="$HOSTS_DEFAULT"
 CLI_ONLY=0
+USAGE_SYNC=0
 EXTRA_TARGETS=()
 PROFILE_FILE="${SCHED_PROFILE_FILE:-$SCRIPT_DIR/sched-fleet/dispatch-profiles.json}"
 BOOTSTRAP_FILE="${SCHED_BOOTSTRAP_FILE:-$SCRIPT_DIR/sched-fleet/bootstrap.sh}"
@@ -40,12 +59,14 @@ CRON_LIB_FILE="${SCHED_CRON_LIB_FILE:-$SCRIPT_DIR/sched-fleet/cron-lib.sh}"
 PROFILE_PROJECTS="${SCHED_PROFILE_PROJECTS:-}"
 PROFILE_FLEET_HOME="${SCHED_PROFILE_FLEET_HOME:-$HOME/.dossier/reset-fleet}"
 
-# The dossiers and skills worth force-refreshing everywhere. Skills are installed AND
-# wrapper-synced; plain dossiers are pulled into cache.
-SKILLS=(
-  "imboard-ai/skills/batch-cycle-skill"
-  "imboard-ai/skills/fleet-cycle-skill"
-)
+# Registry owner whose skills are installed via `install-skill --all`, and the first CLI
+# release that has --all / --owner / --json batch output.
+SKILL_OWNER="imboard-ai"
+MIN_SKILL_CLI="0.82.0"
+SEMVER_RE='^v?[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]*)?$'
+
+# The dossiers worth force-refreshing into the cache everywhere (skills come from
+# `install-skill --all`, not from a list).
 DOSSIERS=(
   "imboard-ai/git/member-cycle"
   "imboard-ai/git/batch-integrate"
@@ -57,13 +78,14 @@ DOSSIERS=(
 while [ $# -gt 0 ]; do
   case "$1" in
     --cli-only) CLI_ONLY=1 ;;
+    --usage-sync) USAGE_SYNC=1 ;;
     --hosts) HOSTS="${2:?--hosts needs a comma-separated list}"; shift ;;
     --hosts=*) HOSTS="${1#*=}" ;;
     --profiles-file) PROFILE_FILE="${2:?--profiles-file needs a JSON path}"; shift ;;
     --profiles-file=*) PROFILE_FILE="${1#*=}" ;;
     --profile-projects) PROFILE_PROJECTS="${2:?--profile-projects needs comma-separated scheduler slugs}"; shift ;;
     --profile-projects=*) PROFILE_PROJECTS="${1#*=}" ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    -h|--help) awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"; exit 0 ;;
     -*) echo "unknown option: $1" >&2; exit 2 ;;
     *) EXTRA_TARGETS+=("$1") ;;
   esac
@@ -89,6 +111,7 @@ AD="$(npm root -g 2>/dev/null)/@ai-dossier/cli/bin/ai-dossier";
 
 declare -A HOST_STATUS
 FAILED=0
+COLLISION_HOSTS=0
 
 # $1 >= $2 ? (semver-ish; same comparison as fleet-cli-audit.sh)
 ver_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" = "$2" ]; }
@@ -356,21 +379,123 @@ NODE
   PROFILE_SYNC_CMD="mkdir -p \"\$HOME/.dossier\" && flock -x \"\$HOME/.dossier/.dispatch-profile-refresh.lock\" env SCHED_PROFILE_B64='$PROFILE_B64' SCHED_PROFILE_PROJECTS='$PROFILE_PROJECTS' SCHED_PROFILE_FLEET_HOME_B64='$PROFILE_FLEET_HOME_B64' SCHED_BOOTSTRAP_B64='$BOOTSTRAP_B64' SCHED_CRON_LIB_B64='$CRON_LIB_B64' node -e '$PROFILE_SYNC_SCRIPT'"
 fi
 
-run_on() {  # run_on <host> <label> <command>
-  local host="$1" label="$2" cmd="$3" out rc
+# print_tail <text>: last 4 lines, indented, control characters stripped (remote-controlled).
+print_tail() { printf '%s\n' "$1" | tail -4 | LC_ALL=C tr -d '\000-\010\013-\037\177' | sed 's/^/         /'; }
+
+# host_exec <host> <command>: run on the host (local shell for wls), set OUT and RC.
+host_exec() {
+  local host="$1" cmd="$2"
   if [ "$host" = "wls" ] || [ "$host" = "$(hostname)" ]; then
-    out=$(bash -lc "$REMOTE_PRELUDE
-$cmd" 2>&1); rc=$?
+    OUT=$(bash -lc "$REMOTE_PRELUDE
+$cmd" 2>&1); RC=$?
   else
-    out=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" "$REMOTE_PRELUDE
-$cmd" 2>&1); rc=$?
+    OUT=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" "$REMOTE_PRELUDE
+$cmd" 2>&1); RC=$?
   fi
-  if [ $rc -eq 0 ]; then
+}
+
+run_on() {  # run_on <host> <label> <command>
+  local host="$1" label="$2" cmd="$3"
+  host_exec "$host" "$cmd"
+  if [ $RC -eq 0 ]; then
     echo "    ok   $label"
   else
-    echo "    FAIL $label (exit $rc)"
-    echo "$out" | tail -4 | sed 's/^/         /'
+    echo "    FAIL $label (exit $RC)"
+    print_tail "$OUT"
     HOST_STATUS[$host]="fail"; FAILED=1
+  fi
+}
+
+# Parse `install-skill --all --json` output (stdin) into report lines. Prints
+# "SUMMARY ok=<n> skipped=<n> failed=<n> collisions=<n>" then one "FAIL|COLLISION <name> — <msg>"
+# line per problem row; a single "ERROR <msg>" line (exit 0) when the CLI reported {error} or
+# listed zero skills; exits 3 when no JSON document is found.
+SKILL_REPORT_JS='
+const raw = require("node:fs").readFileSync(0, "utf8");
+// The document may be surrounded by stderr noise (merged 2>&1): try every
+// line-start "{" against every "}" that ends a line until one parses.
+let doc;
+const starts = [...raw.matchAll(/^\{/gm)].map((m) => m.index);
+const ends = [...raw.matchAll(/\}(?=\n|$)/g)].map((m) => m.index + 1);
+for (const st of starts) {
+  for (const en of ends) {
+    if (en <= st) continue;
+    try {
+      const d = JSON.parse(raw.slice(st, en));
+      if (d && typeof d === "object" && (d.summary || d.error)) { doc = d; break; }
+    } catch {}
+  }
+  if (doc) break;
+}
+if (!doc) process.exit(3);
+// Remote-controlled text: strip control/bidi characters and fold newlines so it cannot
+// forge report lines or drive the terminal.
+const clean = (v) => String(v ?? "").replace(/\s*\n\s*/g, " / ").replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c\u2028\u2029]/g, "?").slice(0, 300);
+const n = (v) => (Number.isInteger(v) && v >= 0 ? v : 0);
+if (!doc.summary) { console.log(`ERROR ${clean(doc.error) || "no summary in install-skill output"}`); process.exit(0); }
+const s = doc.summary;
+if (n(s.ok) + n(s.skipped) + n(s.failed) + n(s.collisions) === 0) {
+  console.log("ERROR registry listed no skills for the owner (registry unreachable or owner filter wrong)");
+  process.exit(0);
+}
+console.log(`SUMMARY ok=${n(s.ok)} skipped=${n(s.skipped)} failed=${n(s.failed)} collisions=${n(s.collisions)}`);
+const rows = Array.isArray(doc.results) ? doc.results.filter((r) => r && typeof r === "object") : [];
+for (const r of rows) {
+  if (r.status === "failed") console.log(`FAIL ${clean(r.name)} — ${clean(r.message) || "install failed"}`);
+  if (r.status === "collision") console.log(`COLLISION ${clean(r.name)} — ${clean(r.message) || "collision"}`);
+}
+if (n(s.failed) > rows.filter((r) => r.status === "failed").length) {
+  console.log(`FAIL (summary) — summary.failed=${n(s.failed)} but fewer failed rows were reported`);
+}
+'
+
+# refresh_skills <host> <cli-version>: install every $SKILL_OWNER skill via --all.
+refresh_skills() {
+  local host="$1" inst="$2" label="install-skill --all --owner $SKILL_OWNER" report line
+  if ! ver_ge "$inst" "$MIN_SKILL_CLI"; then
+    echo "    FAIL $label — host CLI $inst is older than $MIN_SKILL_CLI (needs install-skill --all); upgrade the CLI on $host"
+    HOST_STATUS[$host]="fail"; FAILED=1; return
+  fi
+  host_exec "$host" "\"\$AD\" install-skill --all --owner '$SKILL_OWNER' --fresh --json"
+  local perr; perr=$(mktemp)
+  report=$(printf '%s\n' "$OUT" | node -e "$SKILL_REPORT_JS" 2>"$perr"); local prc=$?
+  if [ $prc -ne 0 ] && [ $prc -ne 3 ]; then
+    echo "    FAIL $label (report parser crashed, exit $prc: $(head -1 "$perr" | cut -c1-200))"
+    rm -f "$perr"; HOST_STATUS[$host]="fail"; FAILED=1; return
+  fi
+  rm -f "$perr"
+  if [ $prc -ne 0 ] || [ -z "$report" ]; then
+    echo "    FAIL $label (exit $RC — no parseable JSON output)"
+    print_tail "$OUT"
+    HOST_STATUS[$host]="fail"; FAILED=1; return
+  fi
+  local summary problems=0 collisions=0
+  summary=$(printf '%s\n' "$report" | sed -n 's/^SUMMARY //p')
+  if printf '%s\n' "$report" | grep -q '^ERROR '; then
+    echo "    FAIL $label — $(printf '%s\n' "$report" | sed -n 's/^ERROR //p' | head -1)"
+    HOST_STATUS[$host]="fail"; FAILED=1; return
+  fi
+  while IFS= read -r line; do
+    case "$line" in
+      FAIL\ *) echo "    FAIL skill ${line#FAIL }"; problems=1 ;;
+      COLLISION\ *) echo "    WARN skill collision ${line#COLLISION } (not overwritten)"; collisions=$((collisions + 1)) ;;
+    esac
+  done <<< "$report"
+  # The CLI exits 1 on any failure OR collision and nothing else. Exit 0 with a failing row,
+  # or any other non-zero exit (ssh drop 255, SIGKILL 137, ...) — even alongside collision
+  # rows — means something else went wrong and must not read as ok.
+  if [ $problems -eq 0 ] && [ $RC -ne 0 ] && { [ $RC -ne 1 ] || [ $collisions -eq 0 ]; }; then
+    echo "    FAIL $label (exit $RC, no failing rows reported)"; problems=1
+  fi
+  [ $collisions -gt 0 ] && COLLISION_HOSTS=$((COLLISION_HOSTS + 1))
+  if [ $problems -ne 0 ]; then
+    echo "    FAIL $label ($summary)"
+    HOST_STATUS[$host]="fail"; FAILED=1
+  elif [ $collisions -gt 0 ]; then
+    echo "    ok   $label ($summary) — $collisions collision(s) need manual attention"
+    HOST_STATUS[$host]="${HOST_STATUS[$host]} +skill-collisions"
+  else
+    echo "    ok   $label ($summary)"
   fi
 }
 
@@ -394,21 +519,16 @@ for host in "${HOST_LIST[@]}"; do
 
   # Capture the version actually installed and compare it against npm latest —
   # `ok` must mean "current", not "the command ran" (#696).
-  if [ "$host" = "wls" ] || [ "$host" = "$(hostname)" ]; then
-    out=$(bash -lc "$REMOTE_PRELUDE
-\"\$AD\" --version" 2>&1); rc=$?
-  else
-    out=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" "$REMOTE_PRELUDE
-\"\$AD\" --version" 2>&1); rc=$?
-  fi
+  host_exec "$host" '"$AD" --version'; out=$OUT; rc=$RC
   # The version is the last non-empty line; nvm/banner noise lands above it.
   inst=$(printf '%s\n' "$out" | sed '/^[[:space:]]*$/d' | tail -1)
+  inst=${inst#v}
   if [ $rc -ne 0 ] || [ -z "$inst" ]; then
     echo "    FAIL cli version (exit $rc — binary did not report a version)"
-    printf '%s\n' "$out" | tail -4 | sed 's/^/         /'
+    print_tail "$out"
     HOST_STATUS[$host]="fail"; FAILED=1
-  elif ! printf '%s' "$inst" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]*)?$'; then
-    echo "    FAIL cli version (unparseable version output: $inst)"
+  elif ! printf '%s' "$inst" | grep -Eq "$SEMVER_RE"; then
+    echo "    FAIL cli version (unparseable version output: $(printf '%s' "$inst" | LC_ALL=C tr -d '\000-\037\177' | cut -c1-120))"
     HOST_STATUS[$host]="fail"; FAILED=1
   elif [ -n "$LATEST" ] && ! ver_ge "$inst" "$LATEST"; then
     echo "    WARN cli version installed=$inst latest=$LATEST — BEHIND (npm still has the previous release, or the install landed under a different node)"
@@ -425,17 +545,53 @@ for host in "${HOST_LIST[@]}"; do
       [ -z "$d" ] && continue
       run_on "$host" "pull $d" "\"\$AD\" pull '$d' --force"
     done
-    for s in "${SKILLS[@]}"; do
-      run_on "$host" "install-skill $s" "\"\$AD\" install-skill '$s' --force --fresh"
-    done
-    run_on "$host" "sync-skills (opencode wrappers)" '"$AD" sync-skills'
+    # install-skill --all writes wrappers for the skills it installs; orphan-wrapper pruning
+    # (the old sync-skills step) is intentionally gone — see the header.
+    if [ "$rc" -eq 0 ] && printf '%s' "$inst" | grep -Eq "$SEMVER_RE"; then
+      refresh_skills "$host" "$inst"
+    else
+      echo "    FAIL install-skill --all --owner $SKILL_OWNER — skipped: host CLI version unknown"
+      HOST_STATUS[$host]="fail"; FAILED=1
+    fi
   fi
   echo
 done
+
+# #782: after every host has the current CLI, exchange the persisted token ledgers so
+# each host can answer `usage window --hosts all`. Runs from the driving host, which
+# is the only one with ssh reach (usage sync pulls from and pushes to the others).
+if [ "$USAGE_SYNC" -eq 1 ]; then
+  echo "== usage sync =="
+  OTHERS=()
+  for host in "${HOST_LIST[@]}"; do
+    { [ "$host" = "wls" ] || [ "$host" = "$(hostname)" ]; } || OTHERS+=("$host")
+  done
+  if [ "${#OTHERS[@]}" -eq 0 ]; then
+    echo "    skip no remote hosts selected"
+  else
+    OTHERS_CSV=$(IFS=,; echo "${OTHERS[*]}")
+    # HOSTS was validated above; the CSV is interpolated into a shell command, so hold the line here too.
+    if [[ ! "$OTHERS_CSV" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}(,[A-Za-z0-9][A-Za-z0-9._-]{0,62})*$ ]]; then
+      echo "    FAIL invalid host list for usage sync: $OTHERS_CSV"; exit 2
+    fi
+    out=$(bash -lc "$REMOTE_PRELUDE
+\"\$AD\" usage sync --hosts '$OTHERS_CSV'" 2>&1); rc=$?
+    printf '%s\n' "$out" | sed 's/^/    /'
+    [ $rc -ne 0 ] && FAILED=1
+  fi
+  echo
+fi
 
 echo "== summary =="
 for host in "${HOST_LIST[@]}"; do
   printf '  %-6s %s\n' "$host" "${HOST_STATUS[$host]:-unknown}"
 done
-[ "$FAILED" -eq 0 ] && echo "  all hosts refreshed" || echo "  ONE OR MORE HOSTS FAILED — see above"
+if [ "$FAILED" -ne 0 ]; then
+  echo "  ONE OR MORE HOSTS FAILED — see above"
+  [ "$COLLISION_HOSTS" -gt 0 ] && echo "  also: $COLLISION_HOSTS host(s) have skill collisions needing manual attention (see WARN lines)"
+elif [ "$COLLISION_HOSTS" -gt 0 ]; then
+  echo "  all hosts refreshed — but $COLLISION_HOSTS host(s) have skill collisions needing manual attention (see WARN lines)"
+else
+  echo "  all hosts refreshed"
+fi
 exit "$FAILED"

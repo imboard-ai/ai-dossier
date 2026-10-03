@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as config from '../config';
-import { checkEngineStaleness } from '../engine-version';
+import { checkCliStaleness, checkEngineStaleness } from '../engine-version';
 import { getPackageVersion } from '../package-info';
 
 vi.mock('node:fs');
@@ -194,5 +194,23 @@ describe('checkEngineStaleness (#537)', () => {
     // The malformed cache entry is treated as a miss — falls through to a fetch.
     expect(fetchMock).toHaveBeenCalled();
     expect(result.latest).toBe('0.13.0');
+  });
+
+  it('#945 checks CLI releases independently from the scheduler package version', async () => {
+    vi.mocked(getPackageVersion).mockImplementation((name) =>
+      name === '@ai-dossier/cli' ? '0.89.5' : '0.68.3'
+    );
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({ version: '0.89.6' }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await checkCliStaleness();
+
+    expect(result).toEqual({ installed: '0.89.5', latest: '0.89.6', stale: true });
+    expect(fetchMock.mock.calls[0][0]).toBe('https://registry.npmjs.org/@ai-dossier%2fcli/latest');
+    expect(mockedFs.writeFileSync).toHaveBeenCalledTimes(1);
+    expect(mockedFs.writeFileSync.mock.calls[0][0]).toContain('cli-latest.json');
   });
 });

@@ -14,6 +14,7 @@
  * All I/O (fetching issues, dependency states, the sched queue) lives in `commands/batch.ts`.
  */
 
+import { assessReadiness, type ReadinessAssessment } from './batch-readiness';
 import { BATCH_ANCHOR_LABEL, pickHardBlockLabel } from './hard-block-labels';
 import {
   EXCLUDING_CHECKS,
@@ -26,6 +27,7 @@ import {
   stripReferenceMaterial,
   TEXT_FLOOR_PATTERNS,
 } from './prescreen';
+import { packageOfPath, type WorkspaceLayout } from './workspace-layout';
 
 /** Version of the `batch compose --json` contract. Bump on any breaking shape change. */
 export const COMPOSE_SCHEMA = 'batch-compose:v1';
@@ -60,6 +62,7 @@ export type ExclusionCode =
   | 'open-dependency'
   | 'data-mutation'
   | 'not-a-unit'
+  | 'not-ready'
   | 'prescreen-full'
   | 'legacy-full';
 
@@ -104,6 +107,8 @@ export interface AssessedIssue {
   packages: string[];
   /** Every prescreen finding — the reason a member is `review=full`. */
   prescreen: PrescreenReason[];
+  /** Deterministic readiness (#802): score, positive signals, blockers. Ranks backfill; excludes backlog issues that are not ready. */
+  readiness: ReadinessAssessment;
   /** Empty when admissible. */
   excluded: ExclusionReason[];
 }
@@ -234,8 +239,13 @@ function isPathToken(token: string): boolean {
   );
 }
 
-/** The workspace package a repo-relative path belongs to: `…/packages/<x>/…` → `packages/<x>`, else its first segment. */
-export function workspaceOf(path: string): string | null {
+/**
+ * The workspace package a repo-relative path belongs to. With the repo's declared workspace
+ * `layout` (#801) that is the declared workspace or null; without one, the path heuristic:
+ * `…/packages/<x>/…` → `packages/<x>`, else its first segment.
+ */
+export function workspaceOf(path: string, layout?: WorkspaceLayout | null): string | null {
+  if (layout) return packageOfPath(path, layout);
   const segments = path
     .replace(/^\.\//, '')
     .split('/')
@@ -253,7 +263,11 @@ export function workspaceOf(path: string): string | null {
  * (reference sections and provenance removed, but quoted spans KEPT — backticked paths are the
  * main signal here). Sorted, de-duplicated, capped at {@link MAX_PACKAGES}.
  */
-export function inferPackages(body: string, predictedFiles?: readonly string[]): string[] {
+export function inferPackages(
+  body: string,
+  predictedFiles?: readonly string[],
+  layout?: WorkspaceLayout | null
+): string[] {
   const paths =
     predictedFiles !== undefined && predictedFiles.length > 0
       ? [...predictedFiles]
@@ -263,7 +277,7 @@ export function inferPackages(body: string, predictedFiles?: readonly string[]):
           .filter(isPathToken);
   const out = new Set<string>();
   for (const p of paths) {
-    const ws = workspaceOf(p);
+    const ws = workspaceOf(p, layout);
     if (ws !== null) out.add(ws);
   }
   return [...out].sort().slice(0, MAX_PACKAGES);
@@ -291,7 +305,11 @@ const COMPOSE_OWN_CHECKS: ReadonlySet<PrescreenReason['check']> = new Set([
  * prescreen:v4 (#772/#805/#818) + data-mutation. Records EVERY exclusion reason, not just the first, so an
  * operator sees the whole picture of why a pick cannot join.
  */
-export function assessIssue(input: ComposeIssueInput, rules: ComposeRules = 'v2'): AssessedIssue {
+export function assessIssue(
+  input: ComposeIssueInput,
+  rules: ComposeRules = 'v2',
+  layout?: WorkspaceLayout | null
+): AssessedIssue {
   const base = { issue: input.issue, source: input.source, title: input.title };
   if (input.error !== undefined) {
     return {
@@ -300,6 +318,7 @@ export function assessIssue(input: ComposeIssueInput, rules: ComposeRules = 'v2'
       review: 'full',
       packages: [],
       prescreen: [],
+      readiness: { score: 0, ready: false, blockers: [], signals: [] },
       excluded: [{ code: 'unreadable', message: input.error }],
     };
   }
@@ -386,6 +405,17 @@ export function assessIssue(input: ComposeIssueInput, rules: ComposeRules = 'v2'
   const notUnit = notAUnitReason(input.title, input.body, input.labels);
   if (notUnit !== null) excluded.push({ code: 'not-a-unit', message: notUnit });
 
+  // Readiness (#802): only for BACKLOG candidates — an operator's explicit pick is intent, so it
+  // keeps its `readiness` record (and the command warns) but is never dropped by this screen.
+  // `--rules legacy` reproduces pre-#770 admission, which had no readiness screen.
+  const readiness = assessReadiness(input.title, input.body, input.labels);
+  if (rules === 'v2' && input.source === 'backlog' && !readiness.ready) {
+    excluded.push({
+      code: 'not-ready',
+      message: `Not ready to batch — ${readiness.blockers.join('; ')}.`,
+    });
+  }
+
   const dataMutation = matchDataMutation(floorScanText(input.title, input.body, input.labels));
   if (dataMutation !== null) {
     excluded.push({
@@ -413,8 +443,9 @@ export function assessIssue(input: ComposeIssueInput, rules: ComposeRules = 'v2'
     ...base,
     admissible: excluded.length === 0,
     review: verdict.review,
-    packages: inferPackages(input.body, input.predictedFiles),
+    packages: inferPackages(input.body, input.predictedFiles, layout),
     prescreen: verdict.reasons,
+    readiness,
     excluded,
   };
 }
@@ -438,6 +469,8 @@ export interface ComposedMember {
   review: 'light' | 'full';
   source: 'pick' | 'backfill' | 'backlog';
   packages: string[];
+  /** Readiness score (#802) — higher = better specified. */
+  readiness: number;
   /** Why `review=full` (prescreen findings); empty for `light`. */
   review_reasons: string[];
 }
@@ -449,7 +482,12 @@ export interface HeldIssue {
   review: 'light' | 'full';
   source: 'pick' | 'backlog';
   packages: string[];
+  readiness: number;
   reason: 'review-full-cap' | 'max-members';
+  /** Why `review=full` (prescreen findings); empty for `light`. */
+  review_reasons: string[];
+  /** What happens to it — held for the next batch-prep run, never an extra small batch (#951). */
+  note: string;
 }
 
 export interface BackfillCandidate {
@@ -458,6 +496,7 @@ export interface BackfillCandidate {
   title: string;
   review: 'light' | 'full';
   packages: string[];
+  readiness: number;
   /** Packages it shares with the operator's admitted picks — the ranking's first key. */
   shared_packages: string[];
   /** Whether the proposed composition takes it. */
@@ -483,7 +522,8 @@ interface Ranked {
 }
 
 /**
- * Order candidates against the current member set: sharing a package first, then `light` before
+ * Order candidates against the current member set: sharing a package first, then better-specified
+ * (readiness, #802 — bounded bugs/chores ahead of under-specified work), then `light` before
  * `full` (a full slot is scarce — the cap), then more shared packages first, then issue number ascending
  * (older first). With no members yet, "shared" means shared with the other candidates, so the
  * seed comes from the largest package cluster.
@@ -505,6 +545,8 @@ function rank(candidates: AssessedIssue[], members: AssessedIssue[]): Ranked[] {
     const sx = x.shared.length > 0 ? 1 : 0;
     const sy = y.shared.length > 0 ? 1 : 0;
     if (sx !== sy) return sy - sx;
+    if (x.a.readiness.score !== y.a.readiness.score)
+      return y.a.readiness.score - x.a.readiness.score;
     if (x.a.review !== y.a.review) return x.a.review === 'light' ? -1 : 1;
     if (x.shared.length !== y.shared.length) return y.shared.length - x.shared.length;
     return x.a.issue - y.a.issue;
@@ -549,15 +591,52 @@ function toMember(a: AssessedIssue, source: ComposedMember['source']): ComposedM
     review: a.review,
     source,
     packages: a.packages,
-    review_reasons: a.review === 'full' ? a.prescreen.map((r) => r.message) : [],
+    readiness: a.readiness.score,
+    review_reasons: reviewReasons(a),
   };
+}
+
+/** Why an issue is `review=full` (its prescreen findings); empty for `light`. */
+function reviewReasons(a: AssessedIssue): string[] {
+  return a.review === 'full' ? a.prescreen.map((r) => r.message) : [];
+}
+
+/** Where a held issue goes — the same words the recommendation uses (#951). */
+const NEXT_RUN = 'the next batch-prep run';
+
+function heldNote(a: AssessedIssue, reason: HeldIssue['reason'], opts: ComposeOptions): string {
+  const why =
+    reason === 'max-members'
+      ? `the batch is at max_members=${opts.maxMembers}`
+      : opts.maxFullReview === 0
+        ? 'review=full members are disabled (--max-full-review 0)'
+        : `the ≤ ${opts.maxFullReview} review=full cap is taken by higher-ranked members`;
+  return a.source === 'pick'
+    ? `Held for ${NEXT_RUN} — ${why}; submit #${a.issue} again then (no extra small batch is opened for it).`
+    : `Held for ${NEXT_RUN} — ${why}; #${a.issue} stays in the backlog and ${NEXT_RUN} reconsiders it.`;
+}
+
+/**
+ * How many members the fill aims for. Picks mode fills every slot a pick asked for (#951): a pick
+ * held over the review=full cap has its slot refilled — light only, the cap is already full; a
+ * pick held for max-members changes nothing (members are already at `maxMembers`); otherwise this
+ * is `minMembers`, as before. Backlog-only mode fills to `maxMembers`. The command layer uses the
+ * same number to decide whether to fetch the backlog at all.
+ */
+export function backfillTarget(admissiblePicks: number, opts: ComposeOptions): number {
+  if (!opts.picksMode) return opts.maxMembers;
+  return Math.min(Math.max(opts.minMembers, admissiblePicks), opts.maxMembers);
 }
 
 /**
  * Propose a composition from assessed issues. Picks first (they are the operator's intent) —
  * all admissible picks join, bounded by `maxMembers` and the `review=full` cap; then, while the
- * set is below its target (`minMembers` with picks, `maxMembers` from the backlog alone), backfill
- * from admissible backlog issues. Member order: picks, then backfill, each in selection order.
+ * set is below its target, backfill from admissible backlog issues. The picks-mode target is
+ * `minMembers`, raised to the number of admissible picks (capped at `maxMembers`) so that a pick
+ * held over the `review=full` cap has its slot refilled — #951 Option (b): an over-cap pick is
+ * held for the next batch-prep run and its slot backfilled (light while the cap is full), never
+ * split into an extra small batch. Backlog-only mode fills to `maxMembers`. Member order: picks,
+ * then backfill, each in selection order.
  */
 export function composeBatch(assessed: AssessedIssue[], opts: ComposeOptions): CompositionResult {
   const admissible = assessed.filter((a) => a.admissible);
@@ -572,7 +651,10 @@ export function composeBatch(assessed: AssessedIssue[], opts: ComposeOptions): C
       review: a.review,
       source: a.source,
       packages: a.packages,
+      readiness: a.readiness.score,
       reason,
+      review_reasons: reviewReasons(a),
+      note: heldNote(a, reason, opts),
     });
 
   // 1. Operator picks — every admissible pick, up to the caps.
@@ -585,7 +667,7 @@ export function composeBatch(assessed: AssessedIssue[], opts: ComposeOptions): C
   }
 
   // 2. Backfill / backlog fill.
-  const target = opts.picksMode ? Math.min(opts.minMembers, opts.maxMembers) : opts.maxMembers;
+  const target = backfillTarget(picks.length, opts);
   const backFill = fill(backlog, pickFill.taken, target, opts.maxFullReview);
   for (const a of backFill.taken)
     members.push(toMember(a, opts.picksMode ? 'backfill' : 'backlog'));
@@ -599,6 +681,7 @@ export function composeBatch(assessed: AssessedIssue[], opts: ComposeOptions): C
         title: r.a.title,
         review: r.a.review,
         packages: r.a.packages,
+        readiness: r.a.readiness.score,
         shared_packages: r.shared,
         selected: takenBack.has(r.a.issue),
       }))
@@ -617,6 +700,8 @@ export function composeBatch(assessed: AssessedIssue[], opts: ComposeOptions): C
     .map(([p]) => p)
     .sort();
 
+  const heldPicks = held.filter((h) => h.source === 'pick');
+  const heldList = heldPicks.map((h) => `#${h.issue} (${h.reason})`).join(', ');
   let status: ComposeStatus;
   let recommendation: string;
   if (members.length >= opts.minMembers) {
@@ -624,13 +709,20 @@ export function composeBatch(assessed: AssessedIssue[], opts: ComposeOptions): C
     recommendation = `Form one batch of ${members.length} on '${opts.baseBranch}' (${members.filter((m) => m.review === 'full').length} review=full).`;
   } else if (members.length >= MIN_FORMABLE_MEMBERS) {
     status = 'under-min';
-    recommendation = `Only ${members.length} admissible member(s), below min_members=${opts.minMembers} — widen the backlog query or accept a small batch.`;
+    recommendation = `Only ${members.length} member(s) fit${heldPicks.length > 0 ? ` (${heldPicks.length} admissible pick(s) held over the caps)` : ''}, below min_members=${opts.minMembers} — backfill ran dry; widen the backlog query or accept a small batch.`;
   } else {
     status = 'no-batch';
     recommendation =
       members.length === 1
         ? `Do not form a batch — run #${members[0].issue} as a full-cycle issue.`
         : 'Do not form a batch — nothing admissible.';
+  }
+  // Held PICKS are the operator's intent deferred — name them so the next run picks them up.
+  if (heldPicks.length > 0) {
+    recommendation +=
+      status === 'no-batch'
+        ? ` Also admissible but held by the caps: ${heldList} — no batch forms, so submit them again in ${NEXT_RUN} or take them through full-cycle.`
+        : ` Held for ${NEXT_RUN}: ${heldList}.`;
   }
 
   return { status, members, held, backfill, shared_packages: shared, recommendation };

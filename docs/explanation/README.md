@@ -1,6 +1,6 @@
 # Explanation & Concepts
 
-Understanding-oriented documentation that explains how and why Dossier works. A dossier is a skill — a reusable instruction set an AI executes — with trust, versioning, and cross-tool portability built in; these docs explain what that adds and why it matters.
+Understanding-oriented documentation that explains how and why Dossier works. A dossier is an agent skill with a version and a signature (a `.ds.md` file); these docs explain what that adds and why it matters.
 
 ## Core Concepts
 
@@ -30,7 +30,7 @@ Understanding-oriented documentation that explains how and why Dossier works. A 
 
 ## Philosophy
 
-Dossier takes a skill and adds what makes it safe to share:
+Dossier takes a skill and adds what copying files lacks:
 - **Trust**: cryptographic signatures + checksums, verified before execution
 - **Versioning**: semantic versions you can pin and upgrade deliberately
 - **Distribution**: a registry that makes skills discoverable and installable

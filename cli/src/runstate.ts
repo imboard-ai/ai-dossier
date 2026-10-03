@@ -118,20 +118,29 @@ const REVIEW_KEYS = ['head', 'fixed', 'escalated', 'agents_done', 'agents_pendin
 /** `agents_done` entries meaning "no review agent ran" — refused on `review done` (#804). */
 const ZERO_AGENT_ENTRIES: ReadonlySet<string> = new Set(['0', 'none', 'n/a', '-', 'null', 'nil']);
 
+/**
+ * `agents_done` entries that are real agents but NOT reviewers (#887): the deterministic
+ * prescreen runs before review and reviews nothing — a mechanical-tier requeue posted
+ * `review done agents_done=prescreen` 10 seconds after implement. Counted like a zero
+ * spelling, so `prescreen` alone (or with `none`) is refused, while `prescreen,security`
+ * still passes.
+ */
+const NON_REVIEWER_ENTRIES: ReadonlySet<string> = new Set(['prescreen']);
+
 /** The `reason=` a review that could not run at all hands back with (#804). */
 export const REVIEW_NOT_RUN_REASON = 'review-not-run';
 
 /**
  * Whether an `agents_done` value names no agent (#804): after splitting on `,`
  * and dropping blank entries, nothing is left or every entry is a zero spelling
- * (`0`, `none`, …) — so `none,none` or `,` cannot pass where `none` would not.
+ * (`0`, `none`, …) or a non-reviewer (`prescreen`, #887) — so `none,none` or `,` cannot pass where `none` would not.
  */
 function namesNoAgent(agentsDone: string): boolean {
   const entries = agentsDone
     .split(',')
     .map((e) => e.trim().toLowerCase())
     .filter((e) => e.length > 0);
-  return entries.every((e) => ZERO_AGENT_ENTRIES.has(e));
+  return entries.every((e) => ZERO_AGENT_ENTRIES.has(e) || NON_REVIEWER_ENTRIES.has(e));
 }
 
 export const PHASE_SPECS: Record<Phase, PhaseSpec> = {
@@ -348,6 +357,33 @@ function enumRule(values: readonly string[]): KeyValueRule {
  */
 export const RISK_LEVELS = ['low', 'med', 'high'] as const;
 
+/** review-issue's live-UI verdicts (`live=`). */
+export const LIVE_VERDICTS = ['pass', 'fail', 'unverifiable', 'n/a'] as const;
+
+/** review-issue's closed `live_note=` reasons (why a live verdict is not `pass`). */
+export const LIVE_NOTES = [
+  'no-scratch-db',
+  'no-runtime',
+  'no-browser',
+  'stale-runtime',
+  'no-flows',
+  'no-second-view',
+  'no-plan-milestone',
+  'agent-incomplete',
+  'floor-violation',
+] as const;
+
+/** Who drives the merge (ship-issue Step 3c): a parked handoff or this run to the end. */
+export const SHIP_MODES = ['detached', 'attached'] as const;
+
+/**
+ * What will merge the PR. Canonical (what ship-issue Step 3c item 3b writes): `watcher | native |
+ * none`. `unknown` and `confirmed` are also accepted because sched's own verdict vocabulary
+ * (`confirmed | none | unknown`, merge-mechanism.ts) is handed to agents as facts, and an agent
+ * echoing it must not be rejected.
+ */
+export const MERGE_MECHANISMS = ['watcher', 'native', 'none', 'unknown', 'confirmed'] as const;
+
 /** The classifier's closed mode set — which cycle shape the issue was routed to. */
 export const CLASSIFY_MODES = ['full', SLOT_MODE] as const;
 
@@ -395,6 +431,19 @@ export const KEY_VALUE_RULES: Record<string, KeyValueRule> = {
     expects:
       'expected a non-negative integer run generation, e.g. 1 (mint one with: runstate fence)',
   },
+  // The review phase's live-UI roll-up (review-issue >= 1.14.0). Sets pinned to what the
+  // registry dossiers write (#670): `live=n/a` + `live_flows=0` + `live_note=no-plan-milestone`
+  // are the values real runs post today.
+  live: enumRule(LIVE_VERDICTS),
+  live_flows: {
+    test: (v) => NON_NEGATIVE_INT_RE.test(v),
+    expects: 'expected a non-negative integer count of UI flows reported, e.g. 2',
+  },
+  live_note: enumRule(LIVE_NOTES),
+  // ship-issue's ship-mode record (#921). `merge_mechanism` also allows sched's verdict
+  // words (`unknown`, `confirmed`): rejecting an honest echo of them would block a run.
+  ship_mode: enumRule(SHIP_MODES),
+  merge_mechanism: enumRule(MERGE_MECHANISMS),
   takeover: {
     test: (v) => TAKEOVER_RE.test(v),
     expects: 'expected a single token naming what took the run over, e.g. slot-2 or r-504-fc02',
@@ -717,6 +766,21 @@ export function hasSlotModeLatestMilestone(bodies: readonly string[]): boolean {
 /** Mint a fresh run id: `r-<issue>-<4 hex>`. */
 export function mintRunId(issue: number | string): string {
   return `r-${issue}-${randomBytes(RUN_ID_RANDOM_BYTES).toString('hex')}`;
+}
+
+/**
+ * Mint a run id for a fresh attempt that supersedes `prior`. The 4-hex suffix collides
+ * with the prior run's 1 time in 65536; a "fresh" run that reuses the prior id would be
+ * indistinguishable from resuming it, so re-mint until it differs (#889).
+ */
+export function mintSuccessorRunId(
+  issue: number | string,
+  prior: string,
+  mint: (issue: number | string) => string = mintRunId
+): string {
+  let run = mint(issue);
+  while (run === prior) run = mint(issue);
+  return run;
 }
 
 // --- Fencing (#504) ---
@@ -1273,7 +1337,11 @@ function reportTrailVerdict(
       note: `report/done milestone carries an unusable run id ('${last.run}') — cannot mint a successor; resuming at report`,
     };
   }
-  return { run_id: mintRunId(runMatch[1]), prior_run: last.run, note: 'stale-report-trail' };
+  return {
+    run_id: mintSuccessorRunId(runMatch[1], last.run),
+    prior_run: last.run,
+    note: 'stale-report-trail',
+  };
 }
 
 /**

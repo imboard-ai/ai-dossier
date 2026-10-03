@@ -1,0 +1,187 @@
+name: Build Standalone Binaries
+
+# Builds Node SEA executables (no Node needed to run) for the current cli version and
+# attaches them to a GitHub Release tagged cli-v<version>, alongside SHA256SUMS.
+# Runs after a successful "Publish Packages to npm" run on main, hourly as a safety net
+# (npm lists a fresh version minutes after the publish run ends, so the workflow_run
+# trigger can race it), or by hand. Safe to re-run: a release that already carries
+# every asset is left untouched.
+
+on:
+  workflow_run:
+    workflows: ['Publish Packages to npm']
+    types: [completed]
+    branches: [main]
+  schedule:
+    - cron: '41 * * * *'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'cli version to build (must equal cli/package.json at ref)'
+        required: true
+        type: string
+      ref:
+        description: 'Git ref to build'
+        required: false
+        default: main
+        type: string
+
+# One group for every trigger: a post-publish run, the hourly schedule and a manual
+# dispatch can target the same cli-v<version> release, and two concurrent release jobs
+# race (both see no release, one create loses with HTTP 403). Serialized, the later run's
+# plan sees the finished release and skips.
+concurrency:
+  group: build-binaries
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.plan.outputs.build }}
+      version: ${{ steps.plan.outputs.version }}
+      sha: ${{ steps.plan.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || inputs.ref }}
+
+      - name: Decide whether to build
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./cli/package.json').version")
+          sha=$(git rev-parse HEAD)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+          if [ "$EVENT" = workflow_dispatch ] && [ "$INPUT_VERSION" != "$version" ]; then
+            echo "::error::input version $INPUT_VERSION != cli/package.json $version at $sha"
+            exit 1
+          fi
+
+          if [ "$EVENT" != workflow_dispatch ]; then
+            # Only a cli version that actually reached npm gets binaries. npm lists a
+            # fresh publish several minutes after the publish run ends, so right after
+            # a publish (workflow_run) poll for up to ~12 min; the hourly schedule
+            # checks once and catches anything this missed.
+            tries=1
+            if [ "$EVENT" = workflow_run ]; then tries=24; fi
+            listed=false
+            for i in $(seq 1 "$tries"); do
+              if npm view "@ai-dossier/cli@$version" version --prefer-online >/dev/null 2>&1; then
+                listed=true; break
+              fi
+              if [ "$i" -lt "$tries" ]; then sleep 30; fi
+            done
+            if [ "$listed" != true ]; then
+              echo "@ai-dossier/cli@$version is not on npm; nothing to build."
+              echo "build=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          tag="cli-v$version"
+          present=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null || true)
+          missing=$(node --input-type=module -e "
+            import { missingAssets } from './scripts/sea-platform.mjs';
+            const present = process.argv[1].split('\n').filter(Boolean);
+            console.log(missingAssets(present).join(' '));
+          " "$present")
+          if [ -z "$missing" ]; then
+            echo "Release $tag already has every asset; skipping."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Release $tag is missing: $missing"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - { os: ubuntu-latest, asset: ai-dossier-linux-x64 }
+          - { os: ubuntu-24.04-arm, asset: ai-dossier-linux-arm64 }
+          - { os: macos-14, asset: ai-dossier-darwin-arm64 }
+          - { os: macos-15-intel, asset: ai-dossier-darwin-x64 }
+          - { os: windows-latest, asset: ai-dossier-win32-x64.exe }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - run: npm ci
+
+      - name: Build packages
+        # Explicit order (no make: not guaranteed on the Windows runner); mirrors build-cli.
+        run: |
+          npm run build --workspace=@ai-dossier/core
+          npm run build --workspace=@ai-dossier/worktree-pool
+          npm run build --workspace=@ai-dossier/sched
+          npm run build --workspace=@ai-dossier/cli
+        shell: bash
+
+      - name: Build standalone binary
+        run: node scripts/build-sea.mjs --out dist-binaries
+
+      - name: Smoke test (version must match cli/package.json)
+        run: node scripts/smoke-binary.mjs "dist-binaries/${{ matrix.asset }}" "${{ needs.plan.outputs.version }}"
+        shell: bash
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist-binaries/${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    needs: [plan, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: assets
+        run: |
+          set -euo pipefail
+          chmod +x ai-dossier-* || true
+          sha256sum ai-dossier-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          set -euo pipefail
+          tag="cli-v$VERSION"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$tag" assets/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$tag" assets/* --repo "$GITHUB_REPOSITORY" \
+              --target "$SHA" --title "ai-dossier CLI $VERSION (standalone binaries)" \
+              --notes "Standalone executables for @ai-dossier/cli $VERSION (no Node.js required). Verify downloads against SHA256SUMS. macOS binaries are ad-hoc signed, not notarized: see docs/getting-started/installation.md."
+          fi

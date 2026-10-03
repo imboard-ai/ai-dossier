@@ -1713,6 +1713,7 @@ describe('batch amortization (#775)', () => {
               },
             ]
           : null,
+      prepOf: (id) => (id === 'b-20260920-01' ? { billable_tokens: 425_000 } : null),
     });
   }
 
@@ -1731,7 +1732,9 @@ describe('batch amortization (#775)', () => {
       gateRuns: 1,
       gateWallClockMinutes: 12,
       billableTokens: 3_000_000,
+      prepTokens: 425_000,
     });
+    expect(byId['b-20260921-01'].prepTokens).toBeNull();
     // AC2: an opencode member's model is attributed, not null.
     expect(byId['b-20260920-01'].byModel[0].model).toBe('openai/gpt-5.6-luna');
     expect(byId['b-20260921-01']).toMatchObject({
@@ -1786,6 +1789,8 @@ describe('batch amortization (#775)', () => {
       issuesPerGateRun: 3,
       billableTokensPerShippedIssue: 1_000_000,
       tokenSamples: 1,
+      prepTokensPerShippedIssue: 425_000 / 3,
+      prepSamples: 1,
     });
     expect(byKind.manual).toMatchObject({ membersShipped: 5, gateRuns: 1, issuesPerGateRun: 5 });
     expect(byKind['full-cycle']).toMatchObject({
@@ -1803,7 +1808,9 @@ describe('batch amortization (#775)', () => {
     expect(md).toContain('**3.00**');
     expect(md).toContain('`openai/gpt-5.6-luna` 3.0M');
     expect(md).toContain('N/A (not on this host)');
-    expect(md).toContain('Prep tokens are not in these figures');
+    expect(md).toContain('EXCLUDES prep');
+    expect(md).toContain('Prep tokens/shipped issue (separate)');
+    expect(md).toContain('| 425k |');
   });
 
   it('keeps both PRs of a reused manual batch id, and drops an out-of-window anchor with no PR', () => {

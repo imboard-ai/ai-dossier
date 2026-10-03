@@ -1,0 +1,23 @@
+{
+  "name": "@ai-dossier/website",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Static project website: landing page, docs (rendered from ../docs) and registry browser. Deployed independently (Vercel root directory: website/); not part of the npm workspaces or the publish pipeline.",
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "test": "node --test \"src/lib/*.test.mjs\"",
+    "check:links": "node scripts/check-links.mjs",
+    "check:canonical": "node scripts/check-canonical.mjs"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dependencies": {
+    "@astrojs/sitemap": "^3.6.0",
+    "astro": "^5.14.0",
+    "unist-util-visit": "^5.0.0"
+  }
+}

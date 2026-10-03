@@ -79,7 +79,14 @@ function handleListRegistries(options: ConfigOptions): void {
   process.exit(0);
 }
 
-function handleAddRegistry(options: ConfigOptions): void {
+function handleAddRegistry(name: string, options: ConfigOptions): void {
+  // An inherited property name (`__proto__`, `toString`, ...) is not a usable key:
+  // `__proto__` would never be saved, and the rest would shadow prototype members.
+  if (name in Object.prototype) {
+    console.error(`\n❌ Invalid registry name '${name}': reserved JavaScript property name\n`);
+    process.exit(1);
+  }
+
   if (!options.url) {
     console.error('\n❌ --url is required when adding a registry\n');
     console.error(
@@ -110,14 +117,14 @@ function handleAddRegistry(options: ConfigOptions): void {
   if (options.default) entry.default = true;
   if (options.readonly) entry.readonly = true;
 
-  currentConfig.registries[options.addRegistry!] = entry;
+  currentConfig.registries[name] = entry;
 
   if (options.default) {
-    currentConfig.defaultRegistry = options.addRegistry;
+    currentConfig.defaultRegistry = name;
   }
 
   const details = [
-    `\n✅ Added registry '${options.addRegistry}': ${options.url}`,
+    `\n✅ Added registry '${name}': ${options.url}`,
     ...(options.default ? ['   Set as default registry'] : []),
     ...(options.readonly ? ['   Marked as read-only'] : []),
     '',
@@ -126,36 +133,41 @@ function handleAddRegistry(options: ConfigOptions): void {
   process.exit(0);
 }
 
-function handleRemoveRegistry(options: ConfigOptions): void {
+function handleRemoveRegistry(name: string): void {
   const currentConfig = config.loadConfig();
-  if (!currentConfig.registries || !(options.removeRegistry! in currentConfig.registries)) {
-    console.error(`\n❌ Registry '${options.removeRegistry}' not found\n`);
+  if (!currentConfig.registries || !Object.hasOwn(currentConfig.registries, name)) {
+    const removable = Object.keys(currentConfig.registries ?? {});
+    console.error(`\n❌ Registry '${name}' not found in ${config.CONFIG_FILE}`);
+    console.error(`   Removable: ${removable.length > 0 ? removable.join(', ') : '(none)'}`);
+    console.error(
+      '   Registries from .dossierrc.json, DOSSIER_REGISTRY_URL or the built-in default cannot be removed here.\n'
+    );
     process.exit(1);
   }
 
-  delete currentConfig.registries[options.removeRegistry!];
-  if (currentConfig.defaultRegistry === options.removeRegistry) {
+  delete currentConfig.registries[name];
+  if (currentConfig.defaultRegistry === name) {
     delete currentConfig.defaultRegistry;
   }
 
-  saveConfigOrExit(currentConfig, `\n✅ Removed registry '${options.removeRegistry}'\n`);
+  saveConfigOrExit(currentConfig, `\n✅ Removed registry '${name}'\n`);
   process.exit(0);
 }
 
-function handleSetDefaultRegistry(options: ConfigOptions): void {
+function handleSetDefaultRegistry(name: string): void {
   const registries = config.resolveRegistries();
-  const found = registries.find((r) => r.name === options.setDefaultRegistry);
+  const found = registries.find((r) => r.name === name);
   if (!found) {
     const names = registries.map((r) => r.name).join(', ');
-    console.error(`\n❌ Registry '${options.setDefaultRegistry}' not found`);
+    console.error(`\n❌ Registry '${name}' not found`);
     console.error(`   Available: ${names}\n`);
     process.exit(1);
   }
 
   const currentConfig = config.loadConfig();
-  currentConfig.defaultRegistry = options.setDefaultRegistry;
+  currentConfig.defaultRegistry = name;
 
-  saveConfigOrExit(currentConfig, `\n✅ Default registry set to '${options.setDefaultRegistry}'\n`);
+  saveConfigOrExit(currentConfig, `\n✅ Default registry set to '${name}'\n`);
   process.exit(0);
 }
 
@@ -277,9 +289,9 @@ Environment variables:
     .action((key: string | undefined, value: string | undefined, options: ConfigOptions) => {
       // --- Registry management ---
       if (options.listRegistries) return handleListRegistries(options);
-      if (options.addRegistry) return handleAddRegistry(options);
-      if (options.removeRegistry) return handleRemoveRegistry(options);
-      if (options.setDefaultRegistry) return handleSetDefaultRegistry(options);
+      if (options.addRegistry) return handleAddRegistry(options.addRegistry, options);
+      if (options.removeRegistry) return handleRemoveRegistry(options.removeRegistry);
+      if (options.setDefaultRegistry) return handleSetDefaultRegistry(options.setDefaultRegistry);
 
       // --- General config management ---
       if (options.list || (!key && !options.reset)) return handleListConfig();

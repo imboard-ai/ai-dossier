@@ -1,0 +1,111 @@
+---
+import Base from '../../layouts/Base.astro';
+import { loadRegistry } from '../../lib/registry.mjs';
+
+const { dossiers, fetchedAt, api } = await loadRegistry();
+const categories = [...new Set(dossiers.flatMap((d) => d.categories))].sort();
+const risks = [...new Set(dossiers.map((d) => d.riskLevel))].sort();
+const stamp = fetchedAt.slice(0, 16).replace('T', ' ') + ' UTC';
+---
+<Base title="Registry" description="Browse published AI Dossier dossiers: signed, versioned automation with declared risk levels." wide>
+  <h1>Registry</h1>
+  <p class="muted">
+    {dossiers.length} published dossiers, snapshot taken at build time ({stamp}) from
+    <code>{api}</code>. Newer publishes appear on the next site rebuild; the CLI always reads the live registry.
+  </p>
+
+  <form class="filters" role="search" onsubmit="return false">
+    <label>Search
+      <input id="q" type="search" placeholder="name, title, tag..." autocomplete="off" />
+    </label>
+    <label>Category
+      <select id="cat">
+        <option value="">All</option>
+        {categories.map((c) => <option value={c}>{c}</option>)}
+      </select>
+    </label>
+    <label>Risk
+      <select id="risk">
+        <option value="">All</option>
+        {risks.map((r) => <option value={r}>{r}</option>)}
+      </select>
+    </label>
+  </form>
+  <p id="count" class="muted" aria-live="polite"></p>
+
+  {dossiers.length === 0 && <p>No registry data was available at build time.</p>}
+
+  <ul class="grid" id="list">
+    {dossiers.map((d) => (
+      <li
+        data-text={[d.name, d.title, d.description, ...d.tags].join(' ').toLowerCase()}
+        data-cat={d.categories.join('|')}
+        data-risk={d.riskLevel}
+      >
+        <h2><a href={`/registry/${d.name}/`}>{d.title}</a></h2>
+        <p class="name"><code>{d.name}</code></p>
+        <p class="desc">{d.description.length > 200 ? `${d.description.slice(0, 197)}...` : d.description}</p>
+        <p class="meta">
+          <span class={`badge risk-${d.riskLevel}`}>risk: {d.riskLevel}</span>
+          {d.signature && <span class="badge signed">signed</span>}
+          <span class="badge">v{d.version}</span>
+        </p>
+      </li>
+    ))}
+  </ul>
+</Base>
+
+<script is:inline>
+  (function () {
+    var q = document.getElementById('q');
+    var cat = document.getElementById('cat');
+    var risk = document.getElementById('risk');
+    var count = document.getElementById('count');
+    var items = Array.prototype.slice.call(document.querySelectorAll('#list > li'));
+    function apply() {
+      var terms = q.value.toLowerCase().split(/\s+/).filter(Boolean);
+      var shown = 0;
+      items.forEach(function (li) {
+        var ok =
+          terms.every(function (t) { return li.dataset.text.indexOf(t) !== -1; }) &&
+          (!cat.value || li.dataset.cat.split('|').indexOf(cat.value) !== -1) &&
+          (!risk.value || li.dataset.risk === risk.value);
+        li.hidden = !ok;
+        if (ok) shown++;
+      });
+      count.textContent = shown + ' of ' + items.length + ' shown';
+    }
+    [q, cat, risk].forEach(function (el) { el.addEventListener('input', apply); });
+    apply();
+  })();
+</script>
+
+<style>
+  .filters { display: flex; gap: 16px; flex-wrap: wrap; margin: 24px 0 8px; }
+  .filters label { display: flex; flex-direction: column; font-size: .8rem; font-weight: 500; color: var(--muted); gap: 6px; }
+  .filters input, .filters select {
+    font: inherit; font-size: .95rem; padding: 9px 12px; border-radius: var(--radius-sm); border: 1px solid var(--input-line);
+    background: var(--bg-soft); color: var(--fg); min-width: 220px; transition: border-color .15s;
+  }
+  .filters input:hover, .filters select:hover { border-color: var(--muted); }
+  #count { font-size: .85rem; min-height: 1.65em; }
+  .grid { list-style: none; padding: 0; margin: 16px 0 0; display: grid; gap: 14px; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+  .grid li {
+    position: relative; display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 18px 20px 16px; background: var(--bg-soft); min-width: 0; transition: border-color .2s, background-color .2s, transform .2s;
+  }
+  .grid li:hover { border-color: var(--accent-line); background: var(--bg-raised); transform: translateY(-2px); }
+  .grid li:has(a:focus-visible) { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .grid li[hidden] { display: none; }
+  .grid h2 { font-size: var(--step-1); margin: 0 0 4px; }
+  .grid h2 a { color: var(--fg); text-decoration: none; }
+  .grid h2 a::after { content: ''; position: absolute; inset: 0; border-radius: var(--radius); }
+  .grid h2 a:focus-visible { outline: none; }
+  .name, .desc, .meta { position: relative; z-index: 1; }
+  .name { margin: 0 0 10px; }
+  .name code { background: none; border: 0; padding: 0; color: var(--muted); font-size: .78rem; overflow-wrap: anywhere; }
+  .desc { margin: 0 0 14px; font-size: .92rem; color: var(--muted); flex: 1; }
+  .meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 0; }
+  @media (max-width: 400px) { .filters input, .filters select { min-width: 0; width: 100%; } .filters label { width: 100%; } .grid { grid-template-columns: minmax(0, 1fr); } }
+  @media (prefers-reduced-motion: reduce) { .grid li:hover { transform: none; } }
+</style>

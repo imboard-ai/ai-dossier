@@ -45,6 +45,7 @@ capabilities:
 |---|---|---|---|
 | `version` | `1` | no | Manifest format version (currently only `1`; absent = `1`) |
 | `capabilities` | mapping | yes | Capability id → entry |
+| `gates` | `none-declared-on-purpose` | no | Durable opt-out (#895) of `sched enqueue`'s undeclared-gate warning, for a repo that deliberately declares no `typecheck.run` / `test.focused`. The only accepted value; anything else makes the manifest invalid |
 | entry `.command` | string | yes | Command line executed via the shell, in the directory `ai-dossier` runs in |
 | entry `.lifecycle` | `active` \| `shadow` | no | `active` (default) = executable; `shadow` = declared but not yet trusted to run |
 | entry `.assumptions` | list of probes | no | Preconditions checked **before** the command runs |
@@ -64,6 +65,17 @@ the outcome is `automation-broken` and the command never runs.**
 |---|---|---|
 | `file-exists` | `- file-exists: package.json` | Path (file or dir, relative to the run directory) exists |
 | `tool-version` | `- tool-version: node>=20` | `<tool> --version` output satisfies `<op><version>` (ops: `>= > <= < = ==`; `==` is an alias of `=`) |
+
+## `cap init [--print]` (#645)
+
+Scaffolds `.dossier/automation/manifest.yaml` from `detectProjectEnv` (package manager,
+install/build commands) and the `package.json` scripts. Idempotent: an existing manifest
+is never modified. Undetectable gates become commented `TODO` stubs. `sched enqueue`
+warns (never blocks — #625) when a created batch's manifest lacks `typecheck.run` /
+`test.focused`; opt out per invocation with `--skip-gate-check` / `DOSSIER_SKIP_GATE_CHECK=1`, or durably with
+`gates: none-declared-on-purpose` in the manifest (#895). With `--repo <owner/name>` the target
+repo's manifest is read from `--repo-dir <path>`, or from the cwd when its `origin` remote is that repo;
+with neither, enqueue says the check was skipped rather than guessing a manifest.
 
 ## `cap list [--json]`
 
@@ -153,6 +165,25 @@ Every `cap run` — all four outcomes included — appends one JSON line to
 `duration_ms`, `reason` (why a non-ok outcome happened), `signal`, `cwd`, `timestamp`,
 and (non-`ok` outcomes only, #583) `output_tail`. This mirrors the `runs.jsonl` dossier
 telemetry but stays a separate file because a capability execution is not a dossier run.
+
+When `cwd` is a git work tree the row also records what was verified (#941): `git_head`
+(`git rev-parse HEAD`), `git_tree` (`HEAD^{tree}`) and `dirty`. The tree is probed before
+and after the run; `dirty` is true if either probe found changes (tracked, staged, or
+untracked-not-ignored files — regardless of `status.showUntrackedFiles`/submodule-ignore
+config — or files hidden with `--assume-unchanged`/`--skip-worktree`, which includes
+sparse-checkout trees) or if the run moved HEAD or the tree. The probe strips `GIT_*`
+env, uses `--no-optional-locks`, and has a 10 s total budget; if it times out or errors,
+the row records `git_probe: "timeout"|"error"` with `dirty: true` (and a stderr warning).
+Rows outside a work tree omit all of these. Rows also record `git_prefix` (`git rev-parse --show-prefix`: the directory inside the repo the run happened in) and `command_hash` (sha256 of the manifest `command`). The dirty probe covers the whole repo even from a subdirectory (`ls-files -v -- :/`) and pins `core.fsmonitor=false`/`core.fileMode=true`. Every row also records `args` (the words after
+`--`) and `args_hash` (sha256 of the JSON array).
+
+`ai-dossier cap last-ok <id> (--tree <40|64-hex sha> | --here) [--prefix <dir>] [-- <args>]` prints the latest clean `ok`
+row for that capability, tree AND exact args (`gate.test -- --only smoke` never satisfies a
+full-gate lookup). Exit codes: 0 match, 1 no match (no output; dirty, probe-failed,
+failed, different-args and pre-`args_hash` rows never match), 2 error (bad `--tree`,
+unreadable log), 3 `auditLog` disabled (cannot answer). A torn line in the log is skipped.
+The match key is capability + tree + args + directory prefix (default: the current directory's own; `--prefix` overrides) + command hash, so a pass from `cli/` never satisfies a lookup from the root. `--tree` must come from a CLEAN tree — `--here` probes the current directory itself (tree + prefix) and exits 1 when it is dirty. The match key deliberately excludes: git-ignored files, toolchain/CLI versions, environment,
+and nested repos other than via submodule status.
 
 ## Capability id vocabulary
 
@@ -261,7 +292,17 @@ preserved. A declared capability's verdict is never replaced by a detected-runne
 gate's stdout. A CI-parity script that prints only its own log gives every red run
 `readable: false`, so the batch blocks `suite-unreadable` instead of pinning the failure
 on a member. To keep attribution, have `gate.batch` emit a vitest JSON report on stdout
-(e.g. `--reporter=json` on its test step).
+(e.g. `--reporter=json` on its test step). The contract, for `gate.batch` and `test.full`
+alike: **stdout carries exactly one JSON document whose first `{` is
+`{ "testResults": [{ "name": "<repo-relative file>", "assertionResults": [{ "status": "failed", "fullName": "…" }] }] }`**
+(human output belongs on stderr; paths must be repo-relative, since they are matched against
+the members' changed paths). This repo's own `test.full` is `node scripts/test-report.mjs`
+(#893): it runs each workspace's vitest and the script tests one at a time with the JSON
+reporter, merges them into that document, and records a workspace that dies without a report
+as a failed record on its `package.json` so the run stays readable. A red run whose report
+names no member-owned test bisects; one that produces no document at all still blocks
+`suite-unreadable`, now with the tail of the failing output in the `suite-failed` journal
+detail.
 
 **Diff with three dots.** `origin/<base_branch>` moves whenever the batch worktree
 fetches. `git diff "$DOSSIER_BATCH_BASE"...HEAD` diffs from the merge-base and is stable;

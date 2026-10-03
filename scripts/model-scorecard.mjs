@@ -1111,6 +1111,7 @@ export function buildBatchRows({
   windowStartIso,
   journalOf = () => null,
   tokensOf = () => null,
+  prepOf = () => null,
 }) {
   // A manual batch-cycle id can be reused on another day (`batch/m3-20260908`,
   // `batch/m3-20260915`); key such PRs by their full head so neither PR's shipped issues
@@ -1140,6 +1141,7 @@ export function buildBatchRows({
     const pr = prById.get(id) ?? null;
     const journal = journalOf(id);
     const byModel = tokensOf(id);
+    const prep = prepOf(id);
     const shippedIssues = (pr?.closingIssuesReferences ?? [])
       .map((ref) => ref?.number)
       .filter((n) => typeof n === 'number');
@@ -1190,6 +1192,8 @@ export function buildBatchRows({
       billableTokens: tokenTerms.length > 0 ? sum(tokenTerms) : null,
       costUsd: costTerms.length > 0 ? sum(costTerms) : null,
       byModel: byModel ?? null,
+      // #796: batch-prep spend (upper bound), disclosed separately from billableTokens.
+      prepTokens: prep?.billable_tokens ?? null,
     });
   }
   return rows.sort((a, b) => a.repo.localeCompare(b.repo) || a.batch.localeCompare(b.batch));
@@ -1210,6 +1214,7 @@ function batchSummaryOf(repo, kind, rows) {
   };
   const tokens = perShipped((r) => r.billableTokens);
   const cost = perShipped((r) => r.costUsd);
+  const prepTokens = perShipped((r) => r.prepTokens);
   const wall = perShipped((r) => r.wallClockMinutes);
   const gateWall = shipped.map((r) => r.gateWallClockMinutes).filter((v) => v != null);
   return {
@@ -1231,6 +1236,8 @@ function batchSummaryOf(repo, kind, rows) {
     wallClockPerShippedIssueMinutes: wall?.value ?? null,
     billableTokensPerShippedIssue: tokens?.value ?? null,
     tokenSamples: tokens?.samples ?? 0,
+    prepTokensPerShippedIssue: prepTokens?.value ?? null,
+    prepSamples: prepTokens?.samples ?? 0,
     costPerShippedIssueUsd: cost?.value ?? null,
     costSamples: cost?.samples ?? 0,
   };
@@ -1333,8 +1340,8 @@ export function renderBatchAmortization(amortization) {
     "members are the merged batch PR's closing references — a batch blocked at `batch-validate`",
     'and recovered by hand never posts `batch-ship`, so its trail alone reads it as unshipped.',
     '',
-    '| Repo | Kind | Batches | Single-member | Shipped / dissolved / blocked | Enqueued | Shipped issues | Evictions | Gate runs | **Issues/gate run** | Median gate wall-clock | Wall-clock/shipped issue | Billable tokens/shipped issue | Cost/shipped issue |',
-    '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|',
+    '| Repo | Kind | Batches | Single-member | Shipped / dissolved / blocked | Enqueued | Shipped issues | Evictions | Gate runs | **Issues/gate run** | Median gate wall-clock | Wall-clock/shipped issue | Billable tokens/shipped issue (excl. prep) | Prep tokens/shipped issue (separate) | Cost/shipped issue |',
+    '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|',
   ];
   for (const s of amortization.summary) {
     const outcomes =
@@ -1344,15 +1351,15 @@ export function renderBatchAmortization(amortization) {
         ? '—'
         : `${s.singleMemberBatches} (${fmtPct(s.singleMemberShare)})`;
     lines.push(
-      `| ${safeCell(s.repo)} | ${BATCH_KIND_LABEL[s.kind] ?? s.kind} | ${dash(s.batches)} | ${single} | ${outcomes} | ${dash(s.membersEnqueued)} | ${s.membersShipped} | ${dash(s.evictions)} | ${s.gateRuns} | **${fmtRatioOrNa(s.issuesPerGateRun)}** | ${fmtMinOrNa(s.medianGateWallClockMinutes)} | ${fmtMinOrNa(s.wallClockPerShippedIssueMinutes)} | ${fmtTokensOrNa(s.billableTokensPerShippedIssue, s.tokenSamples)} | ${fmtUsd(s.costPerShippedIssueUsd, s.costSamples)} |`
+      `| ${safeCell(s.repo)} | ${BATCH_KIND_LABEL[s.kind] ?? s.kind} | ${dash(s.batches)} | ${single} | ${outcomes} | ${dash(s.membersEnqueued)} | ${s.membersShipped} | ${dash(s.evictions)} | ${s.gateRuns} | **${fmtRatioOrNa(s.issuesPerGateRun)}** | ${fmtMinOrNa(s.medianGateWallClockMinutes)} | ${fmtMinOrNa(s.wallClockPerShippedIssueMinutes)} | ${fmtTokensOrNa(s.billableTokensPerShippedIssue, s.tokenSamples)} | ${fmtTokensOrNa(s.prepTokensPerShippedIssue, s.prepSamples)} | ${fmtUsd(s.costPerShippedIssueUsd, s.costSamples)} |`
     );
   }
   lines.push(
     '',
     '### Per batch',
     '',
-    '| Batch | Repo | Kind | Anchor | Outcome | Enqueued | Shipped | Evictions | Gate runs | PR | Gate wall-clock | Tokens by model |',
-    '|---|---|---|---|---|---|---|---|---|---|---|---|'
+    '| Batch | Repo | Kind | Anchor | Outcome | Enqueued | Shipped | Evictions | Gate runs | PR | Gate wall-clock | Tokens by model | Prep tokens (separate) |',
+    '|---|---|---|---|---|---|---|---|---|---|---|---|---|'
   );
   for (const b of amortization.batches) {
     const models =
@@ -1368,15 +1375,19 @@ export function renderBatchAmortization(amortization) {
               .join(', ');
     const outcome = b.blockedReason ? `${b.outcome} (${safeCell(b.blockedReason)})` : b.outcome;
     lines.push(
-      `| \`${safeCell(b.batch)}\` | ${safeCell(b.repo)} | ${b.kind} | ${b.anchor == null ? '—' : `#${b.anchor}`} | ${outcome} | ${dash(b.membersEnqueued)} | ${b.membersShipped} | ${b.evictions} | ${b.gateRuns} | ${b.pr == null ? '—' : `#${b.pr}`} | ${fmtMinOrNa(b.gateWallClockMinutes)} | ${models} |`
+      `| \`${safeCell(b.batch)}\` | ${safeCell(b.repo)} | ${b.kind} | ${b.anchor == null ? '—' : `#${b.anchor}`} | ${outcome} | ${dash(b.membersEnqueued)} | ${b.membersShipped} | ${b.evictions} | ${b.gateRuns} | ${b.pr == null ? '—' : `#${b.pr}`} | ${fmtMinOrNa(b.gateWallClockMinutes)} | ${models} | ${fmtTokensOrNa(b.prepTokens)} |`
     );
   }
   lines.push(
     '',
-    '- **Prep tokens are not in these figures.** `batch-issues-preparation` (the classifier',
-    '  agents that pick members) runs in the operator session, not a scheduler dispatch, and',
-    '  nothing ties its tokens to a batch id yet — so cost/tokens per shipped issue here is',
-    '  member + tail/report dispatches only and understates a batch by its prep spend (#796).',
+    '- **Tokens per shipped issue EXCLUDES prep; prep is disclosed in its own column** (#796).',
+    '  `batch-issues-preparation` (the classifier agents that pick members) runs in the operator',
+    '  session, not a scheduler dispatch. `sched enqueue` records the calling session id',
+    '  (`CLAUDE_CODE_SESSION_ID`) per batch in `<sched-dir>/batch-prep.jsonl`, and the usage ledger',
+    "  attributes that session's tokens (subagents included) from the previous enqueue of the same",
+    '  session (max 6h back) to this one. It is an upper bound: unrelated operator work in that',
+    '  window counts too. `N/A` = no prep session recorded on this host (batches formed before',
+    '  #796 cannot be backfilled; a batch prepared on another host reads N/A).',
     '- **A dissolved batch counts every requeued member as evicted** — the dissolve requeues',
     '  all unshipped members as full-cycle runs, so none of them shipped with the batch.',
     '- **A hand-recovered batch PR records no `ci_fix_attempts`** and counts as one gate run.',
@@ -1514,6 +1525,7 @@ function batchRowsForRepo({
   warnings,
   summarizeBatchJournal,
   tokensByModel,
+  prepOf,
 }) {
   let batchPrs = [];
   try {
@@ -1543,6 +1555,7 @@ function batchRowsForRepo({
       const entries = buildBatchRunLogEntries(runLogDir, id);
       return entries.length > 0 ? tokensByModel(entries) : null;
     },
+    prepOf,
   });
 }
 
@@ -1683,6 +1696,25 @@ export function main({
   const allRows = [];
   const allBatchRows = [];
   const warnings = [];
+  // #796: batch-prep tokens per batch, from the sessions `sched enqueue` recorded. Additive —
+  // a `cli/dist` built before #796 just leaves the column N/A.
+  let batchPrepTokens = null;
+  try {
+    ({ batchPrepTokens } = loadCliDist(repoRoot, join('usage', 'batch-prep.js')));
+  } catch {
+    // stale cli/dist: prep column stays N/A
+  }
+  const prepOfFor = (repo) => {
+    if (typeof batchPrepTokens !== 'function') return () => null;
+    let byBatch = new Map();
+    try {
+      byBatch = batchPrepTokens(schedStateDir(repo, home));
+    } catch (err) {
+      warnings.push(`${repo}: batch prep tokens unavailable — ${err?.message ?? err}.`);
+    }
+    return (id) => byBatch.get(id) ?? null;
+  };
+
   if (!batchHelpersAvailable) {
     warnings.push(
       `cli/dist/sched-run-stats.js predates #775 (no summarizeBatchJournal/tokensByModel) — batch amortization is skipped; run 'make build-all' to include it.`
@@ -1764,6 +1796,7 @@ export function main({
               warnings,
               summarizeBatchJournal,
               tokensByModel,
+              prepOf: prepOfFor(repo),
             })
           );
         } catch (err) {

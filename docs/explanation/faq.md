@@ -14,9 +14,9 @@
 
 ### What exactly is a dossier?
 
-A dossier is a skill — a reusable instruction set an AI executes — with **trust, versioning, and cross-tool portability** built in. It's the same kind of thing as a Claude Code `SKILL.md`, plus a cryptographic signature, a pinnable version, and a registry to distribute it through.
+A dossier is an agent skill with a version and a signature (a `.ds.md` file), so everyone installs the same thing and can verify who wrote it and that it wasn't changed. It's the same kind of thing as a Claude Code `SKILL.md`, plus a cryptographic signature, a pinnable version, and a registry to distribute it through.
 
-**Key difference from a plain skill**: a dossier combines human-readable instructions with machine-readable metadata (JSON frontmatter) and a verification pipeline, so it can be signed, version-pinned, and run safely on *any* LLM tool — not just the one it was written in.
+**Key difference from a plain skill**: a dossier combines human-readable instructions with machine-readable metadata (JSON frontmatter) and a verification pipeline, so it can be signed, version-pinned, and verified before any LLM tool runs it — not just the one it was written in.
 
 ### Who needs dossiers? Can't LLMs just work from natural language?
 
@@ -271,7 +271,7 @@ Because dossiers are portable:
 
 **The question**: "What's the best way to distribute dossiers to my team, other projects, or the open-source community?"
 
-**Short answer**: Dossiers are built for sharing. Because they're protocol-based plain text, share them like code.
+**Short answer**: Copying the file works, but then nobody knows which version they have or who changed it. Publish to a registry so everyone installs the same signed version — or share the file directly; its checksum and signature still let the recipient verify it.
 
 #### Sharing Scenarios
 
@@ -406,7 +406,7 @@ https://raw.githubusercontent.com/you/dossiers/main/deploy.ds.md
 
 ### How do dossiers compare to scripts (bash/Python/etc.)?
 
-See the comprehensive comparison table in the [main README](README.md#dossiers-vs-scripts-when-to-use-each).
+See the comprehensive comparison table in the [main README](../../README.md#why-use-dossier).
 
 **TL;DR**:
 - **Scripts**: Fast, deterministic, brittle (must handle every edge case in code)
@@ -918,7 +918,7 @@ Dossier files use two extensions:
 
 **`.ds.md` (Dossier files)** contain the instructions, metadata, and validation criteria. They are checksummed and optionally signed. Their content should not change during execution.
 
-**`.dsw.md` (Working files)** track execution state: progress, context gathered, decisions made, and action logs. They are mutable and intentionally outside the security boundary. See the [working files example](../../examples/working-files/) for the full pattern.
+**`.dsw.md` (Working files)** track execution state: progress, context gathered, decisions made, and action logs. They are mutable and intentionally outside the security boundary. See the [examples directory](../../examples/) for the full pattern.
 
 **Why not just `.md`?** The `.ds.md` extension makes dossiers discoverable by tooling (CLI, MCP server, IDE plugins) without needing to parse every markdown file in a project.
 
@@ -1802,11 +1802,11 @@ Everything works without internet.
 
 ### Where can I learn more?
 
-- **Documentation**: [Main README](README.md)
-- **Getting Started**: [Quick Start Guide](QUICK_START.md)
-- **Schema Details**: [Schema Documentation](SCHEMA.md)
-- **Security**: [Security Model](SECURITY.md)
-- **Examples**: [examples/](examples/) directory
+- **Documentation**: [Main README](../../README.md)
+- **Getting Started**: [Quick Start Guide](../getting-started/quick-start.md)
+- **Schema Details**: [Schema Documentation](../reference/schema.md)
+- **Security**: [Security Model](security-model.md)
+- **Examples**: [examples/](../../examples/) directory
 
 ### How can I contribute?
 

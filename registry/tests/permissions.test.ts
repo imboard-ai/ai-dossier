@@ -44,7 +44,7 @@ describe('authorizePublish - 403 response', () => {
     const res = createViMockRes();
 
     const result = await authorizePublish(req, res, 'evil-corp/bad-stuff');
-    expect(result).toBe(false);
+    expect(result).toBeNull();
     expect(res.status).toHaveBeenCalledWith(403);
 
     const jsonArg = (res.json as ReturnType<typeof vi.fn>).mock.calls[0][0];
@@ -68,7 +68,7 @@ describe('authorizePublish - 403 response', () => {
     const res = createViMockRes();
 
     const result = await authorizePublish(req, res, 'evil-corp/bad-stuff', 'delete');
-    expect(result).toBe(false);
+    expect(result).toBeNull();
 
     const jsonArg = (res.json as ReturnType<typeof vi.fn>).mock.calls[0][0];
     expect(jsonArg.error.message).toBe("Cannot delete from namespace 'evil-corp/bad-stuff'");

@@ -54,14 +54,28 @@ export interface EngineLeaseHolder {
 
 export interface EngineLease extends EngineLeaseHolder {
   id: string;
+  /**
+   * Heartbeat (#945): rewritten by the engine every tick (`touchEngineLease`).
+   * Absent on a lease written by an older engine.
+   */
+  updated_at?: string;
+}
+
+/** A dead engine's lease that this acquisition displaced — proof the previous engine exited without releasing it (crash / SIGKILL / unhandled signal). */
+export interface ReclaimedEngineLease extends EngineLeaseHolder {
+  updated_at: string | null;
 }
 
 export type EngineLeaseAcquisition =
-  | { acquired: true; lease: EngineLease }
+  | { acquired: true; lease: EngineLease; reclaimed?: ReclaimedEngineLease }
   | { acquired: false; holder: EngineLeaseHolder | null };
 
 export interface EngineLeaseStatus extends EngineLeaseHolder {
   alive: boolean;
+  /** Last heartbeat (ISO), null when the lease predates heartbeats (#945). */
+  updated_at?: string | null;
+  /** Lease id, so a watcher can tell one stale episode from the next (#945). */
+  id?: string;
 }
 
 /** Thrown when the cross-process lock cannot be acquired in time. */
@@ -226,6 +240,8 @@ export function isEngineLeaseRace(err: unknown): boolean {
  */
 export class SchedStore {
   readonly dir: string;
+  /** The lease this store instance acquired (heartbeat target). */
+  private heldLease: EngineLease | null = null;
 
   constructor(
     dir: string,
@@ -255,17 +271,55 @@ export class SchedStore {
     const holder = readEngineLeaseHolder(path.join(this.dir, ENGINE_LEASE_DIR));
     return holder === null
       ? null
-      : { pid: holder.pid, pid_start: holder.pid_start, alive: engineLeaseIsAlive(holder) };
+      : {
+          pid: holder.pid,
+          pid_start: holder.pid_start,
+          alive: engineLeaseIsAlive(holder),
+          updated_at: holder.updated_at ?? null,
+          id: holder.id,
+        };
+  }
+
+  /**
+   * Heartbeat (#945): stamp the held lease's `updated_at`. Atomic (tmp file +
+   * rename inside the lease dir) so a reader never sees a torn holder.json.
+   * Best-effort — a failed heartbeat must never fail a tick; only the lease
+   * this store acquired is touched.
+   */
+  touchEngineLease(now: Date = new Date()): void {
+    const held = this.heldLease;
+    if (held === null) return;
+    const leasePath = path.join(this.dir, ENGINE_LEASE_DIR);
+    const tmp = path.join(leasePath, `${ENGINE_LEASE_HOLDER_FILE}.tmp-${process.pid}`);
+    try {
+      if (readEngineLeaseHolder(leasePath)?.id !== held.id) return;
+      const next: EngineLease = { ...held, updated_at: now.toISOString() };
+      fs.writeFileSync(tmp, `${JSON.stringify(next)}\n`, { mode: 0o600 });
+      // Compare-and-swap on the lease id, as late as the filesystem allows: a
+      // reclaim between the first check and here must not be overwritten by a
+      // stale heartbeat (rename has no CAS; this narrows the window to the
+      // gap between this read and the rename).
+      if (readEngineLeaseHolder(leasePath)?.id !== held.id) {
+        fs.rmSync(tmp, { force: true });
+        return;
+      }
+      fs.renameSync(tmp, path.join(leasePath, ENGINE_LEASE_HOLDER_FILE));
+    } catch {
+      fs.rmSync(tmp, { force: true });
+      // Heartbeat is advisory; the pid-liveness check remains the source of truth.
+    }
   }
 
   /** Acquire the engine lifecycle lease, separate from short-lived state mutation locks. */
   acquireEngineLease(): EngineLeaseAcquisition {
     fs.mkdirSync(this.dir, { recursive: true, mode: 0o700 });
+    let reclaimed: ReclaimedEngineLease | undefined;
     const leasePath = path.join(this.dir, ENGINE_LEASE_DIR);
     const lease: EngineLease = {
       pid: process.pid,
       pid_start: procStartTime(process.pid),
       id: `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      updated_at: new Date().toISOString(),
     };
     while (true) {
       const pending = `${leasePath}.pending-${lease.id}`;
@@ -282,7 +336,8 @@ export class SchedStore {
           }
         );
         fs.renameSync(pending, leasePath);
-        return { acquired: true, lease };
+        this.heldLease = lease;
+        return { acquired: true, lease, ...(reclaimed ? { reclaimed } : {}) };
       } catch (err) {
         fs.rmSync(pending, { recursive: true, force: true });
         if (!isEngineLeaseRace(err)) throw err;
@@ -295,6 +350,13 @@ export class SchedStore {
         const stale = `${leasePath}.stale-${lease.id}`;
         try {
           fs.renameSync(leasePath, stale);
+          if (holder !== null) {
+            reclaimed = {
+              pid: holder.pid,
+              pid_start: holder.pid_start,
+              updated_at: holder.updated_at ?? null,
+            };
+          }
           fs.rmSync(stale, { recursive: true, force: true });
         } catch (reclaimErr) {
           if (!isEngineLeaseRace(reclaimErr)) throw reclaimErr;
@@ -310,6 +372,7 @@ export class SchedStore {
     if (readEngineLeaseHolder(leasePath)?.id === lease.id) {
       fs.rmSync(leasePath, { recursive: true, force: true });
     }
+    if (this.heldLease?.id === lease.id) this.heldLease = null;
   }
 
   load(): SchedState {
@@ -369,81 +432,7 @@ export class SchedStore {
       return mergeDispatchProfiles(config, userProfiles);
     }
     try {
-      const parsed = JSON.parse(fs.readFileSync(this.configPath, 'utf-8')) as SchedConfigFile;
-      const version = String(parsed.schema_version);
-      if (version !== CONFIG_SCHEMA_VERSION && !LEGACY_CONFIG_SCHEMA_VERSIONS.includes(version)) {
-        throw new Error(`unsupported schema version ${version}`);
-      }
-      if (
-        !Number.isInteger(parsed.max_slots) ||
-        parsed.max_slots < MIN_MAX_SLOTS ||
-        parsed.max_slots > MAX_MAX_SLOTS
-      ) {
-        throw new Error(
-          `max_slots must be an integer between ${MIN_MAX_SLOTS} and ${MAX_MAX_SLOTS}`
-        );
-      }
-      config = { max_slots: parsed.max_slots };
-      if (parsed.stall_timeout_ms !== undefined) {
-        config.stall_timeout_ms = requirePositiveIntMs('stall_timeout_ms', parsed.stall_timeout_ms);
-      }
-      if (parsed.reconcile_interval_ms !== undefined) {
-        config.reconcile_interval_ms = requirePositiveIntMs(
-          'reconcile_interval_ms',
-          parsed.reconcile_interval_ms
-        );
-      }
-      if (parsed.pr_poll_interval_ms !== undefined) {
-        config.pr_poll_interval_ms = requirePositiveIntMs(
-          'pr_poll_interval_ms',
-          parsed.pr_poll_interval_ms
-        );
-      }
-      if (parsed.label_poll_interval_ms !== undefined) {
-        config.label_poll_interval_ms = requirePositiveIntMs(
-          'label_poll_interval_ms',
-          parsed.label_poll_interval_ms
-        );
-      }
-      if (parsed.dispatch !== undefined) {
-        config.dispatch = validateDispatchConfig(parsed.dispatch);
-      }
-      if (parsed.auto_upgrade !== undefined) {
-        if (typeof parsed.auto_upgrade !== 'boolean') {
-          throw new Error('auto_upgrade must be a boolean');
-        }
-        config.auto_upgrade = parsed.auto_upgrade;
-      }
-      if (parsed.dissolve_policy !== undefined) {
-        config.dissolve_policy = validateDissolvePolicy(parsed.dissolve_policy);
-      }
-      if (parsed.default_batch_priority !== undefined) {
-        if (!Number.isInteger(parsed.default_batch_priority)) {
-          throw new Error(
-            `default_batch_priority must be an integer, got ${JSON.stringify(parsed.default_batch_priority)}`
-          );
-        }
-        config.default_batch_priority = parsed.default_batch_priority;
-      }
-      if (parsed.max_full_review_members !== undefined) {
-        if (
-          !Number.isInteger(parsed.max_full_review_members) ||
-          parsed.max_full_review_members < 0
-        ) {
-          throw new Error(
-            `max_full_review_members must be a non-negative integer, got ${JSON.stringify(parsed.max_full_review_members)}`
-          );
-        }
-        config.max_full_review_members = parsed.max_full_review_members;
-      }
-      if (parsed.member_parallelism !== undefined) {
-        if (!Number.isInteger(parsed.member_parallelism) || parsed.member_parallelism < 1) {
-          throw new Error(
-            `member_parallelism must be a positive integer, got ${JSON.stringify(parsed.member_parallelism)}`
-          );
-        }
-        config.member_parallelism = parsed.member_parallelism;
-      }
+      config = this.parseConfigFile();
     } catch (err) {
       // Deliberate degrade-to-default (unlike state.json, config is re-derivable
       // operator intent and hard-failing every command on a typo would brick
@@ -461,6 +450,115 @@ export class SchedStore {
       config = { max_slots: DEFAULT_MAX_SLOTS };
     }
     return mergeDispatchProfiles(config, userProfiles);
+  }
+
+  /** Parse + strictly validate the project config file (throws on ANY problem). */
+  private parseConfigFile(): SchedConfig {
+    let config: SchedConfig;
+    const parsed = JSON.parse(fs.readFileSync(this.configPath, 'utf-8')) as SchedConfigFile;
+    const version = String(parsed.schema_version);
+    if (version !== CONFIG_SCHEMA_VERSION && !LEGACY_CONFIG_SCHEMA_VERSIONS.includes(version)) {
+      throw new Error(`unsupported schema version ${version}`);
+    }
+    if (
+      !Number.isInteger(parsed.max_slots) ||
+      parsed.max_slots < MIN_MAX_SLOTS ||
+      parsed.max_slots > MAX_MAX_SLOTS
+    ) {
+      throw new Error(`max_slots must be an integer between ${MIN_MAX_SLOTS} and ${MAX_MAX_SLOTS}`);
+    }
+    config = { max_slots: parsed.max_slots };
+    if (parsed.stall_timeout_ms !== undefined) {
+      config.stall_timeout_ms = requirePositiveIntMs('stall_timeout_ms', parsed.stall_timeout_ms);
+    }
+    if (parsed.reconcile_interval_ms !== undefined) {
+      config.reconcile_interval_ms = requirePositiveIntMs(
+        'reconcile_interval_ms',
+        parsed.reconcile_interval_ms
+      );
+    }
+    if (parsed.pr_poll_interval_ms !== undefined) {
+      config.pr_poll_interval_ms = requirePositiveIntMs(
+        'pr_poll_interval_ms',
+        parsed.pr_poll_interval_ms
+      );
+    }
+    if (parsed.label_poll_interval_ms !== undefined) {
+      config.label_poll_interval_ms = requirePositiveIntMs(
+        'label_poll_interval_ms',
+        parsed.label_poll_interval_ms
+      );
+    }
+    if (parsed.dispatch !== undefined) {
+      config.dispatch = validateDispatchConfig(parsed.dispatch);
+    }
+    if (parsed.auto_upgrade !== undefined) {
+      if (typeof parsed.auto_upgrade !== 'boolean') {
+        throw new Error('auto_upgrade must be a boolean');
+      }
+      config.auto_upgrade = parsed.auto_upgrade;
+    }
+    if (parsed.dissolve_policy !== undefined) {
+      config.dissolve_policy = validateDissolvePolicy(parsed.dissolve_policy);
+    }
+    if (parsed.default_batch_priority !== undefined) {
+      if (!Number.isInteger(parsed.default_batch_priority)) {
+        throw new Error(
+          `default_batch_priority must be an integer, got ${JSON.stringify(parsed.default_batch_priority)}`
+        );
+      }
+      config.default_batch_priority = parsed.default_batch_priority;
+    }
+    if (parsed.max_full_review_members !== undefined) {
+      if (!Number.isInteger(parsed.max_full_review_members) || parsed.max_full_review_members < 0) {
+        throw new Error(
+          `max_full_review_members must be a non-negative integer, got ${JSON.stringify(parsed.max_full_review_members)}`
+        );
+      }
+      config.max_full_review_members = parsed.max_full_review_members;
+    }
+    if (parsed.member_parallelism !== undefined) {
+      if (!Number.isInteger(parsed.member_parallelism) || parsed.member_parallelism < 1) {
+        throw new Error(
+          `member_parallelism must be a positive integer, got ${JSON.stringify(parsed.member_parallelism)}`
+        );
+      }
+      config.member_parallelism = parsed.member_parallelism;
+    }
+    return config;
+  }
+
+  /**
+   * `loadConfig` without the degrade-to-defaults safety net (#883): THROWS on
+   * an unreadable/invalid project config or user profiles. The running
+   * engine's hot reload uses it so a bad edit keeps the last good config
+   * instead of silently reverting every setting to built-in defaults.
+   */
+  loadConfigStrict(onUserConfigError?: (message: string) => void): SchedConfig {
+    // A broken USER config is tolerated exactly as at startup (its profiles
+    // are ignored) so it can never block a valid project-config reload; the
+    // caller is told, naming the file.
+    const userProfiles = this.loadUserProfiles(onUserConfigError);
+    if (!fs.existsSync(this.configPath)) {
+      return mergeDispatchProfiles({ max_slots: DEFAULT_MAX_SLOTS }, userProfiles);
+    }
+    return mergeDispatchProfiles(this.parseConfigFile(), userProfiles);
+  }
+
+  /**
+   * Cheap change detector for the two config files (mtime + size, or `absent`)
+   * — the engine stats this every tick and reloads only when it moves (#883).
+   */
+  configFingerprint(): string {
+    const stamp = (file: string): string => {
+      try {
+        const st = fs.statSync(file);
+        return `${st.mtimeMs}:${st.size}`;
+      } catch {
+        return 'absent';
+      }
+    };
+    return `${stamp(this.configPath)}|${stamp(this.userConfigPath)}`;
   }
 
   saveConfig(config: SchedConfig): void {
@@ -514,7 +612,7 @@ export class SchedStore {
     writeAtomic(this.configPath, `${JSON.stringify(file, null, 2)}\n`);
   }
 
-  private loadUserProfiles(): Record<string, DispatchProfile> {
+  private loadUserProfiles(onError?: (message: string) => void): Record<string, DispatchProfile> {
     if (!fs.existsSync(this.userConfigPath)) return {};
     try {
       const raw: unknown = JSON.parse(fs.readFileSync(this.userConfigPath, 'utf-8'));
@@ -522,6 +620,12 @@ export class SchedStore {
       if (userConfig.dispatch_profiles === undefined) return {};
       return validateDispatchProfiles('dispatch_profiles', userConfig.dispatch_profiles);
     } catch (err) {
+      if (onError) {
+        onError(
+          `user config ${this.userConfigPath} has unreadable dispatch_profiles (${(err as Error).message}) — ignoring user profiles`
+        );
+        return {};
+      }
       console.error(
         `⚠ User config ${this.userConfigPath} has unreadable dispatch_profiles (${(err as Error).message}) — ignoring user profiles; fix the file and re-run`
       );

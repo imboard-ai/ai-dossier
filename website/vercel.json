@@ -1,0 +1,17 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "redirects": [
+    {
+      "source": "/:path*",
+      "has": [{ "type": "host", "value": "ai-dossier-imboard.vercel.app" }],
+      "destination": "https://ai-dossier.dev/:path*",
+      "permanent": true
+    },
+    {
+      "source": "/:path*",
+      "has": [{ "type": "host", "value": "ai-dossier-mu.vercel.app" }],
+      "destination": "https://ai-dossier.dev/:path*",
+      "permanent": true
+    }
+  ]
+}

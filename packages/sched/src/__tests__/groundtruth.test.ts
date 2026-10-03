@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { timestampMs } from '../groundtruth';
 import {
   batchPhaseBlockedReason,
   createExecGroundTruth,
@@ -6,6 +7,7 @@ import {
   type GroundTruthMilestone,
   groundTruthExec,
   isBatchPhaseDone,
+  isBatchTailParked,
   isMemberBlocked,
   isMemberComplete,
   isParkedMilestone,
@@ -473,6 +475,28 @@ describe('isWrongProcedureMilestone (#822)', () => {
   });
 });
 
+describe('createExecGroundTruth — milestone reads are trusted-only (#932)', () => {
+  it('passes --trusted on both milestone reads the scheduler acts on', () => {
+    const calls: string[][] = [];
+    const exec: ExecFn = (_file, args) => {
+      calls.push(args);
+      return args[1] === 'list' ? '[]' : 'null';
+    };
+    const gt = createExecGroundTruth(exec);
+    gt.latestMilestone(7);
+    gt.milestonesSince?.(7, '2026-09-29T00:00:00Z');
+    expect(calls).toHaveLength(2);
+    for (const args of calls) expect(args).toContain('--trusted');
+  });
+
+  it('an older CLI that rejects --trusted reads as unreachable (fail closed), never unfiltered', () => {
+    const exec: ExecFn = (_file, args) => (args.includes('--trusted') ? null : 'null');
+    const gt = createExecGroundTruth(exec);
+    expect(gt.latestMilestone(7)).toBeUndefined();
+    expect(gt.milestonesSince?.(7, '2026-09-29T00:00:00Z')).toBeUndefined();
+  });
+});
+
 describe('createExecGroundTruth', () => {
   it('reads milestones, issue state, and branch heads through the exec fn', () => {
     const calls: Array<[string, string[]]> = [];
@@ -860,6 +884,22 @@ describe('createExecGroundTruth.mergedPrForBranch (#789)', () => {
 
 // --- #468: PR state, setup info, park detection ---
 
+describe('parsePrViewJson autoMergeRequest (#874/#887)', () => {
+  const pr = (extra: Record<string, unknown>) =>
+    JSON.stringify({ state: 'OPEN', mergedAt: null, mergeable: 'MERGEABLE', labels: [], ...extra });
+  it('a non-null autoMergeRequest object is a request', () => {
+    expect(
+      parsePrViewJson(
+        pr({ autoMergeRequest: { enabledAt: '2026-09-29T00:00:00Z', mergeMethod: 'SQUASH' } })
+      )?.autoMergeRequested
+    ).toBe(true);
+  });
+  it('null is a positive "no request"; an absent field is unknown', () => {
+    expect(parsePrViewJson(pr({ autoMergeRequest: null }))?.autoMergeRequested).toBe(false);
+    expect(parsePrViewJson(pr({}))?.autoMergeRequested).toBeUndefined();
+  });
+});
+
 describe('parsePrViewJson (#468 AC1)', () => {
   it('parses the gh pr view --json shape', () => {
     const stdout = JSON.stringify({
@@ -918,6 +958,21 @@ describe('isParkedMilestone (#468 park detection)', () => {
     keys,
   });
 
+  it('an ATTACHED ship awaiting-merge is not a park (#887): the run is still merging', () => {
+    expect(
+      isParkedMilestone(milestone('ship', 'awaiting-merge', { pr: '55', ship_mode: 'attached' }))
+    ).toBe(false);
+    expect(
+      isParkedMilestone(milestone('ship', 'awaiting-merge', { pr: '55', ship_mode: 'detached' }))
+    ).toBe(true);
+    expect(
+      isBatchTailParked(
+        milestone('batch-ship', 'awaiting-merge', { pr: '55', ship_mode: 'attached' })
+      )
+    ).toBe(false);
+    expect(isBatchTailParked(milestone('batch-ship', 'awaiting-merge', { pr: '55' }))).toBe(true);
+  });
+
   it('only ship/awaiting-merge milestones carrying pr= are parks', () => {
     expect(isParkedMilestone(milestone('ship', 'awaiting-merge', { pr: '55' }))).toBe(true);
     expect(isParkedMilestone(milestone('ship', 'awaiting-merge', {}))).toBe(false);
@@ -934,7 +989,7 @@ describe('parseSetupInfo (#468 teardown inputs)', () => {
   // gh issue view --json comments always wraps the array — {"comments": [...]}
   // — never a bare array (#496). This fixture mirrors that real shape.
   const comments = (bodies: string[]) =>
-    JSON.stringify({ comments: bodies.map((body) => ({ body })) });
+    JSON.stringify({ comments: bodies.map((body) => ({ body, authorAssociation: 'OWNER' })) });
 
   it('recovers worktree/pool_claimed from the setup milestone comment', () => {
     const json = comments([
@@ -991,6 +1046,7 @@ describe('parseSetupInfo (#468 teardown inputs)', () => {
       comments: [
         {
           body: '<!-- runstate:v1 -->\nphase=setup status=done run=r-3810 at=2026-08-29T23:00:00Z\nbranch=feature/3810-x\nworktree=/repo/worktrees/feature-3810-x\npool_claimed=true\nnext=plan',
+          authorAssociation: 'OWNER',
         },
       ],
     });
@@ -1020,6 +1076,7 @@ describe('createExecGroundTruth prState/setupInfo (#468)', () => {
           comments: [
             {
               body: '<!-- runstate:v1 -->\nphase=setup status=done run=r-1 at=x\nworktree=/wt-9\npool_claimed=true',
+              authorAssociation: 'OWNER',
             },
           ],
         });
@@ -1092,16 +1149,14 @@ describe('parseSetupInfo author trust (defense-in-depth)', () => {
     ).toBe('/repo/worktrees/real');
   });
 
-  it('comments without authorAssociation (older gh / file fakes) still parse', () => {
+  it('fails closed: a comment with no/non-string/BOT authorAssociation is never a teardown source (#808)', () => {
+    const body =
+      '<!-- runstate:v1 -->\nphase=setup status=done run=r-1 at=x\nworktree=/repo/worktrees/wt\npool_claimed=true';
+    expect(parseSetupInfo(commentsPayload([{ body }]))).toBeNull();
+    expect(parseSetupInfo(commentsPayload([{ body, authorAssociation: 'BOT' }]))).toBeNull();
     expect(
-      parseSetupInfo(
-        commentsPayload([
-          {
-            body: '<!-- runstate:v1 -->\nphase=setup status=done run=r-1 at=x\nworktree=/repo/worktrees/wt\npool_claimed=true',
-          },
-        ])
-      )
-    ).toEqual({ worktree: '/repo/worktrees/wt', poolClaimed: true, branch: null });
+      parseSetupInfo(JSON.stringify({ comments: [{ body, authorAssociation: 7 }] }))
+    ).toBeNull();
   });
 });
 
@@ -1232,6 +1287,8 @@ describe('parseIssueCloseTruthJson (#768)', () => {
         wrap({
           state: 'CLOSED',
           stateReason: 'COMPLETED',
+          createdAt: '2026-09-01T10:00:00Z',
+          closedAt: '2026-09-12T10:00:00Z',
           labels: { nodes: [{ name: 'cycle:slot' }] },
           timelineItems: {
             nodes: [
@@ -1260,6 +1317,9 @@ describe('parseIssueCloseTruthJson (#768)', () => {
         repo: 'imboard-ai/imboard',
       },
       closingPrs: [],
+      closingPrsTruncated: false,
+      createdAt: '2026-09-01T10:00:00Z',
+      closedAt: '2026-09-12T10:00:00Z',
     });
   });
 
@@ -1367,21 +1427,92 @@ describe('parseIssueCloseTruthJson (#768)', () => {
     ).toBeNull();
   });
 
-  it("#799: the close query asks GitHub for the last REOPENED_EVENT and each reference's mergedAt", () => {
+  /** The GraphQL text `issueCloseTruth` sends, captured from its first gh call. */
+  const capturedCloseQuery = (): string => {
     let query = '';
-    const gt = createExecGroundTruth(
+    createExecGroundTruth(
       (_cmd, args) => {
         query ||= args.find((a) => a.startsWith('query=')) ?? '';
         return null;
       },
       { repo: 'o/r' }
-    );
-    gt.issueCloseTruth?.(1);
+    ).issueCloseTruth?.(1);
+    return query;
+  };
+
+  it("#799: the close query asks GitHub for the last REOPENED_EVENT and each reference's mergedAt", () => {
+    const query = capturedCloseQuery();
     expect(query).toContain('reopens:timelineItems(itemTypes:[REOPENED_EVENT],last:1)');
     expect(query).toContain('... on ReopenedEvent{createdAt}');
     expect(query).toMatch(
-      /closedByPullRequestsReferences\([^)]*\)\{nodes\{number merged mergedAt /
+      /closedByPullRequestsReferences\([^)]*\)\{.*nodes\{number merged mergedAt /
     );
+  });
+
+  describe('#850: the creation and close times, and whether the closing-reference list is complete', () => {
+    const timeOf = (field: 'createdAt' | 'closedAt', value: unknown) =>
+      parseIssueCloseTruthJson(
+        wrap({ state: 'CLOSED', stateReason: 'COMPLETED', [field]: value })
+      )?.[field];
+    const truncatedBy = (refs: unknown) =>
+      parseIssueCloseTruthJson(
+        wrap({ state: 'CLOSED', stateReason: 'COMPLETED', closedByPullRequestsReferences: refs })
+      );
+
+    it("reads the issue's createdAt and closedAt; a missing or unparseable one is null (unreadable), never a guessed time", () => {
+      for (const field of ['createdAt', 'closedAt'] as const) {
+        expect(timeOf(field, '2026-09-12T10:00:00Z')).toBe('2026-09-12T10:00:00Z');
+        expect(timeOf(field, '2026-09-12T10:00:00.5Z')).toBe('2026-09-12T10:00:00.5Z');
+        expect(timeOf(field, undefined)).toBeNull();
+        expect(timeOf(field, null)).toBeNull();
+        expect(timeOf(field, 'garbage')).toBeNull();
+        expect(timeOf(field, 1757671200000)).toBeNull();
+        // Loose strings `Date.parse` would accept are not GitHub's format either.
+        expect(timeOf(field, '1')).toBeNull();
+        expect(timeOf(field, '2026-09-12 10:00:00')).toBeNull();
+      }
+    });
+
+    it('timestampMs: epoch ms of a time the parser accepts, NaN for anything else', () => {
+      expect(timestampMs('2026-09-12T10:00:00Z')).toBe(Date.parse('2026-09-12T10:00:00Z'));
+      for (const loose of [null, undefined, '', 'garbage', '1', '2026-09', '2026-09-12', 17]) {
+        expect(timestampMs(loose)).toBeNaN();
+      }
+    });
+
+    it('flags a reference page GitHub says has more behind it; the page read is still kept', () => {
+      const parsed = truncatedBy({
+        pageInfo: { hasNextPage: true },
+        nodes: [
+          { number: 4255, merged: true, mergedAt: '2026-09-10T10:00:00Z', baseRefName: 'main' },
+        ],
+      });
+      expect(parsed?.closingPrsTruncated).toBe(true);
+      expect(parsed?.closingPrs.map((pr) => pr.number)).toEqual([4255]);
+    });
+
+    it('only an explicit hasNextPage: true is truncated — a complete, missing or garbled pageInfo reads complete', () => {
+      for (const refs of [
+        { pageInfo: { hasNextPage: false }, nodes: [] },
+        { nodes: [] },
+        { pageInfo: null, nodes: [] },
+        { pageInfo: { hasNextPage: 'true' }, nodes: [] },
+        null,
+        undefined,
+      ]) {
+        const parsed = truncatedBy(refs);
+        expect(parsed?.closingPrsTruncated).toBe(false);
+        expect(parsed?.closingPrs).toEqual([]);
+      }
+    });
+
+    it("the close query asks GitHub for the issue's createdAt and closedAt, and a full page of references with its hasNextPage", () => {
+      const query = capturedCloseQuery();
+      expect(query).toContain('issue(number:$n){state stateReason createdAt closedAt ');
+      expect(query).toContain(
+        'closedByPullRequestsReferences(first:100,includeClosedPrs:true){pageInfo{hasNextPage} nodes{'
+      );
+    });
   });
 
   it('keeps NOT_PLANNED distinct from COMPLETED, and an open issue as OPEN', () => {
@@ -1441,6 +1572,13 @@ describe('issueCloseTruth: a missing issue is not an outage (#768)', () => {
     const exec: ExecFn = (_file, args) =>
       args[0] === 'api' && args[1] === 'graphql' ? null : 'imboard-ai/imboard';
     const gt = createExecGroundTruth(exec, { repo: 'imboard-ai/imboard' });
-    expect(gt.issueCloseTruth?.(99999)?.state).toBe('MISSING');
+    // #850: with no times and a complete (empty) reference list — nothing to vouch with.
+    expect(gt.issueCloseTruth?.(99999)).toMatchObject({
+      state: 'MISSING',
+      closingPrs: [],
+      closingPrsTruncated: false,
+      createdAt: null,
+      closedAt: null,
+    });
   });
 });

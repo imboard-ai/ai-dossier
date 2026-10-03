@@ -8,7 +8,8 @@ import { registerCapCommand } from '../../commands/cap';
 import { compareVersions } from '../../version';
 import { createTestProgram } from '../helpers/test-utils';
 
-vi.mock('../../cap-log', () => ({
+vi.mock('../../cap-log', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../cap-log')>()),
   appendCapLog: vi.fn(),
 }));
 
@@ -662,6 +663,17 @@ capabilities:
           'capabilities:\n  a.b:\n    command: x\n    assumptions:\n      - magic: yes\n'
         )
       ).toThrow(/unknown probe kind/);
+    });
+
+    it('#895: accepts `gates: none-declared-on-purpose` and rejects any other value', () => {
+      expect(
+        parseCapabilityManifest('gates: none-declared-on-purpose\ncapabilities: {}\n')
+      ).toEqual({});
+      for (const bad of ['true', 'none', '"None-Declared-On-Purpose"', '[a]']) {
+        expect(() => parseCapabilityManifest(`gates: ${bad}\ncapabilities: {}\n`)).toThrow(
+          /'gates:' must be 'none-declared-on-purpose'/
+        );
+      }
     });
 
     it('rejects an unsupported manifest version', () => {

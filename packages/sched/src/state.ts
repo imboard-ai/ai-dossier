@@ -24,6 +24,7 @@ import {
   type FailureEvidence,
   IllegalTransitionError,
   type IssueStatus,
+  JOURNAL_DEDUP_REANNOUNCE_TICKS,
   LEGACY_SCHEMA_VERSIONS,
   MEMBER_EXIT_KINDS,
   MEMBER_RUN_STATUSES,
@@ -154,7 +155,19 @@ const BATCH_TRANSITIONS: Record<BatchStatus, BatchStatus[]> = {
   // read but named no offender. Nothing is requeued or reverted for `blocked`.
   // A member admitted while the suite runs returns the batch to execution;
   // the aggregate suite must run again before final review can begin.
-  validating: ['executing', 'attributing', 'reviewing', 'dissolving', 'blocked', 'stopped'],
+  // → evicting (#912): a red fix attempt (`resolveFixAttempt(..., 'red')`) lands
+  // the batch in `validating` with the suite re-run already red and the offender
+  // already attributed; RFC F.2's "one fix attempt, then evict" goes straight to
+  // eviction rather than re-attributing the same offender.
+  validating: [
+    'executing',
+    'attributing',
+    'evicting',
+    'reviewing',
+    'dissolving',
+    'blocked',
+    'stopped',
+  ],
   // `dissolving` because attribution can legitimately name nobody (bisect
   // absent, errored, or unattributable) — without the edge, an unattributable
   // red suite is a dead end with no way out but fixing or evicting a member the
@@ -337,6 +350,26 @@ function isIsoDateString(value: unknown): value is string {
 }
 
 /**
+ * The one journal-dedup streak step (#638), record-agnostic: advance a
+ * `since`/`ticks` marker by one tick and decide whether THIS tick journals —
+ * the streak's first tick, or every `JOURNAL_DEDUP_REANNOUNCE_TICKS` after,
+ * never every tick. `changed` is the caller's "the identity of the condition
+ * differs from the recorded one" (a batch's `reason`, an entry's condition
+ * key); a `null` `since` is always a new streak. Pure — the caller owns the
+ * journal payload and the marker write-back.
+ */
+export function advanceStreak(
+  prior: { since: string | null; ticks: number },
+  changed: boolean,
+  now: Date
+): { since: string; ticks: number; announce: boolean } {
+  const isNewStreak = changed || prior.since === null;
+  const ticks = isNewStreak ? 1 : prior.ticks + 1;
+  const since = isNewStreak || prior.since === null ? now.toISOString() : prior.since;
+  return { since, ticks, announce: isNewStreak || ticks % JOURNAL_DEDUP_REANNOUNCE_TICKS === 0 };
+}
+
+/**
  * One journal-dedup marker pair (#630/#632): an optional (absent on a legacy
  * state), nullable ISO `*_since` and an optional non-negative-integer
  * `*_ticks`.
@@ -503,6 +536,10 @@ function validateQueueEntry(data: unknown, where: (n: number) => string): void {
     'ground_truth_unreachable_since',
     'ground_truth_unreachable_ticks'
   );
+  const gtCondition = entry.ground_truth_unreachable_condition;
+  if (gtCondition !== null && gtCondition !== undefined && typeof gtCondition !== 'string') {
+    throw new Error(`${label}: ground_truth_unreachable_condition must be a string or null`);
+  }
   validateDedupMarker(entry, label, 'pr_watch_waiting_since', 'pr_watch_waiting_ticks');
   if (!isIsoDateString(entry.enqueued_at) || !isIsoDateString(entry.updated_at)) {
     throw new Error(`${label}: enqueued_at/updated_at must be ISO date strings`);
@@ -948,7 +985,13 @@ export function validateState(data: unknown): SchedState {
     // used for identity matching (run id + generation decides that), only to
     // NAME the trail record the bind/release posts describe. #844's kill
     // timestamps share the same string-or-null shape.
-    for (const field of ['run_id', 'fence_phase', 'kill_sent_at', 'kill_escalated_at'] as const) {
+    for (const field of [
+      'run_id',
+      'fence_phase',
+      'kill_sent_at',
+      'kill_escalated_at',
+      'kill_ineffective_at',
+    ] as const) {
       const value = slot[field];
       if (value !== null && value !== undefined && typeof value !== 'string') {
         throw new Error(`Slot ${slot.id}: ${field} must be a string or null`);
@@ -1114,6 +1157,7 @@ export function validateState(data: unknown): SchedState {
     // escalation existed — null/null is exact, not a guess.
     kill_sent_at: slot.kill_sent_at ?? null,
     kill_escalated_at: slot.kill_escalated_at ?? null,
+    kill_ineffective_at: slot.kill_ineffective_at ?? null,
   }));
   const entries = (obj.entries as QueueEntry[]).map((entry) => ({
     ...entry,
@@ -1137,10 +1181,16 @@ export function validateState(data: unknown): SchedState {
     // exact, not a guess.
     ground_truth_unreachable_since: entry.ground_truth_unreachable_since ?? null,
     ground_truth_unreachable_ticks: entry.ground_truth_unreachable_ticks ?? 0,
+    // Pre-#637 (1.29.0) entries carry no condition key; an in-flight streak
+    // simply adopts the first key reported after load (null !== key starts a
+    // fresh streak once, which is at worst one extra journal line).
+    ground_truth_unreachable_condition: entry.ground_truth_unreachable_condition ?? null,
     pr_watch_waiting_since: entry.pr_watch_waiting_since ?? null,
     pr_watch_waiting_ticks: entry.pr_watch_waiting_ticks ?? 0,
     // Pre-#776 entries were never flagged stale-closed — null is exact.
     stale_closed_at: entry.stale_closed_at ?? null,
+    // Pre-#900 entries carry no hold-tick counter — 0 restarts the streak.
+    stale_closed_ticks: entry.stale_closed_ticks ?? 0,
   }));
   const batches = (obj.batches as BatchEntry[]).map((batch) => ({
     ...batch,
@@ -1361,11 +1411,13 @@ export function transitionBatch(
 export const CLEARED_ENTRY_DEDUP_MARKERS = {
   ground_truth_unreachable_since: null,
   ground_truth_unreachable_ticks: 0,
+  ground_truth_unreachable_condition: null,
   pr_watch_waiting_since: null,
   pr_watch_waiting_ticks: 0,
   // #776: a requeue is a fresh attempt — the stale-closed flag belonged to
   // the previous dispatch's recovery, not to the new one.
   stale_closed_at: null,
+  stale_closed_ticks: 0,
 } as const;
 
 /** The `BatchEntry` `anchor-close-failed` dedup marker (#768), zeroed. */
@@ -1426,6 +1478,7 @@ export const CLEARED_SLOT_FIELDS = {
   // #844: a released slot is waiting on no agent to die.
   kill_sent_at: null,
   kill_escalated_at: null,
+  kill_ineffective_at: null,
 };
 
 export function transitionSlot(
@@ -1727,6 +1780,13 @@ export function requeueMember(
     ...profilePatch,
     reason,
     ...CLEARED_ENTRY_DEDUP_MARKERS,
+    // #778: a requeue is a fresh attempt, so the stale-closed flag is normally
+    // cleared — but not while a `recovering` slot still holds `issue:N`. With
+    // the flag gone, the next tick would read the issue via `issueClosed`,
+    // which is false when gh is unreachable, and respawn a shipped issue.
+    ...(state.slots.some((s) => s.unit === `issue:${issue}` && s.status === 'recovering')
+      ? { stale_closed_at: entry.stale_closed_at, stale_closed_ticks: entry.stale_closed_ticks }
+      : {}),
     ...extra,
   };
   if (entry.status === 'queued' || entry.status === 'classified' || entry.status === 'requeued') {

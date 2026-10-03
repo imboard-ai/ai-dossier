@@ -3,110 +3,97 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
-// The publish workflow's side of publish-guard's fail-safe contract (#846).
-// publish-guard.mjs exits 0 for an undecidable package under
-// --defer-collision and signals "do not publish" only through its `skip`
-// output. So a publish step must run on an explicit `skip == 'false'` — a
-// check that wrote no output (a crash, a future early return) must never
-// publish. `skip != 'true'` would publish in exactly that case.
-//
-// Steps are found by what they RUN, not by name: any step that runs
-// `npm publish` is a publish step, whatever it is called.
 const WORKFLOW = fileURLToPath(
   new URL('../.github/workflows/publish-packages.yml', import.meta.url)
+);
+const PROMOTION_WORKFLOW = fileURLToPath(
+  new URL('../.github/workflows/promote-latest.yml', import.meta.url)
 );
 
 const readWorkflow = () => readFileSync(WORKFLOW, 'utf8');
 
-/** A step's `if:` with an optional `${{ }}` wrapper and whitespace removed. */
-const condition = (step) =>
-  String(step.if ?? '')
-    .trim()
-    .replace(/^\$\{\{\s*([\s\S]*?)\s*\}\}$/, '$1')
-    .replace(/\s+/g, ' ');
+describe('publish-packages.yml channel contract', () => {
+  const workflow = () => parse(readWorkflow());
 
-/** Violations of the fail-safe contract; [] when the workflow is safe. */
-function failSafeViolations(text) {
-  const steps = parse(text)?.jobs?.publish?.steps ?? [];
-  const runOf = (s) => String(s.run ?? '');
-  const checks = steps.filter((s) => /scripts\/publish-guard\.mjs --dir /.test(runOf(s)));
-  const publishes = steps.filter((s) => /\bnpm publish\b/.test(runOf(s)));
-  const checkIds = new Set(checks.map((s) => s.id));
-
-  const problems = [];
-  if (checks.length === 0 || publishes.length === 0) problems.push('no check/publish steps found');
-  for (const check of checks) {
-    if (!/--defer-collision /.test(runOf(check))) {
-      problems.push(`${check.name}: not run through publish-guard with --defer-collision`);
-    }
-  }
-  for (const pub of publishes) {
-    const cond = condition(pub);
-    const m = /^steps\.([\w-]+)\.outputs\.skip == 'false'$/.exec(cond);
-    if (!m || !checkIds.has(m[1])) {
-      problems.push(`${pub.name}: must run only on skip == 'false' (got ${cond || 'no if:'})`);
-    }
-  }
-  const report = steps.find((s) => /--report-collisions/.test(runOf(s)));
-  if (!report) problems.push('no --report-collisions step');
-  else if (condition(report) !== '!cancelled()') {
-    problems.push(`${report.name}: must run if: \${{ !cancelled() }}`);
-  }
-  return problems;
-}
-
-describe('publish-packages.yml fail-safe contract (#846)', () => {
-  it('the real workflow satisfies it, over all 5 packages', () => {
-    const steps = parse(readWorkflow()).jobs.publish.steps;
+  it('publishes a complete five-package cohort with a guard for every package', () => {
+    const steps = workflow().jobs.publish.steps;
     expect(steps.filter((s) => /\bnpm publish\b/.test(String(s.run ?? '')))).toHaveLength(5);
-    expect(failSafeViolations(readWorkflow())).toEqual([]);
-  });
-
-  it("flags a publish step that runs on skip != 'true' (publishes when output is missing)", () => {
-    const text = readWorkflow().replace(
-      "steps.check-cli.outputs.skip == 'false'",
-      "steps.check-cli.outputs.skip != 'true'"
+    expect(steps.filter((s) => /publish-guard\.mjs --dir/.test(String(s.run ?? '')))).toHaveLength(
+      5
     );
-    expect(failSafeViolations(text)).toEqual([
-      "Publish @ai-dossier/cli: must run only on skip == 'false' (got steps.check-cli.outputs.skip != 'true')",
-    ]);
   });
 
-  it('finds a publish step by what it runs, however it is named', () => {
-    const text = readWorkflow()
-      .replace('- name: Publish @ai-dossier/cli', "- name: 'Ship the CLI'")
-      .replace("steps.check-cli.outputs.skip == 'false'", "steps.check-cli.outputs.skip != 'true'");
-    expect(failSafeViolations(text)).toHaveLength(1);
+  it('offers next and stable on workflow_dispatch with next as the default', () => {
+    const { on, jobs } = workflow();
+    expect(on.workflow_dispatch.inputs.channel).toMatchObject({
+      type: 'choice',
+      options: ['next', 'stable'],
+      default: 'next',
+      required: true,
+    });
+    expect(on.push).toMatchObject({ branches: ['main'], tags: ['v*'] });
+    expect(on.release.types).toContain('published');
+    expect(jobs.publish.env.PUBLISH_TAG).toContain("inputs.channel == 'stable'");
+    expect(jobs.publish.env.PUBLISH_TAG).toContain("'latest' || 'next'");
   });
 
-  it('flags a check step that dropped --defer-collision', () => {
-    const text = readWorkflow().replace(
-      'publish-guard.mjs --dir cli --defer-collision "$RUNNER_TEMP/publish-collisions"',
-      'publish-guard.mjs --dir cli'
+  it('prepares and publishes next cohorts on the automatic and default-next paths', () => {
+    const steps = workflow().jobs.publish.steps;
+    const prepare = steps.find((step) => step.name === 'Prepare next release cohort');
+    expect(prepare.if).toContain("env.PUBLISH_CHANNEL == 'next'");
+    expect(prepare.run).toContain(
+      'prepare-next-release.mjs --run-number "$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT"'
     );
-    expect(failSafeViolations(text)).toEqual([
-      'Check if @ai-dossier/cli needs publishing: not run through publish-guard with --defer-collision',
-    ]);
+
+    const guards = steps.filter((step) => /publish-guard\.mjs --dir/.test(String(step.run ?? '')));
+    const publishes = steps.filter((step) => /\bnpm publish\b/.test(String(step.run ?? '')));
+    for (const [index, step] of publishes.entries()) {
+      expect(String(step.run)).toContain('--tag "$PUBLISH_TAG"');
+      expect(step.if).toContain("env.PUBLISH_CHANNEL == 'next'");
+      expect(step.if).toContain(`steps.${guards[index].id}.outputs.skip != 'true'`);
+    }
   });
 
-  it('flags a report step that a failed publish step would skip', () => {
-    const text = readWorkflow().replace(/\n[ \t]*if: \$\{\{ !cancelled\(\) \}\}/, '');
-    expect(failSafeViolations(text)).toEqual([
-      'Fail on version collisions: must run if: ${{ !cancelled() }}',
-    ]);
-  });
-
-  it('ignores a commented-out condition', () => {
-    const text = readWorkflow().replace(
-      /\n([ \t]*)if: \$\{\{ !cancelled\(\) \}\}/,
-      '\n$1# was: if: ${{ !cancelled() }}'
+  it('uses stable manifests only for stable dispatches and fails closed on guard problems', () => {
+    const steps = workflow().jobs.publish.steps;
+    expect(steps.find((step) => step.name === 'Require main for stable publishing')?.if).toContain(
+      "env.PUBLISH_CHANNEL == 'stable'"
     );
-    expect(failSafeViolations(text)).toHaveLength(1);
+    expect(
+      steps.find((step) => step.name === 'Fail on stable publish guard problems')?.run
+    ).toContain('--report-collisions "$RUNNER_TEMP/publish-collisions"');
   });
 
-  it('does not pass vacuously on a workflow with no publish steps', () => {
-    expect(failSafeViolations('jobs:\n  publish:\n    steps: []\n')).toContain(
-      'no check/publish steps found'
+  it('retries registry verification and checks the selected dist-tag', () => {
+    const verify = workflow().jobs.verify;
+    const step = verify.steps.find(
+      (candidate) => candidate.name === 'Verify packages are available under the selected channel'
     );
+    expect(verify.env.PUBLISH_TAG).toContain("'latest' || 'next'");
+    expect(step.run).toContain('for attempt in 1 2 3 4 5');
+    expect(step.run).toContain('delay=$((15 * (2 ** (attempt - 1))))');
+    expect(step.run).toContain('sleep "$delay"');
+    expect(step.run).toContain(
+      'npm view "$package@$PUBLISH_TAG" version --prefer-online 2>"$error_file"'
+    );
+    expect(step.run).toContain("sed 's/::/: :/g'");
+    expect(step.run).toContain('[ "$actual" = "$expected" ]');
+  });
+});
+
+describe('promote-latest.yml dispatcher contract', () => {
+  it('dispatches stable publishing through the existing trusted workflow only', () => {
+    const workflow = parse(readFileSync(PROMOTION_WORKFLOW, 'utf8'));
+    expect(workflow.on).toEqual({ workflow_dispatch: null });
+    expect(workflow.jobs.dispatch.permissions).toEqual({ actions: 'write' });
+    const dispatch = workflow.jobs.dispatch.steps.find(
+      (step) => step.name === 'Dispatch stable package publish through the trusted workflow'
+    );
+    expect(dispatch.env).toEqual({ GH_TOKEN: '${' + '{ github.token }}' });
+    expect(dispatch.run).toBe(
+      'gh workflow run publish-packages.yml --repo imboard-ai/ai-dossier --ref main --field channel=stable'
+    );
+    expect(JSON.stringify(workflow)).not.toMatch(/NPM_TOKEN|NODE_AUTH_TOKEN|id-token/);
+    expect(dispatch.run).not.toMatch(/(?:^|\s)npm publish\b|npm dist-tag add/);
   });
 });

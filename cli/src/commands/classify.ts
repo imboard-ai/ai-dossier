@@ -15,7 +15,12 @@ import {
   tryFetchIssueState,
 } from '../gh';
 import { parseIssueSelection } from '../issue-selection';
-import { findLatestPlan } from '../plan-artifact';
+import {
+  findLatestTrustedPlan,
+  type IgnoredPlan,
+  ignoredPlanWarning,
+  toAuthoredComments,
+} from '../plan-artifact';
 import {
   extractDependencyRefs,
   PRESCREEN_SCHEMA,
@@ -82,16 +87,19 @@ interface PredictedFilesResult {
   status: PlanArtifactStatus;
   files?: string[];
   error?: string;
+  /** Untrusted newer plan:v1 artifacts passed over (#808) — surfaced as a warning. */
+  ignored?: IgnoredPlan[];
 }
 
 /** The plan:v1 artifact's predicted files, when the issue already carries one — distinguishes "no artifact" from "couldn't read comments" so a transient `gh` failure never silently looks like a clean issue. */
 function fetchPredictedFiles(issue: string, repo: string | undefined): PredictedFilesResult {
   const comments = tryFetchComments(issue, repo);
   if (!comments.ok) return { status: 'unreadable', error: comments.error };
-  const bodies = comments.comments.map((c) => (typeof c?.body === 'string' ? c.body : ''));
-  const latest = findLatestPlan(bodies);
-  if (latest === null) return { status: 'absent' };
-  return { status: 'present', files: latest.artifact.predictedFiles };
+  // Only an artifact from an author with write access may feed predicted files (#808): a
+  // stranger's benign plan:v1 posted over a legitimate one must not dodge file-count/path-floor.
+  const { latest, ignored } = findLatestTrustedPlan(toAuthoredComments(comments.comments));
+  if (latest === null) return { status: 'absent', ignored };
+  return { status: 'present', files: latest.artifact.predictedFiles, ignored };
 }
 
 /** The one JSON shape every path emits (`schema: prescreen:v4`, #772/#805/#818) — success and failure alike carry the same keys, plus `degraded`/`warnings` when something didn't run cleanly. */
@@ -181,6 +189,9 @@ function registerPrescreenSubcommand(cmd: Command): void {
         warnings.push(
           `Could not read comments to check for a plan:v1 artifact — path-floor and file-count checks were skipped: ${predicted.error}`
         );
+      }
+      if (predicted.ignored && predicted.ignored.length > 0) {
+        warnings.push(ignoredPlanWarning(predicted.ignored));
       }
       if (unresolved.length > 0) {
         warnings.push(

@@ -1,0 +1,12 @@
+---
+import Base from '../layouts/Base.astro';
+---
+<Base title="Page not found" noindex>
+  <p class="code" aria-hidden="true">404</p>
+  <h1>Page not found</h1>
+  <p>Try the <a href="/docs/">docs</a>, the <a href="/registry/">registry</a> or the <a href="/">home page</a>.</p>
+</Base>
+
+<style>
+  .code { font: 650 var(--step-4) var(--font-mono); color: var(--accent); margin: 40px 0 0; letter-spacing: -0.04em; }
+</style>

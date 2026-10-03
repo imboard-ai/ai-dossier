@@ -1,0 +1,359 @@
+---
+import Base from '../layouts/Base.astro';
+
+type Download = { label: string; href: string };
+type Variant = {
+  id: string;
+  name: string;
+  note: string;
+  src: string;
+  alt: string;
+  height: number;
+  // Which tiles to show it on. A variant is only shown where it is legible.
+  on: ('light' | 'dark')[];
+  files: Download[];
+};
+
+const b = '/brand/ai-dossier';
+const variants: Variant[] = [
+  {
+    id: 'mark',
+    name: 'Mark',
+    note: 'The primary logo: a document with a check on a rounded green square. Use it as the app icon, favicon and avatar. Same artwork as favicon.svg.',
+    src: `${b}-mark.svg`,
+    alt: 'AI Dossier mark: white document with a checkmark on a green rounded square',
+    height: 112,
+    on: ['light', 'dark'],
+    files: [
+      { label: 'SVG', href: `${b}-mark.svg` },
+      { label: 'PNG 64', href: `${b}-mark-64.png` },
+      { label: 'PNG 256', href: `${b}-mark-256.png` },
+      { label: 'PNG 512', href: `${b}-mark-512.png` },
+      { label: 'PNG 1024', href: `${b}-mark-1024.png` },
+    ],
+  },
+  {
+    id: 'mark-dark',
+    name: 'Mark, dark theme',
+    note: 'The mint square with a near-black glyph, as the website draws it in its dark theme. Prefer it on dark surfaces.',
+    src: `${b}-mark-dark.svg`,
+    alt: 'AI Dossier mark in dark theme colours: near-black document with a checkmark on a mint rounded square',
+    height: 112,
+    on: ['dark', 'light'],
+    files: [
+      { label: 'SVG', href: `${b}-mark-dark.svg` },
+      { label: 'PNG 512', href: `${b}-mark-dark.png` },
+    ],
+  },
+  {
+    id: 'lockup',
+    name: 'Horizontal lockup',
+    note: 'The mark followed by the "ai-dossier" wordmark, set in Inter and converted to outlines so it renders the same everywhere. Use the dark-text version on light backgrounds and the light-text version on dark ones.',
+    src: `${b}-lockup.svg`,
+    alt: 'AI Dossier lockup: the mark followed by the text ai-dossier',
+    height: 56,
+    on: ['light'],
+    files: [
+      { label: 'SVG', href: `${b}-lockup.svg` },
+      { label: 'PNG', href: `${b}-lockup.png` },
+    ],
+  },
+  {
+    id: 'lockup-dark',
+    name: 'Horizontal lockup, for dark backgrounds',
+    note: 'Mint mark with light wordmark.',
+    src: `${b}-lockup-dark.svg`,
+    alt: 'AI Dossier lockup for dark backgrounds: mint mark followed by light text ai-dossier',
+    height: 56,
+    on: ['dark'],
+    files: [
+      { label: 'SVG', href: `${b}-lockup-dark.svg` },
+      { label: 'PNG', href: `${b}-lockup-dark.png` },
+    ],
+  },
+  {
+    id: 'glyph',
+    name: 'Glyph, green',
+    note: 'The document-and-check without the square, on a transparent background. For light surfaces where the filled square would be too heavy.',
+    src: `${b}-glyph.svg`,
+    alt: 'AI Dossier glyph in green: document outline with a checkmark',
+    height: 96,
+    on: ['light'],
+    files: [
+      { label: 'SVG', href: `${b}-glyph.svg` },
+      { label: 'PNG', href: `${b}-glyph.png` },
+    ],
+  },
+  {
+    id: 'glyph-white',
+    name: 'Glyph, white',
+    note: 'One-colour version for dark or photographic backgrounds, and for stamping on a brand-coloured surface.',
+    src: `${b}-glyph-white.svg`,
+    alt: 'AI Dossier glyph in white: document outline with a checkmark',
+    height: 96,
+    on: ['dark'],
+    files: [
+      { label: 'SVG', href: `${b}-glyph-white.svg` },
+      { label: 'PNG', href: `${b}-glyph-white.png` },
+    ],
+  },
+  {
+    id: 'glyph-black',
+    name: 'Glyph, black',
+    note: 'One-colour version for print, documents and anywhere only black is available.',
+    src: `${b}-glyph-black.svg`,
+    alt: 'AI Dossier glyph in black: document outline with a checkmark',
+    height: 96,
+    on: ['light'],
+    files: [{ label: 'SVG', href: `${b}-glyph-black.svg` }],
+  },
+];
+
+const swatches = [
+  { name: 'Brand green', hex: '#047857', use: 'Mark fill; website accent in the light theme.', fg: '#ffffff' },
+  { name: 'Mint', hex: '#34d399', use: 'Website accent in the dark theme; dark-theme mark fill.', fg: '#04140d' },
+  { name: 'Mark foreground', hex: '#ffffff', use: 'Glyph on the green mark.', fg: '#0f1114' },
+  { name: 'Dark foreground', hex: '#04140d', use: 'Glyph on the mint mark.', fg: '#ffffff' },
+  { name: 'Ink', hex: '#0f1114', use: 'Wordmark on light backgrounds; light-theme text.', fg: '#ffffff' },
+  { name: 'Paper', hex: '#eceef1', use: 'Wordmark on dark backgrounds; dark-theme text.', fg: '#0f1114' },
+];
+
+const dos = [
+  'Use the supplied files. Scale them proportionally.',
+  'Keep the clear space around the logo.',
+  'Use the mark on a light or dark background that gives it contrast.',
+  'Use the glyph versions when you need a single colour.',
+  'Use the lockup for a name next to the mark, and the mark alone where space is tight.',
+];
+const donts = [
+  'Do not stretch, squash, rotate or skew it.',
+  'Do not recolour it outside the palette above.',
+  'Do not add shadows, outlines, gradients or effects.',
+  'Do not put the green mark on a green or low-contrast background.',
+  'Do not redraw the glyph or retype the wordmark in another font.',
+  'Do not imply endorsement by using it as your own product logo.',
+];
+---
+<Base
+  title="Logo showcase"
+  description="Download the AI Dossier logo as SVG and PNG: mark, lockup and glyph variants, colour swatches, minimum size, clear space and usage guidelines."
+  wide
+>
+  <header class="intro">
+    <h1>Logo showcase</h1>
+    <p class="muted lede">
+      Downloads and guidelines for the AI Dossier logo. Every variant is shown on a light and a dark background, with SVG
+      for most uses and PNG where a raster is handy.
+    </p>
+    <nav class="jump" aria-label="On this page">
+      <a href="#variants">Variants</a>
+      <a href="#colors">Colors</a>
+      <a href="#sizing">Size and clear space</a>
+      <a href="#usage">Usage</a>
+    </nav>
+  </header>
+
+  <section aria-labelledby="variants">
+    <h2 id="variants">Variants</h2>
+    <div class="grid">
+      {variants.map((v) => (
+        <article class="card" id={v.id}>
+          <h3>{v.name}</h3>
+          <p class="muted note">{v.note}</p>
+          <div class={`tiles${v.on.length === 1 ? ' one' : ''}`}>
+            {v.on.map((bg) => (
+              <div class={`tile ${bg}`}>
+                <img src={v.src} alt={v.alt} height={v.height} style={`height:${v.height}px`} loading="lazy" decoding="async" />
+                <span class="tag">{bg === 'light' ? 'On light' : 'On dark'}</span>
+              </div>
+            ))}
+          </div>
+          <ul class="dl" aria-label={`Download ${v.name}`}>
+            {v.files.map((f) => (
+              <li><a class="btn secondary" href={f.href} download>{f.label}</a></li>
+            ))}
+          </ul>
+        </article>
+      ))}
+    </div>
+  </section>
+
+  <section aria-labelledby="colors">
+    <h2 id="colors">Colors</h2>
+    <p class="muted">These match the tokens the website uses. Select a swatch to copy its hex value.</p>
+    <ul class="swatches">
+      {swatches.map((s) => (
+        <li>
+          <button type="button" class="swatch" data-hex={s.hex} style={`background:${s.hex};color:${s.fg}`} aria-label={`Copy ${s.name} ${s.hex}`}>
+            <span class="hex">{s.hex}</span>
+            <span class="state" aria-live="polite">Copy</span>
+          </button>
+          <div class="sw-meta">
+            <strong>{s.name}</strong>
+            <span class="muted">{s.use}</span>
+          </div>
+        </li>
+      ))}
+    </ul>
+  </section>
+
+  <section aria-labelledby="sizing">
+    <h2 id="sizing">Size and clear space</h2>
+    <div class="grid two">
+      <article class="card">
+        <h3>Clear space</h3>
+        <p class="muted note">
+          Leave at least a quarter of the mark's height free on every side, measured as <em>x</em>. Nothing else (text,
+          edges, other logos) should enter that zone.
+        </p>
+        <div class="tile light diagram">
+          <div class="zone">
+            <img src={`${b}-lockup.svg`} alt="AI Dossier lockup inside its clear-space boundary" style="height:64px" />
+            <span class="x top">x</span>
+            <span class="x left">x</span>
+          </div>
+        </div>
+      </article>
+      <article class="card">
+        <h3>Minimum size</h3>
+        <p class="muted note">Below these sizes the glyph stops reading clearly.</p>
+        <div class="tile light mins">
+          <figure>
+            <img src={`${b}-mark.svg`} alt="Mark at its minimum size of 16 pixels" width="16" height="16" />
+            <figcaption>Mark: 16 px</figcaption>
+          </figure>
+          <figure>
+            <img src={`${b}-glyph.svg`} alt="Glyph at its minimum size of 16 pixels tall" height="16" style="height:16px" />
+            <figcaption>Glyph: 16 px tall</figcaption>
+          </figure>
+          <figure>
+            <img src={`${b}-lockup.svg`} alt="Lockup at its minimum size of 96 pixels wide" width="96" />
+            <figcaption>Lockup: 96 px wide</figcaption>
+          </figure>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <section aria-labelledby="usage">
+    <h2 id="usage">Usage</h2>
+    <div class="grid two">
+      <article class="card yes">
+        <h3>Do</h3>
+        <ul>{dos.map((t) => <li>{t}</li>)}</ul>
+      </article>
+      <article class="card no">
+        <h3>Don't</h3>
+        <ul>{donts.map((t) => <li>{t}</li>)}</ul>
+      </article>
+    </div>
+    <div class="tile light misuse" role="group" aria-label="Examples of incorrect use">
+      <figure>
+        <img class="stretch" src={`${b}-mark.svg`} alt="Mark stretched wide, incorrect" />
+        <figcaption>Stretched</figcaption>
+      </figure>
+      <figure>
+        <img class="rotate" src={`${b}-mark.svg`} alt="Mark rotated, incorrect" />
+        <figcaption>Rotated</figcaption>
+      </figure>
+      <figure>
+        <img class="hue" src={`${b}-mark.svg`} alt="Mark recoloured to purple, incorrect" />
+        <figcaption>Recoloured</figcaption>
+      </figure>
+      <figure>
+        <img class="fx" src={`${b}-mark.svg`} alt="Mark with a heavy drop shadow, incorrect" />
+        <figcaption>Effects</figcaption>
+      </figure>
+    </div>
+    <p class="muted fine">
+      AI Dossier is open source under AGPL-3.0; the licence covers the code, and this page only describes how the logo
+      should be shown. Questions: <a href="https://github.com/imboard-ai/ai-dossier/issues">open an issue</a>.
+    </p>
+  </section>
+
+  <script is:inline>
+    document.querySelectorAll('.swatch').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var state = btn.querySelector('.state');
+        var done = function (msg) {
+          state.textContent = msg;
+          setTimeout(function () { state.textContent = 'Copy'; }, 1400);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(btn.dataset.hex).then(function () { done('Copied'); }, function () { done('Press Ctrl+C'); });
+        } else {
+          done('Press Ctrl+C');
+        }
+      });
+    });
+  </script>
+</Base>
+
+<style>
+  section { margin-top: 56px; }
+  h1 { margin-bottom: 8px; }
+  h2 { margin: 0 0 16px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+  h3 { margin: 0 0 6px; font-size: var(--step-1); }
+  .lede { max-width: var(--measure); margin: 0 0 16px; }
+  .jump { display: flex; flex-wrap: wrap; gap: 8px 20px; font-size: .92rem; }
+  .jump a { color: var(--muted); }
+  .jump a:hover { color: var(--fg); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 20px; }
+  .grid.two { grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); }
+  .card { background: var(--bg-raised); border: 1px solid var(--line); border-radius: var(--radius); padding: 20px; box-shadow: var(--shadow); min-width: 0; }
+  .note { margin: 0 0 14px; font-size: .92rem; line-height: 1.55; }
+
+  /* Tiles use fixed colours on purpose: they preview the logo on light and dark
+     backgrounds regardless of the visitor's colour scheme. */
+  .tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .tiles.one { grid-template-columns: 1fr; }
+  .tile { position: relative; display: flex; align-items: center; justify-content: center; min-height: 160px; padding: 36px 16px 24px; border-radius: var(--radius-sm); border: 1px solid var(--line-strong); min-width: 0; }
+  .tile.light { background: #fcfcfd; border-color: #cdd2d9; color: #4f5660; }
+  .tile.dark { background: #0a0b0d; border-color: #363c45; color: #9ba2ab; }
+  .tile img { max-width: 100%; width: auto; }
+  .tag { position: absolute; top: 10px; left: 12px; font-size: .75rem; letter-spacing: .02em; }
+
+  .dl { list-style: none; margin: 14px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+  .dl li { margin: 0; }
+  .dl .btn { padding: 6px 14px; font-size: .85rem; }
+
+  .swatches { list-style: none; margin: 20px 0 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 180px), 1fr)); gap: 16px; }
+  .swatches li { margin: 0; min-width: 0; }
+  .swatch { display: flex; flex-direction: column; justify-content: space-between; width: 100%; height: 96px; padding: 12px 14px; text-align: left; border: 1px solid var(--line-strong); border-radius: var(--radius-sm); cursor: pointer; font: inherit; }
+  .swatch .hex { font-family: var(--font-mono); font-weight: 600; font-size: .95rem; }
+  .swatch .state { font-size: .78rem; opacity: .85; }
+  .sw-meta { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; font-size: .85rem; line-height: 1.4; }
+
+  .diagram { min-height: 200px; padding: 24px; }
+  /* Padding of one quarter of the mark height (64px mark => 16px). */
+  .zone { position: relative; padding: 16px; border: 1px dashed #047857; line-height: 0; max-width: 100%; }
+  .zone img { max-width: 100%; }
+  .x { position: absolute; font: 600 .75rem var(--font-mono); color: #047857; line-height: 1; }
+  .x.top { top: 2px; left: 50%; }
+  .x.left { left: 4px; top: 50%; }
+
+  .mins, .misuse { gap: 32px; flex-wrap: wrap; align-items: flex-end; }
+  .mins { min-height: 200px; }
+  figure { margin: 0; display: flex; flex-direction: column; align-items: center; gap: 12px; }
+  figcaption { font-size: .8rem; }
+  .mins figure { align-items: flex-start; }
+
+  .yes h3 { color: var(--ok); }
+  .no h3 { color: var(--bad); }
+  .card ul { margin: 8px 0 0; padding-left: 1.2em; }
+  .card li { margin: 6px 0; font-size: .95rem; }
+
+  .misuse { margin-top: 20px; padding: 28px 16px 20px; justify-content: space-around; }
+  .misuse img { width: 64px; height: 64px; }
+  .misuse .stretch { transform: scaleX(1.8); margin: 0 28px; }
+  .misuse .rotate { transform: rotate(18deg); }
+  .misuse .hue { filter: hue-rotate(200deg) saturate(1.6); }
+  .misuse .fx { filter: drop-shadow(6px 6px 3px rgba(0, 0, 0, .55)); }
+  .fine { margin-top: 24px; font-size: .88rem; }
+
+  @media (max-width: 520px) {
+    .tiles { grid-template-columns: 1fr; }
+    .card { padding: 16px; }
+  }
+</style>

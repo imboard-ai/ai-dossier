@@ -1,0 +1,38 @@
+---
+import Logo from './Logo.astro';
+
+const repo = 'https://github.com/imboard-ai/ai-dossier';
+---
+<footer>
+  <div class="inner">
+    <div class="brandcol">
+      <a class="brand" href="/"><Logo />AI Dossier</a>
+      <p class="muted">Your agent skills, versioned and signed.</p>
+    </div>
+    <nav aria-label="Footer">
+      <a href={repo}>GitHub</a>
+      <a href={`${repo}/releases`}>Releases</a>
+      <a href="https://www.npmjs.com/package/@ai-dossier/cli">npm</a>
+      <a href="/registry/">Registry</a>
+      <a href="/docs/">Docs</a>
+      <a href="/logo-showcase/">Logo</a>
+    </nav>
+  </div>
+  <div class="inner legal">
+    <p class="muted">
+      AI Dossier is open source (AGPL-3.0).
+      This site sets no cookies and runs no analytics or trackers.
+    </p>
+  </div>
+</footer>
+<style>
+  footer { border-top: 1px solid var(--line); background: var(--bg-soft); }
+  .inner { max-width: var(--page); margin: 0 auto; padding: 32px 20px 8px; display: flex; gap: 24px 48px; justify-content: space-between; flex-wrap: wrap; }
+  .legal { padding: 8px 20px 32px; }
+  .brand { display: inline-flex; align-items: center; gap: 10px; font-weight: 650; color: var(--fg); text-decoration: none; }
+  .brandcol p { margin: 8px 0 0; font-size: .92rem; max-width: 30em; }
+  nav { display: flex; gap: 8px 24px; flex-wrap: wrap; align-items: flex-start; font-size: .92rem; }
+  nav a { color: var(--muted); text-decoration: none; }
+  nav a:hover { color: var(--fg); text-decoration: underline; }
+  .legal p { margin: 0; font-size: .85rem; }
+</style>

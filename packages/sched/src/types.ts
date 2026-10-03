@@ -402,11 +402,9 @@ export interface QueueEntry {
    * on a given tick, and `QueueEntry` — unlike `SlotEntry` — exists for a
    * unit regardless of whether it currently holds a slot.
    *
-   * Streak identity here is PRESENCE-ONLY: unlike `BatchEntry`'s
-   * `pr_watch_failed_reason`, a changed `detail` does not start a new streak.
-   * Every site journalling this event must therefore be a flavour of the same
-   * underlying condition — a site whose `detail` describes a materially
-   * different failure would be silently folded into a running streak (#637).
+   * Streak identity is `ground_truth_unreachable_condition` + presence (#637):
+   * a changed condition key starts a new streak, like `BatchEntry`'s
+   * `pr_watch_failed_reason`.
    */
   ground_truth_unreachable_since: string | null;
   /**
@@ -418,6 +416,16 @@ export interface QueueEntry {
    * whenever `ground_truth_unreachable_since` is `null`.
    */
   ground_truth_unreachable_ticks: number;
+  /**
+   * Stable per-site key of the condition the current
+   * `ground-truth-unreachable` streak is counting (#637) — e.g.
+   * `poll-unreachable`, `parked-milestone-no-pr` — never the interpolated
+   * `detail`. A different key on the next report starts a NEW streak and
+   * journals immediately, so a milestone-parse failure is not folded into a
+   * network-outage streak. `null` whenever `ground_truth_unreachable_since`
+   * is `null`.
+   */
+  ground_truth_unreachable_condition: string | null;
   /**
    * ISO time this entry's current `pr-watch-waiting` streak began (#632) — a
    * merge GitHub has recorded but not yet reflected as the issue closing.
@@ -433,6 +441,13 @@ export interface QueueEntry {
    */
   pr_watch_waiting_ticks: number;
   /**
+   * #887: `<pr>@<ISO time>` — when the watch first saw this parked PR with no auto-merge
+   * request and no confirmed watcher workflow. Optional (absent on older state); cleared
+   * the moment the condition stops holding. Keyed by PR number so a re-park elsewhere
+   * never inherits a stale onset.
+   */
+  no_merge_mechanism_since?: string | null;
+  /**
    * #776: ISO time the engine first saw this entry's GitHub issue CLOSED while
    * a cycle slot held it in `recovering` — the "stale-closed" flag. Once set,
    * the recovery rail never respawns the unit (a closed issue is shipped or
@@ -443,6 +458,14 @@ export interface QueueEntry {
    * Cleared only by a requeue (a fresh attempt). `null` = never flagged.
    */
   stale_closed_at: string | null;
+  /**
+   * #900: ticks a BATCH member's stale-closed hold has persisted, silent ticks
+   * included — drives the `advanceStreak` re-announce (every
+   * `JOURNAL_DEDUP_REANNOUNCE_TICKS`) so a held batch stays visible to
+   * journal-based alerting. Streak start is `stale_closed_at`. `0` when unflagged
+   * or flagged on the cycle rail (which does not count ticks).
+   */
+  stale_closed_ticks: number;
   enqueued_at: string;
   updated_at: string;
 }
@@ -732,6 +755,14 @@ export interface BatchEntry {
    */
   pr_watch_failed_ticks: number;
   /**
+   * #921: `<pr>@<ISO time>` — when the batch PR watch first saw this parked OPEN batch PR with
+   * no auto-merge request and no confirmed watcher workflow (the issue-unit
+   * `QueueEntry.no_merge_mechanism_since` backstop, for batch PRs). Optional (absent on older
+   * state); cleared the moment the condition stops holding or the batch leaves
+   * `awaiting-merge`.
+   */
+  no_merge_mechanism_since?: string | null;
+  /**
    * When the engine verified the batch's anchor issue CLOSED (#768) — either
    * it closed it itself (every member closed as completed, no failure trail)
    * or it found it already closed. `null` while the anchor is open or was
@@ -989,6 +1020,8 @@ export interface SlotEntry {
    * null.
    */
   kill_escalated_at: string | null;
+  /** When a SIGKILL survivor was first observed; null until the second bound starts. */
+  kill_ineffective_at: string | null;
   updated_at: string;
 }
 
@@ -1510,8 +1543,10 @@ export const JOURNAL_DEDUP_REANNOUNCE_TICKS = 20;
  * 1.29.0 (#844): `SlotEntry` gains `kill_sent_at`/`kill_escalated_at` — the
  * SIGTERM → SIGKILL escalation anchor and its journal dedup marker;
  * `null`/`null` backfilled on load.
+ * 1.30.0 (#637): `QueueEntry` gains `ground_truth_unreachable_condition` —
+ * the streak's stable condition key; `null` backfilled on load.
  */
-export const SCHEMA_VERSION = '1.29.0' as const;
+export const SCHEMA_VERSION = '1.30.0' as const;
 
 /** Schema versions `validateState` accepts on load (migrated to SCHEMA_VERSION on save). */
 export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
@@ -1544,6 +1579,7 @@ export const LEGACY_SCHEMA_VERSIONS: readonly string[] = [
   '1.26.0',
   '1.27.0',
   '1.28.0',
+  '1.29.0',
 ];
 
 export const CONFIG_SCHEMA_VERSION = '1.9.0' as const;
@@ -1666,6 +1702,7 @@ export class EngineTooOldError extends Error {
  */
 export type JournalEventName =
   | 'assigned'
+  | 'assigned-recovered'
   | 'spawned'
   | 'exit-detected'
   | 'orphan-pid'
@@ -1712,6 +1749,10 @@ export type JournalEventName =
   // "api_error"` — a confirmed provider-side wall, never an agent that ran.
   | 'dispatch-failure'
   | 'tick-failed'
+  // #883: the running engine adopted an edited config (`detail` = the dispatch diff), or
+  // rejected an invalid edit and kept the last good one.
+  | 'config-reloaded'
+  | 'config-reload-failed'
   | 'pr-parked'
   | 'merge-accepted'
   | 'pr-watch-failed'
@@ -1830,6 +1871,8 @@ export type JournalEventName =
   // member (stale after a failed teardown or a crash mid-eviction),
   // journalled once at the moment it is discarded for a fresh prep.
   | 'member-worktree-reused'
+  | 'member-claim-reused'
+  | 'landing-retry'
   | 'member-landed'
   | 'landing-failed'
   | 'member-worktree-torn-down'
@@ -1861,6 +1904,28 @@ export type JournalEventName =
   // unit-scoped). Appended once per distinct (installed, latest) pair, not
   // every tick — see `installed_version`/`latest_version` on `JournalEvent`.
   | 'engine-stale'
+  // #945: the installed `@ai-dossier/cli` is behind npm latest; a CLI-only
+  // release must still reach a running service even when sched's version is unchanged.
+  | 'engine-cli-stale'
+  // #945/#940: before respawning onto an existing worktree the engine
+  // preserved what the dead agent left (`work-preserved`, ref + sha in
+  // `branch`/`detail`), or could not (`work-preserve-failed`).
+  | 'work-preserved'
+  | 'work-preserve-failed'
+  // #940: a tail respawn refused over uncommitted / dirty-gated work (the block reason is `tail-dirty-worktree`).
+  | 'tail-respawn-refused'
+  // #945: rescue refs older than the TTL deleted at `sched start`.
+  | 'rescue-pruned'
+  // #945: engine lifecycle — `engine-started` on every `sched start`;
+  // `engine-exit` (reason + stack) on EVERY termination path the process can
+  // observe (signal, uncaught exception, unhandled rejection, normal stop, bare
+  // process.exit); `engine-restarted-after-crash` when a start reclaims a lease
+  // whose holder died without releasing it (SIGKILL/OOM/unlogged crash);
+  // `stale-engine-lease-alert` once per stale episode with unfinished work.
+  | 'engine-started'
+  | 'engine-exit'
+  | 'engine-restarted-after-crash'
+  | 'stale-engine-lease-alert'
   // #537: `--auto-upgrade`'s `npm i -g @ai-dossier/cli@latest` outcome —
   // journaled so an operator whose stderr isn't captured (systemd unit
   // without journald wiring, redirected to /dev/null) can still answer "was
@@ -1927,6 +1992,7 @@ export type JournalEventName =
   // available). Once per dispatch (`SlotEntry.kill_escalated_at`); `pid`
   // names the agent, `issue` the member, `slot` the slot id.
   | 'kill-escalated'
+  | 'kill-ineffective'
   // #844: the engine sent SIGTERM to an agent it must wait on before a
   // decision (the wrong-procedure stop) — once per dispatch; `pid`/`slot`
   // name it. Pairs with `kill-escalated` when the agent ignores it.

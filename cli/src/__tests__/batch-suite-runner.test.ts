@@ -498,21 +498,34 @@ describe('gate.batch capability (#777)', () => {
     );
   });
 
-  it('falls back to test.full when cap run reports gate.batch capability-unavailable', () => {
-    withManifest(manifest('active'));
+  it('refuses to fall back to test.full when a declared-active gate.batch is unavailable (#793)', () => {
+    withManifest(manifest('active', '    timeout_prone: true\n'));
     vi.mocked(spawnSync).mockImplementation((_cmd, args) =>
       (args as string[])[2] === 'gate.batch'
         ? spawnResult({ status: 3, stdout: envelope('gate.batch', 'capability-unavailable', 3) })
         : spawnResult({ status: 0, stdout: envelope('test.full', 'ok') })
     );
 
-    const result = createBatchSuiteRunner(config())('/wt', CTX);
+    const result = createBatchSuiteRunner(config({ suite_command: 'echo x' }))('/wt', CTX);
 
-    expect(result.detail).toContain('cap run test.full');
+    expect(result).toMatchObject({ ok: false, readable: false });
+    expect(result.detail).toContain('manifest declares gate.batch active');
+    expect(result.detail).toContain('unavailable');
     expect(vi.mocked(spawnSync).mock.calls.map((c) => (c[1] as string[])[2])).toEqual([
       'gate.batch',
-      'test.full',
     ]);
+  });
+
+  it('is also terminal when gate.batch cannot be invoked at all (no ai-dossier on PATH)', () => {
+    withManifest(manifest('active'));
+    vi.mocked(spawnSync).mockReturnValue(
+      spawnResult({ status: null, error: Object.assign(new Error('nope'), { code: 'ENOENT' }) })
+    );
+
+    const result = createBatchSuiteRunner(config())('/wt', CTX);
+
+    expect(result.readable).toBe(false);
+    expect(vi.mocked(spawnSync)).toHaveBeenCalledTimes(1);
   });
 
   it('omits the batch env when no context is supplied (pre-#777 callers)', () => {
@@ -567,6 +580,42 @@ describe('gate.batch capability (#777)', () => {
       expect(result).toMatchObject({ ok: false, failing: [], readable: false });
       expect(result.detail).toContain(`cap run ${id}: outcome=automation-broken`);
       expect(spawnSync).toHaveBeenCalledTimes(1);
+    });
+
+    it('#893: absolute report paths are re-rooted repo-relative so overlap attribution can match them', () => {
+      const report = JSON.stringify({
+        testResults: [
+          {
+            name: '/wt/cli/src/__tests__/x.test.ts',
+            assertionResults: [{ status: 'failed', fullName: 'x fails' }],
+          },
+          {
+            name: 'packages/sched/src/__tests__/y.test.ts',
+            assertionResults: [{ status: 'failed', fullName: 'y fails' }],
+          },
+        ],
+      });
+      vi.mocked(spawnSync).mockReturnValue(
+        spawnResult({ status: 1, stdout: `${report}\n${envelope(id, 'task-failed', 1)}` })
+      );
+      const result = createBatchSuiteRunner(config())('/wt', CTX);
+      expect(result.failing.map((t) => t.id)).toEqual([
+        'cli/src/__tests__/x.test.ts::x fails',
+        'packages/sched/src/__tests__/y.test.ts::y fails',
+      ]);
+    });
+
+    it('#893: an unreadable red run carries the failing output tail from the envelope', () => {
+      const env = JSON.stringify({
+        capability: id,
+        outcome: 'task-failed',
+        exit_code: 1,
+        output_tail: 'registry: Error: Test timed out in 5000ms',
+      });
+      vi.mocked(spawnSync).mockReturnValue(spawnResult({ status: 1, stdout: `boom\n${env}` }));
+      const result = createBatchSuiteRunner(config())('/wt', CTX);
+      expect(result.readable).toBe(false);
+      expect(result.detail).toContain('output tail: registry: Error: Test timed out in 5000ms');
     });
 
     it('task-failed without a report → unreadable (suite-unreadable block), no detection fallback', () => {

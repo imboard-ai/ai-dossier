@@ -11,7 +11,14 @@
  * and any consumer — supply fake ground truth and no subprocess runs.
  */
 
+import { isTrustedAuthorAssociation } from '@ai-dossier/core';
 import { unwrapList } from './json';
+import {
+  classifyWorkflowText,
+  type MergeMechanism,
+  parseRepoMergeSettings,
+  REPO_MERGE_SETTINGS_JQ,
+} from './merge-mechanism';
 import { createExecFn, type ExecFn } from './project';
 import { type BatchPhase, PHASES } from './types';
 
@@ -49,6 +56,12 @@ export interface PrTruth {
   mergeable: 'MERGEABLE' | 'CONFLICTING' | 'UNKNOWN' | null;
   /** True when the PR carries the `auto-merge-blocked` label (the watcher's block signal). */
   blocked: boolean;
+  /**
+   * True when GitHub has an auto-merge REQUEST on the PR (`autoMergeRequest`
+   * non-null, #874) — the label is not proof. Absent when the payload carried no
+   * such field (older fixtures); `false` is a positive "no request".
+   */
+  autoMergeRequested?: boolean;
 }
 
 /** Teardown inputs recovered from a run's `setup` milestone (#468 AC2). */
@@ -108,6 +121,12 @@ export interface IssueCloseTruth {
    */
   closingPrs: ClosingPr[];
   /**
+   * #850: GitHub reported more closing references than the one page read
+   * (`pageInfo.hasNextPage`), so `closingPrs` is only a prefix of the list —
+   * finding no reference that vouches in it is not a verified refusal.
+   */
+  closingPrsTruncated: boolean;
+  /**
    * When the issue was last REOPENED (#799): an ISO timestamp, `null` when the
    * timeline verifiably holds no reopen, `undefined` when it could not be read.
    * A closing reference merged BEFORE the last reopen did not finish the issue
@@ -115,6 +134,21 @@ export interface IssueCloseTruth {
    * an unreadable reopen time is never read as "never reopened".
    */
   lastReopenedAt: string | null | undefined;
+  /**
+   * When the issue was CREATED (#850 review): an ISO timestamp, `null` when it
+   * could not be read. A PR merged before the issue existed cannot have carried
+   * a working `Closes #N` — only an edit made after the fact can link it — so
+   * it cannot vouch for a hand close either.
+   */
+  createdAt: string | null;
+  /**
+   * When the issue was last CLOSED (#850): an ISO timestamp, `null` when it is
+   * open or the time could not be read. A closing reference that merged after
+   * this did not back the close, so it cannot vouch for it — whether or not
+   * GitHub links a `Closes #N` added to a PR body after the fact. A closed
+   * issue with no readable close time is never read as "no bound".
+   */
+  closedAt: string | null;
 }
 
 /** A PR that references an issue as closed by it (#768). */
@@ -177,6 +211,13 @@ export interface GroundTruth {
    * FAILED (unreachable — watcher decisions pause); an object = the truth.
    */
   prState(pr: number): PrTruth | undefined;
+  /**
+   * #887: what will merge a PR parked on `auto-merge` — native auto-merge allowed
+   * on the repo and/or a watcher workflow. Optional and cached by the exec
+   * implementation; `undefined` (or an absent method) = not detected, which the
+   * callers treat as "unknown", never as "none".
+   */
+  mergeMechanism?(): MergeMechanism | undefined;
   /**
    * The number of an OPEN pull request the fleet opened from `branch`, or
    * `null` when none exists (#596): the terminal recovery branch's
@@ -320,6 +361,101 @@ export function parseMilestoneJson(stdout: string | null): GroundTruthMilestone 
   }
 }
 
+/** Repo merge settings change rarely; re-read at most this often (#887). */
+const MERGE_MECHANISM_TTL_MS = 10 * 60 * 1000;
+
+/** Config files whose presence means another merge bot may own the merge — opaque to sched. */
+const MERGE_BOT_CONFIG_RE =
+  /^(\.mergify\.yml|\.github\/mergify\.yml|\.kodiak\.toml|\.github\/\.kodiak\.toml)$/;
+const WORKFLOW_FILE_RE = /^\.github\/workflows\/[^/]+\.ya?ml$/i;
+
+/**
+ * `gh api` jq projection: only the workflow files and merge-bot configs of the default
+ * branch's recursive tree (one call), plus the `truncated` flag (a truncated tree cannot
+ * prove a file is absent).
+ */
+const WATCHER_TREE_JQ =
+  '{truncated, blobs: [.tree[] | select(.type == "blob") | select(.path | test(' +
+  '"^(\\\\.github/workflows/[^/]+\\\\.ya?ml|\\\\.mergify\\\\.yml|\\\\.github/mergify\\\\.yml|\\\\.kodiak\\\\.toml|\\\\.github/\\\\.kodiak\\\\.toml)$"' +
+  ')) | {path, sha}]}';
+
+/** A git blob id — the only thing interpolated into the blob-read argv (CWE-88). */
+const BLOB_SHA_RE = /^[0-9a-f]{40}$/;
+
+/**
+ * Whether a label watcher exists, read from the GitHub API for the repo's DEFAULT branch
+ * (`git/trees/HEAD`), never from a local `origin/*` ref: a checkout's remote-tracking refs
+ * are only as fresh as its last fetch, so a watcher added since would be invisible and a
+ * positive "no watcher" could fail a unit that would have merged (#921). The API is
+ * stateless (no checkout needed, no fetch, no ref mutation) and each blob is read by
+ * immutable sha. `true` = a workflow merges on the label, `false` = every workflow was
+ * read and none does, `null` = cannot tell (API failure, truncated tree, an unreadable
+ * file, a remote reusable workflow, a Mergify/Kodiak config).
+ */
+function scanWatcherWorkflow(
+  exec: ExecFn,
+  slug: string,
+  repoDir: string | undefined
+): boolean | null {
+  // No verified repo and no checkout: gh's `{owner}/{repo}` placeholders would resolve from an
+  // arbitrary cwd, so refuse to scan rather than read the wrong repo's workflows.
+  if (slug.includes('{') && repoDir === undefined) return null;
+  const tree = exec(
+    'gh',
+    ['api', `repos/${slug}/git/trees/HEAD?recursive=1`, '--jq', WATCHER_TREE_JQ],
+    repoDir
+  );
+  if (tree === null) return null;
+  let blobs: { path: string; sha: string }[];
+  try {
+    const obj = JSON.parse(tree) as { truncated?: unknown; blobs?: unknown };
+    if (obj.truncated !== false || !Array.isArray(obj.blobs)) return null;
+    blobs = obj.blobs as { path: string; sha: string }[];
+    if (blobs.some((b) => typeof b?.path !== 'string' || !BLOB_SHA_RE.test(String(b?.sha)))) {
+      return null;
+    }
+  } catch {
+    return null;
+  }
+  if (blobs.some((b) => MERGE_BOT_CONFIG_RE.test(b.path))) return null;
+  let unknown = false;
+  for (const b of blobs) {
+    if (!WORKFLOW_FILE_RE.test(b.path)) continue;
+    const text = exec(
+      'gh',
+      ['api', '-H', 'Accept: application/vnd.github.raw', `repos/${slug}/git/blobs/${b.sha}`],
+      repoDir
+    );
+    if (text === null) return null;
+    const verdict = classifyWorkflowText(text);
+    if (verdict === 'watcher') return true;
+    if (verdict === 'unknown') unknown = true;
+  }
+  return unknown ? null : false;
+}
+
+/**
+ * Detect the repo's merge mechanism (#887): `gh api repos/<r>` for
+ * `allow_auto_merge` + allowed methods, and a scan of `.github/workflows` for a
+ * label watcher. Pinned to the verified repo when there is one, else gh's
+ * `{owner}/{repo}` cwd placeholders. Never throws.
+ */
+export function detectMergeMechanism(
+  exec: ExecFn,
+  repoDir: string | undefined,
+  repo: { owner: string; name: string } | null
+): MergeMechanism {
+  const slug = repo !== null ? `${repo.owner}/${repo.name}` : '{owner}/{repo}';
+  const settings = parseRepoMergeSettings(
+    exec('gh', ['api', `repos/${slug}`, '--jq', REPO_MERGE_SETTINGS_JQ], repoDir)
+  );
+  return {
+    nativeAutoMerge: settings?.nativeAutoMerge ?? null,
+    watcherWorkflow: scanWatcherWorkflow(exec, slug, repoDir),
+    allowedMethods: settings?.allowedMethods ?? [],
+  };
+}
+
 /**
  * Ground truth backed by subprocess calls:
  * - `ai-dossier runstate last --issue N --json` — the milestone trail
@@ -355,11 +491,15 @@ export function createExecGroundTruth(
 ): GroundTruth {
   const runstateBin = opts.runstateBin ?? 'ai-dossier';
   const repo = opts.repo !== undefined ? parseRepoName(opts.repo) : null;
+  let mechanismCache: { at: number; value: MergeMechanism | undefined } | null = null;
   const truth: GroundTruth = {
     latestMilestone(issue: number): GroundTruthMilestone | null | undefined {
       const out = exec(
         runstateBin,
-        ['runstate', 'last', '--issue', String(issue), '--json'],
+        // #932: every consumer of these reads ACTS on the result, so only milestones from
+        // a repo owner / org member / collaborator count. An older CLI without --trusted
+        // errors out -> undefined (unreachable) -> fail closed.
+        ['runstate', 'last', '--issue', String(issue), '--trusted', '--json'],
         opts.repoDir
       );
       if (out === null) return undefined; // subprocess failed — unreachable, NOT known-absent
@@ -368,7 +508,7 @@ export function createExecGroundTruth(
     milestonesSince(issue: number, since: string): GroundTruthMilestone[] | undefined {
       const out = exec(
         runstateBin,
-        ['runstate', 'list', '--issue', String(issue), '--since', since, '--json'],
+        ['runstate', 'list', '--issue', String(issue), '--since', since, '--trusted', '--json'],
         opts.repoDir
       );
       return parseMilestoneListJson(out);
@@ -404,12 +544,21 @@ export function createExecGroundTruth(
           String(pr),
           ...(repo !== null ? ['-R', `${repo.owner}/${repo.name}`] : []),
           '--json',
-          'state,mergedAt,mergeable,labels',
+          'state,mergedAt,mergeable,labels,autoMergeRequest',
         ],
         opts.repoDir
       );
       if (out === null) return undefined; // poll failed — unreachable
       return parsePrViewJson(out) ?? undefined;
+    },
+    mergeMechanism(): MergeMechanism | undefined {
+      const now = Date.now();
+      if (mechanismCache !== null && now - mechanismCache.at < MERGE_MECHANISM_TTL_MS) {
+        return mechanismCache.value;
+      }
+      const value = detectMergeMechanism(exec, opts.repoDir, repo);
+      mechanismCache = { at: now, value };
+      return value;
     },
     openPrForBranch(branch: string): number | null | undefined {
       // Same `SAFE_REF_NAME` validation as `branchHead` (CWE-88): the branch
@@ -486,7 +635,10 @@ export function createExecGroundTruth(
             labels: [],
             closer: null,
             closingPrs: [],
+            closingPrsTruncated: false,
             lastReopenedAt: null,
+            createdAt: null,
+            closedAt: null,
           };
     };
     truth.mergedPrForBranch = (
@@ -563,18 +715,29 @@ export function parseRepoName(repo: string): { owner: string; name: string } | n
  */
 const ISSUE_LABEL_PAGE_SIZE = 100;
 
+/**
+ * How many closing references `issueCloseTruth` reads — GitHub's page maximum,
+ * so it takes 100 PRs naming the issue to push a vouching one off the page
+ * (#850 review: anyone who can open a PR can add one). A longer list is
+ * flagged `closingPrsTruncated` rather than read as complete: a reference
+ * that vouches for a hand close could be on the next page.
+ */
+const CLOSING_REF_PAGE_SIZE = 100;
+
 /** A full or abbreviated git object id. */
 export const GIT_OID_RE = /^[0-9a-f]{7,40}$/i;
 
 /**
- * GraphQL for `issueCloseTruth` — one round trip for state, reason, labels,
- * closer, closing references and the last reopen (#799; aliased `reopens`
- * because `timelineItems` is already queried for the close event).
+ * GraphQL for `issueCloseTruth` — one round trip for state, reason, creation
+ * and close times, labels, closer, closing references and the last reopen
+ * (#799; aliased `reopens` because `timelineItems` is already queried for the
+ * close event).
  */
 const ISSUE_CLOSE_QUERY =
   'query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){issue(number:$n){' +
-  `state stateReason labels(first:${ISSUE_LABEL_PAGE_SIZE}){pageInfo{hasNextPage} nodes{name}} ` +
-  'closedByPullRequestsReferences(first:10,includeClosedPrs:true){nodes{number merged mergedAt baseRefName repository{nameWithOwner}}} ' +
+  `state stateReason createdAt closedAt labels(first:${ISSUE_LABEL_PAGE_SIZE}){pageInfo{hasNextPage} nodes{name}} ` +
+  `closedByPullRequestsReferences(first:${CLOSING_REF_PAGE_SIZE},includeClosedPrs:true){pageInfo{hasNextPage} ` +
+  'nodes{number merged mergedAt baseRefName repository{nameWithOwner}}} ' +
   'reopens:timelineItems(itemTypes:[REOPENED_EVENT],last:1){nodes{... on ReopenedEvent{createdAt}}} ' +
   'timelineItems(itemTypes:[CLOSED_EVENT],last:1){nodes{... on ClosedEvent{closer{__typename ' +
   '... on PullRequest{number merged baseRefName repository{nameWithOwner}} ... on Commit{oid}}}}}}}}';
@@ -594,6 +757,18 @@ function parseableTimestamp(value: unknown): string | null {
     Number.isFinite(Date.parse(value))
     ? value
     : null;
+}
+
+/**
+ * Epoch ms of a time {@link parseableTimestamp} accepts, else `NaN` —
+ * unreadable, so it can never pass a bound it is compared against. The one
+ * rule every closing-reference bound compares through (#850 review): the
+ * same GitHub-format check the parser applies, even for an `IssueCloseTruth`
+ * that did not come from it.
+ */
+export function timestampMs(value: unknown): number {
+  const ts = parseableTimestamp(value);
+  return ts === null ? Number.NaN : Date.parse(ts);
 }
 
 /**
@@ -652,7 +827,13 @@ export function parseIssueCloseTruthJson(stdout: string | null): IssueCloseTruth
       closer = { kind: 'commit', oid: c.oid };
     }
   }
-  const refNodes = (obj.closedByPullRequestsReferences as { nodes?: unknown } | undefined)?.nodes;
+  const refConn = obj.closedByPullRequestsReferences as
+    | { nodes?: unknown; pageInfo?: { hasNextPage?: unknown } }
+    | null
+    | undefined;
+  const refNodes = refConn?.nodes;
+  // #850: more references than one page — `closingPrs` is only a prefix.
+  const closingPrsTruncated = refConn?.pageInfo?.hasNextPage === true;
   const closingPrs: ClosingPr[] = [];
   for (const n of Array.isArray(refNodes) ? refNodes : []) {
     const pr = n as {
@@ -681,7 +862,20 @@ export function parseIssueCloseTruthJson(stdout: string | null): IssueCloseTruth
     const lastReopen = reopenNodes[reopenNodes.length - 1] as { createdAt?: unknown } | null;
     lastReopenedAt = parseableTimestamp(lastReopen?.createdAt) ?? undefined;
   }
-  return { state, stateReason, labels, closer, closingPrs, lastReopenedAt };
+  // #850: an unparseable creation or close time is `null` (unreadable), never a guessed time.
+  const createdAt = parseableTimestamp(obj.createdAt);
+  const closedAt = parseableTimestamp(obj.closedAt);
+  return {
+    state,
+    stateReason,
+    labels,
+    closer,
+    closingPrs,
+    closingPrsTruncated,
+    lastReopenedAt,
+    createdAt,
+    closedAt,
+  };
 }
 
 /**
@@ -739,7 +933,9 @@ export function parsePrViewJson(stdout: string | null): PrTruth | null {
         ? mergeableRaw
         : null;
     const blocked = labelNames(obj.labels).includes('auto-merge-blocked');
-    return { state, mergedAt, mergeable, blocked };
+    return 'autoMergeRequest' in obj
+      ? { state, mergedAt, mergeable, blocked, autoMergeRequested: obj.autoMergeRequest !== null }
+      : { state, mergedAt, mergeable, blocked };
   } catch {
     return null;
   }
@@ -960,8 +1156,6 @@ export function parseSetupInfo(commentsJson: string | null): SetupInfo | null {
   const comments = unwrapList(parsed, 'comments');
   if (comments === null) return null;
 
-  const TRUSTED_ASSOCIATIONS = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
-
   // Newest setup milestone wins (a re-run can re-post setup).
   for (const raw of [...comments].reverse()) {
     if (raw === null || typeof raw !== 'object') continue;
@@ -969,10 +1163,7 @@ export function parseSetupInfo(commentsJson: string | null): SetupInfo | null {
     if (typeof comment.body !== 'string' || !comment.body.includes('<!-- runstate:v1 -->')) {
       continue;
     }
-    if (
-      comment.authorAssociation !== undefined &&
-      !TRUSTED_ASSOCIATIONS.has(String(comment.authorAssociation))
-    ) {
+    if (!isTrustedAuthorAssociation(comment.authorAssociation)) {
       continue; // untrusted author — never a teardown source
     }
 
@@ -1031,6 +1222,9 @@ export function isParkedMilestone(
 ): milestone is GroundTruthMilestone {
   if (milestone === null) return false;
   if (milestone.phase !== 'ship' || milestone.status !== 'awaiting-merge') return false;
+  // #887: an ATTACHED ship posts this milestone before its CI wait — the run is still
+  // driving the merge, so an exit here is unverified (redispatch), never a park.
+  if (milestone.keys.ship_mode === 'attached') return false;
   return prOfMilestone(milestone) !== null;
 }
 
@@ -1245,6 +1439,8 @@ export function isBatchTailParked(
 ): milestone is GroundTruthMilestone {
   if (milestone === null) return false;
   if (milestone.phase !== 'batch-ship' || milestone.status !== 'awaiting-merge') return false;
+  // #887: same rule as `isParkedMilestone` — an attached batch ship is still merging.
+  if (milestone.keys.ship_mode === 'attached') return false;
   return prOfMilestone(milestone) !== null;
 }
 

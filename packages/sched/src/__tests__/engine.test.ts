@@ -1,9 +1,11 @@
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import {
   buildStatusReport,
+  createExecFn,
   type EngineDeps,
   type EnqueueInput,
   enqueueEntries,
@@ -12,10 +14,13 @@ import {
   JOURNAL_DEDUP_REANNOUNCE_TICKS,
   Journal,
   type JournalEvent,
+  type MergeMechanism,
   type PrTruth,
   type RunFenceBinder,
   type RunFenceReleaser,
   type RunFencer,
+  requeueMember,
+  runLoop,
   type SchedConfig,
   SchedStore,
   type SetupInfo,
@@ -28,6 +33,7 @@ import {
   transitionIssue,
   transitionSlot,
 } from '../index';
+import { advanceStreak, patchEntry } from '../state';
 import {
   writeAnnouncedWaitLog,
   writeApiErrorLog,
@@ -55,7 +61,22 @@ function harness(
   existingDir?: string
 ) {
   const dir = existingDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'sched-engine-'));
+  // Per-harness unique dir, removed in afterEach — never swept by name prefix,
+  // which would delete a concurrent run's live dirs (#896).
+  if (!existingDir) REGISTRIES.push(dir);
   const store = new SchedStore(dir);
+  // Tracks whether the state lock is held, so a test can prove a read happens outside it (#887).
+  let lockDepth = 0;
+  const rawWithLock = store.withLock.bind(store);
+  store.withLock = ((fn: Parameters<typeof rawWithLock>[0]) =>
+    rawWithLock((state) => {
+      lockDepth++;
+      try {
+        return fn(state);
+      } finally {
+        lockDepth--;
+      }
+    })) as typeof store.withLock;
   const journal = new Journal(dir);
   // #524: runs.jsonl telemetry writes under EngineDeps.homeDir — a fresh
   // tmp dir per harness, so no test ever touches the real machine's
@@ -104,7 +125,13 @@ function harness(
   const teardownCalls: Array<{ file: string; args: string[]; cwd?: string }> = [];
   /** Scriptable teardown subprocess behavior (default: every call fails). */
   let teardownScript: (file: string, args: string[]) => string | null = () => null;
+  let mergeMechanism: MergeMechanism | undefined;
+  let onMechanismRead: (() => void) | undefined;
   const groundTruth: GroundTruth = {
+    mergeMechanism: () => {
+      onMechanismRead?.();
+      return mergeMechanism;
+    },
     latestMilestone: (issue) =>
       unreachable.has(issue) ? undefined : (milestones.get(issue) ?? null),
     issueClosed: (issue) => closedIssues.has(issue),
@@ -318,6 +345,13 @@ function harness(
         at: at ?? clock.toISOString(),
         keys,
       }),
+    onMechanismRead: (fn: () => void) => {
+      onMechanismRead = fn;
+    },
+    lockHeld: () => lockDepth > 0,
+    setMergeMechanism: (m: MergeMechanism | undefined) => {
+      mergeMechanism = m;
+    },
     setPr: (pr: number, truth: Partial<PrTruth> & { state: PrTruth['state'] }) =>
       prStates.set(pr, {
         mergedAt: null,
@@ -347,16 +381,6 @@ const REGISTRIES: string[] = [];
 afterEach(() => {
   for (const dir of REGISTRIES.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-// One top-level sweep: every harness dir is a fresh `sched-engine-` tmpdir —
-// stale dirs from crashed runs never leak between tests.
-beforeEach(() => {
-  for (const name of fs.readdirSync(os.tmpdir())) {
-    if (name.startsWith('sched-engine-')) {
-      fs.rmSync(path.join(os.tmpdir(), name), { recursive: true, force: true });
-    }
   }
 });
 
@@ -1682,6 +1706,32 @@ describe('restart self-healing', () => {
   });
 });
 
+describe('runLoop post-tick handoff', () => {
+  it('awaits an async callback and stops before the next tick when the callback requests shutdown', async () => {
+    const h = harness({ maxSlots: 1 });
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full' }]);
+    let callbacks = 0;
+    let stopAfterTick = false;
+
+    await runLoop(
+      h.deps,
+      { ...h.config, reconcile_interval_ms: 1 },
+      () => stopAfterTick,
+      async (result) => {
+        callbacks += 1;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        expect(result.spawned).toEqual(['issue:101']);
+        stopAfterTick = true;
+      }
+    );
+
+    expect(callbacks).toBe(1);
+    expect(h.spawnCalls).toHaveLength(1);
+    expect(h.state().slots.find((slot) => slot.unit === 'issue:101')?.status).toBe('running');
+  });
+});
+
 describe('ground-truth outage pause (decision 2, option A)', () => {
   it('an unreachable poll pauses the stall decision — no kill, no redispatch, journaled', () => {
     const h = harness({ stallTimeoutMs: 30 * 60 * 1000 });
@@ -2741,6 +2791,144 @@ describe('#468 AC3: watcher failure paths', () => {
     expect(h.state().entries.find((e) => e.issue === 101)?.reason).toBe('auto-merge-blocked');
   });
 
+  describe('#887: a PR parked where nothing can merge it', () => {
+    // ai-dossier's own shape: native auto-merge ALLOWED on the repo, no watcher — and #878 parked forever.
+    const NO_WATCHER: MergeMechanism = {
+      nativeAutoMerge: true,
+      watcherWorkflow: false,
+      allowedMethods: ['squash'],
+    };
+    const GRACE = 11 * 60 * 1000;
+
+    const parkedPolls = (h: ReturnType<typeof harness>, polls: number) => {
+      let last = h.tick();
+      for (let i = 1; i < polls; i++) {
+        h.advance(GRACE);
+        last = h.tick();
+      }
+      return last;
+    };
+
+    it('native auto-merge allowed but never requested: fails no-merge-mechanism only after it PERSISTS (never parked forever)', () => {
+      const h = harness();
+      parkUnit(h, 101, 55);
+      h.setMergeMechanism(NO_WATCHER);
+      h.setPr(55, { state: 'OPEN', autoMergeRequested: false });
+      h.advance(200_000);
+      // first sighting only arms the marker
+      expect(h.tick().failed).toEqual([]);
+      expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('parked');
+      // a second poll inside the grace window still holds
+      h.advance(200_000);
+      expect(h.tick().failed).toEqual([]);
+      h.advance(GRACE);
+      const result = h.tick();
+      expect(result.failed).toEqual(['issue:101']);
+      expect(h.state().entries.find((e) => e.issue === 101)?.reason).toBe('no-merge-mechanism');
+    });
+
+    it.each([
+      ['a watcher workflow exists', { ...NO_WATCHER, watcherWorkflow: true }, false],
+      [
+        'watcher detection unknown (Mergify, remote workflow, unreadable)',
+        { ...NO_WATCHER, watcherWorkflow: null },
+        false,
+      ],
+      ['detection unavailable', undefined, false],
+      ['GitHub holds an auto-merge request', NO_WATCHER, true],
+    ] as const)('%s → keeps watching indefinitely (unchanged park path)', (_name, mechanism, requested) => {
+      const h = harness();
+      parkUnit(h, 101, 55);
+      h.setMergeMechanism(mechanism);
+      h.setPr(55, { state: 'OPEN', autoMergeRequested: requested });
+      h.advance(200_000);
+      const result = parkedPolls(h, 3);
+      expect(result.failed).toEqual([]);
+      expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('parked');
+    });
+
+    it('the streak resets when a request appears (a request that lands late is honoured)', () => {
+      const h = harness();
+      parkUnit(h, 101, 55);
+      h.setMergeMechanism(NO_WATCHER);
+      h.setPr(55, { state: 'OPEN', autoMergeRequested: false });
+      h.advance(200_000);
+      h.tick(); // armed
+      h.setPr(55, { state: 'OPEN', autoMergeRequested: true });
+      h.advance(GRACE);
+      expect(h.tick().failed).toEqual([]);
+      expect(
+        h.state().entries.find((e) => e.issue === 101)?.no_merge_mechanism_since ?? null
+      ).toBeNull();
+      h.setPr(55, { state: 'OPEN', autoMergeRequested: false });
+      h.advance(GRACE);
+      expect(h.tick().failed).toEqual([]); // re-armed, not failed off the old onset
+    });
+
+    it('a payload with no autoMergeRequest field never trips the backstop', () => {
+      const h = harness();
+      parkUnit(h, 101, 55);
+      h.setMergeMechanism(NO_WATCHER);
+      h.setPr(55, { state: 'OPEN' });
+      h.advance(200_000);
+      expect(parkedPolls(h, 3).failed).toEqual([]);
+    });
+
+    it('the dispatched prompt carries the detected facts: attached when none, detached when confirmed', () => {
+      const none = harness();
+      none.setMergeMechanism({
+        nativeAutoMerge: false,
+        watcherWorkflow: false,
+        allowedMethods: [],
+      });
+      none.enqueue([{ issue: 101, mode: 'full', tier: 'mid' }]);
+      none.tick();
+      expect(none.spawnCalls[0].prompt).toContain('ship_mode=attached');
+      expect(none.spawnCalls[0].prompt).not.toContain('{ship_clause}');
+
+      const native = harness();
+      native.setMergeMechanism(NO_WATCHER);
+      native.enqueue([{ issue: 101, mode: 'full', tier: 'mid' }]);
+      native.tick();
+      expect(native.spawnCalls[0].prompt).toContain('ship_mode=detached');
+      expect(native.spawnCalls[0].prompt).toContain('autoMergeRequest');
+    });
+
+    it('the mechanism is read once per tick, before the state lock', () => {
+      const h = harness();
+      let reads = 0;
+      let underLock = false;
+      h.setMergeMechanism(NO_WATCHER);
+      h.onMechanismRead(() => {
+        reads++;
+        if (h.lockHeld()) underLock = true;
+      });
+      h.enqueue([
+        { issue: 101, mode: 'full', tier: 'mid' },
+        { issue: 102, mode: 'full', tier: 'mid' },
+      ]);
+      h.tick();
+      expect(reads).toBe(1);
+      expect(underLock).toBe(false);
+    });
+
+    it('an exit on an ATTACHED ship awaiting-merge is NOT parked — it is an unverified exit (redispatch)', () => {
+      const h = harness();
+      h.enqueue([{ issue: 101, mode: 'full', tier: 'mid' }]);
+      h.tick();
+      h.milestones.set(101, {
+        phase: 'ship',
+        status: 'awaiting-merge',
+        run: 'r-101-ab12',
+        at: h.clock().toISOString(),
+        keys: { pr: '55', ship_mode: 'attached' },
+      });
+      h.alive.delete(h.spawnCalls[0].pid);
+      h.tick();
+      expect(h.state().entries.find((e) => e.issue === 101)?.status).not.toBe('parked');
+    });
+  });
+
   it('OPEN and mergeable keeps watching (no failure, no slots)', () => {
     const h = harness();
     REGISTRIES.push(h.dir);
@@ -3034,6 +3222,167 @@ describe('zombie-run fencing on redispatch (#504)', () => {
     expect(fence.spawnsBefore).toBe(1);
     expect(h.spawnCalls).toHaveLength(2);
     expect(h.events().some((e) => e.event === 'fence-written')).toBe(true);
+  });
+
+  /** A real repo at the harness repoDir with a linked worktree at h.wt(name), holding leftover work. */
+  function realTakeoverRepo(h: ReturnType<typeof stalling>, name = 'wt-504') {
+    const g = (cwd: string, ...args: string[]) =>
+      execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], {
+        cwd,
+        encoding: 'utf8',
+      }).trim();
+    g(h.dir, 'init', '-q');
+    fs.writeFileSync(path.join(h.dir, 'README'), 'r\n');
+    g(h.dir, 'add', 'README');
+    g(h.dir, 'commit', '-q', '-m', 'init');
+    fs.mkdirSync(path.dirname(h.wt(name)), { recursive: true });
+    const worktree = h.wt(name);
+    g(h.dir, 'worktree', 'add', '-q', '-b', `f/${name}`, worktree);
+    const real = fs.realpathSync(worktree);
+    return { g, worktree: real };
+  }
+
+  it('#945: a takeover onto a registered worktree with leftover work preserves it first (outside the lock, real git) and is told to resume from the rescue ref', () => {
+    const h = stalling();
+    const { g, worktree } = realTakeoverRepo(h);
+    fs.writeFileSync(path.join(worktree, 'gated-fix.ts'), 'export const x = 1;\n');
+    fs.writeFileSync(path.join(worktree, '.env'), 'SECRET=1\n');
+    h.setupInfos.set(504, { worktree, poolClaimed: false, branch: 'f/wt-504' });
+    const real = createExecFn(30_000);
+    const lockHeldDuring: boolean[] = [];
+    h.deps.rescueExec = (file, args, cwd) => {
+      lockHeldDuring.push(fs.existsSync(path.join(h.dir, '.sched-lock')));
+      return real(file, args, cwd);
+    };
+    h.advance(HOUR + 1000);
+
+    // Tick 1: the stall enters recovery; the takeover is HELD (no rescue under the lock).
+    expect(h.tick().redispatched).toEqual(['issue:504']);
+    expect(h.spawnCalls).toHaveLength(1);
+    expect(lockHeldDuring).toEqual([]);
+    // Tick 2: the rescue runs before the lock pass, then the takeover spawns.
+    h.tick();
+    expect(h.spawnCalls).toHaveLength(2);
+    expect(lockHeldDuring.length).toBeGreaterThan(0);
+    expect(lockHeldDuring.some(Boolean)).toBe(false);
+
+    const takeover = h.spawnCalls[1].prompt;
+    expect(takeover).toContain('PRESERVED WORK');
+    expect(takeover).toMatch(/refs\/sched-rescue\/issue-504-\d{8}T\d{6}Z/);
+    expect(takeover).toContain('secret pattern');
+    const ev = h.events().find((e) => e.event === 'work-preserved');
+    expect(ev).toMatchObject({ unit: 'issue:504', worktree });
+    const ref = String(ev?.branch);
+    expect(g(h.dir, 'ls-tree', '-r', '--name-only', ref)).toContain('gated-fix.ts');
+    expect(g(h.dir, 'ls-tree', '-r', '--name-only', ref)).not.toContain('.env');
+    expect(h.spawnCalls[0].prompt).not.toContain('PRESERVED WORK');
+    // held ticks do not pile up rescue events
+    h.tick();
+    expect(h.events().filter((e) => e.event === 'work-preserved')).toHaveLength(1);
+  });
+
+  it('#945: a worktree path git does not list is never acted on (setup milestones are issue comments)', () => {
+    const h = stalling();
+    realTakeoverRepo(h);
+    h.setupInfos.set(504, { worktree: '/etc', poolClaimed: false, branch: 'f/504' });
+    const calls: string[] = [];
+    const real = createExecFn(30_000);
+    h.deps.rescueExec = (file, args, cwd) => {
+      calls.push(file);
+      return real(file, args, cwd);
+    };
+    h.advance(HOUR + 1000);
+
+    expect(h.tick().redispatched).toEqual(['issue:504']);
+    h.tick();
+
+    expect(h.spawnCalls).toHaveLength(2); // a refused rescue never blocks the takeover
+    expect(calls.filter((c) => c === 'sh')).toHaveLength(0);
+    expect(h.spawnCalls[1].prompt).not.toContain('PRESERVED WORK');
+    expect(h.events().find((e) => e.event === 'work-preserve-failed')?.detail).toMatch(
+      /not-a-registered-worktree/
+    );
+  });
+
+  it('#945: a takeover never touches the main checkout, even when the milestone names it', () => {
+    const h = stalling();
+    realTakeoverRepo(h);
+    fs.writeFileSync(path.join(h.dir, 'dirty.txt'), 'x');
+    h.setupInfos.set(504, { worktree: fs.realpathSync(h.dir), poolClaimed: false, branch: 'main' });
+    h.deps.rescueExec = createExecFn(30_000);
+    h.advance(HOUR + 1000);
+    h.tick();
+    h.tick();
+    expect(h.spawnCalls).toHaveLength(2);
+    expect(h.events().find((e) => e.event === 'work-preserve-failed')?.detail).toMatch(
+      /main-checkout/
+    );
+    expect(h.events().some((e) => e.event === 'work-preserved')).toBe(false);
+  });
+
+  it('#945: a paused scheduler makes no rescue git/gh calls and never respawns without one', () => {
+    const h = stalling();
+    const calls: string[] = [];
+    h.deps.rescueExec = (file) => {
+      calls.push(file);
+      return null;
+    };
+    h.advance(HOUR + 1000);
+    h.tick(); // stall enters recovery
+    h.store.withLock((state) => ({ state: setPaused(state, true), result: null }));
+    calls.length = 0;
+    h.tick();
+    h.tick();
+    expect(calls).toEqual([]);
+    expect(h.spawnCalls).toHaveLength(1);
+  });
+
+  it('#945: a refusal that repeats every tick is journaled once per (unit, reason)', () => {
+    const h = stalling();
+    realTakeoverRepo(h);
+    h.setupInfos.set(504, { worktree: '/etc', poolClaimed: false, branch: 'f/504' });
+    h.deps.rescueExec = createExecFn(30_000);
+    h.advance(HOUR + 1000);
+    h.tick();
+    // keep the slot awaiting a takeover across several ticks by reading the refusal repeatedly
+    for (let i = 0; i < 3; i++) h.tick();
+    expect(
+      h
+        .events()
+        .filter((e) => e.event === 'work-preserve-failed' && /registered/.test(String(e.detail)))
+    ).toHaveLength(1);
+  });
+
+  it('#945: rescue refs are pruned daily, outside the lock — baseline on the first tick, then once per 24h', () => {
+    const h = stalling();
+    const lockHeld: boolean[] = [];
+    const prunes: number[] = [];
+    h.deps.rescueExec = (file, args) => {
+      if (file === 'git' && args[0] === 'for-each-ref' && args.includes('refs/sched-rescue/')) {
+        prunes.push(1);
+        lockHeld.push(fs.existsSync(path.join(h.dir, '.sched-lock')));
+      }
+      return null;
+    };
+    h.tick();
+    expect(prunes).toHaveLength(0); // baseline (the CLI pruned at start)
+    h.advance(HOUR);
+    h.tick();
+    expect(prunes).toHaveLength(0);
+    h.advance(24 * HOUR);
+    h.tick();
+    expect(prunes).toHaveLength(1);
+    expect(lockHeld).toEqual([false]);
+    h.advance(HOUR);
+    h.tick();
+    expect(prunes).toHaveLength(1);
+  });
+
+  it('without a rescueExec a takeover respawns immediately, exactly as before (no hold)', () => {
+    const h = stalling();
+    h.advance(HOUR + 1000);
+    expect(h.tick().redispatched).toEqual(['issue:504']);
+    expect(h.spawnCalls).toHaveLength(2);
   });
 
   it('records the installed generation on the slot and hands it to the takeover', () => {
@@ -4384,5 +4733,465 @@ describe('#776: recovery never re-dispatches a unit whose issue is closed', () =
     h.store.withLock((state) => ({ state: setPaused(state, false), result: null }));
     h.tick();
     expect(h.spawnCalls).toHaveLength(1);
+  });
+});
+
+describe('#778: no dispatch path spawns an issue that is closed on GitHub', () => {
+  const flagged = (h: ReturnType<typeof harness>, issue = 101) =>
+    h.state().entries.find((e) => e.issue === issue)?.stale_closed_at ?? null;
+  const staleEvents = (h: ReturnType<typeof harness>) =>
+    h.journal.read().filter((e) => e.event === 'stale-closed');
+
+  /** Spawn #101, then leave its slot `assigned` with no live agent (crash between assign and spawn). */
+  function assignedUnit() {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+    h.tick();
+    h.alive.delete(h.spawnCalls[0].pid);
+    h.store.withLock((state) => ({
+      state: {
+        ...state,
+        slots: state.slots.map((sl) =>
+          sl.unit === 'issue:101' ? { ...sl, status: 'assigned' as const, pid: null } : sl
+        ),
+      },
+      result: null,
+    }));
+    return h;
+  }
+
+  describe('reconcileAssigned (crash-left assigned slot)', () => {
+    it('control: an OPEN issue is spawned fresh', () => {
+      const h = assignedUnit();
+      h.tick();
+      expect(h.spawnCalls).toHaveLength(2);
+      expect(staleEvents(h)).toHaveLength(0);
+    });
+
+    it('a CLOSED issue is flagged, journaled once, and never spawned; the flag is sticky', () => {
+      const h = assignedUnit();
+      h.closedIssues.add(101);
+      h.tick();
+      expect(h.spawnCalls).toHaveLength(1);
+      expect(flagged(h)).not.toBeNull();
+      expect(h.state().slots.find((sl) => sl.unit === 'issue:101')?.status).toBe('assigned');
+      // gh now reads the issue as open (or unreachable): still held, still one event.
+      h.closedIssues.delete(101);
+      h.tick();
+      h.tick();
+      expect(h.spawnCalls).toHaveLength(1);
+      expect(staleEvents(h)).toHaveLength(1);
+    });
+
+    it('flags while PAUSED so `sched resume` cannot re-run shipped work', () => {
+      const h = assignedUnit();
+      h.store.withLock((state) => ({ state: setPaused(state, true), result: null }));
+      h.closedIssues.add(101);
+      h.tick();
+      expect(flagged(h)).not.toBeNull();
+      h.store.withLock((state) => ({ state: setPaused(state, false), result: null }));
+      h.tick();
+      expect(h.spawnCalls).toHaveLength(1);
+    });
+
+    it('a slot whose agent is still alive is re-attached, not flagged or killed', () => {
+      const h = harness();
+      REGISTRIES.push(h.dir);
+      h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+      h.tick();
+      h.store.withLock((state) => ({
+        state: {
+          ...state,
+          slots: state.slots.map((sl) =>
+            sl.unit === 'issue:101' ? { ...sl, status: 'assigned' as const } : sl
+          ),
+        },
+        result: null,
+      }));
+      h.closedIssues.add(101);
+      h.tick();
+      expect(h.spawnCalls).toHaveLength(1);
+      expect(h.killedPids).toHaveLength(0);
+    });
+  });
+
+  describe('queued / classified entries closed while waiting', () => {
+    it('control: an open queued entry dispatches', () => {
+      const h = harness();
+      REGISTRIES.push(h.dir);
+      h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+      h.tick();
+      expect(h.spawnCalls).toHaveLength(1);
+    });
+
+    it('a closed queued entry is flagged and not dispatched, and the next entry still is', () => {
+      const h = harness();
+      REGISTRIES.push(h.dir);
+      h.enqueue([
+        { issue: 101, mode: 'full', tier: 'mechanical' },
+        { issue: 102, mode: 'full', tier: 'mechanical' },
+      ]);
+      h.closedIssues.add(101);
+      h.tick();
+      expect(flagged(h)).not.toBeNull();
+      expect(h.state().entries.find((e) => e.issue === 101)?.status).toBe('queued');
+      expect(h.spawnCalls).toHaveLength(1);
+      expect(h.state().slots.some((sl) => sl.unit === 'issue:102')).toBe(true);
+      expect(h.state().slots.some((sl) => sl.unit === 'issue:101')).toBe(false);
+      // Sticky: reading open afterwards does not dispatch it; excluded without re-reads.
+      h.closedIssues.delete(101);
+      h.tick();
+      expect(h.state().slots.some((sl) => sl.unit === 'issue:101')).toBe(false);
+      expect(staleEvents(h)).toHaveLength(1);
+    });
+
+    it('a closed classified entry is not dispatched', () => {
+      const h = harness();
+      REGISTRIES.push(h.dir);
+      h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+      h.store.withLock((state) => ({
+        state: transitionIssue(state, 101, 'classified', {}, h.clock()),
+        result: null,
+      }));
+      h.closedIssues.add(101);
+      h.tick();
+      expect(h.spawnCalls).toHaveLength(0);
+      expect(flagged(h)).not.toBeNull();
+    });
+
+    it('a paused fleet reads nothing', () => {
+      const h = harness();
+      REGISTRIES.push(h.dir);
+      h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+      h.store.withLock((state) => ({ state: setPaused(state, true), result: null }));
+      const reads: number[] = [];
+      const real = h.deps.groundTruth.issueClosed;
+      h.deps.groundTruth.issueClosed = (i) => {
+        reads.push(i);
+        return real(i);
+      };
+      h.tick();
+      expect(reads).toEqual([]);
+    });
+
+    it('gh unreachable reads as "not closed": the unit is NOT flagged (no work lost on a blip)', () => {
+      const h = harness();
+      REGISTRIES.push(h.dir);
+      h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+      // issueClosed is false when gh is unreachable — modeled by the default fake.
+      h.tick();
+      expect(flagged(h)).toBeNull();
+      expect(h.spawnCalls).toHaveLength(1);
+    });
+  });
+
+  describe('requeueOrphanedDispatches', () => {
+    /** Entry `dispatched` with its slot gone — the crash window the requeue self-heals. */
+    function orphan(h: ReturnType<typeof harness>) {
+      h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+      h.store.withLock((state) => {
+        let next = transitionIssue(state, 101, 'classified', {}, h.clock());
+        next = transitionIssue(next, 101, 'dispatched', {}, h.clock());
+        return { state: next, result: null };
+      });
+    }
+
+    it('control: an orphan on an OPEN issue is requeued and re-dispatched', () => {
+      const h = harness();
+      REGISTRIES.push(h.dir);
+      orphan(h);
+      h.tick();
+      expect(h.spawnCalls).toHaveLength(1);
+    });
+
+    it('an orphan on a CLOSED issue is requeued but flagged, never re-dispatched', () => {
+      const h = harness();
+      REGISTRIES.push(h.dir);
+      orphan(h);
+      h.closedIssues.add(101);
+      h.tick();
+      expect(h.spawnCalls).toHaveLength(0);
+      expect(flagged(h)).not.toBeNull();
+      // The flag survives the requeue rail: an open/unreachable read cannot free it.
+      h.closedIssues.delete(101);
+      h.tick();
+      expect(h.spawnCalls).toHaveLength(0);
+    });
+
+    it('an already-flagged orphan keeps its flag through the requeue', () => {
+      const h = harness();
+      REGISTRIES.push(h.dir);
+      orphan(h);
+      h.store.withLock((state) => ({
+        state: patchEntry(state, 101, { stale_closed_at: h.clock().toISOString() }),
+        result: null,
+      }));
+      h.tick();
+      expect(flagged(h)).not.toBeNull();
+      expect(h.spawnCalls).toHaveLength(0);
+    });
+  });
+
+  describe('requeueMember edge (recovering slot still holds the unit)', () => {
+    it('keeps the flag while a recovering slot holds issue:N; clears it otherwise', () => {
+      const h = harness();
+      REGISTRIES.push(h.dir);
+      h.enqueue([{ issue: 101, mode: 'full', tier: 'mechanical' }]);
+      h.tick();
+      h.store.withLock((state) => {
+        const slot = state.slots.find((sl) => sl.unit === 'issue:101');
+        if (!slot) throw new Error('no slot');
+        const rec = transitionSlot(state, slot.id, 'recovering', { pid: null });
+        return {
+          state: patchEntry(rec, 101, { stale_closed_at: h.clock().toISOString() }),
+          result: null,
+        };
+      });
+      const held = h.store.withLock((state) => ({
+        state: requeueMember(state, 101, { mode: 'full', batch: null }, 'r', h.clock()).state,
+        result: null,
+      }));
+      expect(held).toBeNull();
+      expect(flagged(h)).not.toBeNull();
+      // No slot holding it -> a requeue is a fresh attempt and clears the flag.
+      const bare = patchEntry(
+        { ...h.state(), slots: h.state().slots.map((sl) => ({ ...sl, unit: null })) },
+        101,
+        { stale_closed_at: h.clock().toISOString() }
+      );
+      const cleared = requeueMember(bare, 101, { mode: 'full', batch: null }, 'r', h.clock()).state;
+      expect(cleared.entries.find((e) => e.issue === 101)?.stale_closed_at).toBeNull();
+    });
+  });
+});
+
+describe('#890: slot worktree paths use the project root (worktreesDirFor)', () => {
+  function requeuedMemberSeed(h: ReturnType<typeof harness>) {
+    h.enqueue([
+      { issue: 900, mode: 'slot', batch: 'b-890', anchor: 899, base_branch: 'develop' },
+      { issue: 890, mode: 'full', tier: 'mid' },
+    ]);
+    h.store.withLock((state) => ({
+      state: {
+        ...state,
+        entries: state.entries.map((e) =>
+          e.issue === 890
+            ? {
+                ...e,
+                failure_evidence: {
+                  batch: 'b-890',
+                  reason: 'suite-red-after-fix',
+                  failing_tests: [],
+                  attribution: 'overlap' as const,
+                  reverted_commits: [],
+                  branch: 'batch/b-890-m1-890',
+                  at: new Date().toISOString(),
+                },
+              }
+            : e
+        ),
+      },
+      result: null,
+    }));
+    const seen: string[] = [];
+    h.deps.resumeSeeder = (_issue, seed) => {
+      seen.push(seed.worktree);
+      return { ok: true, run: 'r-890' };
+    };
+    return seen;
+  }
+
+  it('nested layout: the slot worktree lands under <project root>/worktrees', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), 'sched-nested-'));
+    REGISTRIES.push(project);
+    fs.mkdirSync(path.join(project, '.dossier'));
+    const checkout = path.join(project, 'main');
+    fs.mkdirSync(checkout);
+    h.deps.repoDir = checkout;
+    const seen = requeuedMemberSeed(h);
+    h.tick();
+    expect(seen).toEqual([path.join(project, 'worktrees', 'batch-b-890-m1-890')]);
+  });
+
+  it('flat layout: unchanged (<repoDir>/worktrees)', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    const seen = requeuedMemberSeed(h);
+    h.tick();
+    expect(seen).toEqual([path.join(h.dir, 'worktrees', 'batch-b-890-m1-890')]);
+  });
+});
+
+describe('#637: ground-truth-unreachable streak identity is the condition, not just presence', () => {
+  const gtEvents = (h: ReturnType<typeof harness>) =>
+    h.journal.read().filter((e) => e.event === 'ground-truth-unreachable' && e.issue === 101);
+
+  function seedMarker(h: ReturnType<typeof harness>, condition: string | null): void {
+    h.store.withLock((state) => ({
+      state: {
+        ...state,
+        entries: state.entries.map((e) =>
+          e.issue === 101
+            ? {
+                ...e,
+                ground_truth_unreachable_since: h.clock().toISOString(),
+                ground_truth_unreachable_ticks: 3,
+                ground_truth_unreachable_condition: condition,
+              }
+            : e
+        ),
+      },
+      result: undefined,
+    }));
+  }
+
+  it('AC1/AC4/AC6: a different condition key on the same unit starts a new streak and journals at once, carrying the key', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    parkUnit(h, 101, 55);
+    // A streak of ANOTHER flavour is live for this unit (three ticks in).
+    seedMarker(h, 'poll-unreachable');
+
+    h.prUnreachable.add(55);
+    h.advance(200_000);
+    h.tick();
+
+    const events = gtEvents(h);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.condition).toBe('pr-watch-paused');
+    expect(events[0]?.ticks_persisted).toBe(1);
+    const entry = h.state().entries.find((e) => e.issue === 101);
+    expect(entry?.ground_truth_unreachable_condition).toBe('pr-watch-paused');
+    expect(entry?.ground_truth_unreachable_ticks).toBe(1);
+  });
+
+  it('AC2/AC3: an unchanged condition key still dedups; the key is stable, not the interpolated detail', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    parkUnit(h, 101, 55);
+    seedMarker(h, 'pr-watch-paused');
+
+    h.prUnreachable.add(55);
+    for (let i = 0; i < 3; i++) {
+      h.advance(200_000);
+      h.tick();
+    }
+
+    // Marker was already mid-streak (ticks=3) on the SAME key: silent, counting on.
+    expect(gtEvents(h)).toHaveLength(0);
+    expect(h.state().entries.find((e) => e.issue === 101)?.ground_truth_unreachable_ticks).toBe(6);
+  });
+
+  it('AC5: the condition key is cleared with the other markers when truth answers', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    parkUnit(h, 101, 55);
+    h.prUnreachable.add(55);
+    h.advance(200_000);
+    h.tick();
+    expect(h.state().entries.find((e) => e.issue === 101)?.ground_truth_unreachable_condition).toBe(
+      'pr-watch-paused'
+    );
+
+    h.prUnreachable.delete(55);
+    h.setPr(55, { state: 'OPEN' });
+    h.advance(200_000);
+    h.tick();
+    const entry = h.state().entries.find((e) => e.issue === 101);
+    expect(entry?.ground_truth_unreachable_condition).toBeNull();
+    expect(entry?.ground_truth_unreachable_since).toBeNull();
+  });
+});
+
+describe('#636: runTeardownFor dedups its ground-truth-unreachable journal', () => {
+  function mergedAwaitingTeardown(h: ReturnType<typeof harness>, issue: number, pr: number): void {
+    parkUnit(h, issue, pr);
+    h.setPr(pr, { state: 'MERGED', mergedAt: '2026-08-29T12:30:00Z' });
+    h.closedIssues.add(issue);
+    h.setupUnreachable.add(issue);
+    h.advance(200_000);
+  }
+  const events = (h: ReturnType<typeof harness>) =>
+    h.journal.read().filter((e) => e.event === 'ground-truth-unreachable' && e.issue === 101);
+
+  it('AC1/AC4: three ticks against one unreachable setupInfo produce exactly one entry; recovery clears the marker and a new failure would report afresh', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    mergedAwaitingTeardown(h, 101, 55);
+
+    h.tick();
+    h.advance(1000);
+    h.tick();
+    h.advance(1000);
+    h.tick();
+
+    expect(events(h)).toHaveLength(1);
+    expect(events(h)[0]?.condition).toBe('teardown-paused');
+    expect(events(h)[0]?.ticks_persisted).toBe(1);
+    const mid = h.state().entries.find((e) => e.issue === 101);
+    expect(mid?.cleanup).toBeNull();
+    expect(mid?.ground_truth_unreachable_ticks).toBe(3);
+
+    // AC3: the marker write never bumped updated_at.
+    const before = mid?.updated_at;
+    h.advance(1000);
+    h.tick();
+    expect(h.state().entries.find((e) => e.issue === 101)?.updated_at).toBe(before);
+
+    // Recovery: setupInfo answers, teardown runs, the marker is cleared.
+    h.setupUnreachable.delete(101);
+    h.setupInfos.set(101, { worktree: h.wt('wt-101'), poolClaimed: false, branch: 'f/101' });
+    h.setTeardownScript(removingTeardown(h.wt('wt-101')));
+    h.advance(1000);
+    h.tick();
+    const after = h.state().entries.find((e) => e.issue === 101);
+    expect(after?.cleanup).toBe('done');
+    expect(after?.ground_truth_unreachable_since).toBeNull();
+    expect(after?.ground_truth_unreachable_ticks).toBe(0);
+    expect(after?.ground_truth_unreachable_condition).toBeNull();
+  });
+
+  it('AC1: re-announces every JOURNAL_DEDUP_REANNOUNCE_TICKS ticks while the outage persists', () => {
+    const h = harness();
+    REGISTRIES.push(h.dir);
+    mergedAwaitingTeardown(h, 101, 55);
+    for (let i = 0; i < JOURNAL_DEDUP_REANNOUNCE_TICKS; i++) {
+      h.tick();
+      h.advance(1000);
+    }
+    expect(events(h)).toHaveLength(2);
+    expect(events(h)[1]?.ticks_persisted).toBe(JOURNAL_DEDUP_REANNOUNCE_TICKS);
+  });
+});
+
+describe('#638: advanceStreak is the one streak step', () => {
+  const now = new Date('2026-09-29T10:00:00.000Z');
+  it('starts a streak on null since or a changed identity, counts otherwise, announces on the window', () => {
+    expect(advanceStreak({ since: null, ticks: 0 }, false, now)).toEqual({
+      since: now.toISOString(),
+      ticks: 1,
+      announce: true,
+    });
+    const prior = { since: '2026-09-29T09:00:00.000Z', ticks: 4 };
+    expect(advanceStreak(prior, false, now)).toEqual({
+      since: prior.since,
+      ticks: 5,
+      announce: false,
+    });
+    expect(advanceStreak(prior, true, now)).toEqual({
+      since: now.toISOString(),
+      ticks: 1,
+      announce: true,
+    });
+    const atWindow = advanceStreak(
+      { since: prior.since, ticks: JOURNAL_DEDUP_REANNOUNCE_TICKS - 1 },
+      false,
+      now
+    );
+    expect(atWindow.announce).toBe(true);
+    expect(atWindow.since).toBe(prior.since);
   });
 });

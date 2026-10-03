@@ -1,7 +1,7 @@
 {
   "name": "@ai-dossier/cli",
-  "version": "0.69.0",
-  "description": "Create, verify, sign, publish, and run dossiers — portable, signed, versioned skills for any LLM tool. The dossier ⇄ Claude Code skill bridge (install-skill / skill-export).",
+  "version": "0.89.6",
+  "description": "CLI for portable AI-agent skills: create, verify, sign, publish, and install workflows for Claude Code, Codex, OpenCode, and LLM tools.",
   "main": "dist/cli.js",
   "bin": {
     "ai-dossier": "./bin/ai-dossier"
@@ -19,20 +19,13 @@
     "test:smoke": "node test/smoke/login.smoke.mjs ./bin/ai-dossier"
   },
   "keywords": [
-    "dossier",
-    "skill",
-    "skills",
-    "claude-code",
+    "agent-skills",
     "claude-code-skills",
-    "ai",
-    "llm",
-    "agent",
-    "security",
-    "verification",
-    "checksum",
-    "signature",
-    "automation",
-    "cli"
+    "codex-skills",
+    "signed-skills",
+    "skill-registry",
+    "ai-agent-cli",
+    "workflow-verification"
   ],
   "author": "Imboard AI",
   "license": "AGPL-3.0-only",
@@ -41,7 +34,7 @@
     "url": "https://github.com/imboard-ai/ai-dossier.git",
     "directory": "cli"
   },
-  "homepage": "https://github.com/imboard-ai/ai-dossier#readme",
+  "homepage": "https://ai-dossier.dev",
   "bugs": {
     "url": "https://github.com/imboard-ai/ai-dossier/issues"
   },
@@ -53,8 +46,8 @@
     "registry": "https://registry.npmjs.org"
   },
   "dependencies": {
-    "@ai-dossier/core": "^1.9.0",
-    "@ai-dossier/sched": "^0.57.0",
+    "@ai-dossier/core": "^1.14.0",
+    "@ai-dossier/sched": "^0.68.0",
     "@ai-dossier/worktree-pool": "^0.7.0",
     "commander": "^12.1.0",
     "yaml": "^2.8.3"

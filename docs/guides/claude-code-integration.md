@@ -9,7 +9,7 @@
 
 There are two ways to use dossiers in Claude Code, and most teams use both:
 
-1. **Trigger skills** *(recommended for shareable, versioned workflows)* — a thin Claude Code skill (`SKILL.md`) that fires on a phrase and invokes a versioned, signed dossier. This is how you turn a workflow into something installable, pinnable, and verifiable.
+1. **Trigger skills** *(recommended for versioned, signed workflows)* — a thin Claude Code skill (`SKILL.md`) that fires on a phrase and invokes a versioned, signed dossier. This is how you turn a workflow into something installable, pinnable, and verifiable.
 2. **MCP server** *(for interactive discovery and authoring)* — gives Claude Code native tools to search, verify, read, and run dossiers through natural conversation.
 
 See [Dossiers as Claude Code Skills](#dossiers-as-claude-code-skills) below for the full trigger-skill treatment.
@@ -207,6 +207,16 @@ ai-dossier install-skill imboard-ai/git/full-cycle-issue-skill
 ```
 
 This writes the dossier to `~/.claude/skills/<name>/SKILL.md`. From then on, Claude routes to it whenever a request matches its `description`.
+
+To sync a whole machine (skills are dossiers named `*-skill` or tagged `skill`):
+
+```bash
+ai-dossier install-skill --all --owner imboard-ai   # install/refresh every skill from an owner
+ai-dossier install-skill --outdated                 # refresh only installed skills with a newer registry version
+ai-dossier install-skill --list                     # installed vs latest, flags BEHIND
+```
+
+Each install records `x_source: <owner/category/name>` in the skill's frontmatter, which is what lets `--outdated` re-fetch it. Skills whose basename collides (e.g. published under two categories) are reported, not overwritten. All modes take `--json` and exit non-zero if any skill failed.
 
 To go the other direction — publish a local skill to the registry as a versioned, signed dossier — use `ai-dossier skill-export <name> --namespace <org>/skills`.
 
