@@ -3,7 +3,7 @@
   "dossier_schema_version": "1.0.0",
   "name": "report-issue",
   "title": "Report Issue — Rich Completion Summary",
-  "version": "1.7.1",
+  "version": "1.8.1",
   "protocol_version": "1.0",
   "status": "Stable",
   "objective": "Generate a comprehensive completion report covering what changed, user-facing implications, dev/ops implications, and review results — posted to both conversation and PR comment; in batch mode (batch_id set): one batch report on the anchor plus one short completion comment per member issue",
@@ -83,16 +83,16 @@
       "name": "Yuval Dimnik"
     }
   ],
-  "last_updated": "2026-08-29",
+  "last_updated": "2026-09-29",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "ed8f6cdc74640786ad34cb7dd3e624c3a351312c340117344b993815ab2f1361"
+    "hash": "6e5c9746394ddc54fc91f804073c0c697a83da65ef90991595e17d0f2f34b12d"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "IZgDGuoklwe4o3kwstULpzxteChdKja3GZpmFlZ5YxvhcibQ+DQusZ6dRLodGom5OhwxAsBrNdw18iqvW5phAg==",
+    "signature": "qAPlENkzJKJu9qxfXLkyXmw2poNxhBx7Tqz/+kMoCRBy0BatN0OPdtATnWcoGcBN1S/C8miD1zpnuS32FUYYBQ==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-08-29T18:21:28.170Z",
+    "signed_at": "2026-09-29T15:23:11.979Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -275,13 +275,20 @@ EOF
 Check the trigger condition — fetch the last `phase=ship` and `phase=implement` milestones:
 
 ```bash
-gh issue view <issue_number> --json comments \
-  --jq '[.comments[].body | select(startswith("<!-- runstate:v1 -->"))]'
+ai-dossier runstate list --issue <issue_number> --json
 ```
 
 Read `ci_fix_attempts` from the last `phase=ship status=done` milestone, and `ci_parity` from the `phase=implement` milestone.
 
-If the repo has `docs/agent-traps.md` AND (`ci_fix_attempts` ≥ 1 OR `ci_parity=fail-then-fixed` OR the run surfaced a finding a future agent would grep for — a masked failure mode, a vacuous test pattern, a tool workaround), you MUST append one row per qualifying finding (mechanical triggers guarantee at least one; judgment findings add more — err toward writing the row): `| <the literal error string a future agent would grep> | <what actually went wrong> | <the fix, as a command or one sentence> | PR #<n> |`. Commit it on a tiny follow-up branch and open a PR (`docs(traps): …`), or if the repo allows, include it before merge. Otherwise `traps_added=0`. If the file does not exist, skip and note it.
+Detect the trap index layout, directory first: a `docs/agent-traps/` directory takes precedence over `docs/agent-traps.md` (checked only when the directory does not exist).
+
+If a trap index exists (either layout) AND (`ci_fix_attempts` ≥ 1 OR `ci_parity=fail-then-fixed` OR the run surfaced a finding a future agent would grep for — a masked failure mode, a vacuous test pattern, a tool workaround), you MUST write one entry per qualifying finding (mechanical triggers guarantee at least one; judgment findings add more — err toward writing the entry):
+
+- **`docs/agent-traps/` exists:** create **one new file** per qualifying finding, named `<issue>-<short-slug>.md`, holding the same four fields — **Symptom** (the literal grep-able error string a future agent would grep), **Trap** (what actually went wrong), **Fix** (the fix, as a command or one sentence), **Source** (`PR #<n>`). Never edit an existing trap file, and never edit any index file in the directory — only add new files.
+- **`docs/agent-traps.md` exists (directory does not):** keep today's behaviour — append one row per qualifying finding: `| <the literal error string a future agent would grep> | <what actually went wrong> | <the fix, as a command or one sentence> | PR #<n> |`.
+- **Neither exists:** skip and note it; `traps_added=0`.
+
+Commit the new file(s), or the appended row, on a tiny follow-up branch and open a PR (`docs(traps): …`), or if the repo allows, include it before merge. With the per-file layout the follow-up PR no longer conflicts with parallel runs writing other trap files.
 
 ### Step 4c: Extract learnings + delete PLANNING file
 
@@ -303,7 +310,7 @@ ai-dossier runstate post --issue <issue_number> --phase report --status done --r
   --kv traps_added=<n>
 ```
 
-Let the CLI stamp `at=` and compute `next=done` — do not pass either; never hand-write the comment. `traps_added` is the number of rows appended to `docs/agent-traps.md` in Step 4b (0 or 1 normally).
+Let the CLI stamp `at=` and compute `next=done` — do not pass either; never hand-write the comment. `traps_added` is the number of files created under `docs/agent-traps/`, or rows appended to `docs/agent-traps.md`, in Step 4b (0 or 1 normally).
 
 ## Output
 
@@ -322,7 +329,7 @@ Let the CLI stamp `at=` and compute `next=done` — do not pass either; never ha
 - [ ] Full report printed to conversation; condensed report posted as PR comment
 - [ ] If base_branch != main: epic sub-issue note included
 - [ ] Review results accurately reflect what was fixed and clean
-- [ ] Trap index write-back checked: if `docs/agent-traps.md` exists and (`ci_fix_attempts` ≥ 1 OR `ci_parity=fail-then-fixed`), a row per qualifying finding (mechanical OR judgment-flagged) was appended and shipped via a follow-up PR or pre-merge commit; otherwise `traps_added=0`
+- [ ] Trap index write-back checked: if `docs/agent-traps/` or `docs/agent-traps.md` exists and (`ci_fix_attempts` ≥ 1 OR `ci_parity=fail-then-fixed`), one entry per qualifying finding (mechanical OR judgment-flagged) was written — a new file per finding under the directory layout (no existing trap file or index edited), or an appended row under the single-file layout — and shipped via a follow-up PR or pre-merge commit; otherwise `traps_added=0`
 - [ ] `PLANNING-<n>-*.md` was deleted from the worktree if still present
 - [ ] Runstate milestone comment was posted to the issue
 

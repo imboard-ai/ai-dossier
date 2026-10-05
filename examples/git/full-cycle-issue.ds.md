@@ -3,10 +3,10 @@
   "dossier_schema_version": "1.0.0",
   "name": "full-cycle-issue",
   "title": "Full Cycle Issue Workflow",
-  "version": "3.16.0",
+  "version": "3.17.0",
   "protocol_version": "1.0",
   "status": "Draft",
-  "last_updated": "2026-09-17",
+  "last_updated": "2026-09-29",
   "objective": "Take a GitHub issue from start to merged PR autonomously — composed from shared sub-dossiers: gate, setup, plan, implement, review, ship, and report",
   "category": [
     "development"
@@ -54,7 +54,7 @@
       },
       {
         "name": "ship_mode",
-        "description": "attached (default) = Phase 5 drives the PR to a confirmed merge and deploy, then Phase 6 reports. detached = Phase 5 parks the PR on auto-merge, posts the awaiting-merge milestone, and the run STOPS; a later run resumes at ship-teardown. Fleet-cycle dispatches detached.",
+        "description": "attached (default) = Phase 5 drives the PR to a confirmed merge and deploy, then Phase 6 reports. detached = a REQUEST to park: Phase 5 parks the PR on auto-merge, posts the awaiting-merge milestone, and the run STOPS (a later run resumes at ship-teardown) ONLY when ship-issue Step 3c confirms a merge mechanism (watcher workflow, or a non-null autoMergeRequest read back after requesting native auto-merge) — otherwise the run falls back to attached and merges the PR itself. Fleet-cycle and sched pass the detected mechanism and dispatch detached only where it is confirmed.",
         "type": "string",
         "default": "attached"
       }
@@ -77,13 +77,13 @@
   "content_scope": "references-external",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "ceca0683001cc167d4fa64b74d60876e8fb7d9ca9feaf744f05c3539c7fa04de"
+    "hash": "0ba9f60d6a674dac14e7419f0a8de9d3029b49e1140c156c613d0720241a78d9"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "MJhhKMVrqCVU/nRyis7nmTKG56bifT/z742UaAW3iOYJ4XkRT1QujbQEtzMhFTSclHdAZ9M4GqOPhl55VeUkCA==",
+    "signature": "y85IQd26ToK47UIRFxyELLWB4XVYKtkU794T3wPiCt3yca4JkUkwigUlfJslx3igKH71cZdCHxGSY80iwNiaDQ==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-17T14:22:45.342Z",
+    "signed_at": "2026-09-29T13:21:55.214Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -120,7 +120,7 @@ The orchestrator's metered model budget, provider quotas and rate limits, and wa
 
 Do NOT ask about (just proceed): file names, branch names, commit messages, PR descriptions, whether to proceed, or any other mechanical decision.
 
-**Ship attachment.** In fleet context ship runs detached — PR parked on auto-merge, run ends there (Phase 5, `ship_mode`). Solo runs stay attached unless the user passes `--detached`.
+**Ship attachment.** In fleet context ship runs detached — PR parked on auto-merge, run ends there (Phase 5, `ship_mode`) — but only where a merge mechanism is confirmed; a label is never proof (#874/#887). Solo runs stay attached unless the user passes `--detached`.
 
 ### Model routing (by role, not by strength)
 
@@ -247,9 +247,9 @@ Always runs — it determines `resume_from`.
 1. Run `ai-dossier run imboard-ai/git/ship-issue`.
 2. Pass through: issue number, base_branch, worktree_path, original_dir, pool_claimed, `run_id`, `ship_mode`, `ac_results` (from Phase 4 — builds the PR body's Acceptance Criteria section), and `live_results` with `live`/`live_flows`/`live_note`.
 2a. **The PR body carries a `Visual verification` line built from `live_results`**, immediately after the Acceptance Criteria section: the verdict per touched UI flow with its evidence path for `met`, or the reason for `not-met`/`unverifiable`, plus `live_note=` when one was recorded. Omit the line entirely only when `live=n/a`, mirroring how ship-issue omits the Acceptance Criteria section on an empty `ac_results`. This is what puts browser evidence in front of the human reading the PR; a `pass` with no paths, or an `unverifiable` with no reason, is not the line.
-2b. **`ship_mode=detached` ends the run here** (ship-issue Step 3c): PR opened, parked on a confirmed `auto-merge` label, `awaiting-merge` milestone posted, run STOPS — no CI wait, no merge, no teardown, **no Phase 6**. The worktree is left in place (work already pushed). gate-issue maps a merged PR on that milestone to `resume_from=ship-teardown`, so a later `full cycle issue <n>` re-enters at teardown and runs Phase 6. Items 3–7 are the **attached** path (and what that tail run executes).
+2b. **`ship_mode=detached` ends the run here — only once ship-issue Step 3c has CONFIRMED a merge mechanism** (a watcher workflow, or `gh pr view --json autoMergeRequest` non-null after requesting native auto-merge; the label alone is not proof — ai-dossier#874/#887: sched's PR watch only waits, so an unconfirmed park never merges). If it cannot be confirmed, ship falls back to attached (wait for required checks, self-merge with an allowed method) and Items 3–7's attached path runs; the chosen `ship_mode`/`merge_mechanism`/`ship_evidence` are on the ship runstate. When confirmed: PR opened, parked, `awaiting-merge` milestone posted, run STOPS — no CI wait, no merge, no teardown, **no Phase 6**. The worktree is left in place (work already pushed). gate-issue maps a merged PR on that milestone to `resume_from=ship-teardown`, so a later `full cycle issue <n>` re-enters at teardown and runs Phase 6. Items 3–7 are the **attached** path (and what that tail run executes).
 3. **Opening a PR is NOT completion, and neither is merging it. You are done when the merge has REACHED PRODUCTION** (or you have a hard blocker you escalated). A PR left green-but-unmerged is a FAILED run; a PR merged but never deployed is code live to nobody — see ship-issue Step 6c.
-**Merge authority**: items 4–5 apply ONLY when the repo has an auto-merge watcher (`.github/workflows/auto-merge-watcher.yml` exists). Without one, attached mode self-merges per ship-issue Step 6 and these items are moot.
+**Merge authority**: items 4–5 apply ONLY when the repo has an auto-merge watcher (`.github/workflows/auto-merge-watcher.yml` exists). Without one, attached mode self-merges per ship-issue Step 6 (with a merge method the repo allows) and these items are moot.
 4. **Both ship milestones still get posted** on the watcher path: `awaiting-merge` when the PR opens (ship Step 3b), `done` once merge and teardown are confirmed (Step 8) — or `blocked` with a `reason=` if the watcher blocks or the PR is unmerged at hand-off.
 5. **Hand off the merge to the auto-merge watcher — do NOT babysit CI and do NOT merge the PR yourself.** An `auto-merge-watcher` Action (every 5 min) squash-merges green, clean PRs server-side and deletes the branch. Your terminal action: apply and **confirm** the `auto-merge` label (ship Step 3c items 1–2 — retry once on failure, then escalate as a hard blocker; do NOT fall back to self-merging / CI polling), then exit the polling loop. Do NOT re-run `gh pr checks` / `statusCheckRollup` in a loop, do NOT `gh pr merge` yourself, do NOT background a CI monitor.
 6. **Confirm the merge before reporting done** (passive, not CI babysitting): poll `gh pr view <pr_number> --json mergedAt` every ~3–5 min, up to ~25 min, until non-null — run this as an **armed watch per `imboard-ai/git/watch-task`**: a single bounded blocking poll loop or harness monitor/wait call that holds you until resolution or timeout. Never end the turn "waiting for the watcher" with nothing armed — an unarmed wait strands a green-but-unmerged PR (or a merged one) indefinitely, the run's known lost-time failure. The same rule covers ship's CI wait (Step 5) and the deploy watch in attached mode. Then ship Step 6b must pass, then Step 6c ALSO — a successful deploy must carry `MERGE_COMMIT`, dispatched by you if nothing else does. Where a bot token merges, GitHub does not fire `on: push`, so the deploy NEVER runs by itself. Do not confuse "merged" with "shipped".
@@ -284,7 +284,7 @@ Orchestration-level only — each sub-dossier validates its own phase.
 - [ ] A runstate milestone was posted via `ai-dossier runstate post` after every phase (ship posted two — one only, on a detached run)
 - [ ] Every phase that touched the working tree synced to origin (WIP Sync Rule) before posting its milestone — `head=` values are pushed shas, never `-dirty`
 - [ ] The PR head commit carried NO CI skip marker at `gh pr create` time (ship Step 2.5 printed `CI-TRIGGER-OK`), and >= 1 `pull_request`-triggered run exists for that sha (ship Step 3a). A PR with zero `pull_request` runs is a FAILED run even if it merged green
-- [ ] `ship_mode` honored: `detached` ended the run at the `awaiting-merge` milestone with the PR parked on auto-merge (Phase 5 item 2b) and left Phase 6 to the tail run; `attached` drove the merge, deploy, and report
+- [ ] `ship_mode` honored: `detached` ended the run at the `awaiting-merge` milestone with the PR parked on a CONFIRMED merge mechanism (Phase 5 item 2b) and left Phase 6 to the tail run; `attached` (requested, or the fallback when auto-merge could not be confirmed) drove the merge, deploy, and report — the ship runstate records `ship_mode`, `merge_mechanism` and `ship_evidence`
 - [ ] On resume, no phase before `resume_from` was re-run; a skipped setup materialized the worktree from origin (cloned fresh if absent on this machine) rather than assuming local state
 
 ## Troubleshooting

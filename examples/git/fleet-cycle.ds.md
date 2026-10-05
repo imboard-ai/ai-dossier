@@ -3,11 +3,11 @@
   "dossier_schema_version": "1.0.0",
   "name": "fleet-cycle",
   "title": "Fleet Cycle — Orchestrate Multiple Issues",
-  "version": "1.7.1",
+  "version": "1.9.0",
   "protocol_version": "1.0",
   "status": "Draft",
-  "last_updated": "2026-09-24",
-  "objective": "Take a SET of GitHub issues to merged PRs by building a dependency-aware wave plan, dispatching detached full-cycle-issue runs across background agents, and supervising the parked PRs through merge — serial, parallel, or mixed",
+  "last_updated": "2026-09-29",
+  "objective": "Take a SET of GitHub issues to merged PRs by building a dependency-aware wave plan, dispatching full-cycle-issue runs across background agents (detached where the repo can merge a parked PR, attached otherwise), and supervising every PR through merge — serial, parallel, or mixed",
   "category": [
     "development"
   ],
@@ -93,13 +93,13 @@
   ],
   "checksum": {
     "algorithm": "sha256",
-    "hash": "0002f711b6bbff15c8d1fc9285eba256d344d62ff6a4024c3a13aa3b2760dcbe"
+    "hash": "76863d05303c69d4cd2e9a62a1212529121b5a6403ca5556abd6b414298d76aa"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "n8hqXsUmFVtsnIPxabzEwKTC52E1lh8NgNMY70OrRGfdplLc37aR2XneYviHEYe2Dd6HPxr3P6ZsIIhJO4vdAw==",
+    "signature": "T7EQde3wPZ5acHFeo9Owul1A0fTnCBtD261aQeSeTZj08OE3pIWKBiBro5fuoADeQqnlpdIbn+cpYyZQFhosDg==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-23T21:24:40.347Z",
+    "signed_at": "2026-09-29T13:21:57.508Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -162,12 +162,30 @@ Topologically partition the DAG into **waves**:
 
 Apply `mode`: `auto` (default) = the wave plan as computed; `serial` = one issue per wave, ascending number order; `parallel` = a single wave with all issues (only when the user asserts independence). Respect `max_parallel`: if a wave has more issues than the cap, dispatch in batches within the wave, refilling as runs finish.
 
-**Write the wave plan to `~/.dossier/logs/fleet-cycle/{project}/FLEET-PLAN-{timestamp}.md`** capturing: the resolved set, the dependency edges with their justification (explicit vs inferred), the wave breakdown, the concurrency cap, and the failure policy.
+**Write the wave plan to `~/.dossier/logs/fleet-cycle/{project}/FLEET-PLAN-{timestamp}.md`** capturing: the resolved set, the dependency edges with their justification (explicit vs inferred), the wave breakdown, the concurrency cap, the chosen `ship_mode` with its evidence (Phase 3.25), and the failure policy.
 - `{project}` = repo slug `<owner>-<repo>` from `gh repo view --json owner,name -q '.owner.login + "-" + .name'`; if that fails (no remote / no `gh`), fall back to the basename of `git rev-parse --show-toplevel`.
 - `{timestamp}` = UTC `YYYYMMDD-HHMMSS`.
 - `mkdir -p` the target directory, write the file, then `gzip -f` it in place so the artifact on disk is `FLEET-PLAN-{timestamp}.md.gz`.
 - **Retention**: after writing, list `FLEET-PLAN-*.md.gz` in that project's log directory by mtime and delete all but the 20 most recent.
 - Present a concise version of the plan in the conversation — the file is for audit/history, not re-read during this run.
+
+## Phase 3.25: Choose the Ship Mode — can this repo merge a parked PR?
+
+Detached ship parks each PR on the `auto-merge` label and exits; something ELSE must merge it. Assert that something exists before dispatching anything (ai-dossier#860: the 2026-09-25 ai-dossier fleet dispatched every run detached into a repo with no watcher and no native auto-merge — `autoMergeRequest=null` on every PR — so nothing would ever have merged them, and nothing said so):
+
+```bash
+BASE=<the fleet's base_branch>
+git fetch origin "$BASE" --quiet
+WATCHER=$(git grep -l -e 'auto-merge' "origin/$BASE" -- '.github/workflows/*.yml' '.github/workflows/*.yaml' 2>/dev/null | head -1)
+NATIVE=$(gh api repos/{owner}/{repo} --jq '.allow_auto_merge')
+echo "watcher=${WATCHER:-none} native_auto_merge=${NATIVE:-unknown}"
+```
+
+- **A watcher workflow that acts on the `auto-merge` label** (open `$WATCHER` and confirm it merges labeled PRs — a text match is not proof) → `ship_mode=detached`, the fleet default.
+- **No watcher, but `NATIVE=true`** → `ship_mode=detached` is viable ONLY because each run's ship step requests native auto-merge (`gh pr merge --auto`) after its review round AND reads `autoMergeRequest` back as non-null (a label is not proof — ai-dossier#874: #869/#871 had the label and `autoMergeRequest=null`); a run that cannot confirm it falls back to attached and merges the PR itself. Say so in the plan.
+- **Neither** → `ship_mode=attached` for every dispatch: each agent drives its own PR through CI, review-gated merge, deploy-confirm and teardown, and there are no tail runs. State it in the plan: `ship_mode=attached — <repo> has no auto-merge watcher and native auto-merge is disabled; parked PRs would never merge`.
+
+Record the chosen `ship_mode` and the evidence (watcher path, `allow_auto_merge`) in the FLEET-PLAN file. **Every ship mode merges only after the full review round** (review-issue `phase=review status=done`, then ship's verdict-freshness gate): detached does not skip review, and neither does a native auto-merge request — an agent that ran `gh pr merge --auto` before its review round was permission-blocked as "Merge Without Review" (#795 / PR #837). A run that reaches ship without a completed review round has failed; never merge or park it by hand.
 
 ## Phase 3.5: Prewarm the Pool
 
@@ -189,11 +207,11 @@ For each wave, in order:
 
 0. **Every wait in this phase is an armed watch — run it per `imboard-ai/git/watch-task`.** This is the fleet's known lost-time failure: the orchestrator dispatches, says "waiting", ends its turn — and nothing ever wakes it, so finished runs sit un-tailed and hung runs are never noticed. Between dispatch and wave resolution the orchestrator must always be inside a blocking poll loop, a harness monitor/wait call, or covered by a verified scheduled wakeup — completion notifications alone don't cover hangs, so pair them with a timer. Per watch-task: check commands are the runstate trail + `gh pr view` (read-only); the progress signal is a new milestone or newly pushed commit; the stall timeout is 30 min feeding rule 4b's escalation ladder (its cap = watch-task's `max_recoveries`); watchdog work runs on the cheap tier (rule 1b).
 
-1. Dispatch one **background agent per issue** in the wave (up to `max_parallel` concurrently). Each agent's task is exactly: run `full cycle issue <N>` — i.e. `ai-dossier run imboard-ai/git/full-cycle-issue --pull` for that issue, passing through `warmup_dossier`, the issue's resolved `base_branch`, and **`ship_mode=detached`**.
+1. Dispatch one **background agent per issue** in the wave (up to `max_parallel` concurrently). Each agent's task is exactly: run `full cycle issue <N>` — i.e. `ai-dossier run imboard-ai/git/full-cycle-issue --pull` for that issue, passing through `warmup_dossier`, the issue's resolved `base_branch`, and **the `ship_mode` chosen in Phase 3.25** (`detached` only where a merge mechanism exists).
 1b. Dispatch each issue's full-cycle run at its tier per `dispatch_model_tier` (auto = judge per issue from its labels/title/likely paths, using the same risk signals as review tiering). The fleet's OWN work splits by role: dependency analysis and wave planning are judgment — do them at the strongest tier (i.e. the orchestrator itself); supervision, PR polling and tail dispatches are mechanical — tails and any watchdog run cheap.
-2. **Detached ship is the fleet default.** A dispatched run ends as soon as its PR is open and parked on auto-merge (full-cycle Phase 5 item 2b): no CI wait, no merge, no teardown, no report. The agent exits there and the orchestrator owns everything after the park.
+2. **Detached ship is the fleet default — where the repo can merge a parked PR.** A dispatched run ends as soon as its PR is open and parked on auto-merge (full-cycle Phase 5 item 2b): no CI wait, no merge, no teardown, no report. The agent exits there and the orchestrator owns everything after the park. After each park, assert the PR has a merge mechanism — a confirmed watcher, or `gh pr view <pr> --json autoMergeRequest` non-null — and if it has neither, fail loudly: mark the issue **failed** with `reason=no-merge-mechanism` (ship posts it too) and redispatch it attached rather than counting it parked. Under `ship_mode=attached` (Phase 3.25 found no mechanism) each agent runs through merge, deploy-confirm and teardown itself: there is no parked state and no tail run, and rule 5's polling reduces to confirming the merge (rule 8) when the agent reports done.
 3. A **dependent** issue must branch from the **updated** base — the merged result, not a stale snapshot. Its dependency must be fully merged before it is dispatched; this is why dependents live in a later wave.
-4. Supervise the wave: track every issue in exactly one state — **running** (agent working), **parked** (last milestone is `phase=ship status=awaiting-merge`; PR open on auto-merge, agent exited), **merged** (PR merged AND its tail run finished), **failed**, or **blocked**.
+4. Supervise the wave: track every issue in exactly one state — **running** (agent working), **parked** (last milestone is `phase=ship status=awaiting-merge` WITHOUT `ship_mode=attached`; PR open with a confirmed merge mechanism, agent exited — a milestone carrying `ship_mode=attached` means the run is still driving the merge itself and is **running**; read `ship_mode=`/`merge_mechanism=`/`ship_evidence=` on it to know whether GitHub or the run merges), **merged** (PR merged AND its tail run finished), **failed**, or **blocked**.
 4b. **Escalation ladder.** If a dispatched run stalls (no new milestone AND no new pushed commit for 30+ minutes) or completes a phase without its milestone, redispatch the same issue one tier stronger — the resume protocol carries the work forward. Two escalations per issue, then mark it failed and block dependents.
 5. **Poll the parked PRs** every 2–3 minutes, as an armed watch (rule 0):
    ```bash
@@ -231,7 +249,8 @@ Post it to the conversation, with direct PR URLs for every merged and failed iss
 | Dependency cycle detected | Surface it and ask — cannot be auto-ordered. |
 | Wave wider than `max_parallel` | Batch within the wave; refill as runs complete. |
 | An issue fails mid-wave | Block its transitive dependents; let independents continue. Partial fleet success is normal — the report must make the blocked set and its cause explicit so the user can re-run the remainder. |
-| A dispatched agent exits with its PR open | Expected — the run is parked, not done. Poll the PR; dispatch the tail run once it merges (Phase 4 rule 8). An un-tailed merge leaves a worktree behind and no completion report. |
+| Parked PRs never merge; `autoMergeRequest=null`, no watcher workflow | The repo has no merge mechanism for detached ship (ai-dossier#860). Phase 3.25 should have chosen `ship_mode=attached`; redispatch the issues attached (ship resumes on the existing `pr=`). Never `gh pr merge --auto` a PR whose review round has not completed. |
+| A dispatched agent exits with its PR open | Under detached ship: expected — the run is parked, not done. Poll the PR; dispatch the tail run once it merges (Phase 4 rule 8). An un-tailed merge leaves a worktree behind and no completion report. |
 | A parked PR goes `CONFLICTING` or gets `auto-merge-blocked` | Mark the issue failed and block dependents. Do not self-merge around it. |
 | Wave has parked PRs but no live agents | The wave is NOT resolved. Keep polling; do not start wave N+1 — a parked PR is not in the base branch, so dependents would branch off a base missing their dependency. Parked runs do free up `max_parallel` slots for tails. |
 | A dependent branched before its dependency merged | Stale base — it will miss the code and likely conflict. Wave gating exists to prevent this; re-branch from the updated base. |
@@ -246,7 +265,9 @@ Post it to the conversation, with direct PR URLs for every merged and failed iss
 - [ ] Dependency graph built from explicit + inferred signals; no undetected dependency cycle
 - [ ] Wave plan computed and written to `~/.dossier/logs/fleet-cycle/{project}/FLEET-PLAN-{timestamp}.md.gz` (gzipped; older entries beyond the most recent 20 pruned)
 - [ ] Plan presented before dispatch
-- [ ] Each issue dispatched as a background `full-cycle-issue` run with `ship_mode=detached`
+- [ ] Ship mode chosen at plan time (Phase 3.25): `detached` only with a confirmed auto-merge watcher or native auto-merge that ship will request; otherwise `attached`, stated in the plan with its evidence
+- [ ] Each issue dispatched as a background `full-cycle-issue` run with the planned `ship_mode`; every parked PR asserted to have a merge mechanism (watcher or non-null `autoMergeRequest`), else failed loudly as `no-merge-mechanism`
+- [ ] No PR merged (or parked, or native-auto-merge-requested) before its full review round completed
 - [ ] Each dispatch's generation-phase tier set per `dispatch_model_tier` (auto = risk-based); the fleet's own dependency/wave-planning judgment ran on the strongest tier, supervision/tails/watchdog ran cheap
 - [ ] Escalation ladder applied on a stalled or milestone-non-compliant dispatched run (redispatch one tier stronger; cap two escalations per issue, then fail + block dependents)
 - [ ] Every wait ran as an armed watch per `watch-task` (blocking loop, monitor call, or verified scheduled wakeup) — at no point did the orchestrator idle on a dispatched wave with nothing armed
@@ -260,6 +281,12 @@ Post it to the conversation, with direct PR URLs for every merged and failed iss
 - [ ] Wave N+1 gated on wave N being MERGED (not merely parked)
 - [ ] Pool prewarmed before each wave (or the missing-pool case reported once)
 - [ ] Aggregate report posted with per-issue status, PR links, `model=` per issue, any escalations, and last-runstate-comment links
+
+## Fleet Lessons (proven in the 2026-09 fleets)
+
+- **Reviewer hand-backs live on disk.** When a dispatched agent's review sub-agent finishes but its findings never reach the orchestrator (the agent exited, the notification was dropped, or the summary was truncated), do NOT re-run the review — read the full transcript at `~/.claude/projects/<project-slug>/<session-id>/subagents/agent-<agent-id>.jsonl` (the last assistant message is the hand-back). Re-running doubles cost and can return a different verdict for the same head.
+- **`git stash` is shared across worktrees.** `refs/stash` is one ref for the whole repository, so every worktree in the pool sees the same stash stack: a `git stash pop` in one agent's worktree can apply ANOTHER agent's changes, and a `git stash drop` can destroy them. Fleet agents never use `git stash` — commit WIP on their own branch (the WIP Sync Rule) or copy files outside the worktree instead. If a stash already exists, identify its owner by `git stash list` branch name before touching it.
+- **Re-check published versions right before merge.** Parallel runs that bump a package version choose it at implement time; a sibling PR can publish that same version first (or the registry may already carry it). Immediately before the merge — the ship step on attached runs, or before a parked PR's watcher merges — re-run `npm view <package> version` (and `versions --json` for the exact candidate) against the PR's `package.json`; on a collision, rebump on the branch, re-run the gates, and only then merge. A version collision fails the publish AFTER merge, when it is hardest to fix.
 
 ## Relationship to Other Dossiers
 
