@@ -82,3 +82,35 @@ npm run test:coverage --workspace=@ai-dossier/zero-trust
 
 `make build-all` includes this package; `make test` and `make test-coverage`
 discover it through the existing `packages/*` workspace glob, including PR CI.
+# Durable write intents
+
+`Journal` and `IntentDriver` are controller-only infrastructure. Use a dedicated
+controller-owned directory, outside worker filesystems. One controller process must
+exclusively own that directory throughout its lifetime (the supervisor must stop
+the old controller before recovery). Duplicate opens/drivers within a process are
+rejected; this is not a distributed lock or a worker-facing authorization API.
+
+Construct a `Journal`, then an `IntentDriver` with the original run identity,
+contribution ID, injected trusted `WriteAdapter`, and an ISO timestamp clock.
+`resume()` reconciles pending writes; `execute(input)` also applies that barrier
+before admitting any mutation. `snapshot()` returns the durable run and intents.
+Close the journal before recovery. Recover with the same run/contribution/target
+identity; the journal, not the supplied initial state, controls progress.
+
+The adapter must authenticate artifact ownership/target, enforce current permission
+and receipt checks, and implement compare-and-swap branch writes. For push results,
+`found`/mutation success must include `remoteSha` equal to `candidateSha`. A different
+or missing SHA blocks the run. A truly absent branch is `absent`; inability to prove
+absence is `unknown`. No adapter exception text is persisted. Engagement adapters
+must include `engagementMarker(contributionId)` in comments and reconcile the unique
+matching marker via `parseEngagementMarker`, with contributor/target checks.
+
+Only one retry is available after proven absence, including across restarts.
+Unknown reconciliation persists a `PolicyBlocked` lifecycle transition and denies
+all further writes. Every intent and attempt is fsynced before the adapter runs;
+confirmation is fsynced before success returns. File and ancestor directory entries
+are fsynced on open. Write uncertainty poisons the live driver; recover from disk
+and reconcile before trying again. Invalid or torn JSONL fails closed and requires
+operator recovery; it is never skipped or automatically truncated. The trusted
+storage/supervisor boundary is required: this mechanism cannot defend against an
+actor who can rewrite the controller's journal or run a second controller process.
