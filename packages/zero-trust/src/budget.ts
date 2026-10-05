@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import * as fs from 'node:fs';
+import fs from 'node:fs';
 import * as path from 'node:path';
 import {
   BudgetError,
@@ -73,6 +73,8 @@ function rate(r: BudgetRate): void {
 
 /** Startup preflight: missing prices are errors even for purportedly free resources. */
 export function requireBudgetRates(rates: BudgetRate[], resources: string[]): void {
+  rates = structuredClone(rates);
+  resources = structuredClone(resources);
   if (!Array.isArray(rates)) throw new BudgetError('invalid_budget', 'rates must be an array');
   const names = new Set<string>();
   for (const r of rates) {
@@ -89,6 +91,10 @@ export function requireBudgetRates(rates: BudgetRate[], resources: string[]): vo
 
 /** Round UP once per resource using exact rational minor-unit conversion. */
 export function estimateBudget(request: EstimateRequest, rates: BudgetRate[]): BudgetEstimate {
+  // Validate, price and persist the SAME primitive snapshot, including getters
+  // supplied through a provider configuration object.
+  request = structuredClone(request);
+  rates = structuredClone(rates);
   currency(request.currency);
   requireBudgetRates(rates, []);
   const used: BudgetRate[] = [];
@@ -142,7 +148,7 @@ export function estimateBudget(request: EstimateRequest, rates: BudgetRate[]): B
 function session(s: BudgetSession): void {
   text(s.id, 'session ID');
   money(s.ceiling);
-  integer(s.ceiling.minor, 'ceiling', true);
+  integer(s.ceiling.minor, 'ceiling');
   integer(s.cleanupAllowance, 'cleanup allowance');
   integer(s.tokenLimit, 'token limit', true);
   integer(s.timeLimitMs, 'time limit', true);
@@ -256,6 +262,7 @@ export function budgetTotals(state: BudgetState, sessionId: string): BudgetTotal
 /** Controller-owned LOCAL filesystem ledger. Opening is read-only and never resets history. */
 export class BudgetLedger {
   readonly file: string;
+  private writeUncertain = false;
   constructor(
     file: string,
     readonly contributionId: string,
@@ -263,7 +270,9 @@ export class BudgetLedger {
   ) {
     text(contributionId, 'contribution ID');
     integer(lockTimeoutMs, 'lock timeout', true);
-    this.file = path.resolve(file);
+    // Normalize directory aliases so two callers cannot lock the same ledger
+    // through different symlinked directory names. The supervisor provisions it.
+    this.file = path.join(fs.realpathSync(path.dirname(path.resolve(file))), path.basename(file));
   }
 
   /** Explicit first creation only: cannot overwrite an existing contribution. */
@@ -284,7 +293,17 @@ export class BudgetLedger {
   snapshot(): BudgetState {
     let raw: string;
     try {
-      raw = fs.readFileSync(this.file, 'utf8');
+      const fd = fs.openSync(
+        this.file,
+        fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK
+      );
+      try {
+        if (!fs.fstatSync(fd).isFile())
+          throw new BudgetError('corrupt_ledger', 'Ledger must be a regular file');
+        raw = fs.readFileSync(fd, 'utf8');
+      } finally {
+        fs.closeSync(fd);
+      }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT')
         throw new BudgetError('missing_ledger', 'Budget ledger missing; never reset on resume');
@@ -398,13 +417,22 @@ export class BudgetLedger {
       } finally {
         fs.closeSync(dirFd);
       }
+    } catch (error) {
+      // A failed fsync may occur AFTER rename. Never retry from this instance
+      // assuming that a failed call means nothing committed.
+      this.writeUncertain = true;
+      throw error;
     } finally {
       fs.rmSync(tmp, { force: true });
     }
   }
 
   private locked<T>(fn: () => T): T {
-    fs.mkdirSync(path.dirname(this.file), { recursive: true, mode: 0o700 });
+    if (this.writeUncertain)
+      throw new BudgetError(
+        'persistence_uncertain',
+        'Fence and reconcile ledger before reopening after write uncertainty'
+      );
     const lock = `${this.file}.lock`;
     const start = Date.now();
     let fd: number;

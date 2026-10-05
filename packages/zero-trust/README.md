@@ -155,7 +155,10 @@ blocks admission (`lock_timeout`): stop/fence all writers, reconcile the committ
 ledger and possible external effects, then remove that lock before retrying.
 Never infer safe lock removal from age or a PID alone. Leftover temp files are
 not committed state. Filesystem errors propagate; after write uncertainty reload
-and reconcile before retrying an action. Use a pre-provisioned durable local
+and reconcile before retrying an action. A write/fsync failure poisons the live
+instance (`persistence_uncertain`); the complete state may already have committed.
+Directory aliases resolve to one canonical lock path; ledger symlinks are refused.
+Use a pre-provisioned durable local
 directory exclusively controlled by the controller; no network filesystem or
 worker write access. The ledger neither invokes nor enforces provider token/time
 limits: execution adapters must honor the admitted maximums, and pricing is an

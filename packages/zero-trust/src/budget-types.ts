@@ -84,6 +84,7 @@ export type BudgetErrorCode =
   | 'missing_ledger'
   | 'identity_mismatch'
   | 'lock_timeout'
+  | 'persistence_uncertain'
   | 'unknown_session'
   | 'unknown_reservation'
   | 'already_reconciled';
