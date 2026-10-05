@@ -2,10 +2,10 @@
 {
   "dossier_schema_version": "1.0.0",
   "title": "Plan Issue — Rich Planning Document",
-  "version": "1.7.1",
+  "version": "1.8.0",
   "protocol_version": "1.0",
   "status": "Stable",
-  "last_updated": "2026-08-29",
+  "last_updated": "2026-09-29",
   "objective": "Read a GitHub issue and its comments, explore the codebase, confirm new states/flows are reachable, and write a rich planning document — consuming an existing plan:v1 artifact when present (validate-then-refine, never recreate) and posting the result back as the issue's canonical artifact",
   "category": [
     "development"
@@ -66,7 +66,7 @@
   "name": "plan-issue",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "372ee0b0a50622692db4dbb6818ab6a1a729ce68527547c18d10bda183538bf0"
+    "hash": "d50c283e6f530bf066e450e434337c4833c685a4fd9268474cd9081524020338"
   },
   "signature": {
     "algorithm": "ed25519",
@@ -141,7 +141,7 @@ From the issue description and comments:
 2. Read key files to understand the current implementation
 3. Check for existing patterns, utilities, or abstractions to reuse
 4. If `base_branch` is not `main`, ensure you are exploring code on `base_branch` (it may have changes not yet on main)
-5. If `docs/agent-traps.md` exists, read it in full (it is small by design) and grep it for terms from the issue title and the affected paths. Mention any hit under Risk Areas.
+5. Detect the trap index layout, directory first: if `docs/agent-traps/` exists, `grep -ril` it for terms from the issue title and the affected paths, then read only the files that match. Otherwise, if `docs/agent-traps.md` exists, grep it for the same terms and read only the matching rows — it is no longer small enough to read in full. Mention any hit under Risk Areas.
 
 ### Step 4b: Reachability Check (REQUIRED before planning any new state/flow)
 
@@ -296,7 +296,7 @@ Let the CLI stamp `at=` and compute `next=implement` — do not pass either; nev
 - [ ] On the refine path: the five carried sections came verbatim from the artifact, every amendment is recorded, and only full-cycle sections were added fresh
 - [ ] Issue body and ALL comments were read
 - [ ] Relevant code was explored on the correct base branch
-- [ ] `docs/agent-traps.md`, if present, was read in full and grepped for terms from the issue title and affected paths; any hit is under Risk Areas
+- [ ] Trap index, if present (`docs/agent-traps/` directory or `docs/agent-traps.md` file), was grepped for terms from the issue title and affected paths and only matching files/rows were read; any hit is under Risk Areas
 - [ ] Reachability check performed for every new state/flow (prod data cited, or N/A justified); unreachable states escalated, not built
 - [ ] Planning file follows the `PLANNING-{number}-{slug}.md` naming convention
 - [ ] Acceptance Criteria section is populated — verbatim from the issue where stated, else the minimal testable set, each checkable by reading code/tests

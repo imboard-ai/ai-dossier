@@ -3,7 +3,7 @@
   "dossier_schema_version": "1.0.0",
   "name": "issue-workflows-guide",
   "title": "Issue Workflows Guide",
-  "version": "1.5.5",
+  "version": "1.6.0",
   "protocol_version": "1.0",
   "status": "Stable",
   "objective": "Reference guide for the issue workflow family — explains when to use each workflow, how they compose from shared sub-dossiers, and available flags",
@@ -25,10 +25,10 @@
       "name": "Yuval Dimnik"
     }
   ],
-  "last_updated": "2026-09-24",
+  "last_updated": "2026-09-29",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "007a3ebb4326c317f8947678f8c21af4487d3329ffac26bf311216a74e743e17"
+    "hash": "4cc19d5b0b729240bf53eab378600a93bfbcee8d64e30c662fd9f83d1c99269c"
   },
   "signature": {
     "algorithm": "ed25519",
@@ -103,7 +103,7 @@ All three skills support:
 | `implement-issue` | `imboard-ai/git/implement-issue` | Implement per plan + affected-scoped tests + `scripts/ci-parity.sh` when the repo has it | guided, full-cycle |
 | `review-issue` | `imboard-ai/git/review-issue` | Tiered report-only review agents (DRY, Security, Supportability, Maintainability, Docs, Convention, **blind Conformance vs the issue's Acceptance Criteria**, and **Visual Conformance — drives the app in a headless browser when the plan flagged `visual_review=true`**) + validity gate + fix findings | guided, full-cycle |
 | `ship-issue` | `imboard-ai/git/ship-issue` | ci-parity → commit → push → PR (with AC checklist) → `awaiting-merge` milestone → CI/merge → teardown (incl. `ensure-test-env.sh --teardown`) | guided, full-cycle |
-| `report-issue` | `imboard-ai/git/report-issue` | Rich summary → conversation + PR comment; mechanical trap write-back to `docs/agent-traps.md` when a CI fix was needed; deletes the PLANNING file | guided, full-cycle |
+| `report-issue` | `imboard-ai/git/report-issue` | Rich summary → conversation + PR comment; mechanical trap write-back to `docs/agent-traps/` (one new file per finding) or `docs/agent-traps.md` (appended row) when a CI fix was needed; deletes the PLANNING file | guided, full-cycle |
 | `watch-task` | `imboard-ai/git/watch-task` | Armed-watchdog discipline for every long wait: blocking poll loop / harness monitor / verified scheduled wakeup, stall detection on progress signals, bounded recovery — kills the "waiting with nothing armed" lost-time failure | full-cycle (merge confirm), fleet-cycle (all supervision) |
 
 ## Shared Parameter: `base_branch`
@@ -129,7 +129,8 @@ Every phase of a full-cycle run appends a `<!-- runstate:v1 -->` comment to the 
   the review milestone carries `live=`/`live_flows=`.
 - **Knowledge**: repos may provide `scripts/ci-parity.sh` (exact CI gates, run locally),
   `scripts/ensure-test-env.sh` (remote Atlas/S3 test env, per-worktree isolation + teardown), and
-  `docs/agent-traps.md` (grep-first symptom→trap→fix index; plan reads it, report writes it).
+  a trap index — `docs/agent-traps/` (one file per trap) or the legacy single-file
+  `docs/agent-traps.md` — a grep-first symptom→trap→fix index; plan reads it, report writes it.
 - **Fleet prewarm**: fleet-cycle replenishes the worktree pool once per wave via
   `npx -y @ai-dossier/worktree-pool@^0.7.2`; agents never run pool `gc`/`refresh`.
 
