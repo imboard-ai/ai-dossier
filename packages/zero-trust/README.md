@@ -118,3 +118,46 @@ and reconcile before trying again. Invalid or torn JSONL fails closed and requir
 operator recovery; it is never skipped or automatically truncated. The trusted
 storage/supervisor boundary is required: this mechanism cannot defend against an
 actor who can rewrite the controller's journal or run a second controller process.
+
+## Budget admission ledger
+
+`BudgetLedger` is a separate controller-owned local-file admission primitive. Create
+it once with `initialize(requiredResources, injectedRates)`, then `startSession`
+with a unique session ID, finite minor-unit ceiling, cleanup allowance and positive
+token/time limits. A revision gets a new session; opening/resuming never initializes
+or rewrites history, and model changes do not rewrite prior pricing evidence.
+
+Use `estimateBudget(request, rates)` before model calls or resource allocations,
+then `reserve(sessionId, estimate, 'work')` **before** the action. Rates include a
+source, pricing unit/batch size, currency, rational minor-unit FX conversion and
+timestamp. Missing rates (including for free models) block startup/admission.
+All arithmetic is integer, rounds charges upward, and rejects unsafe overflow.
+The helper includes all attempts, input/max-output tokens, streaming duration and
+optional streaming charges, rounded-up VM billing increments, and retained storage.
+Token/time ceilings apply cumulatively even at zero incremental cost.
+
+`settle(id, observed)` stores provider-reported money/usage/source separately from
+the estimate; conservative accounting uses the larger amount per dimension.
+Provider overruns remain visible and deny further work rather than being capped.
+`settle(id, null)` retains the full unknown hold. `release(id, noChargeEvidence)`
+is an explicit controller reconciliation that requires evidence no billable action
+occurred. Repeated reconciliation fails closed; retain and use the reservation ID.
+`snapshot()` exposes the contribution's entire history; `budgetTotals(state, id)`
+returns spent/reserved/usage per session. Do not add different currencies together.
+Only controller-authorized `teardown` reservations can access the cleanup allowance;
+they still respect the full ceiling and resource limits.
+
+Mutations re-read and validate every row under an exclusive file lock and persist
+via unique temp file + fsync + same-directory rename + directory fsync. Unknown
+reservations survive a process crash. Missing/corrupt history is never reset.
+If a writer dies **inside** the short mutation, an orphaned `.lock` intentionally
+blocks admission (`lock_timeout`): stop/fence all writers, reconcile the committed
+ledger and possible external effects, then remove that lock before retrying.
+Never infer safe lock removal from age or a PID alone. Leftover temp files are
+not committed state. Filesystem errors propagate; after write uncertainty reload
+and reconcile before retrying an action. Use a pre-provisioned durable local
+directory exclusively controlled by the controller; no network filesystem or
+worker write access. The ledger neither invokes nor enforces provider token/time
+limits: execution adapters must honor the admitted maximums, and pricing is an
+estimate rather than a provider billing guarantee. It is not yet an execution
+engine integration or the complete S1 release gate.
