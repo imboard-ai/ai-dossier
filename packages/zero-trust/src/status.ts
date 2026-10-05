@@ -40,38 +40,37 @@ function isAmount(value: unknown): value is number {
 }
 
 function money(value: unknown): MoneyEstimate {
-  if (
-    !isRecord(value) ||
-    !isAmount(value.amount) ||
-    typeof value.currency !== 'string' ||
-    !/^[A-Z]{3}$/.test(value.currency)
-  )
+  if (!isRecord(value)) throw new InvalidStatusError();
+  const amount = value.amount;
+  const currency = value.currency;
+  if (typeof currency === 'string') assertNoSecrets(currency);
+  if (!isAmount(amount) || typeof currency !== 'string' || !/^[A-Z]{3}$/.test(currency))
     throw new InvalidStatusError();
-  return { amount: value.amount, currency: value.currency };
+  return { amount, currency };
 }
 
-function safeStatus(value: StatusRecord): StatusRecord {
-  if (!isRecord(value)) throw new InvalidStatusError();
+function safeStatus(input: StatusRecord): StatusRecord {
+  if (!isRecord(input)) throw new InvalidStatusError();
+  // Read each fact once: getters cannot swap a validated value before rendering.
+  const value = {
+    runId: input.runId,
+    phase: input.phase,
+    state: input.state,
+    upstreamIssue: input.upstreamIssue,
+    contributor: input.contributor,
+    candidateSha: input.candidateSha,
+    activeTimeMs: input.activeTimeMs,
+    estimatedSpend: input.estimatedSpend,
+    budgetRemaining: input.budgetRemaining,
+    reasonCode: input.reasonCode,
+    nextPermittedAction: input.nextPermittedAction,
+  };
   // Inspect actual strings (JSON escapes whitespace), never invoke input toJSON.
   // Unknown properties are stripped rather than visited or serialized.
-  for (const key of [
-    'runId',
-    'phase',
-    'state',
-    'upstreamIssue',
-    'contributor',
-    'candidateSha',
-    'reasonCode',
-    'nextPermittedAction',
-  ]) {
-    const field = value[key];
+  for (const field of Object.values(value)) {
     if (typeof field === 'string') assertNoSecrets(field);
   }
-  for (const field of [value.estimatedSpend, value.budgetRemaining]) {
-    if (isRecord(field) && typeof field.currency === 'string') assertNoSecrets(field.currency);
-  }
   if (
-    !isRecord(value) ||
     !isNonemptyString(value.runId) ||
     !isNonemptyString(value.phase) ||
     !isRunState(value.state) ||
@@ -81,7 +80,8 @@ function safeStatus(value: StatusRecord): StatusRecord {
     !isReasonCode(value.reasonCode) ||
     !isNonemptyString(value.nextPermittedAction) ||
     (value.candidateSha !== undefined &&
-      (typeof value.candidateSha !== 'string' || !/^[a-f0-9]{40,64}$/.test(value.candidateSha)))
+      (typeof value.candidateSha !== 'string' ||
+        !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value.candidateSha)))
   )
     throw new InvalidStatusError();
   const estimatedSpend = money(value.estimatedSpend);

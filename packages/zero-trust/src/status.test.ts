@@ -98,6 +98,8 @@ describe('status contract', () => {
     { ...status, reasonCode: 'invented' },
     { ...status, nextPermittedAction: '' },
     { ...status, candidateSha: 'not-a-sha' },
+    { ...status, candidateSha: 'a'.repeat(41) },
+    { ...status, candidateSha: 'a'.repeat(63) },
     { ...status, candidateSha: 1 },
     { ...status, activeTimeMs: -1 },
     { ...status, activeTimeMs: Number.POSITIVE_INFINITY },
@@ -121,5 +123,28 @@ describe('status contract', () => {
     };
     expect(JSON.parse(renderJson(value))).toEqual(value);
     expect(() => assertNoSecrets('public facts only')).not.toThrow();
+  });
+
+  it('snapshots getter-backed facts once before validation and secret detection', () => {
+    for (const render of [renderJson, renderHuman]) {
+      let reads = 0;
+      const value = {
+        ...status,
+        get contributor() {
+          reads++;
+          return reads === 1 ? 'alice' : 'ghp_secret';
+        },
+      };
+      expect(render(value)).not.toContain('ghp_');
+      expect(reads).toBe(1);
+      expect(() =>
+        render({
+          ...status,
+          get contributor() {
+            return 'ghp_secret';
+          },
+        })
+      ).toThrow(SecretRedactionError);
+    }
   });
 });

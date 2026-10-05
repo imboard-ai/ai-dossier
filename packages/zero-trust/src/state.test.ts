@@ -297,6 +297,13 @@ describe('fail-closed persistence', () => {
     expect(() => createRun({ ...identity, runId: ' ' }, time)).toThrow(InvalidRunError);
   });
 
+  it('compares extended ISO years by instant, not lexicographic spelling', () => {
+    const future = transitionRun(initial(), R.GatePassed, '+010000-01-01T00:00:00.000Z');
+    expect(future.state).toBe('planning');
+    expect(() => transitionRun(future, R.PlanApproved, time)).toThrow(InvalidRunError);
+    expect(deserializeRun(serializeRun(future))).toEqual(future);
+  });
+
   it('rejects credential-bearing identities rather than persisting raw secrets', () => {
     expect(() => createRun({ ...identity, contributor: 'Bearer secret' }, time)).toThrow(
       SecretRedactionError

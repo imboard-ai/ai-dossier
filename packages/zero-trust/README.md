@@ -33,7 +33,8 @@ observation: event names are not upstream evidence or write authorization.
 `blocked_cleanup` has just one exit, `CleanupCompleted → blocked`. It cannot
 escape indirectly through gating or a pause into execution/publication. Cleanup
 must be reconciled externally before explicitly creating another run. Checkpoint
-resume events represent trusted controller decisions; that controller must bind
+resume events must return to the interrupted phase and represent trusted
+controller decisions; that controller must bind
 the checkpoint, candidate, receipts, policy and budget before emitting them.
 Publication observations must be reconciled before pause/cancel if an API response
 was lost; this package performs no GitHub writes or resource teardown.

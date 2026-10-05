@@ -244,15 +244,12 @@ function applyTransition(run: RunRecord, reasonCode: ReasonCode, timestamp: stri
   // A checkpoint cannot skip forward or silently switch the paused phase.
   if (
     run.state === 'paused_user' &&
-    to !== 'blocked' &&
-    to !== 'unsupported' &&
-    to !== 'failed' &&
-    to !== 'cancelled' &&
-    to !== 'blocked_cleanup' &&
+    !Object.hasOwn(failures, reasonCode) &&
     to !== run.history.at(-1)?.from
   )
     throw new IllegalTransitionError(run.state, reasonCode);
-  if (!isTimestamp(timestamp) || timestamp < run.updatedAt) throw new InvalidRunError();
+  if (!isTimestamp(timestamp) || Date.parse(timestamp) < Date.parse(run.updatedAt))
+    throw new InvalidRunError();
   return freezeRun({
     ...run,
     state: to,
