@@ -173,6 +173,41 @@ describe('durable provider-independent write intents', () => {
         )
     ).toThrow(IntentError);
   });
+  it('denies further admission even when the blocked transition clock fails', async () => {
+    const fake = new FakeAdapter();
+    fake.mode = 'lost';
+    const d = new IntentDriver(journal(), fake, { run, contributionId: 'c-1' }, () => {
+      throw new Error('clock unavailable');
+    });
+    await expect(d.execute(input)).rejects.toThrow(MutationUncertainError);
+    fake.observation = { kind: 'unknown' };
+    await expect(d.resume()).rejects.toThrow('clock unavailable');
+    fake.observation = { kind: 'absent' };
+    await expect(d.execute({ ...input, target: 'new' })).rejects.toThrow(WriteBlockedError);
+    expect(fake.writes).toBe(1);
+  });
+  it('recovery binds all controller identities before constructing a writer', async () => {
+    const dir = directory();
+    const fake = new FakeAdapter();
+    const j = journal(dir);
+    await driver(j, fake).execute(input);
+    j.close();
+    const restoredJournal = journal(dir);
+    for (const changed of [
+      { run: createRun({ ...run, runId: 'other' }, timestamp), contributionId: 'c-1' },
+      { run: createRun({ ...run, contributor: 'bob' }, timestamp), contributionId: 'c-1' },
+      {
+        run: createRun({ ...run, upstreamIssue: 'https://github.com/o/r/issues/2' }, timestamp),
+        contributionId: 'c-1',
+      },
+      { run, contributionId: 'other' },
+    ])
+      expect(() => new IntentDriver(restoredJournal, fake, changed, () => timestamp)).toThrow(
+        IntentError
+      );
+    expect(await driver(restoredJournal, fake).execute(input)).toBe('artifact-1');
+    expect(fake.writes).toBe(1);
+  });
   it.each(
     OPERATION_KINDS
   )('persists intended and attempted before %s and never duplicates confirmed writes', async (operationKind) => {
@@ -426,6 +461,7 @@ describe('durable provider-independent write intents', () => {
     const key = idempotencyKey(input);
     const attempted = { v: 1, type: 'attempted', key };
     const absent = { v: 1, type: 'absent', key };
+    const blocked = transitionRun(run, ReasonCode.PolicyBlocked, timestamp);
     for (const bad of [
       [start, intended, { v: 1, type: 'ambiguous', key }],
       [start, intended, { v: 1, type: 'absent', key }],
@@ -433,6 +469,12 @@ describe('durable provider-independent write intents', () => {
       [start, intended, attempted, attempted],
       [start, intended, attempted, absent, attempted, absent],
       [start, intended, attempted, absent, attempted, { v: 1, type: 'unexpected', key }],
+      [start, { v: 1, type: 'blocked', run: blocked, reason: 'unrecognized' }],
+      [
+        start,
+        { v: 1, type: 'blocked', run: { ...blocked, contributor: 'bob' }, reason: 'unknown' },
+      ],
+      [start, { v: 1, type: 'blocked', run: blocked, reason: 'unknown' }, intended],
     ])
       expect(() => replayIntents(bad)).toThrow(IntentError);
     const push = { ...input, operationKind: 'push_branch' as const };

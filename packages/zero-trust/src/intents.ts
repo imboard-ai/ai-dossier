@@ -282,6 +282,8 @@ export class IntentDriver {
     return pending;
   }
   private block(reason: WriteBlockReason = 'unknown'): never {
+    // Latch before clock/transition/persistence: even a failed hand-off blocks admission.
+    this.failed = true;
     const run = transitionRun(this.state.run, ReasonCode.PolicyBlocked, this.now());
     this.persist({ v: 1, type: 'blocked', run, reason });
     throw new WriteBlockedError();
