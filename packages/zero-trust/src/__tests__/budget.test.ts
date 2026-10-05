@@ -156,14 +156,22 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
   });
 
   it('allocates independent revision ceilings without resetting history or old holds', () => {
-    ledger.reserve('initial', estimate(90));
+    const settled = ledger.reserve('initial', estimate(20));
+    ledger.settle(settled.id, {
+      money: { currency: 'USD', minor: 20 },
+      tokens: 10,
+      timeMs: 100,
+      source: 'invoice',
+    });
+    ledger.reserve('initial', estimate(70));
     ledger.startSession(session('revision', 50));
     ledger.reserve('revision', estimate(40));
     code(() => ledger.reserve('revision', estimate(1)), 'ceiling_exceeded');
     code(() => ledger.startSession(session('initial', 1000)), 'invalid_budget');
     const state = ledger.snapshot();
     expect(state.sessions).toHaveLength(2);
-    expect(budgetTotals(state, 'initial').reserved).toBe(90);
+    expect(budgetTotals(state, 'initial').spent).toBe(20);
+    expect(budgetTotals(state, 'initial').reserved).toBe(70);
     expect(budgetTotals(state, 'revision').reserved).toBe(40);
   });
 
@@ -357,6 +365,36 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
       source: 'reconciled invoice',
     });
     expect(budgetTotals(resumed.snapshot(), 'initial').spent).toBe(90);
+  });
+
+  it.each([
+    'before',
+    'after',
+  ] as const)('recovers a real writer killed %s atomic rename without stealing its lock', async (when) => {
+    const module = compiledModule();
+    const script = `const fs=require('node:fs');const {BudgetLedger}=require(${JSON.stringify(module)});const rename=fs.renameSync;fs.renameSync=(...args)=>{if(${JSON.stringify(when)}==='after')rename(...args);process.send('at-rename');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,60000);};new BudgetLedger(${JSON.stringify(file)},'contribution-1').reserve('initial',${JSON.stringify(estimate(90))});`;
+    const child = spawn(process.execPath, ['-e', script], {
+      stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+    });
+    const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
+    try {
+      await new Promise<void>((resolve, reject) => {
+        child.once('message', () => resolve());
+        child.once('error', reject);
+        child.once('exit', () => reject(new Error('Writer exited before rename')));
+      });
+    } finally {
+      child.kill('SIGKILL');
+      await exited;
+    }
+    const resumed = new BudgetLedger(file, 'contribution-1', 20);
+    expect(resumed.snapshot().reservations).toHaveLength(when === 'before' ? 0 : 1);
+    code(() => resumed.reserve('initial', estimate(1)), 'lock_timeout');
+    expect(fs.existsSync(`${file}.lock`)).toBe(true);
+    // Fixture supervisor has joined the killed writer; reconciliation is now explicit.
+    fs.unlinkSync(`${file}.lock`);
+    if (when === 'after') code(() => resumed.reserve('initial', estimate(1)), 'ceiling_exceeded');
+    else resumed.reserve('initial', estimate(90));
   });
 });
 
