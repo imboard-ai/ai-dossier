@@ -18,6 +18,7 @@ export const OPERATION_KINDS = Object.freeze([
   'pr_close',
 ] as const);
 export type OperationKind = (typeof OPERATION_KINDS)[number];
+const MAX_WRITE_ATTEMPTS = 2; // Initial attempt plus one retry after proven absence.
 export interface IntentInput {
   readonly contributionId: string;
   readonly target: string;
@@ -50,7 +51,16 @@ export interface IntentState {
   readonly run: RunRecord;
   readonly contributionId: string;
   readonly intents: ReadonlyMap<string, Intent>;
+  readonly blockedReason?: WriteBlockReason;
 }
+export const WRITE_BLOCK_REASONS = Object.freeze([
+  'unknown',
+  'reconciliation_error',
+  'invalid_evidence',
+  'unexpected_remote_sha',
+  'retry_exhausted',
+] as const);
+export type WriteBlockReason = (typeof WRITE_BLOCK_REASONS)[number];
 export class IntentError extends Error {
   constructor() {
     super('Invalid zero-trust write intent or journal event');
@@ -127,7 +137,7 @@ type Event =
   | { v: 1; type: 'intended'; input: IntentInput }
   | { v: 1; type: 'attempted' | 'ambiguous' | 'absent'; key: string }
   | { v: 1; type: 'confirmed'; key: string; artifactRef: string; remoteSha?: string }
-  | { v: 1; type: 'blocked'; run: RunRecord };
+  | { v: 1; type: 'blocked'; run: RunRecord; reason: WriteBlockReason };
 
 function reduce(state: IntentState | undefined, raw: unknown): IntentState {
   if (!isRecord(raw) || raw.v !== 1) throw new IntentError();
@@ -144,10 +154,11 @@ function reduce(state: IntentState | undefined, raw: unknown): IntentState {
   }
   if (!state || state.run.state === 'blocked') throw new IntentError();
   if (raw.type === 'blocked') {
+    if (!WRITE_BLOCK_REASONS.includes(raw.reason as WriteBlockReason)) throw new IntentError();
     const run = restoreRun(raw.run);
     const expected = transitionRun(state.run, ReasonCode.PolicyBlocked, run.updatedAt);
     if (JSON.stringify(expected) !== JSON.stringify(run)) throw new IntentError();
-    return { ...state, run };
+    return { ...state, run, blockedReason: raw.reason as WriteBlockReason };
   }
   const intents = new Map(state.intents);
   if (raw.type === 'intended') {
@@ -171,7 +182,10 @@ function reduce(state: IntentState | undefined, raw: unknown): IntentState {
     let next: Intent;
     switch (raw.type) {
       case 'attempted':
-        if (!(intent.status === 'intended' || intent.retryReady) || intent.attempts >= 2)
+        if (
+          !(intent.status === 'intended' || intent.retryReady) ||
+          intent.attempts >= MAX_WRITE_ATTEMPTS
+        )
           throw new IntentError();
         next = { ...intent, status: 'attempted', attempts: intent.attempts + 1, retryReady: false };
         break;
@@ -180,7 +194,10 @@ function reduce(state: IntentState | undefined, raw: unknown): IntentState {
         next = { ...intent, status: 'ambiguous' };
         break;
       case 'absent':
-        if (!['attempted', 'ambiguous'].includes(intent.status) || intent.attempts >= 2)
+        if (
+          !['attempted', 'ambiguous'].includes(intent.status) ||
+          intent.attempts >= MAX_WRITE_ATTEMPTS
+        )
           throw new IntentError();
         next = { ...intent, status: 'ambiguous', retryReady: true };
         break;
@@ -264,16 +281,17 @@ export class IntentDriver {
     this.tail = pending.catch(() => undefined);
     return pending;
   }
-  private block(): never {
+  private block(reason: WriteBlockReason = 'unknown'): never {
     const run = transitionRun(this.state.run, ReasonCode.PolicyBlocked, this.now());
-    this.persist({ v: 1, type: 'blocked', run });
+    this.persist({ v: 1, type: 'blocked', run, reason });
     throw new WriteBlockedError();
   }
   private confirm(intent: Intent, result: MutationResult): void {
     // Snapshot once; adapter values do not get re-read after validation.
     const artifactRef = safeString(result.artifactRef);
     const remoteSha = intent.operationKind === 'push_branch' ? result.remoteSha : undefined;
-    if (intent.operationKind === 'push_branch' && remoteSha !== intent.candidateSha) this.block();
+    if (intent.operationKind === 'push_branch' && remoteSha !== intent.candidateSha)
+      this.block('unexpected_remote_sha');
     this.persist({
       v: 1,
       type: 'confirmed',
@@ -294,7 +312,7 @@ export class IntentDriver {
             ? { kind, artifactRef: observed.artifactRef, remoteSha: observed.remoteSha }
             : { kind };
       } catch {
-        this.block();
+        this.block('reconciliation_error');
       }
       if (!result || result.kind === 'unknown') this.block();
       if (result.kind === 'found') {
@@ -302,12 +320,12 @@ export class IntentDriver {
           this.confirm(intent, result);
         } catch (error) {
           if (this.failed || error instanceof WriteBlockedError) throw error;
-          this.block();
+          this.block('invalid_evidence');
         }
       } else if (result.kind === 'absent') {
-        if (intent.attempts >= 2) this.block();
+        if (intent.attempts >= MAX_WRITE_ATTEMPTS) this.block('retry_exhausted');
         if (!intent.retryReady) this.persist({ v: 1, type: 'absent', key: intent.key });
-      } else this.block();
+      } else this.block('invalid_evidence');
     }
   }
   resume(): Promise<void> {

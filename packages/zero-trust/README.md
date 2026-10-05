@@ -2,7 +2,7 @@
 
 Private, provider-independent foundation for [PRD-ZTFC-001](../../docs/features/zero-trust-full-cycle/prd.md)
 §5.1, §5.8 and §5.9. No runtime dependencies or VM/network/model/GitHub calls.
-This is a lifecycle/status library, not a complete execution or isolation engine.
+This is a lifecycle/status and durable-intent library, not a complete execution or isolation engine.
 Publication remains gated on S1 feasibility.
 
 ```ts
@@ -21,9 +21,9 @@ const restored = deserializeRun(serializeRun(planned));
 `ReasonCode`, every transition records canonical UTC time, and immutable records
 contain replayable history. Restore validates the entire history; unknown schema,
 illegal edges, inconsistent summaries and backwards timestamps fail closed.
-The caller owns controller-local atomic storage, concurrency, retention and
-identity validation. JSON encoding is not an authenticated journal; that layer
-is a separate foundation slice.
+Pure lifecycle callers own atomic storage, concurrency, retention and identity
+validation. The controller can use the durable write journal described below;
+neither JSON encoding nor this local journal is an authenticated receipt.
 
 Negative terminal states and `merged` cannot transition. Explicit `createRun`
 starts at `gating`; when given a previous run it rejects reuse of its ID. Only
@@ -82,7 +82,8 @@ npm run test:coverage --workspace=@ai-dossier/zero-trust
 
 `make build-all` includes this package; `make test` and `make test-coverage`
 discover it through the existing `packages/*` workspace glob, including PR CI.
-# Durable write intents
+
+## Durable write intents
 
 `Journal` and `IntentDriver` are controller-only infrastructure. Use a dedicated
 controller-owned directory, outside worker filesystems. One controller process must
@@ -107,7 +108,10 @@ matching marker via `parseEngagementMarker`, with contributor/target checks.
 
 Only one retry is available after proven absence, including across restarts.
 Unknown reconciliation persists a `PolicyBlocked` lifecycle transition and denies
-all further writes. Every intent and attempt is fsynced before the adapter runs;
+all further writes. `snapshot().blockedReason` preserves the bounded reason
+(`unknown`, `reconciliation_error`, `invalid_evidence`, `unexpected_remote_sha`,
+or `retry_exhausted`) without storing provider exception text.
+Every intent and attempt is fsynced before the adapter runs;
 confirmation is fsynced before success returns. File and ancestor directory entries
 are fsynced on open. Write uncertainty poisons the live driver; recover from disk
 and reconcile before trying again. Invalid or torn JSONL fails closed and requires

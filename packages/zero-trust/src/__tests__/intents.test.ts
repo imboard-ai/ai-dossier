@@ -255,6 +255,7 @@ describe('durable provider-independent write intents', () => {
     d = driver(j, fake);
     await expect(d.resume()).rejects.toThrow(WriteBlockedError);
     expect(d.snapshot().run.state).toBe('blocked');
+    expect(d.snapshot().blockedReason).toBe('retry_exhausted');
     expect(fake.writes).toBe(2);
     j.close();
     d = driver(journal(dir), fake);
@@ -316,6 +317,7 @@ describe('durable provider-independent write intents', () => {
       WriteBlockedError
     );
     expect(d.snapshot().run.state).toBe('blocked');
+    expect(d.snapshot().blockedReason).toBe('unexpected_remote_sha');
   });
   it('serializes same-key calls and snapshots caller input before awaiting', async () => {
     const fake = new FakeAdapter();
@@ -417,6 +419,32 @@ describe('durable provider-independent write intents', () => {
       expect(() => replayIntents(bad)).toThrow(IntentError);
     expect(() => replayIntents([])).toThrow(IntentError);
     expect(() => replayIntents([null])).toThrow(IntentError);
+  });
+  it('replay refuses illegal transitions, push evidence and renewed retry budgets', () => {
+    const start = { v: 1, type: 'run', run, contributionId: 'c-1' };
+    const intended = { v: 1, type: 'intended', input };
+    const key = idempotencyKey(input);
+    const attempted = { v: 1, type: 'attempted', key };
+    const absent = { v: 1, type: 'absent', key };
+    for (const bad of [
+      [start, intended, { v: 1, type: 'ambiguous', key }],
+      [start, intended, { v: 1, type: 'absent', key }],
+      [start, intended, { v: 1, type: 'confirmed', key, artifactRef: 'x' }],
+      [start, intended, attempted, attempted],
+      [start, intended, attempted, absent, attempted, absent],
+      [start, intended, attempted, absent, attempted, { v: 1, type: 'unexpected', key }],
+    ])
+      expect(() => replayIntents(bad)).toThrow(IntentError);
+    const push = { ...input, operationKind: 'push_branch' as const };
+    const pushKey = idempotencyKey(push);
+    expect(() =>
+      replayIntents([
+        start,
+        { v: 1, type: 'intended', input: push },
+        { v: 1, type: 'attempted', key: pushKey },
+        { v: 1, type: 'confirmed', key: pushKey, artifactRef: 'branch', remoteSha: 'b'.repeat(40) },
+      ])
+    ).toThrow(IntentError);
   });
   it('builds and parses exact bounded engagement markers, rejecting ambiguous markers', () => {
     expect(parseEngagementMarker(`body\n${engagementMarker('c-1')}`)).toBe('c-1');
@@ -531,7 +559,7 @@ describe('fail-closed journal durability', () => {
     expect(fake.reads).toBe(1);
     expect(restored.snapshot().intents.get(idempotencyKey(input))?.attempts).toBe(2);
   });
-  it('confirmation fsync failure never repeats a successful external write', async () => {
+  it('confirmation journal failure never repeats a successful external write', async () => {
     const dir = directory();
     const j = journal(dir);
     const fake = new FakeAdapter();
@@ -547,6 +575,50 @@ describe('fail-closed journal durability', () => {
     await restored.resume();
     expect(await restored.execute(input)).toBe('artifact-1');
     expect(fake.writes).toBe(1);
+  });
+  it('real confirmation fsync failure poisons admission and restart preserves the external effect', async () => {
+    const dir = directory();
+    const j = journal(dir);
+    const fake = new FakeAdapter();
+    const d = driver(j, fake);
+    const sync = fs.fsyncSync;
+    let syncs = 0;
+    vi.spyOn(fs, 'fsyncSync').mockImplementation((fd) => {
+      syncs++;
+      if (syncs === 3) throw new Error('confirmation flush failed');
+      sync(fd);
+    });
+    await expect(d.execute(input)).rejects.toThrow(JournalError);
+    await expect(d.execute({ ...input, target: 'other' })).rejects.toThrow(WriteBlockedError);
+    expect(fake.writes).toBe(1);
+    vi.restoreAllMocks();
+    j.close();
+    const restored = driver(journal(dir), fake);
+    expect(await restored.execute(input)).toBe('artifact-1');
+    expect(fake.writes).toBe(1);
+  });
+  it('a torn append aborts mutation and cannot be silently skipped on restart', async () => {
+    const dir = directory();
+    const j = journal(dir);
+    const fake = new FakeAdapter();
+    const d = driver(j, fake);
+    const write = fs.writeSync;
+    let calls = 0;
+    vi.spyOn(fs, 'writeSync').mockImplementation(((
+      fd: number,
+      bytes: Buffer,
+      offset: number,
+      length: number
+    ) => {
+      calls++;
+      if (calls > 1) throw new Error('disk full');
+      return write(fd, bytes, offset, Math.min(length, 5));
+    }) as typeof fs.writeSync);
+    await expect(d.execute(input)).rejects.toThrow(JournalError);
+    expect(fake.writes).toBe(0);
+    vi.restoreAllMocks();
+    j.close();
+    expect(() => journal(dir)).toThrow(JournalError);
   });
   it.each(['{"broken":', '{oops}\n', '\n'])('refuses truncated/corrupt JSONL %s', (text) => {
     const dir = directory();
