@@ -1,7 +1,7 @@
 # Dossier Build System
 # Handles build order dependencies across npm workspaces
 
-.PHONY: all build build-all clean test test-coverage install help lint format check build-pool build-sched build-vscode build-binary
+.PHONY: all build build-all clean test test-coverage install help lint format check build-pool build-sched build-vscode build-binary build-zero-trust
 .DEFAULT_GOAL := help
 
 ## help: Show this help message
@@ -29,7 +29,7 @@ install:
 build: lint build-all
 
 ## build-all: Build all packages in dependency order (no lint)
-build-all: build-core build-pool build-sched build-mcp build-cli build-vscode
+build-all: build-core build-pool build-sched build-zero-trust build-mcp build-cli build-vscode
 	@echo "✓ All packages built successfully"
 
 ## build-core: Build @ai-dossier/core package
@@ -68,6 +68,12 @@ build-sched: build-core build-pool
 	cd packages/sched && npm run build
 	@echo "✓ packages/sched built"
 
+## build-zero-trust: Build private provider-independent zero-trust foundation
+build-zero-trust:
+	@echo "Building packages/zero-trust..."
+	cd packages/zero-trust && npm run build
+	@echo "✓ packages/zero-trust built"
+
 ## build-binary: Build a standalone (no-Node) ai-dossier executable for this host into dist-binaries/
 build-binary: build-cli
 	node scripts/build-sea.mjs
@@ -78,6 +84,7 @@ clean:
 	rm -rf packages/core/dist
 	rm -rf packages/worktree-pool/dist
 	rm -rf packages/sched/dist
+	rm -rf packages/zero-trust/dist
 	rm -rf mcp-server/dist
 	rm -rf cli/dist
 	@echo "✓ Build artifacts cleaned"
