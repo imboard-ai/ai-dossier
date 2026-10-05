@@ -50,6 +50,28 @@ with `SecretRedactionError` containing no input. Other malformed facts raise
 that arbitrary input contains no secrets; the controller must supply sanitized
 facts and never raw environment dumps.
 
+```ts
+import { renderHuman, renderJson, ReasonCode } from '@ai-dossier/zero-trust';
+
+const status = {
+  runId: restored.runId,
+  phase: 'plan',
+  state: restored.state,
+  upstreamIssue: restored.upstreamIssue,
+  contributor: restored.contributor,
+  activeTimeMs: 60000,
+  estimatedSpend: { amount: 0.25, currency: 'USD' },
+  budgetRemaining: { amount: 4.75, currency: 'USD' },
+  reasonCode: ReasonCode.GatePassed,
+  nextPermittedAction: 'approve_plan',
+};
+console.log(renderHuman(status));
+console.log(renderJson(status));
+```
+
+The values above are illustrative controller-supplied facts; the status renderer
+does not calculate spend, elapsed time or shipping authorization.
+
 ## Development
 
 ```sh
