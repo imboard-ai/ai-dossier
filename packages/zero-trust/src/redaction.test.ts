@@ -35,6 +35,9 @@ describe('shared credential rejection policy', () => {
     String.raw`Authorization:\U00000009token\U00000020x`,
     JSON.stringify({ header: 'Authorization:\ttoken\tx' }),
     JSON.stringify({ command: String.raw`curl -H $'Authorization:\ttoken\tx'` }),
+    String.raw`Authorization:\ token\ syntheticOpaqueToken`,
+    String.raw`Authorization:\0040token\0040syntheticOpaqueToken`,
+    JSON.stringify({ command: 'Authoriza\\\ntion: token syntheticOpaqueToken' }),
     'Authorization:\\\n token syntheticOpaqueToken',
   ])('rejects synthetic credential %# without echoing input', (credential) => {
     for (const text of [credential, credential.toUpperCase(), `prefix ${credential} suffix`]) {

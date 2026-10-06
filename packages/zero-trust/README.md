@@ -58,6 +58,8 @@ ASCII whitespace in bounded octal, `\xHH`, `\uHHHH`, and `\UHHHHHHHH`
 forms, including shell short forms) are scanned in a normalized view after
 removing shell backslash-newline continuations;
 the scan conservatively consumes complete backslash runs for nested serialization.
+Escaped literal whitespace, printf's leading-zero octal forms and serialized
+shell continuations are covered by detection-only normalized/collapsed views.
 input is never executed. Rejection raises `SecretRedactionError` containing no
 input. Other malformed facts raise
 `InvalidStatusError`. Pattern detection is a defense-in-depth guard, not proof

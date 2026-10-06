@@ -20,10 +20,10 @@ const credentialPattern = new RegExp(SECRET_PATTERNS.join('|'), 'i');
 // Recognize literal JSON/shell whitespace escapes without evaluating input.
 // A single linear pass also detects headers stored inside serialized command text.
 const escapedWhitespace =
-  /(?<!\\)\\+(?:[tnrvfTNRVF]|[0-7]{1,3}|[xX][0-9a-fA-F]{1,2}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8})/g;
+  /(?<!\\)\\+(?:[ \t\r\n]|[tnrvfTNRVF]|0[0-7]{1,3}|[0-7]{1,3}|[xX][0-9a-fA-F]{1,2}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8})/g;
 function normalizeWhitespace(sequence: string): string {
   const payload = sequence.replace(/^\\+/, '');
-  if (/^[tnrvf]$/i.test(payload)) return ' ';
+  if (/^[ \t\r\n]|^[tnrvf]$/i.test(payload)) return ' ';
   const octal = /^[0-7]/.test(payload);
   const code = Number.parseInt(payload.slice(octal ? 0 : 1), octal ? 8 : 16);
   return [9, 10, 11, 12, 13, 32].includes(code) ? ' ' : sequence;
@@ -31,10 +31,16 @@ function normalizeWhitespace(sequence: string): string {
 
 /** Reject even prefix-only tokens. Never include input in the diagnostic. */
 export function assertNoSecrets(value: string): void {
+  const continued = value.replace(/(?<!\\)\\+\r?\n/g, '');
   if (
     credentialPattern.test(value) ||
+    credentialPattern.test(continued.replace(escapedWhitespace, normalizeWhitespace)) ||
+    // Serialized shell continuations can split the header name itself. Scan a
+    // conservative collapsed view too, without parsing/evaluating command text.
     credentialPattern.test(
-      value.replace(/(?<!\\)\\+\r?\n/g, '').replace(escapedWhitespace, normalizeWhitespace)
+      continued
+        .replace(/(?<!\\)\\{2,}(?:r\\{2,})?n/gi, '')
+        .replace(escapedWhitespace, normalizeWhitespace)
     )
   )
     throw new SecretRedactionError();
