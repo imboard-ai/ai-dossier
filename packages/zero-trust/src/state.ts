@@ -361,6 +361,25 @@ export function restoreRun(value: unknown): RunRecord {
   return run;
 }
 
+/** Exactly the same run record, history included. */
+export function sameRunRecord(a: RunRecord, b: RunRecord): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/** `run` is the same controller run as `previous`, or an exact forward continuation of
+ * it: same identity and creation time, and `previous`'s history as its prefix. */
+export function isRunContinuation(previous: RunRecord, run: RunRecord): boolean {
+  return (
+    run.runId === previous.runId &&
+    run.upstreamIssue === previous.upstreamIssue &&
+    run.contributor === previous.contributor &&
+    run.createdAt === previous.createdAt &&
+    run.history.length >= previous.history.length &&
+    JSON.stringify(run.history.slice(0, previous.history.length)) ===
+      JSON.stringify(previous.history)
+  );
+}
+
 export function serializeRun(run: RunRecord): string {
   return JSON.stringify(restoreRun(run));
 }

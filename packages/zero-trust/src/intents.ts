@@ -3,6 +3,7 @@ import { isRecoveryEvent } from './recovery';
 import { assertNoSecrets } from './redaction';
 import {
   isRecord,
+  isRunContinuation,
   permittedTransitions,
   ReasonCode,
   type RunRecord,
@@ -21,13 +22,16 @@ export const OPERATION_KINDS = Object.freeze([
 ] as const);
 export type OperationKind = (typeof OPERATION_KINDS)[number];
 /** Hybrid hand-off (PRD §5.7, §5.9): the contributor submits these from their own account
- * through `HandoffDriver`, so `execute` refuses them. Journals that already hold them still
- * replay; a pending one is reconciled by whatever adapter the controller supplies. The
- * PRD matrix also makes fork creation, withdrawal and PR title/body edits contributor
- * actions; they stay admissible here until their hand-offs exist. */
+ * (`HandoffDriver` for the comment and PR, `PrTracker` for PR edits, close and reopen), so
+ * `execute` refuses them. A revision updates the PR through `push_branch` to the same fork
+ * branch. Journals that already hold them still replay; a pending one is reconciled by
+ * whatever adapter the controller supplies. Fork creation is a one-time manual prerequisite
+ * (#1065); `fork_ensure` stays admissible here as an inert fallback. */
 export const CONTRIBUTOR_CONFIRMED_OPERATIONS = Object.freeze([
   'engagement_comment',
   'pr_create',
+  'pr_update',
+  'pr_close',
 ] as const);
 const isContributorConfirmed = (kind: OperationKind) =>
   (CONTRIBUTOR_CONFIRMED_OPERATIONS as readonly OperationKind[]).includes(kind);
@@ -236,22 +240,14 @@ type Event =
 /** Only the same controller run or an exact forward continuation may be observed. */
 function continuation(previous: RunRecord, value: unknown): RunRecord {
   const run = restoreRun(value);
-  if (
-    run.runId !== previous.runId ||
-    run.upstreamIssue !== previous.upstreamIssue ||
-    run.contributor !== previous.contributor ||
-    run.createdAt !== previous.createdAt ||
-    run.history.length < previous.history.length ||
-    JSON.stringify(run.history.slice(0, previous.history.length)) !==
-      JSON.stringify(previous.history)
-  )
-    throw new IntentError();
+  if (!isRunContinuation(previous, run)) throw new IntentError();
   return run;
 }
 
 const ADMISSION: Readonly<Record<OperationKind, readonly RunState[]>> = Object.freeze({
-  // engagement_comment and pr_create are unreachable through execute() (contributor
-  // confirmed); their rows stay as an inert fallback.
+  // Contributor-confirmed kinds are unreachable through execute(). PrTracker applies the
+  // pr_update and pr_close rows to its edit/reopen and withdrawal hand-offs; HandoffDriver
+  // checks its own states, so the engagement_comment and pr_create rows are inert.
   engagement_comment: ['gating', 'awaiting_maintainer'],
   fork_ensure: ['shipping'],
   push_branch: ['shipping'],

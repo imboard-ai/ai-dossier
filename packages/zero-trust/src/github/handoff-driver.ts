@@ -1,18 +1,25 @@
 /** Durable contributor hand-off (PRD §5.8 `awaiting_contributor`). Issuing a link is never
  * a write: the journal records "link issued" and, after reconciliation, "observed". The
  * driver schedules nothing — no reminders, no compute until an explicit resume. */
-import { createHash } from 'node:crypto';
-import fs from 'node:fs';
 import path from 'node:path';
-import { replacePrivate } from '../durable-fs';
+import { writePrivateFile } from '../durable-fs';
 import { type IntentInput, idempotencyKey } from '../intents';
 import type { Journal } from '../journal';
 import { receiptDigest } from '../receipt/issue';
 import { parseReceipt } from '../receipt/schema';
 import { isRecoveryEvent } from '../recovery';
 import { assertNoSecrets } from '../redaction';
-import { isRecord, ReasonCode, type RunRecord, restoreRun, transitionRun } from '../state';
 import {
+  isRecord,
+  isRunContinuation,
+  ReasonCode,
+  type RunRecord,
+  restoreRun,
+  sameRunRecord,
+  transitionRun,
+} from '../state';
+import {
+  bodyDigest,
   compareLink,
   formatCompareLink,
   type HandoffOperation,
@@ -156,23 +163,12 @@ function fail(): never {
   throw new HandoffError('invalid_journal');
 }
 
-function sameRun(a: RunRecord, b: RunRecord): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
-}
+const sameRun = sameRunRecord;
 
 /** Only the same controller run or an exact forward continuation may be observed. */
 function continuation(previous: RunRecord, value: unknown): RunRecord {
   const run = restoreRun(value);
-  if (
-    run.runId !== previous.runId ||
-    run.upstreamIssue !== previous.upstreamIssue ||
-    run.contributor !== previous.contributor ||
-    run.createdAt !== previous.createdAt ||
-    run.history.length < previous.history.length ||
-    JSON.stringify(run.history.slice(0, previous.history.length)) !==
-      JSON.stringify(previous.history)
-  )
-    fail();
+  if (!isRunContinuation(previous, run)) fail();
   return run;
 }
 
@@ -207,10 +203,6 @@ function bindingFor(
   )
     throw new HandoffError('invalid_binding');
   return b;
-}
-
-function digestOf(body: string): string {
-  return createHash('sha256').update(Buffer.from(body, 'utf8')).digest('hex');
 }
 
 /** The journaled link must be exactly the one the binding, title and body produce. */
@@ -273,6 +265,8 @@ function reduce(state: HandoffState | undefined, raw: unknown): HandoffState {
     const key = idempotencyKey(input);
     const binding = bindingFor(state.run, input, raw.binding);
     if (
+      // PR edits, close and reopen are `PrTracker` hand-offs, never this driver's.
+      (operationKind !== 'pr_create' && operationKind !== 'engagement_comment') ||
       input.contributionId !== state.contributionId ||
       handoffs.has(key) ||
       pendingOf(state) ||
@@ -280,7 +274,7 @@ function reduce(state: HandoffState | undefined, raw: unknown): HandoffState {
         [...handoffs.values()].some((r) => r.input.operationKind === 'engagement_comment')) ||
       state.run.state !== (operationKind === 'pr_create' ? 'shipping' : 'gating') ||
       typeof raw.body !== 'string' ||
-      raw.bodyDigest !== digestOf(raw.body) ||
+      raw.bodyDigest !== bodyDigest(raw.body) ||
       typeof raw.bodyFile !== 'string' ||
       !path.isAbsolute(raw.bodyFile) ||
       path.basename(raw.bodyFile) !== `${intentId}.md` ||
@@ -592,12 +586,12 @@ export class HandoffDriver {
     binding: PrBinding | IssueBinding,
     link: PreparedLink
   ): HandoffOutcome {
-    const directory = path.resolve(this.deps.bodyDirectory);
-    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-    const bodyFile = path.join(directory, `${handoffIntentId(intent)}.md`);
-    const bytes = Buffer.from(link.body, 'utf8');
     // Write-ahead: the body exists before the journal makes the link visible.
-    replacePrivate(bodyFile, bytes);
+    const bodyFile = writePrivateFile(
+      path.resolve(this.deps.bodyDirectory),
+      `${handoffIntentId(intent)}.md`,
+      Buffer.from(link.body, 'utf8')
+    );
     const run = transitionRun(this.state.run, ReasonCode.ContributorHandoff, this.deps.now());
     this.persist({
       v: 1,
@@ -609,7 +603,7 @@ export class HandoffDriver {
       ...(link.title === undefined ? {} : { title: link.title }),
       body: link.body,
       bodyFile,
-      bodyDigest: digestOf(link.body),
+      bodyDigest: bodyDigest(link.body),
       run,
     });
     return {

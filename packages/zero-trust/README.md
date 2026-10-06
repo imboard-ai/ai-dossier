@@ -123,12 +123,13 @@ controller transition, including cancellation and cleanup failure. This takes ef
 even while reconciliation is awaiting an adapter response. Already-issued mutations
 cannot be recalled; their outcomes are still journaled and reconciled.
 
-`execute` refuses `CONTRIBUTOR_CONFIRMED_OPERATIONS` (`engagement_comment`, `pr_create`)
-with `IntentError('contributor_confirmed')` before anything is journaled: those are
-contributor hand-offs (below). Journals that already hold such intents stay replayable.
-Admission is checked after reconciliation: fork/push require `shipping`; PR updates require
-`shipping` or `revising`. Explicit withdrawal (`pr_close`) is permitted in `shipping`,
-`submitted`, `awaiting_review`, `revising` or `accepted`, before recording `declined`.
+`execute` refuses `CONTRIBUTOR_CONFIRMED_OPERATIONS` (`engagement_comment`, `pr_create`,
+`pr_update`, `pr_close`) with `IntentError('contributor_confirmed')` before anything is
+journaled: those are contributor hand-offs (below). Journals that already hold such
+intents stay replayable. Admission is checked after reconciliation: fork/push require
+`shipping`. The same table admits the contributor hand-offs for PR edits (`shipping` or
+`revising`) and withdrawal (`shipping`, `submitted`, `awaiting_review`, `revising` or
+`accepted`, before recording `declined`); a revision updates the PR by `push_branch`.
 Terminal states, `blocked_cleanup` and `paused_user` deny every mutation with
 `WriteBlockedError`, including retries and calls for already-confirmed intents.
 `resume()` may still reconcile attempted/ambiguous intents in these states, persisting
@@ -183,7 +184,8 @@ actor who can rewrite the controller's journal or run a second controller proces
 
 ## Contributor hand-off (upstream writes)
 
-Upstream writes (engagement comment, PR creation) are contributor hand-offs, not
+Upstream writes (engagement comment, PR creation, and the PR title/body edit, reopen
+and withdrawal described under "PR tracking and revisions") are contributor hand-offs, not
 brokered writes (owner decision A in the [GitHub credentials decision
 record](../../docs/features/zero-trust-full-cycle/decisions/github-credentials.md)).
 A person reviews and submits every public submission under their own account. The
@@ -231,6 +233,66 @@ run prepares the exact content, issues a link, waits durably in
   body, and only the driver's own events may record an observation. `status()`
   shows the link, what it submits, and that the contributor is the author. Nothing
   is scheduled: no reminders, and no compute until an explicit resume.
+
+### PR tracking and revisions
+
+`PrTracker` (`src/github/track.ts`, #1068) takes over once the PR is observed
+(`trackFromHandoff(record, fork)`), in its own controller-owned journal. It reads
+GitHub only on an explicit `resume()`, `beginRevision()` or `shipRevision()`; nothing
+polls, and `status()` reports CI as `not_observed` until a read in this process. It
+records PR outcomes, review and revision steps only from its own reads: `observeRun`
+accepts lifecycle progress made elsewhere (verification, pause, failures) and refuses
+any of those steps (`run_diverged`). After each call, pass `snapshot().run` to the
+other drivers' `observeRun`; a restart may hand it an older copy of the run.
+
+- **State from observations only.** `observePr` reads the PR, the fork (bound by
+  repository id) and its branch. Open is `awaiting_review`; `merged` is recorded only
+  when GitHub reports the merge (even if the fork is gone afterwards), with the head
+  it reported; closed and not merged is `declined`. A deleted PR, fork or head branch,
+  a fork id that changed, or a head SHA (on the PR or the branch) that no verified
+  push left there blocks. A read that fails records nothing (`unknown`, with the
+  failed read and its HTTP status as `detail`).
+- **Upstream CI as observed.** `observeCi` combines check runs and workflow runs for
+  exactly the head SHA and the commit's statuses: `failed`, `awaiting_approval` (a
+  fork PR's runs waiting for a maintainer), `pending`, `passed` (at least one success
+  and nothing failing or outstanding), `none` (nothing ran, or everything was skipped)
+  or `unknown` (a read failed, a listing was truncated, an answer was not understood
+  or named another commit). Only `passed` is green, CI is reported only for a head the
+  run verified, and the next permitted action says so in words.
+- **Re-detection.** When the tracked PR is closed and not merged, `relocatePr` lists
+  head + base + `state=all` and keeps PRs with this contribution's marker other than
+  the tracked one. Exactly one, by the contributor, is followed; its head must be the
+  verified SHA or the run blocks (`unexpected_head_sha`). Several, or one carrying
+  other markers, by another account, or whose fork no longer resolves, hand off and
+  record nothing; none means `declined`. Re-detection is skipped while a withdrawal
+  or a revision is pending. The duplicate-PR 422 is never relied on.
+- **Revisions.** `beginRevision()` reads the PR and keeps maintainer feedback
+  (`MAINTAINER_ASSOCIATIONS`: OWNER, MEMBER, COLLABORATOR) that is not by the
+  contributor or a bot, carries no ai-dossier marker, is not an empty approval, and
+  was not addressed by a confirmed revision (an edited item is new). It rechecks
+  freshness (`RevisionAdmission`: AI policy, issue, assignment, competing fixes and
+  permission; contributor; fork binding) and moves the run to `revising`. A probe
+  that answers no blocks; one that throws refuses without recording
+  (`freshness_unavailable`, naming the probe). The returned feedback is untrusted
+  input for the isolated revision. After independent verification brings the run to
+  `shipping`, `shipRevision({ candidateSha, push })` rechecks freshness, blocks on a
+  head that is neither the last verified SHA nor the candidate
+  (`unexpected_head_sha`), journals the candidate, and pushes through the caller's
+  `IntentDriver.execute` (`ForkPusher`: a fresh receipt, CAS from the last verified
+  SHA). The revision is confirmed only when the PR head equals the candidate
+  (`revised`, back to `submitted`); until then it is `revision_pending`, and
+  `shipRevision` with the same candidate is safe to repeat. A CAS refusal blocks
+  (`push_blocked`). A PR closed mid-revision issues a reopen action and pushes nothing
+  while it is closed; a PR merged mid-revision blocks (`merged_during_revision`).
+- **Contributor actions.** `requestEdit({ title, body })` (during a revision) and
+  `requestWithdrawal({ reason, explanation })` (maintainer request or user
+  instruction; not during a revision) write the prepared text to a body file whose
+  digest covers exactly the file, and return the PR link and instructions. An edit
+  must keep the PR's marker, may carry no hidden comment or invisible character, and
+  is recorded only when a read shows the same title and body; it stays pending across
+  a confirmed revision. A withdrawal comment carries its own `pr_close` marker; the
+  run records `declined` only after it observes the PR closed, deletes nothing, and
+  sends no follow-up. `cancelAction()` drops a pending action without touching GitHub.
 
 ## Budget admission ledger
 

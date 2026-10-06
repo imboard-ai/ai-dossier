@@ -59,6 +59,15 @@ export function publishPrivate(file: string, bytes: Buffer): void {
   replacePrivate(file, bytes);
 }
 
+/** Writes `name` into a private (0700) controller directory, created if needed, by atomic
+ * replacement; returns the file's path. */
+export function writePrivateFile(directory: string, name: string, bytes: Buffer): string {
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const file = path.join(directory, name);
+  replacePrivate(file, bytes);
+  return file;
+}
+
 /** Atomic replacement under the caller's guard. Temporary basenames are fixed
  * length, independent of the final filename's component length. */
 export function replacePrivate(file: string, bytes: Buffer): void {

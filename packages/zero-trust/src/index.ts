@@ -10,6 +10,7 @@ export * from './github/handoff';
 export * from './github/handoff-driver';
 export * from './github/pr-body';
 export * from './github/reconcile';
+export * from './github/track';
 export * from './intents';
 export * from './journal';
 export * from './receipt/issue';
