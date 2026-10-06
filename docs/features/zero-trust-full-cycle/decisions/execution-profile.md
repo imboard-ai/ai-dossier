@@ -179,7 +179,7 @@ On a development machine without `/dev/kvm`, a TCG bake ran for over an hour wit
 (the earlier sketch measured about 330 s for the unbaked image's first boot alone), so bakes belong
 on a KVM host or in CI. Container start-up costs more under TCG than the original ×4
 command-timeout scale assumed for short commands (8.8–15×). #1010 re-measured it with the gate 2
-fixtures (installs, rebuilds and tests 10–15×, boot and phase switch 9–13×) and raised the scale
+fixtures (multi-second steps 10–15×, sub-second commands up to 19×) and raised the scale
 to ×16; see the [package-proxy record](package-proxy.md#timings-and-the-tcg-timeout-scale).
 
 ## Attack categories (scenario 4)

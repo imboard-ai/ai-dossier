@@ -51,10 +51,11 @@ export function provisioningNetworkPolicy(hostPort: number): typeof RUN_NETWORK_
 }
 
 /** TCG is software emulation: same image and isolation, longer clocks. Measured on
- * GitHub-hosted runners, TCG ran short container commands 8.8–15× slower than KVM
- * (#1009) and the npm fixture's install, rebuild and test 10–15× slower (#1010), so
- * the scale covers the worst observed ratio. ×4 would time out a command that takes
- * more than a quarter of its budget under KVM and report it inconclusive. */
+ * GitHub-hosted runners (#1009, #1010), multi-second steps ran 10–15× slower than under
+ * KVM and sub-second commands up to 19× (container start-up dominates those, far inside
+ * their budgets). ×4 timed out commands that need more than a quarter of their KVM
+ * budget; 16 covers the long ones and keeps the 20-minute default under the broker's
+ * 6-hour exec cap. */
 export const TIMEOUT_SCALE: Readonly<Record<Accelerator, number>> = Object.freeze({
   kvm: 1,
   tcg: 16,

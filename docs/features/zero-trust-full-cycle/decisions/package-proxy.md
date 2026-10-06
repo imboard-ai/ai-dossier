@@ -72,7 +72,7 @@ drives the TypeScript reference evaluator used in unit tests and the generated S
 | `registry.npmjs.org` | Package document (`/name`, `/@scope%2fname`, `/@scope/name`) and tarball (`/[@scope/]name/-/name-<version>.tgz`) | `dstdomain -n` + `urlpath_regex` |
 | `pypi.org` | `/simple/<project>/` only. Not the root index, the JSON API, upload or account paths | same |
 | `files.pythonhosted.org` | `/packages/xx/yy/<60 hex>/<file>.(whl\|tar.gz\|zip)[.metadata]` | same |
-| Redirects | **none** (`maxRedirects: 0`) | `http_reply_access deny redirect_status` |
+| Redirects | **none** (`maxRedirects: 0`) | `http_reply_access deny redirect_status` (every 3xx except 304 Not Modified, the answer to a mirror's conditional request) |
 | Destinations | no IP literals (IPv4 or IPv6); no private, loopback, link-local (including metadata), CGNAT, multicast, IPv4-mapped, NAT64 or 6to4 ranges, checked after Squid's own DNS resolution | `deny ip_literal`, `deny forbidden_dst` |
 | Size | Response body capped at 256 MiB | `reply_body_max_size` |
 
@@ -293,11 +293,18 @@ isolated proof is below.
 
 ## Evidence
 
-CI run [37524097751](https://github.com/imboard-ai/ai-dossier/actions/runs/37524097751) (GitHub-hosted `ubuntu-24.04`), job "Package proxy proof (KVM)", artifact
-`zero-trust-proxy-evidence-kvm` (evidence JSON, policy checks, Squid access log, mirror
-logs). The first full run, [37520527415](https://github.com/imboard-ai/ai-dossier/actions/runs/37520527415), produced the same results; its only failure was the
-test's own receipt construction, fixed since. The gate 1 hostile suite passed again on the
-rebaked image in the same runs.
+CI run [37532883190](https://github.com/imboard-ai/ai-dossier/actions/runs/37532883190)
+(GitHub-hosted `ubuntu-24.04`, the code in this record), job "Package proxy proof (KVM)",
+artifact `zero-trust-proxy-evidence-kvm` (evidence JSON, policy checks, Squid access log,
+mirror logs, QEMU stderr per VM and phase). Earlier runs
+[37520527415](https://github.com/imboard-ai/ai-dossier/actions/runs/37520527415) and
+[37524097751](https://github.com/imboard-ai/ai-dossier/actions/runs/37524097751) gave the
+same results before the review fixes (the first failed only on the test's own receipt
+construction). One intermediate run failed: after the review moved the guest relay's
+start off the hello path, the controller could dial in before the relay listened, and
+those connections never reached it; the agent now answers the hello only once the relay
+is up, and the connector replaces idle connections after 30 s. The gate 1 hostile suite
+passed again on the rebaked image in every run.
 
 **AC1 — provision via the proxy, test offline, exact commits.** Per fixture, three Git
 commits (base, base + regression test, + fix). Per commit, a fresh VM provisions the
@@ -371,24 +378,29 @@ the policy evaluator, none was denied, and none was a redirect; the hosts were e
 
 ## Timings and the TCG timeout scale
 
-Two CI runs ([37520527415](https://github.com/imboard-ai/ai-dossier/actions/runs/37520527415), [37524097751](https://github.com/imboard-ai/ai-dossier/actions/runs/37524097751)), GitHub-hosted `ubuntu-24.04`. KVM: VM boot
-8.9–9.9 s (about 16 s for the first VM of a job), provisioning 1.2–1.5 s (npm), 5.0–5.5 s
-(pip, mostly `venv`), 1.5–1.6 s (uv), phase switch 9.9–11 s, offline tests 0.5–1.2 s; the
-proxy stack starts in about 30 s. TCG ran the npm fixture (job "Package proxy timings
-(TCG)"); the table compares the same npm steps, so its KVM column is npm-only:
+Three CI runs ([37520527415](https://github.com/imboard-ai/ai-dossier/actions/runs/37520527415), [37524097751](https://github.com/imboard-ai/ai-dossier/actions/runs/37524097751), [37532883190](https://github.com/imboard-ai/ai-dossier/actions/runs/37532883190)), GitHub-hosted `ubuntu-24.04`; runner hardware varies
+between jobs. KVM: VM boot 7.4–9.9 s (12–16 s for the first VM of a job), provisioning
+0.9–1.5 s (npm), 4.0–5.5 s (pip, mostly `venv`), 1.2–1.6 s (uv), phase switch 8.1–11 s,
+offline tests 0.4–1.2 s; the proxy stack starts in about 30 s. TCG ran the npm fixture
+(job "Package proxy timings (TCG)"). The table compares the same npm steps, with each
+ratio taken between the KVM and TCG jobs of the same run:
 
 | Step | KVM | TCG | TCG / KVM |
 |---|---|---|---|
-| VM boot | 8.9–9.9 s | 88–106 s | 8.9–11.9× |
-| Phase switch (power off, relaunch, hello) | 10.0–10.8 s | 108–128 s | 10.0–12.9× |
-| `npm ci` through the proxy | 1.22–1.47 s | 14.4–18.5 s | 9.8–15.2× |
-| `npm rebuild` | 1.12–1.17 s | 12.1–14.5 s | 10.3–12.9× |
-| `npm test` | 0.52–0.57 s | 6.4–7.9 s | 11.3–15.2× |
+| VM boot | 7.8–9.9 s | 88–107 s | 9.8–12.6× |
+| Phase switch (power off, relaunch, hello) | 8.3–10.8 s | 108–128 s | 10.0–15.1× |
+| `npm ci` through the proxy | 0.92–1.47 s | 14.1–18.5 s | 10.1–16.9× |
+| `npm rebuild` | 0.82–1.17 s | 11.8–14.5 s | 10.3–16.0× |
+| `npm test` | 0.37–0.57 s | 6.4–7.9 s | 11.3–19.4× |
 
 With #1009's 8.8–15× for short container commands, the old ×4 command-timeout scale was
 too small: a command needing more than a quarter of its budget under KVM would time out
-under TCG and come back `inconclusive`. `TIMEOUT_SCALE.tcg` is now 16, the worst
-measured ratio rounded up. It scales command, broker and shutdown clocks; the TCG boot
+under TCG and come back `inconclusive`. `TIMEOUT_SCALE.tcg` is now 16. The ratio that
+matters is the one for long commands, since only a command near its budget can time out:
+multi-second steps (boot, phase switch) measured 10–15×, so 16 covers them. Sub-second
+commands reached 19× (fixed container start-up dominates them), far inside their budgets.
+16 is also the largest scale that keeps the 20-minute default command budget under the
+broker's 6-hour exec cap. It scales command, broker and shutdown clocks; the TCG boot
 timeout (20 min) already had headroom.
 
 ## Gate 2 verdict

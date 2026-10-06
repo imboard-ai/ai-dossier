@@ -258,7 +258,7 @@ describe('policy constants', () => {
 
   it('TCG gets longer clocks than KVM', () => {
     expect(TIMEOUT_SCALE.tcg).toBeGreaterThan(TIMEOUT_SCALE.kvm);
-    // Covers the worst TCG/KVM ratio measured in CI (15× for short container commands).
+    // Covers the TCG/KVM ratio of multi-second steps measured in CI (up to 15×).
     expect(TIMEOUT_SCALE.tcg).toBeGreaterThanOrEqual(15);
     expect(BOOT_TIMEOUT_MS.tcg).toBeGreaterThan(BOOT_TIMEOUT_MS.kvm);
     expect(Object.isFrozen(TIMEOUT_SCALE)).toBe(true);
