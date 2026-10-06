@@ -27,13 +27,12 @@
     "model-driven-orchestration",
     "agent-orchestration",
     "ai-agents",
-    "llm",
-    "skill-md",
     "claude-code",
-    "claude-skills",
-    "supply-chain-security",
-    "signed",
-    "versioning"
+    "versioning",
+    "scheduler",
+    "dossier",
+    "batch",
+    "orchestration"
   ],
   "author": "Yuval Dimnik <yuval.dimnik@gmail.com>",
   "license": "AGPL-3.0-only",
