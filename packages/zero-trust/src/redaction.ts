@@ -26,6 +26,14 @@ function normalizeWhitespace(sequence: string): string {
   if (/^[ \t\r\n]|^[tnrvf]$/i.test(payload)) return ' ';
   const octal = /^[0-7]/.test(payload);
   const code = Number.parseInt(payload.slice(octal ? 0 : 1), octal ? 8 : 16);
+  // printf %b permits a leading zero plus three digits; ANSI-C shell strings
+  // consume only three. Reject conservatively if either interpretation is space.
+  if (
+    octal &&
+    payload.length === 4 &&
+    [9, 10, 11, 12, 13, 32].includes(Number.parseInt(payload.slice(0, 3), 8))
+  )
+    return ' ';
   return [9, 10, 11, 12, 13, 32].includes(code) ? ' ' : sequence;
 }
 
