@@ -16,6 +16,7 @@ import {
   formatDossierFields,
   formatTable,
   logPaginationInfo,
+  OFFICIAL_KMS_KEYS,
   parseDossierMetadataFromContent,
   parseListSource,
   printRegistryErrors,
@@ -651,5 +652,25 @@ describe('formatPublishedBy (#971)', () => {
     expect(formatPublishedBy(undefined)).toBe('N/A');
     expect(formatPublishedBy('  ')).toBe('N/A');
     expect(formatPublishedBy('\x1b[2Jmallory\x07')).toBe('[2Jmallory');
+  });
+});
+
+describe('OFFICIAL_KMS_KEYS', () => {
+  // Mirrors the substring match in commands/sign.ts.
+  const isOfficial = (id: string) =>
+    OFFICIAL_KMS_KEYS.some((key) => id === key || id.includes(key));
+
+  it('flags the official key by alias and by full ARN without naming an account', () => {
+    expect(isOfficial('alias/dossier-official-prod')).toBe(true);
+    expect(
+      isOfficial('arn:aws:kms:us-east-1:123456789012:key/d9ccd3fc-b190-49fd-83f7-e94df6620c1d')
+    ).toBe(true);
+    expect(OFFICIAL_KMS_KEYS.some((key) => /\d{12}/.test(key))).toBe(false);
+  });
+
+  it('does not flag an unrelated key', () => {
+    expect(
+      isOfficial('arn:aws:kms:us-east-1:123456789012:key/00000000-0000-0000-0000-000000000000')
+    ).toBe(false);
   });
 });
