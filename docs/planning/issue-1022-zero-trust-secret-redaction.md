@@ -34,7 +34,7 @@ N/A — no new reachable state. Existing string validation/output paths are repa
 - Existing status fixture, FakeAdapter/journal helpers and receipt signer fixtures exercise real boundaries.
 
 ## Risk Areas
-- Keep existing prefix-only conservatism rather than adding word boundaries or minimum lengths that weaken the guard. Avoid global regex state and mutable exported regex objects.
+- Keep existing prefix-only conservatism for GitHub/Anthropic/Bearer patterns. Generic sk- uses a word boundary so public words like task-ready and risk-budget remain valid. Avoid global regex state and mutable exported regex objects.
 - Trap index: scan primitive snapshots before JSON escapes whitespace; preserve getter snapshot guarantees (#1004).
 - Private zero-trust package needs no version bump or lockfile changes. Preexisting npm audit exception requires unchanged-base proof and one CI retry; no unsolicited dependency update.
 - Model selection is unavailable; actual model openai/gpt-6.1-sol. Independent review must be recorded honestly with required redo.

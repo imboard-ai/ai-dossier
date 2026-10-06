@@ -19,6 +19,7 @@ import {
   WriteBlockedError,
 } from '../intents';
 import { Journal, JournalError } from '../journal';
+import { SecretRedactionError } from '../redaction';
 import { createRun, ReasonCode, RUN_STATES, type RunRecord, transitionRun } from '../state';
 
 const timestamp = '2026-10-05T00:00:00.000Z';
@@ -91,6 +92,30 @@ afterEach(() => {
 });
 
 describe('durable provider-independent write intents', () => {
+  it('rejects user-to-server credentials before persistence or provider mutation', () => {
+    const fake = new FakeAdapter();
+    const j = journal();
+    const d = driver(j, fake);
+    const secret = 'ghu_syntheticUserToken';
+    const before = fs.readFileSync(j.filePath, 'utf8');
+    expect(() => d.execute({ ...input, target: secret })).toThrow(SecretRedactionError);
+    expect(() => d.execute({ ...input, target: secret })).not.toThrow(secret);
+    expect(fs.readFileSync(j.filePath, 'utf8')).toBe(before);
+    expect(fake.writes).toBe(0);
+  });
+  it('never persists user-to-server credentials from mutation or reconciliation evidence', async () => {
+    const fake = new FakeAdapter();
+    const j = journal();
+    const d = driver(j, fake);
+    const secret = 'ghu_syntheticUserToken';
+    const mutate = vi.spyOn(fake, 'mutate').mockResolvedValue({ artifactRef: secret });
+    await expect(d.execute(input)).rejects.toThrow(MutationUncertainError);
+    fake.observation = { kind: 'found', artifactRef: secret };
+    await expect(d.resume()).rejects.toThrow(WriteBlockedError);
+    expect(fs.readFileSync(j.filePath, 'utf8')).not.toContain(secret);
+    expect(d.snapshot().intents.get(idempotencyKey(input))?.artifactRef).toBeNull();
+    expect(mutate).toHaveBeenCalledTimes(1);
+  });
   it('rejects credentials and snapshots getter-backed input/results once', async () => {
     const fake = new FakeAdapter();
     const j = journal();

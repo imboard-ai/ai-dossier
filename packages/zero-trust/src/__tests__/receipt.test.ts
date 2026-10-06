@@ -451,13 +451,20 @@ describe('controller receipt — scenarios 10/17, contributor integrity, S3/S4',
     'ghp_secret',
     'github_pat_secret',
     'ghs_secret',
+    'ghu_syntheticUserToken',
+    'GHO_SYNTHETIC',
+    'ghr_synthetic',
+    'sk-proj-syntheticKey',
+    'Authorization: token x',
     'sk-ant-secret',
     'Bearer\tsecret',
     'Bearer\nsecret',
   ])('rejects secrets without echoing them: %s', async (secret) => {
     input.commands[0].command = `npm test ${secret}`;
+    const sign = vi.spyOn(signer, 'sign');
     await expect(issue()).rejects.not.toThrow(secret);
     await expect(issue()).rejects.toThrow('prohibited credential');
+    expect(sign).not.toHaveBeenCalled();
   });
   it('escapes hostile HTML/Markdown and reports actual counts/log digests', async () => {
     input.commands[0].command = 'npm test </code><script>alert(1)</script> `\n';

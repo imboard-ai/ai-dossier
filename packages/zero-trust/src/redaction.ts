@@ -5,7 +5,18 @@ export class SecretRedactionError extends Error {
   }
 }
 
+/** Shared case-insensitive policy. Strings prevent callers mutating RegExp state. */
+export const SECRET_PATTERNS: readonly string[] = Object.freeze([
+  'gh[pousr]_',
+  'github_pat_',
+  'sk-ant-',
+  '\\bsk-',
+  'bearer\\s',
+  'authorization[ \\t]*:\\s*token\\s',
+]);
+const credentialPattern = new RegExp(SECRET_PATTERNS.join('|'), 'i');
+
 /** Reject even prefix-only tokens. Never include input in the diagnostic. */
 export function assertNoSecrets(value: string): void {
-  if (/(?:ghp_|github_pat_|ghs_|sk-ant-|bearer\s)/i.test(value)) throw new SecretRedactionError();
+  if (credentialPattern.test(value)) throw new SecretRedactionError();
 }
