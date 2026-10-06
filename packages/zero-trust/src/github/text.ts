@@ -9,7 +9,7 @@ export class HandoffError extends Error {
   }
 }
 
-const SUCCESS_CLAIM = /all\s+tests\s+passed/giu;
+const SUCCESS_CLAIM = /all\s*tests\s*passed/giu;
 const PROMOTION: readonly RegExp[] = [
   /\bstar(?:ring)?\s+(?:this|the|our|my)\s+(?:repo|repository|project)\b/iu,
   /\b(?:give|leave)\s+(?:us|it|me|this)\s+a\s+star\b/iu,
@@ -22,11 +22,16 @@ const PROMOTION: readonly RegExp[] = [
   /\bcheck\s+out\s+(?:our|my)\b/iu,
 ];
 
+/** NFKC plus no format characters: zero-width/bidi controls cannot hide or split words. */
+function visible(text: string): string {
+  return text.normalize('NFKC').replace(/\p{Cf}/gu, '');
+}
+
 /** Model or repository text: bounded, single-sourced, unable to forge a run marker
  * or a blanket success claim. Newlines survive only where `multiline` allows them. */
 export function untrustedText(value: unknown, maxLength: number, multiline = true): string {
   if (typeof value !== 'string') throw new HandoffError('invalid_text');
-  let text = value.replace(/\r\n?/gu, '\n');
+  let text = visible(value).replace(/\r\n?/gu, '\n');
   // biome-ignore lint/suspicious/noControlCharactersInRegex: Strip control characters from untrusted text.
   text = text.replace(/[\u0000-\u0008\u000b-\u001f\u007f\u2028\u2029]/gu, '');
   text = multiline ? text.trim() : text.replace(/\s+/gu, ' ').trim();
@@ -63,9 +68,10 @@ export function allRequiredPassed(commands: readonly CommandEvidence[]): boolean
 }
 
 /** No star requests or advertising; a blanket success claim needs passing evidence. */
-export function assertContentPolicy(text: string, commands?: readonly CommandEvidence[]): void {
+export function assertContentPolicy(raw: string, commands?: readonly CommandEvidence[]): void {
+  const text = visible(raw);
   if (PROMOTION.some((pattern) => pattern.test(text)))
     throw new HandoffError('promotional_content');
-  if (/all\s+tests\s+passed/iu.test(text) && !(commands && allRequiredPassed(commands)))
+  if (/all\s*tests\s*passed/iu.test(text) && !(commands && allRequiredPassed(commands)))
     throw new HandoffError('unsupported_success_claim');
 }

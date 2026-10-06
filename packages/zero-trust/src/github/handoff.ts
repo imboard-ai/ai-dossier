@@ -3,6 +3,7 @@
  * that is URL-encoded and bounded and cannot move the target. */
 import { createHash } from 'node:crypto';
 import { type IntentInput, idempotencyKey } from '../intents';
+import type { CommandEvidence } from '../receipt/schema';
 import { assertNoSecrets } from '../redaction';
 import { assertContentPolicy, HandoffError, untrustedText } from './text';
 
@@ -32,7 +33,7 @@ export interface IssueBinding {
   readonly issue: number;
 }
 
-const OWNER = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u;
+const OWNER = /^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}$/u;
 const REPO = /^[A-Za-z0-9._-]{1,100}$/u;
 
 export function isGitHubLogin(value: unknown): value is string {
@@ -149,22 +150,40 @@ export function compareLink(
   intent: IntentInput,
   binding: PrBinding,
   title: string,
-  body: string
+  body: string,
+  /** Receipt commands backing the body (`PrContent.commands`). */
+  evidence?: readonly CommandEvidence[]
 ): PreparedLink {
   const valid = handoffInput(intent);
   if (valid.operationKind !== 'pr_create') throw new HandoffError('not_a_handoff');
   const b = prBinding(binding);
   const safeTitle = prTitle(title);
   const safeBody = checkedBody(body, handoffMarker(valid));
-  assertContentPolicy(safeTitle);
+  // No advertising; a blanket success claim needs the receipt's passing evidence.
+  assertContentPolicy(`${safeTitle}\n${safeBody}`, evidence);
+  return Object.freeze({ ...formatCompareLink(b, safeTitle, safeBody), title: safeTitle });
+}
+
+/** Pure URL formatting (no policy checks); replay uses it to re-derive an issued link. */
+export function formatCompareLink(
+  binding: PrBinding,
+  title: string,
+  body: string
+): { kind: PreparedLink['kind']; url: string; body: string } {
+  const b = prBinding(binding);
   const base =
     `https://github.com/${segment(b.upstream.owner)}/${segment(b.upstream.repo)}` +
     `/compare/${ref(b.base)}...${segment(b.headOwner)}:${ref(b.branch)}` +
-    `?expand=1&title=${encodeURIComponent(safeTitle)}`;
-  const full = `${base}&body=${encodeURIComponent(safeBody)}`;
-  if (full.length <= MAX_PREFILL_URL_LENGTH)
-    return Object.freeze({ kind: 'prefilled', url: full, title: safeTitle, body: safeBody });
-  return Object.freeze({ kind: 'body_file', url: base, title: safeTitle, body: safeBody });
+    `?expand=1&title=${encodeURIComponent(title)}`;
+  const full = `${base}&body=${encodeURIComponent(body)}`;
+  return full.length <= MAX_PREFILL_URL_LENGTH
+    ? { kind: 'prefilled', url: full, body }
+    : { kind: 'body_file', url: base, body };
+}
+
+export function issueUrl(binding: IssueBinding): string {
+  const b = issueBinding(binding);
+  return `https://github.com/${segment(b.upstream.owner)}/${segment(b.upstream.repo)}/issues/${b.issue}`;
 }
 
 /** GitHub has no prefill parameter for issue comments: the link opens the issue and the
@@ -178,9 +197,10 @@ export function issueCommentLink(
   if (valid.operationKind !== 'engagement_comment') throw new HandoffError('not_a_handoff');
   const b = issueBinding(binding);
   const safeBody = checkedBody(body, handoffMarker(valid));
+  assertContentPolicy(safeBody);
   return Object.freeze({
     kind: 'body_file',
-    url: `https://github.com/${segment(b.upstream.owner)}/${segment(b.upstream.repo)}/issues/${b.issue}`,
+    url: issueUrl(b),
     body: safeBody,
   });
 }

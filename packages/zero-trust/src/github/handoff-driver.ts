@@ -12,13 +12,14 @@ import { assertNoSecrets } from '../redaction';
 import { isRecord, ReasonCode, type RunRecord, restoreRun, transitionRun } from '../state';
 import {
   compareLink,
+  formatCompareLink,
   type HandoffOperation,
   handoffIntentId,
   handoffMarker,
   type IssueBinding,
   issueBinding,
   issueCommentLink,
-  MAX_PREFILL_URL_LENGTH,
+  issueUrl,
   type PrBinding,
   type PreparedLink,
   prBinding,
@@ -102,6 +103,8 @@ export type HandoffOutcome =
       readonly kind: 'observed';
       readonly operation: HandoffOperation;
       readonly url: string;
+      /** PR only, as observed; a closed PR is surfaced, not hidden. */
+      readonly prState?: 'open' | 'closed' | 'merged';
       /** Never `green`: upstream CI is not observed here (scenario 12). */
       readonly ci: 'pending' | 'unknown';
     }
@@ -118,6 +121,7 @@ type Event =
       link: string;
       linkKind: PreparedLink['kind'];
       title?: string;
+      body: string;
       bodyFile: string;
       bodyDigest: string;
       run: RunRecord;
@@ -186,14 +190,33 @@ function bindingFor(
   return b;
 }
 
-function linkPrefix(input: IntentInput, binding: PrBinding | IssueBinding): string {
-  const owner = encodeURIComponent(binding.upstream.owner);
-  const repo = encodeURIComponent(binding.upstream.repo);
-  if (input.operationKind === 'engagement_comment')
-    return `https://github.com/${owner}/${repo}/issues/${(binding as IssueBinding).issue}`;
-  const b = binding as PrBinding;
-  return `https://github.com/${owner}/${repo}/compare/${b.base}...${b.headOwner}:${b.branch}?expand=1&title=`;
+function digestOf(body: string): string {
+  return createHash('sha256').update(Buffer.from(body, 'utf8')).digest('hex');
 }
+
+/** The journaled link must be exactly the one the binding, title and body produce. */
+function sameLink(
+  input: IntentInput,
+  binding: PrBinding | IssueBinding,
+  raw: Record<string, unknown>
+): boolean {
+  if (input.operationKind === 'engagement_comment')
+    return (
+      raw.title === undefined &&
+      raw.linkKind === 'body_file' &&
+      raw.link === issueUrl(binding as IssueBinding)
+    );
+  if (typeof raw.title !== 'string' || typeof raw.body !== 'string') return false;
+  const expected = formatCompareLink(binding as PrBinding, raw.title, raw.body);
+  return raw.link === expected.url && raw.linkKind === expected.kind;
+}
+
+/** Hand-off edges are recorded only by this driver's own events. */
+const HANDOFF_REASONS: readonly ReasonCode[] = [
+  ReasonCode.ContributorHandoff,
+  ReasonCode.PublicationObserved,
+  ReasonCode.EngagementObserved,
+];
 
 function observedReason(operation: HandoffOperation): ReasonCode {
   return operation === 'pr_create' ? ReasonCode.PublicationObserved : ReasonCode.EngagementObserved;
@@ -210,7 +233,18 @@ function reduce(state: HandoffState | undefined, raw: unknown): HandoffState {
     return { run: restoreRun(raw.run), contributionId: raw.contributionId, handoffs: new Map() };
   }
   if (!state) fail();
-  if (raw.type === 'handoff_run_update') return { ...state, run: continuation(state.run, raw.run) };
+  if (raw.type === 'handoff_run_update') {
+    const run = continuation(state.run, raw.run);
+    // While a link is pending, the lifecycle may only fail/cancel, never observe or re-issue.
+    if (
+      pendingOf(state) &&
+      run.history
+        .slice(state.run.history.length)
+        .some((entry) => HANDOFF_REASONS.includes(entry.reasonCode))
+    )
+      fail();
+    return { ...state, run };
+  }
   const handoffs = new Map(state.handoffs);
   const run = restoreRun(raw.run);
   if (raw.type === 'link_issued') {
@@ -225,18 +259,17 @@ function reduce(state: HandoffState | undefined, raw: unknown): HandoffState {
       pendingOf(state) ||
       (operationKind === 'engagement_comment' &&
         [...handoffs.values()].some((r) => r.input.operationKind === 'engagement_comment')) ||
-      typeof raw.link !== 'string' ||
-      raw.link.length > MAX_PREFILL_URL_LENGTH ||
-      !raw.link.startsWith(linkPrefix(input, binding)) ||
-      (raw.linkKind !== 'prefilled' && raw.linkKind !== 'body_file') ||
-      (raw.title !== undefined && typeof raw.title !== 'string') ||
+      state.run.state !== (operationKind === 'pr_create' ? 'shipping' : 'gating') ||
+      typeof raw.body !== 'string' ||
+      raw.bodyDigest !== digestOf(raw.body) ||
       typeof raw.bodyFile !== 'string' ||
-      typeof raw.bodyDigest !== 'string' ||
-      !/^[a-f0-9]{64}$/u.test(raw.bodyDigest) ||
+      !path.isAbsolute(raw.bodyFile) ||
+      path.basename(raw.bodyFile) !== `${intentId}.md` ||
+      !sameLink(input, binding, raw) ||
       !sameRun(run, transitionRun(state.run, ReasonCode.ContributorHandoff, run.updatedAt))
     )
       fail();
-    assertNoSecrets(raw.link);
+    assertNoSecrets(raw.link as string);
     handoffs.set(
       key,
       Object.freeze({
@@ -244,8 +277,8 @@ function reduce(state: HandoffState | undefined, raw: unknown): HandoffState {
         intentId,
         input: Object.freeze({ ...input, operationKind }),
         binding,
-        link: raw.link,
-        linkKind: raw.linkKind,
+        link: raw.link as string,
+        linkKind: raw.linkKind as PreparedLink['kind'],
         ...(raw.title === undefined ? {} : { title: raw.title as string }),
         bodyFile: raw.bodyFile,
         bodyDigest: raw.bodyDigest,
@@ -363,6 +396,9 @@ export class HandoffDriver {
     } else {
       this.state = replayHandoffs(events);
       if (this.state.contributionId !== initial.contributionId) fail();
+      const directory = path.resolve(deps.bodyDirectory);
+      for (const record of this.state.handoffs.values())
+        if (path.dirname(record.bodyFile) !== directory) fail();
       this.observeRun(initial.run);
     }
     drivenJournals.add(journal);
@@ -434,7 +470,8 @@ export class HandoffDriver {
       });
       if (existing.kind === 'unknown') throw new HandoffError('reconciliation_unavailable');
       if (existing.kind !== 'absent') throw new HandoffError('existing_submission');
-      const link = compareLink(intent, binding, request.content.title, request.content.body);
+      const { title, body, commands } = request.content;
+      const link = compareLink(intent, binding, title, body, commands);
       return this.issue(intent, binding, link);
     });
   }
@@ -523,8 +560,9 @@ export class HandoffDriver {
       link: link.url,
       linkKind: link.kind,
       ...(link.title === undefined ? {} : { title: link.title }),
+      body: link.body,
       bodyFile,
-      bodyDigest: createHash('sha256').update(bytes).digest('hex'),
+      bodyDigest: digestOf(link.body),
       run,
     });
     return {
@@ -545,6 +583,7 @@ export class HandoffDriver {
     const marker = handoffMarker(record.input);
     let url: string;
     let ci: 'pending' | 'unknown' = 'unknown';
+    let prState: 'open' | 'closed' | 'merged' | undefined;
     if (record.input.operationKind === 'pr_create') {
       const observed = await reconcilePr(this.deps.read, record.binding as PrBinding, {
         marker,
@@ -555,7 +594,8 @@ export class HandoffDriver {
       if (observed.kind === 'head_mismatch') return this.block(record, 'unexpected_head_sha');
       if (observed.kind !== 'found') return this.waiting(observed.kind);
       url = observed.url;
-      if (observed.state === 'open' && !observed.merged) ci = 'pending';
+      prState = observed.merged ? 'merged' : observed.state;
+      if (prState === 'open') ci = 'pending';
     } else {
       const observed = await reconcileComment(this.deps.read, record.binding as IssueBinding, {
         marker,
@@ -571,7 +611,13 @@ export class HandoffDriver {
       this.deps.now()
     );
     this.persist({ v: 1, type: 'handoff_observed', key: record.key, artifactRef: url, run });
-    return { kind: 'observed', operation: record.input.operationKind, url, ci };
+    return {
+      kind: 'observed',
+      operation: record.input.operationKind,
+      url,
+      ...(prState === undefined ? {} : { prState }),
+      ci,
+    };
   }
 
   private waiting(reconciliation: 'absent' | 'unknown'): HandoffOutcome {

@@ -3,9 +3,15 @@
 import type { IntentInput } from '../intents';
 import { receiptDigest } from '../receipt/issue';
 import { renderReceipt } from '../receipt/render';
-import { type CommandStatus, parseReceipt } from '../receipt/schema';
+import { type CommandEvidence, type CommandStatus, parseReceipt } from '../receipt/schema';
 import { handoffMarker, MAX_BODY_LENGTH, prTitle } from './handoff';
-import { assertContentPolicy, escapeHtml, HandoffError, untrustedText } from './text';
+import {
+  allRequiredPassed,
+  assertContentPolicy,
+  escapeHtml,
+  HandoffError,
+  untrustedText,
+} from './text';
 
 export const LLM_DISCLOSURE_URL = 'https://github.com/imboard-ai/ai-dossier';
 
@@ -38,6 +44,8 @@ export interface PrContentInput {
 export interface PrContent {
   readonly title: string;
   readonly body: string;
+  /** The receipt's commands: the evidence behind any success claim in the body. */
+  readonly commands: readonly CommandEvidence[];
 }
 
 const STATUSES: readonly CommandStatus[] = ['passed', 'failed', 'inconclusive', 'skipped'];
@@ -49,6 +57,14 @@ function status(value: unknown): CommandStatus {
 
 function code(text: string): string {
   return `<code>${escapeHtml(untrustedText(text, 4096, false))}</code>`;
+}
+
+/** Model prose stays inside a blockquote, so it cannot forge a Verification section. */
+function quoted(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => `> ${line}`)
+    .join('\n');
 }
 
 export function buildPrContent(input: PrContentInput): PrContent {
@@ -63,7 +79,7 @@ export function buildPrContent(input: PrContentInput): PrContent {
   const sha = receipt.candidateSha;
   const commands = receipt.commands;
   // Stricter than the content check: no blanket claim while anything was not `passed`.
-  const everyPassed = commands.every((c) => c.status === 'passed');
+  const everyPassed = allRequiredPassed(commands) && commands.every((c) => c.status === 'passed');
 
   const baseline = input.baselineFailures;
   if (baseline && baseline.failures.length > 0 && baseline.permitted !== true)
@@ -75,10 +91,10 @@ export function buildPrContent(input: PrContentInput): PrContent {
     `Fixes #${input.issue}`,
     '',
     '## Cause',
-    untrustedText(input.cause, 4000),
+    quoted(untrustedText(input.cause, 4000)),
     '',
     '## Scope',
-    untrustedText(input.scope, 4000),
+    quoted(untrustedText(input.scope, 4000)),
     '',
     '## LLM disclosure',
     `This contribution used substantial LLM assistance, orchestrated with [ai-dossier](${LLM_DISCLOSURE_URL}). ` +
@@ -121,5 +137,5 @@ export function buildPrContent(input: PrContentInput): PrContent {
   const body = sections.join('\n');
   if (body.length > MAX_BODY_LENGTH) throw new HandoffError('invalid_body');
   assertContentPolicy(`${title}\n${body}`, commands);
-  return Object.freeze({ title, body });
+  return Object.freeze({ title, body, commands: Object.freeze([...commands]) });
 }

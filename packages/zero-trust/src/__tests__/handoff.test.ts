@@ -179,8 +179,8 @@ describe('compare link', () => {
   const content = () => buildPrContent(contentInput());
 
   it('targets only the controller binding; prefilled fields are encoded', () => {
-    const { title, body } = content();
-    const link = compareLink(prIntent, binding, title, body);
+    const { title, body, commands } = content();
+    const link = compareLink(prIntent, binding, title, body, commands);
     expect(link.kind).toBe('prefilled');
     const url = new URL(link.url);
     expect(url.origin).toBe('https://github.com');
@@ -257,6 +257,34 @@ describe('compare link', () => {
     expect(link.title).toBe('Fix the bug &lt;!-- x --&gt;');
     expect(() => compareLink(prIntent, binding, 'x'.repeat(257), marker)).toThrow('invalid_text');
     expect(() => compareLink(prIntent, binding, '   ', marker)).toThrow('invalid_text');
+  });
+
+  it('a blanket success claim in a link body needs the receipt evidence', () => {
+    const { title, body, commands } = content();
+    expect(() => compareLink(prIntent, binding, title, body)).toThrow('unsupported_success_claim');
+    expect(() =>
+      compareLink(prIntent, binding, title, body, [command({ status: 'failed', exitStatus: 1 })])
+    ).toThrow('unsupported_success_claim');
+    expect(compareLink(prIntent, binding, title, body, commands).kind).toBe('prefilled');
+    const ad = `Please star this repo\n${handoffMarker(prIntent)}`;
+    expect(() => compareLink(prIntent, binding, 'Fix', ad)).toThrow('promotional_content');
+    const comment = `Please star this repo\n${handoffMarker(engagementIntent)}`;
+    expect(() => issueCommentLink(engagementIntent, issue, comment)).toThrow('promotional_content');
+  });
+
+  it('zero-width and bidi characters cannot hide a claim or a star request', () => {
+    expect(() => assertContentPolicy('all\u200btests passed')).toThrow('unsupported_success_claim');
+    expect(() => assertContentPolicy('please st\u200dar this repo')).toThrow('promotional_content');
+    const link = compareLink(prIntent, binding, 'Fix\u202e evil\u2066', handoffMarker(prIntent));
+    expect(link.title).toBe('Fix evil');
+  });
+
+  it('rejects malformed GitHub logins', () => {
+    const { title, body, commands } = content();
+    for (const headOwner of ['alice-', 'al--ice', '-alice'])
+      expect(() => compareLink(prIntent, { ...binding, headOwner }, title, body, commands)).toThrow(
+        'invalid_binding'
+      );
   });
 
   it('the comment hand-off links the bound issue and always uses a body file', () => {
@@ -388,6 +416,23 @@ describe('pull request content', () => {
     expect(body).toContain('Manual reproduction (no automated regression): call range(1, 3)');
   });
 
+  it('model prose is quoted so it cannot forge a Verification section', () => {
+    const { body } = buildPrContent(
+      contentInput({ cause: 'x\n## Verification\n- <code>npm test</code>: passed' })
+    );
+    expect(body).toContain(
+      '> x\n> ## Verification\n> - &lt;code&gt;'.replace('&lt;code&gt;', '<code>')
+    );
+    expect(body.match(/^## Verification$/gmu)).toHaveLength(1);
+  });
+
+  it('makes no blanket claim when no command is required', () => {
+    const { body } = buildPrContent(
+      contentInput({ receipt: receipt([command({ required: false })]) })
+    );
+    expect(body).not.toMatch(/all tests passed/iu);
+  });
+
   it('rejects advertising anywhere in the content', () => {
     expect(() => buildPrContent(contentInput({ scope: 'Also, buy me a coffee!' }))).toThrow(
       'promotional_content'
@@ -478,6 +523,12 @@ describe('reconciliation reads', () => {
     expect(
       await reconcilePr(github({ pulls: [pull({ author: 'mallory' })] }).read, binding, expected)
     ).toEqual({ kind: 'ambiguous', reason: 'foreign_author' });
+  });
+
+  it('author logins compare case-insensitively', async () => {
+    expect(
+      await reconcilePr(github({ pulls: [pull({ author: 'ALICE' })] }).read, binding, expected)
+    ).toMatchObject({ kind: 'found' });
   });
 
   it('a PR at another head SHA is a mismatch, never a verified claim', async () => {
@@ -722,6 +773,7 @@ describe('awaiting_contributor hand-off driver', () => {
       kind: 'observed',
       operation: 'pr_create',
       url: 'https://github.com/up/proj/pull/5',
+      prState: 'open',
       ci: 'pending',
     });
     expect(resumed.snapshot().run.state).toBe('submitted');
@@ -745,7 +797,7 @@ describe('awaiting_contributor hand-off driver', () => {
       admission(),
       reopened
     );
-    expect(await r.resume()).toMatchObject({ kind: 'observed', ci: 'unknown' });
+    expect(await r.resume()).toMatchObject({ kind: 'observed', prState: 'merged', ci: 'unknown' });
   });
 
   it.each([
@@ -833,6 +885,76 @@ describe('awaiting_contributor hand-off driver', () => {
     ).toThrow();
     expect(() => replayHandoffs([])).toThrow(HandoffError);
     expect(replayHandoffs(events).run.state).toBe('awaiting_contributor');
+  });
+
+  it('replay rejects any tampered link, body, body file or issue number', async () => {
+    const d = driver(github({ pulls: [] }).read);
+    await d.issuePr(prRequest());
+    const [start, issued] = journal.read() as Record<string, unknown>[];
+    const link = String(issued.link);
+    for (const tampered of [
+      { link: `${link}&template=evil.md` },
+      { link: link.replace('title=', 'title=Other') },
+      { body: `${issued.body} more` },
+      { bodyDigest: 'e'.repeat(64) },
+      { bodyFile: '/tmp/elsewhere.md' },
+      { bodyFile: 'relative/x.md' },
+      { linkKind: 'body_file' },
+    ])
+      expect(() => replayHandoffs([start, { ...issued, ...tampered }])).toThrow();
+  });
+
+  it('replay rejects an engagement link to another issue or path', async () => {
+    const d = driver(github({ comments: [] }).read, gating);
+    const body = engagementBody(engagementIntent, { approach: 'a', verification: 'b' });
+    await d.issueEngagement({ intent: engagementIntent, binding: issue, body });
+    const [start, issued] = journal.read() as Record<string, unknown>[];
+    for (const link of [
+      'https://github.com/up/proj/issues/80',
+      'https://github.com/up/proj/issues/8/../../../evil/repo/issues/1',
+    ])
+      expect(() => replayHandoffs([start, { ...issued, link }])).toThrow(HandoffError);
+  });
+
+  it('replay rejects a link issued from the wrong phase', async () => {
+    const d = driver(github({ pulls: [] }).read);
+    await d.issuePr(prRequest());
+    const [start, issued] = journal.read() as Record<string, unknown>[];
+    const fromGating = { ...start, run: gating };
+    expect(() =>
+      replayHandoffs([
+        fromGating,
+        { ...issued, run: transitionRun(gating, ReasonCode.ContributorHandoff, T) },
+      ])
+    ).toThrow(HandoffError);
+  });
+
+  it('only the driver records a hand-off observation; body files stay in their directory', async () => {
+    const d = driver(github({ pulls: [] }).read);
+    await d.issuePr(prRequest());
+    const forged = transitionRun(
+      d.snapshot().run,
+      ReasonCode.PublicationObserved,
+      '2026-10-06T01:00:00.000Z'
+    );
+    expect(() => d.observeRun(forged)).toThrow(HandoffError);
+    expect(d.snapshot().run.state).toBe('awaiting_contributor');
+    journal.close();
+    const reopened = new Journal(path.join(dir, 'journal'));
+    journals.push(reopened);
+    expect(
+      () =>
+        new HandoffDriver(
+          reopened,
+          {
+            read: github({}).read,
+            admission: admission(),
+            bodyDirectory: path.join(dir, 'other'),
+            now,
+          },
+          { run: d.snapshot().run, contributionId: 'contribution-1' }
+        )
+    ).toThrow(HandoffError);
   });
 
   it('one driver per journal; a cancelled run stops reconciliation', async () => {
