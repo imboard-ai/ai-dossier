@@ -28,6 +28,9 @@ jobs:
     timeout-minutes: 120
     permissions:
       contents: read
+    outputs:
+      # The one definition of the profile cache key; the TCG job restores by it.
+      profile-key: ${{ steps.profile-cache.outputs.cache-primary-key }}
     steps:
       - name: Checkout code
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -194,7 +197,7 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ runner.temp }}/zt-profile
-          key: zt-profile-${{ hashFiles('packages/zero-trust/src/vm/profile.ts', 'packages/zero-trust/src/vm/cloud-init.ts', 'packages/zero-trust/src/vm/bake.ts', 'packages/zero-trust/vm-guest/agent.py') }}
+          key: ${{ needs.kvm-gate.outputs.profile-key }}
           fail-on-cache-miss: true
 
       - name: Smoke test (TCG)

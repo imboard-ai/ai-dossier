@@ -3,7 +3,13 @@ import fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { bakeProfile, ensureBaseImage, parseBakeConsole } from '../vm/bake';
+import {
+  acquireBakeLock,
+  bakeProfile,
+  ensureBaseImage,
+  parseBakeConsole,
+  sweepStaleBakes,
+} from '../vm/bake';
 import { BAKE_FAILED_MARKER, BAKE_RESULT_MARKER } from '../vm/cloud-init';
 import type { HostTools } from '../vm/host';
 import type { HostOps, Launched } from '../vm/local-qemu';
@@ -131,34 +137,64 @@ describe('ensureBaseImage', () => {
   });
 
   it('abandons a body that stops delivering, keeping the idle timer alive per chunk', async () => {
-    vi.useFakeTimers();
+    // Only the idle timer is faked: setImmediate and file I/O stay real, so the
+    // test can let the download consume a chunk before moving the clock.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     try {
+      const gate = {
+        signal: undefined as AbortSignal | undefined,
+        pulls: 0,
+        deliver: null as (() => void) | null,
+      };
       const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
-        const signal = init?.signal;
-        let sent = 0;
-        const body = new ReadableStream<Uint8Array>({
-          pull(controller) {
-            // Two chunks, then nothing until the request is aborted.
-            if (sent++ < 2) return controller.enqueue(new Uint8Array(10));
-            return new Promise<void>((_resolve, reject) =>
-              signal?.addEventListener('abort', () =>
-                reject(new DOMException('aborted', 'AbortError'))
-              )
-            );
+        gate.signal = init?.signal ?? undefined;
+        const body = new ReadableStream<Uint8Array>(
+          {
+            // Each chunk waits for the test; an abort rejects the pending read,
+            // including one that was already aborted when the read started.
+            pull(controller) {
+              gate.pulls++;
+              return new Promise<void>((resolve, reject) => {
+                const abort = () => reject(new DOMException('aborted', 'AbortError'));
+                if (gate.signal?.aborted) return abort();
+                gate.signal?.addEventListener('abort', abort, { once: true });
+                gate.deliver = () => {
+                  gate.signal?.removeEventListener('abort', abort);
+                  gate.deliver = null;
+                  controller.enqueue(new Uint8Array(10));
+                  resolve();
+                };
+              });
+            },
           },
-        });
+          { highWaterMark: 0 }
+        );
         return new Response(body);
       }) as unknown as typeof fetch;
-      let settled = false;
-      const result = ensureBaseImage(cacheDir, fetchImpl).catch((e: unknown) => {
-        settled = true;
-        return e;
-      });
-      // Chunks arrive through real file I/O, so the idle timer may be re-armed after
-      // an advance; keep advancing until the stalled download gives up.
-      for (let i = 0; i < 20 && !settled; i++) await vi.advanceTimersByTimeAsync(120_000);
-      const error = (await result) as Error;
-      expect(error.message).toMatch(/stalled for 120 s$/);
+      const turn = () => new Promise<void>((resolve) => setImmediate(resolve));
+      const until = async (condition: () => boolean) => {
+        for (let i = 0; i < 1000 && !condition(); i++) await turn();
+        expect(condition()).toBe(true);
+      };
+      const result = ensureBaseImage(cacheDir, fetchImpl).catch((e: unknown) => e as Error);
+
+      await until(() => gate.deliver !== null);
+      await vi.advanceTimersByTimeAsync(100_000);
+      expect(gate.signal?.aborted).toBe(false);
+      // A chunk at 100 s re-arms the idle timer...
+      gate.deliver?.();
+      await until(() => gate.pulls >= 2 && gate.deliver !== null);
+      await turn();
+      // ...so 200 s after the start the download is still alive...
+      await vi.advanceTimersByTimeAsync(100_000);
+      expect(gate.signal?.aborted).toBe(false);
+      // ...until 120 s pass without a chunk.
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(gate.signal?.aborted).toBe(true);
+      const error = await result;
+      expect(error.message).toBe(
+        `Base image download from ${PROFILE_PINS.baseImage.url} stalled for 120 s`
+      );
       expect(fs.readdirSync(cacheDir)).toEqual([]);
     } finally {
       vi.useRealTimers();
@@ -256,7 +292,9 @@ describe('bakeProfile', () => {
         async connect() {
           throw new Error('unused');
         },
-        startToken: () => null,
+        startToken: (pid) => `tok-${pid}`,
+        cmdline: () => null,
+        listProcesses: () => [],
         alive: () => false,
         kill(pid, signal) {
           fake.kills.push([pid, signal]);
@@ -430,5 +468,208 @@ describe('bakeProfile', () => {
     );
     expect(fs.existsSync(path.join(profileDir, 'manifest.json'))).toBe(false);
     expect(fake.runs.map((r) => r.args[0])).not.toContain('convert');
+  });
+
+  it('holds the bake lock while baking and removes it afterwards, on success or failure', async () => {
+    seedCache();
+    const lock = path.join(profileDir, '.bake.lock');
+    const fake = fakeOps(RESULT_LINE);
+    let held: unknown = null;
+    const launch = fake.ops.launch;
+    fake.ops.launch = async (...args) => {
+      held = JSON.parse(fs.readFileSync(lock, 'utf8'));
+      expect(fs.statSync(lock).mode & 0o777).toBe(0o600);
+      return launch(...args);
+    };
+    await bakeProfile({ profileDir, cacheDir, tools, ops: fake.ops });
+    expect(held).toEqual({ pid: process.pid, token: `tok-${process.pid}` });
+    expect(fs.existsSync(lock)).toBe(false);
+    const failing = fakeOps(`${BAKE_FAILED_MARKER} line=1\n`);
+    await expect(bakeProfile({ profileDir, cacheDir, tools, ops: failing.ops })).rejects.toThrow(
+      'Bake script failed'
+    );
+    expect(fs.existsSync(lock)).toBe(false);
+  });
+
+  it('refuses to start while another live bake holds the lock', async () => {
+    seedCache();
+    fs.mkdirSync(profileDir, { recursive: true });
+    const lock = path.join(profileDir, '.bake.lock');
+    fs.writeFileSync(lock, JSON.stringify({ pid: 4321, token: 'tok-4321' }));
+    const fake = fakeOps(RESULT_LINE);
+    await expect(bakeProfile({ profileDir, cacheDir, tools, ops: fake.ops })).rejects.toThrow(
+      `Another bake holds ${lock} (pid 4321); wait for it to finish`
+    );
+    expect(fake.launches).toEqual([]);
+    // The other bake's lock is not ours to remove.
+    expect(fs.existsSync(lock)).toBe(true);
+  });
+
+  it('sweeps the work dir of an interrupted bake, killing its VM, before baking', async () => {
+    seedCache();
+    fs.mkdirSync(profileDir, { recursive: true });
+    const stale = path.join(profileDir, '.bake-old123');
+    fs.mkdirSync(stale);
+    fs.writeFileSync(path.join(stale, 'disk.qcow2'), 'old');
+    const fake = fakeOps(RESULT_LINE);
+    fake.ops.listProcesses = () => [555];
+    fake.ops.cmdline = (pid) =>
+      pid === 555
+        ? ['qemu', '-drive', `file=${stale}/disk.qcow2`, '-pidfile', `${stale}/qemu.pid`]
+        : null;
+    await bakeProfile({ profileDir, cacheDir, tools, ops: fake.ops });
+    expect(fake.kills).toEqual([[555, 'SIGKILL']]);
+    expect(fs.existsSync(stale)).toBe(false);
+    expect(leftovers()).toEqual([]);
+  });
+});
+
+describe('acquireBakeLock', () => {
+  const ops = (startToken: HostOps['startToken']): HostOps =>
+    ({ startToken }) as unknown as HostOps;
+  const lockFile = () => path.join(profileDir, '.bake.lock');
+  const holder = (value: unknown) => {
+    fs.mkdirSync(profileDir, { recursive: true });
+    fs.writeFileSync(lockFile(), typeof value === 'string' ? value : JSON.stringify(value));
+  };
+  const mine = () => JSON.parse(fs.readFileSync(lockFile(), 'utf8'));
+
+  it('creates a private lock naming this process', () => {
+    fs.mkdirSync(profileDir);
+    expect(
+      acquireBakeLock(
+        profileDir,
+        ops((pid) => `tok-${pid}`)
+      )
+    ).toBe(lockFile());
+    expect(mine()).toEqual({ pid: process.pid, token: `tok-${process.pid}` });
+    expect(fs.statSync(lockFile()).mode & 0o777).toBe(0o600);
+  });
+
+  it('refuses a live holder, and a holder whose liveness cannot be read', () => {
+    holder({ pid: 4321, token: 'tok-4321' });
+    expect(() =>
+      acquireBakeLock(
+        profileDir,
+        ops((pid) => `tok-${pid}`)
+      )
+    ).toThrow(/Another bake holds .*\(pid 4321\)/);
+    const unreadable = ops((pid) => {
+      if (pid === 4321) throw new Error('EACCES');
+      return 'mine';
+    });
+    expect(() => acquireBakeLock(profileDir, unreadable)).toThrow(/Another bake holds/);
+    expect(mine()).toEqual({ pid: 4321, token: 'tok-4321' });
+  });
+
+  it.each([
+    ['a holder whose PID was recycled', { pid: 4321, token: 'tok-old' }],
+    ['a holder that is gone', { pid: 4321, token: 'tok-4321', gone: true }],
+    ['pid 1', { pid: 1, token: 'tok-1' }],
+    ['a non-numeric pid', { pid: 'x', token: 'tok-x' }],
+    ['an unreadable lock', '{not json'],
+    ['an empty lock', ''],
+  ])('takes over a stale lock: %s', (_label, value) => {
+    holder(value);
+    const startToken = (pid: number) =>
+      pid === process.pid
+        ? 'mine'
+        : pid === 4321 && typeof value === 'object' && 'gone' in value
+          ? null
+          : `tok-${pid}`;
+    expect(acquireBakeLock(profileDir, ops(startToken))).toBe(lockFile());
+    expect(mine()).toEqual({ pid: process.pid, token: 'mine' });
+  });
+
+  it('rethrows errors other than an existing lock', () => {
+    expect(() =>
+      acquireBakeLock(
+        path.join(root, 'missing'),
+        ops(() => 'x')
+      )
+    ).toThrow(/ENOENT/);
+  });
+
+  it('gives up when the lock keeps reappearing', () => {
+    holder({ pid: 4321, token: 'tok-old' });
+    const rm = fs.rmSync;
+    const spy = vi.spyOn(fs, 'rmSync').mockImplementation(((target: fs.PathLike, options) => {
+      if (String(target) === lockFile()) return; // another bake re-creates it at once
+      rm(target, options);
+    }) as typeof fs.rmSync);
+    try {
+      expect(() =>
+        acquireBakeLock(
+          profileDir,
+          ops((pid) => `tok-${pid}-now`)
+        )
+      ).toThrow(`Could not take the bake lock ${lockFile()}`);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe('sweepStaleBakes', () => {
+  interface SweepFake {
+    ops: HostOps;
+    kills: [number, NodeJS.Signals][];
+    listed: number;
+  }
+  function sweepOps(processes: Record<number, string[] | null | Error>): SweepFake {
+    const fake: SweepFake = {
+      kills: [],
+      listed: 0,
+      ops: {
+        listProcesses: () => {
+          fake.listed++;
+          return Object.keys(processes).map(Number);
+        },
+        cmdline: (pid: number) => {
+          const argv = processes[pid];
+          if (argv instanceof Error) throw argv;
+          return argv ?? null;
+        },
+        kill: (pid: number, signal: NodeJS.Signals) => {
+          fake.kills.push([pid, signal]);
+          if (pid === 13) throw new Error('ESRCH');
+        },
+      } as unknown as HostOps,
+    };
+    return fake;
+  }
+
+  it('does nothing, and lists no processes, without stale work dirs', () => {
+    fs.mkdirSync(profileDir);
+    fs.writeFileSync(path.join(profileDir, 'manifest.json'), '{}');
+    const fake = sweepOps({ 10: ['qemu'] });
+    expect(sweepStaleBakes(profileDir, fake.ops)).toEqual([]);
+    expect(fake.listed).toBe(0);
+    expect(fs.readdirSync(profileDir)).toEqual(['manifest.json']);
+  });
+
+  it('kills only processes using a stale work dir, then removes every one', () => {
+    fs.mkdirSync(profileDir);
+    const a = path.join(profileDir, '.bake-a');
+    const b = path.join(profileDir, '.bake-b');
+    for (const dir of [a, b]) {
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, 'disk.qcow2'), 'x');
+    }
+    fs.writeFileSync(path.join(profileDir, 'image.qcow2'), 'keep');
+    const fake = sweepOps({
+      10: ['qemu', '-pidfile', `${a}/qemu.pid`],
+      11: ['qemu', '-pidfile', path.join(root, 'elsewhere', 'qemu.pid')],
+      12: new Error('EACCES'),
+      13: ['qemu', `${b}/disk.qcow2`],
+      14: null,
+      15: ['qemu', `${a}bc/disk.qcow2`, a],
+    });
+    expect(sweepStaleBakes(profileDir, fake.ops).sort()).toEqual([a, b]);
+    expect(fake.kills).toEqual([
+      [10, 'SIGKILL'],
+      [13, 'SIGKILL'],
+    ]);
+    expect(fs.readdirSync(profileDir)).toEqual(['image.qcow2']);
   });
 });

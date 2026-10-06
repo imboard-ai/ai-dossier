@@ -125,6 +125,86 @@ export async function bakeProfile(options: BakeOptions): Promise<VmProfileManife
   const digest = profileDigest(agentSource);
   const base = await ensureBaseImage(options.cacheDir, options.fetchImpl, log);
   privateDir(options.profileDir);
+  const lock = acquireBakeLock(options.profileDir, ops);
+  try {
+    sweepStaleBakes(options.profileDir, ops);
+    return await bakeLocked(options, { log, ops, tools, agentSource, digest, base });
+  } finally {
+    fs.rmSync(lock, { force: true });
+  }
+}
+
+const BAKE_LOCK = '.bake.lock';
+
+/** One bake per profile directory; a lock whose holder is gone is taken over. */
+export function acquireBakeLock(profileDir: string, ops: HostOps): string {
+  const lock = path.join(profileDir, BAKE_LOCK);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const fd = fs.openSync(lock, 'wx', 0o600);
+      fs.writeSync(fd, JSON.stringify({ pid: process.pid, token: ops.startToken(process.pid) }));
+      fs.closeSync(fd);
+      return lock;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    }
+    let holder: { pid?: unknown; token?: unknown } = {};
+    try {
+      holder = JSON.parse(fs.readFileSync(lock, 'utf8'));
+    } catch {
+      // unreadable lock: treated as stale below
+    }
+    const pid = Number(holder.pid);
+    let live = false;
+    try {
+      live = Number.isSafeInteger(pid) && pid > 1 && ops.startToken(pid) === holder.token;
+    } catch {
+      live = true; // cannot prove the holder is gone
+    }
+    if (live) throw new Error(`Another bake holds ${lock} (pid ${pid}); wait for it to finish`);
+    fs.rmSync(lock, { force: true });
+  }
+  throw new Error(`Could not take the bake lock ${lock}`);
+}
+
+/** Work dirs of interrupted bakes: stop any bake VM still using one, then remove it.
+ * Only called with the bake lock held, so no other bake owns them. */
+export function sweepStaleBakes(profileDir: string, ops: HostOps): string[] {
+  const stale = fs
+    .readdirSync(profileDir)
+    .filter((name) => name.startsWith('.bake-'))
+    .map((name) => path.join(profileDir, name));
+  if (!stale.length) return [];
+  for (const pid of ops.listProcesses()) {
+    let argv: string[] | null = null;
+    try {
+      argv = ops.cmdline(pid);
+    } catch {
+      continue;
+    }
+    if (argv?.some((arg) => stale.some((dir) => arg.startsWith(`${dir}${path.sep}`))))
+      try {
+        ops.kill(pid, 'SIGKILL');
+      } catch {
+        // already gone
+      }
+  }
+  for (const dir of stale) fs.rmSync(dir, { recursive: true, force: true });
+  return stale;
+}
+
+async function bakeLocked(
+  options: BakeOptions,
+  ctx: {
+    log: (message: string) => void;
+    ops: HostOps;
+    tools: HostTools;
+    agentSource: string;
+    digest: string;
+    base: string;
+  }
+): Promise<VmProfileManifest> {
+  const { log, ops, tools, agentSource, digest, base } = ctx;
   const work = fs.mkdtempSync(path.join(options.profileDir, '.bake-'));
   let launchedPid: number | null = null;
   // The bake VM is detached; an interrupted controller must not leave it running.

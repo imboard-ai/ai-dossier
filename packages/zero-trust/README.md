@@ -479,7 +479,8 @@ QEMU flags, network design, measured overhead and residual risks:
   unsupported OS or architecture, missing QEMU tools, or a forced `kvm` without `/dev/kvm`.
   There is no host-container fallback.
 - `LocalQemuAdapter` implements the provider-neutral `VmAdapter` (create, exec, putFile,
-  getFile, destroy, listByRun) plus the `killAll` incident kill switch. QEMU runs rootless with
+  getFile, destroy, listByRun) plus the `killAll` incident kill switch, `reconcile` and
+  `releaseKillSwitch`. QEMU runs rootless with
   `restrict=on` user-mode networking, no forwards and no shared folders; the broker
   (`BrokerClient`, `vm-guest/agent.py`) is the only data path.
 - `teardownVm` caps deletion at three attempts, then moves the run to `blocked_cleanup` and
@@ -503,10 +504,12 @@ npm run build
 node scripts/zt-vm.mjs bake  --profile-dir <dir> --cache-dir <dir> [--accel auto|kvm|tcg]
 node scripts/zt-vm.mjs smoke --profile-dir <dir> --state-dir <dir> [--accel ...] [--timings-out f]
 node scripts/zt-vm.mjs kill-all --state-dir <dir> --reason <text>   # exit 2: a VM was left behind
+node scripts/zt-vm.mjs reconcile --state-dir <dir> [--destroy]      # orphan VMs and directories
+node scripts/zt-vm.mjs release --state-dir <dir> --reason <text>    # lift the kill switch
 ZT_VM_E2E=1 ZT_PROFILE_DIR=<abs dir> npx vitest run src/__tests__/vm-gate.e2e.test.ts
 ```
 
-The kill switch stays engaged until an operator deletes `<state-dir>/KILL_SWITCH`.
+The kill switch stays engaged until `release` lifts it, which is refused while any VM remains.
 
 The hostile fixtures live in `fixtures/hostile/`; `.github/workflows/zero-trust-vm.yml` runs
 the gate under KVM, plus a TCG smoke test, on every PR touching this package.

@@ -4,8 +4,9 @@ import net from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { Duplex } from 'node:stream';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Journal } from '../journal';
+import { createRun, ReasonCode, type RunRecord, transitionRun } from '../state';
 import {
   BrokerError,
   type ExecScope,
@@ -102,6 +103,8 @@ interface FakeHost {
   seen: Frame[];
   alive: Set<number>;
   tokens: Map<number, string | null | Error>;
+  /** argv per PID (an Error is thrown by cmdline); only live PIDs are visible. */
+  argv: Map<number, string[] | Error>;
   state: {
     nextPid: number;
     /** Overrides the scope the guest announces; null = never answer hello. */
@@ -121,6 +124,7 @@ function fakeHost(): FakeHost {
     seen: [],
     alive: new Set(),
     tokens: new Map(),
+    argv: new Map(),
     state: { nextPid: PID, respond: defaultResponder, dieOn: 'SIGTERM' },
     ops: undefined as unknown as HostOps,
   };
@@ -135,6 +139,7 @@ function fakeHost(): FakeHost {
       scope = oem.slice(oem.indexOf(SCOPE_OEM_PREFIX) + SCOPE_OEM_PREFIX.length);
       const pid = host.state.nextPid++;
       host.alive.add(pid);
+      host.argv.set(pid, [binary, ...args]);
       host.tokens.set(
         pid,
         host.state.startTokenAtLaunch === undefined ? `tok-${pid}` : host.state.startTokenAtLaunch
@@ -159,6 +164,12 @@ function fakeHost(): FakeHost {
       if (token instanceof Error) throw token;
       return token ?? null;
     },
+    cmdline(pid) {
+      const argv = host.argv.get(pid);
+      if (argv instanceof Error) throw argv;
+      return host.alive.has(pid) ? (argv ?? null) : null;
+    },
+    listProcesses: () => [...host.alive],
     alive: (pid) => host.alive.has(pid),
     kill(pid, signal) {
       host.calls.kill.push([pid, signal]);
@@ -182,8 +193,16 @@ const tools = (accelerator: 'kvm' | 'tcg' = 'kvm'): HostTools => ({
   accelerator,
 });
 
+/** Writes the image with an explicit mode: verifyImage refuses group/other write
+ * bits, and the umask decides what writeFileSync leaves. */
+function writeImage(profileDir: string, bytes: Buffer | string, mode = 0o644): void {
+  const image = path.join(profileDir, 'image.qcow2');
+  fs.writeFileSync(image, bytes);
+  fs.chmodSync(image, mode);
+}
+
 function writeManifest(profileDir: string, over: Record<string, unknown> = {}): void {
-  fs.writeFileSync(path.join(profileDir, 'image.qcow2'), IMAGE_BYTES);
+  writeImage(profileDir, IMAGE_BYTES);
   const manifest = path.join(profileDir, 'manifest.json');
   fs.writeFileSync(
     manifest,
@@ -337,7 +356,7 @@ describe('LocalQemuAdapter construction', () => {
     expect(a.killSwitchEngaged()).toBe(false);
     expect(await a.listByRun('run-1')).toEqual([]);
     await expect(a.destroy({ vmId: 'zt-0123456789ab', runId: 'run-1' })).resolves.toBeUndefined();
-    expect(await a.killAll('incident')).toEqual({ destroyed: [], failed: [] });
+    expect(await a.killAll('incident')).toEqual({ destroyed: [], failed: [], blockedRuns: [] });
     expect(a.killSwitchEngaged()).toBe(true);
   });
 
@@ -347,7 +366,7 @@ describe('LocalQemuAdapter construction', () => {
     const a = adapter({ tools: undefined });
     expect(await a.listByRun('run-1')).toHaveLength(1);
     const result = await a.killAll('incident');
-    expect(result).toEqual({ destroyed: [handle.vmId], failed: [] });
+    expect(result).toEqual({ destroyed: [handle.vmId], failed: [], blockedRuns: [] });
     expect(host.calls.kill).toEqual([[PID, 'SIGTERM']]);
   });
 
@@ -594,7 +613,7 @@ describe('LocalQemuAdapter.create', () => {
     writeManifest(profileDir, {
       imageSha256: createHash('sha256').update(backed).digest('hex'),
     });
-    fs.writeFileSync(path.join(profileDir, 'image.qcow2'), backed);
+    writeImage(profileDir, backed);
     const error = await rejects(
       adapter({ verifyImage: true }).create(spec()),
       UnsupportedEnvironmentError
@@ -1089,6 +1108,584 @@ describe('LocalQemuAdapter listing and kill switch', () => {
   });
 });
 
+describe('LocalQemuAdapter image ownership', () => {
+  it.each([
+    ['group-writable', 0o664],
+    ['other-writable', 0o646],
+  ])('refuses a %s image even when its digest matches', async (_label, mode) => {
+    writeImage(profileDir, IMAGE_BYTES, mode);
+    const error = await rejects(
+      adapter({ verifyImage: true }).create(spec()),
+      UnsupportedEnvironmentError
+    );
+    expect(error.detail).toBe('profile_image_mismatch');
+    expect(error.message).toContain('not writable by group or others');
+    expect(host.calls.run).toEqual([]);
+  });
+
+  it('accepts a read-only image owned by this user', async () => {
+    writeImage(profileDir, IMAGE_BYTES, 0o400);
+    await expect(adapter({ verifyImage: true }).create(spec())).resolves.toBeDefined();
+  });
+
+  it('refuses an image reached through a symlink before hashing it', async () => {
+    const image = path.join(profileDir, 'image.qcow2');
+    const real = path.join(root, 'real.qcow2');
+    fs.renameSync(image, real);
+    fs.symlinkSync(real, image);
+    const error = await rejects(
+      adapter({ verifyImage: true }).create(spec()),
+      UnsupportedEnvironmentError
+    );
+    // The digest is read with O_NOFOLLOW, so a symlink never reaches the ownership check.
+    expect(error.detail).toBe('profile_image_missing');
+  });
+
+  it.each([
+    ['owned by another user', (stat: fs.Stats) => ({ uid: stat.uid + 1 })],
+    ['no longer a regular file', () => ({ isFile: () => false })],
+  ])('refuses an image %s', async (_label, patch) => {
+    const image = path.join(profileDir, 'image.qcow2');
+    const lstat = fs.lstatSync;
+    const spy = vi.spyOn(fs, 'lstatSync').mockImplementation(((target: fs.PathLike) => {
+      const stat = lstat(target);
+      if (String(target) !== image) return stat;
+      for (const [key, value] of Object.entries(patch(stat)))
+        Object.defineProperty(stat, key, { value });
+      return stat;
+    }) as typeof fs.lstatSync);
+    try {
+      const error = await rejects(
+        adapter({ verifyImage: true }).create(spec()),
+        UnsupportedEnvironmentError
+      );
+      expect(error.detail).toBe('profile_image_mismatch');
+      expect(error.message).toContain('must be a regular file owned by this user');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe('LocalQemuAdapter taint journaling', () => {
+  it('journals a broker taint once, with the run and VM', async () => {
+    const j = journal();
+    host.state.respond = (f) => ({ v: 1, id: f.id, ok: true, exitCode: 999 });
+    const a = adapter({ journal: j });
+    const handle = await a.create(spec());
+    await rejects(a.exec(handle, { profile: 'node', argv: ['x'] }), BrokerError);
+    await rejects(a.exec(handle, { profile: 'node', argv: ['y'] }), BrokerError);
+    const tainted = (j.read() as Record<string, unknown>[]).filter(
+      (e) => e.type === 'vm_broker_tainted'
+    );
+    expect(tainted).toEqual([
+      expect.objectContaining({
+        runId: 'run-1',
+        vmId: handle.vmId,
+        code: 'malformed_response',
+      }),
+    ]);
+  });
+});
+
+/** Rewrites a VM record in place, keeping it private. */
+function patchRecord(vmDir: string, patch: Record<string, unknown>): void {
+  const recordFile = path.join(vmDir, 'vm.json');
+  const record = JSON.parse(fs.readFileSync(recordFile, 'utf8'));
+  fs.writeFileSync(recordFile, JSON.stringify({ ...record, ...patch }));
+  fs.chmodSync(recordFile, 0o600);
+}
+
+/** The controller crashed after QEMU wrote its pidfile but before the PID reached
+ * the record. */
+function crashBeforeRecord(vmDir: string, pid = PID): void {
+  patchRecord(vmDir, { pid: null, startToken: null });
+  fs.writeFileSync(path.join(vmDir, 'qemu.pid'), `${pid}\n`);
+}
+
+describe('LocalQemuAdapter.destroy without a recorded PID', () => {
+  async function created(a = adapter(), runId = 'run-1') {
+    const handle = await a.create(spec(runId));
+    return { a, handle, vmDir: path.join(stateDir, 'vms', handle.vmId) };
+  }
+
+  it("stops a crash orphan whose own argv names this VM's pidfile", async () => {
+    const j = journal();
+    const { a, handle, vmDir } = await created(adapter({ journal: j }));
+    crashBeforeRecord(vmDir);
+    expect(await a.listByRun('run-1')).toEqual([
+      expect.objectContaining({ vmId: handle.vmId, pid: PID, alive: true }),
+    ]);
+    await a.destroy(handle);
+    expect(host.calls.kill).toEqual([[PID, 'SIGTERM']]);
+    expect(fs.existsSync(vmDir)).toBe(false);
+    expect(j.read()).toContainEqual(
+      expect.objectContaining({ type: 'vm_destroyed', vmId: handle.vmId })
+    );
+  });
+
+  it('never signals a pidfile PID whose argv names something else', async () => {
+    const { a, handle, vmDir } = await created();
+    crashBeforeRecord(vmDir);
+    host.argv.set(PID, ['/usr/bin/vim', path.join(stateDir, 'vms', 'zt-ffffffffffff', 'qemu.pid')]);
+    expect((await a.listByRun('run-1'))[0]).toMatchObject({ pid: PID, alive: false });
+    await a.destroy(handle);
+    expect(host.calls.kill).toEqual([]);
+    expect(fs.existsSync(vmDir)).toBe(false);
+  });
+
+  it('treats a pidfile PID that no longer exists as gone', async () => {
+    const { a, handle, vmDir } = await created();
+    crashBeforeRecord(vmDir);
+    host.alive.delete(PID);
+    await a.destroy(handle);
+    expect(host.calls.kill).toEqual([]);
+    expect(fs.existsSync(vmDir)).toBe(false);
+  });
+
+  it('reports a pidfile PID whose argv cannot be read as a leftover, never signalling it', async () => {
+    const { a, handle, vmDir } = await created();
+    crashBeforeRecord(vmDir);
+    host.argv.set(PID, new Error('EACCES'));
+    expect((await a.listByRun('run-1'))[0]).toMatchObject({ pid: PID, alive: true });
+    const error = await rejects(a.destroy(handle), VmCleanupError);
+    expect(error.leftoverPids).toEqual([PID]);
+    expect(error.leftoverPaths).toEqual([vmDir]);
+    expect(error.vmId).toBe(handle.vmId);
+    expect(error.message).toContain(handle.vmId);
+    expect(host.calls.kill).toEqual([]);
+    expect(fs.existsSync(path.join(vmDir, 'vm.json'))).toBe(true);
+  });
+
+  it('kill-all stops the QEMU of a directory whose record is unusable, and leaves the dir', async () => {
+    const { a, handle, vmDir } = await created();
+    crashBeforeRecord(vmDir);
+    fs.writeFileSync(path.join(vmDir, 'vm.json'), '{}', { mode: 0o600 });
+    const result = await a.killAll('incident');
+    expect(host.calls.kill).toEqual([[PID, 'SIGTERM']]);
+    expect(result.failed.map((f) => [f.vmId, f.leftoverPids])).toEqual([[handle.vmId, []]]);
+    expect(fs.existsSync(vmDir)).toBe(true);
+  });
+
+  it('reports the PID when the QEMU of an unusable directory cannot be judged', async () => {
+    const { a, handle, vmDir } = await created();
+    crashBeforeRecord(vmDir);
+    fs.writeFileSync(path.join(vmDir, 'vm.json'), '{}', { mode: 0o600 });
+    host.argv.set(PID, new Error('EACCES'));
+    const result = await a.killAll('incident');
+    expect(host.calls.kill).toEqual([]);
+    expect(result.failed.map((f) => [f.vmId, f.leftoverPids])).toEqual([[handle.vmId, [PID]]]);
+  });
+
+  it('reports a crash orphan that survives SIGKILL', async () => {
+    host.state.dieOn = null;
+    const { a, handle, vmDir } = await created();
+    crashBeforeRecord(vmDir);
+    const error = await rejects(a.destroy(handle), VmCleanupError);
+    expect(error.leftoverPids).toEqual([PID]);
+    expect(host.calls.kill).toEqual([
+      [PID, 'SIGTERM'],
+      [PID, 'SIGKILL'],
+    ]);
+  });
+
+  it.each([
+    ['garbage', 'not a pid'],
+    ['pid 1', '1'],
+    ['a negative pid', '-5'],
+    ['a fractional pid', '4242.5'],
+  ])('ignores a pidfile holding %s', async (_label, content) => {
+    const { a, handle, vmDir } = await created();
+    patchRecord(vmDir, { pid: null, startToken: null });
+    fs.writeFileSync(path.join(vmDir, 'qemu.pid'), content);
+    await a.destroy(handle);
+    expect(host.calls.kill).toEqual([]);
+    expect(fs.existsSync(vmDir)).toBe(false);
+  });
+
+  it('stops the QEMU of a directory without a record, and removes its default socket', async () => {
+    const { a, handle, vmDir } = await created();
+    fs.writeFileSync(path.join(vmDir, 'qemu.pid'), String(PID));
+    fs.rmSync(path.join(vmDir, 'vm.json'));
+    const socket = path.join(runtimeDir, `${handle.vmId}.sock`);
+    fs.writeFileSync(socket, '');
+    await a.destroy(handle);
+    expect(host.calls.kill).toEqual([[PID, 'SIGTERM']]);
+    expect(fs.existsSync(vmDir)).toBe(false);
+    expect(fs.existsSync(socket)).toBe(false);
+  });
+
+  it('falls back to the default runtime dir for the socket of an unrecorded VM', async () => {
+    const saved = process.env.XDG_RUNTIME_DIR;
+    try {
+      process.env.XDG_RUNTIME_DIR = path.join(root, 'xdg');
+      const a = adapter({ runtimeDir: undefined });
+      const handle = await a.create(spec());
+      const socket = path.join(root, 'xdg', 'ai-dossier-zt', `${handle.vmId}.sock`);
+      fs.writeFileSync(socket, '');
+      fs.rmSync(path.join(stateDir, 'vms', handle.vmId, 'vm.json'));
+      host.alive.delete(PID);
+      await a.destroy(handle);
+      expect(fs.existsSync(socket)).toBe(false);
+    } finally {
+      if (saved === undefined) delete process.env.XDG_RUNTIME_DIR;
+      else process.env.XDG_RUNTIME_DIR = saved;
+    }
+  });
+});
+
+const T0 = Date.parse('2026-10-05T00:00:00.000Z');
+const at = (minute: number) => new Date(T0 + minute * 60_000).toISOString();
+
+/** A run in gating; `blocked` moves it to a terminal state, `cleanup` to blocked_cleanup. */
+function run(runId: string, state: 'gating' | 'blocked' | 'blocked_cleanup' = 'gating'): RunRecord {
+  const gating = createRun({ runId, upstreamIssue: 'o/r#1', contributor: 'alice' }, at(0));
+  if (state === 'blocked') return transitionRun(gating, ReasonCode.PolicyBlocked, at(1));
+  if (state === 'blocked_cleanup') return transitionRun(gating, ReasonCode.CleanupFailed, at(1));
+  return gating;
+}
+
+describe('LocalQemuAdapter.killAll and blocked runs', () => {
+  it('blocks the run of every VM it cannot confirm dead, and still attempts every VM', async () => {
+    const j = journal();
+    const a = adapter({ journal: j });
+    const ids: Record<string, string> = {};
+    for (const runId of ['run-a', 'run-b', 'run-c', 'run-d', 'run-e'])
+      ids[runId] = (await a.create(spec(runId))).vmId;
+    // Every VM except run-b's has an unreadable start token: not confirmed dead.
+    for (let pid = PID; pid < PID + 5; pid++)
+      if (pid !== PID + 1) host.tokens.set(pid, new Error('EACCES'));
+    const runs: Record<string, RunRecord> = {
+      'run-a': run('run-a'),
+      'run-b': run('run-b'),
+      'run-c': run('run-c', 'blocked_cleanup'),
+      'run-e': run('run-e', 'blocked'),
+    };
+    const observed: RunRecord[] = [];
+    const looked: string[] = [];
+    const result = await a.killAll('incident', {
+      lookupRun: (runId) => {
+        looked.push(runId);
+        return runs[runId];
+      },
+      observeRun: (blocked) => observed.push(blocked),
+    });
+    expect(result.destroyed).toEqual([ids['run-b']]);
+    expect(result.failed.map((f) => f.vmId).sort()).toEqual(
+      [ids['run-a'], ids['run-c'], ids['run-d'], ids['run-e']].sort()
+    );
+    expect(result.blockedRuns).toEqual(['run-a']);
+    expect(looked.sort()).toEqual(['run-a', 'run-c', 'run-d', 'run-e']);
+    expect(observed).toHaveLength(1);
+    expect(observed[0]).toMatchObject({
+      runId: 'run-a',
+      state: 'blocked_cleanup',
+      reasonCode: ReasonCode.CleanupFailed,
+      updatedAt: '2026-10-06T00:00:00.000Z',
+    });
+    const events = j.read() as Record<string, unknown>[];
+    expect(events.filter((e) => e.type === 'vm_run_block_failed')).toEqual([
+      expect.objectContaining({ runId: 'run-e', cause: 'IllegalTransitionError' }),
+    ]);
+  });
+
+  it('journals a run it could not persist as blocked, and carries on', async () => {
+    const j = journal();
+    const a = adapter({ journal: j });
+    const stuck = await a.create(spec('run-a'));
+    const ok = await a.create(spec('run-b'));
+    host.tokens.set(PID, new Error('EACCES'));
+    const result = await a.killAll('incident', {
+      lookupRun: (runId) => run(runId),
+      observeRun: () => {
+        throw new RangeError('store unavailable');
+      },
+    });
+    expect(result.destroyed).toEqual([ok.vmId]);
+    expect(result.failed.map((f) => f.vmId)).toEqual([stuck.vmId]);
+    expect(result.blockedRuns).toEqual([]);
+    expect(j.read()).toContainEqual(
+      expect.objectContaining({ type: 'vm_run_block_failed', runId: 'run-a', cause: 'RangeError' })
+    );
+  });
+
+  it('blocks nothing without a run lookup, and blocks runs whose destroy failed unexpectedly', async () => {
+    const a = adapter();
+    await a.create(spec('run-a'));
+    host.tokens.set(PID, new Error('EACCES'));
+    expect((await a.killAll('incident')).blockedRuns).toEqual([]);
+    host.ops.alive = () => {
+      throw new TypeError('proc unavailable');
+    };
+    host.tokens.set(PID, `tok-${PID}`);
+    const observed: RunRecord[] = [];
+    const result = await a.killAll('incident', {
+      lookupRun: (runId) => run(runId),
+      observeRun: (blocked) => observed.push(blocked),
+    });
+    expect(result.failed[0]?.leftoverPids).toEqual([]);
+    expect(result.blockedRuns).toEqual(['run-a']);
+    expect(observed.map((r) => r.state)).toEqual(['blocked_cleanup']);
+  });
+
+  it('names the VM of an untrustworthy directory in its failure', async () => {
+    const a = adapter();
+    fs.mkdirSync(path.join(stateDir, 'vms', 'zt-aaaaaaaaaaaa'), { recursive: true });
+    const result = await a.killAll('incident');
+    expect(result.failed.map((f) => f.vmId)).toEqual(['zt-aaaaaaaaaaaa']);
+    expect(result.failed[0]?.message).toContain('for zt-aaaaaaaaaaaa');
+  });
+});
+
+describe('LocalQemuAdapter orphan QEMU processes', () => {
+  /** A VM whose directory is gone while its QEMU still runs. */
+  async function orphan(a: LocalQemuAdapter): Promise<string> {
+    const handle = await a.create(spec());
+    fs.rmSync(path.join(stateDir, 'vms', handle.vmId), { recursive: true });
+    return handle.vmId;
+  }
+
+  /** Processes the adapter must never touch: another state dir, unreadable argv,
+   * a pidfile in a directory that is not a VM ID, no pidfile at all. */
+  function bystanders(): void {
+    const other = path.join(root, 'other-state', 'vms', 'zt-111111111111', 'qemu.pid');
+    const entries: [number, string[] | Error][] = [
+      [9001, ['qemu', '-pidfile', other]],
+      [9002, new Error('EACCES')],
+      [9003, ['qemu', '-pidfile', path.join(stateDir, 'vms', 'junk', 'qemu.pid')]],
+      [9004, ['sleep', '30']],
+      [9005, ['qemu', '-pidfile', path.join(stateDir, 'vms', 'zt-222222222222', 'qemu.log')]],
+    ];
+    for (const [pid, argv] of entries) {
+      host.alive.add(pid);
+      host.argv.set(pid, argv);
+    }
+  }
+
+  it('kill-all stops a QEMU of this state dir whose directory is gone', async () => {
+    const a = adapter();
+    const vmId = await orphan(a);
+    bystanders();
+    const result = await a.killAll('incident');
+    expect(result.destroyed).toEqual([vmId]);
+    expect(result.failed).toEqual([]);
+    expect(host.calls.kill).toEqual([[PID, 'SIGTERM']]);
+  });
+
+  it('kill-all reports an orphan that survives SIGKILL', async () => {
+    host.state.dieOn = null;
+    const a = adapter();
+    const vmId = await orphan(a);
+    const result = await a.killAll('incident');
+    expect(result.destroyed).toEqual([]);
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0]).toMatchObject({ vmId, leftoverPids: [PID], leftoverPaths: [] });
+  });
+
+  it('kill-all leaves the QEMU of a directory that still exists to that directory', async () => {
+    host.state.dieOn = null;
+    const a = adapter();
+    const handle = await a.create(spec());
+    host.tokens.set(PID, new Error('EACCES'));
+    const result = await a.killAll('incident');
+    expect(result.failed.map((f) => f.vmId)).toEqual([handle.vmId]);
+    expect(host.calls.kill).toEqual([]);
+  });
+});
+
+describe('LocalQemuAdapter.releaseKillSwitch', () => {
+  const marker = () => path.join(stateDir, KILL_SWITCH_FILE);
+
+  it('returns false when the kill switch is not engaged', () => {
+    const j = journal();
+    expect(adapter({ journal: j }).releaseKillSwitch('all clear')).toBe(false);
+    expect(j.read()).toEqual([]);
+  });
+
+  it('refuses while a VM directory remains', async () => {
+    const a = adapter();
+    const handle = await a.create(spec());
+    host.tokens.set(PID, new Error('EACCES'));
+    await a.killAll('incident');
+    expect(() => a.releaseKillSwitch('all clear')).toThrow(
+      new RegExp(`stays engaged: 1 VM\\(s\\) remain \\(${handle.vmId}\\)`)
+    );
+    expect(a.killSwitchEngaged()).toBe(true);
+  });
+
+  it('refuses while an orphan QEMU of this state dir runs', async () => {
+    host.state.dieOn = null;
+    const a = adapter();
+    const handle = await a.create(spec());
+    fs.rmSync(path.join(stateDir, 'vms', handle.vmId), { recursive: true });
+    await a.killAll('incident');
+    expect(() => a.releaseKillSwitch('all clear')).toThrow(handle.vmId);
+    expect(fs.existsSync(marker())).toBe(true);
+  });
+
+  it('releases once nothing remains, journaling who engaged it and when', async () => {
+    const j = journal();
+    const a = adapter({ journal: j });
+    await a.create(spec());
+    await a.killAll('incident 42');
+    expect(a.releaseKillSwitch('all clear')).toBe(true);
+    expect(a.killSwitchEngaged()).toBe(false);
+    expect(j.read()).toContainEqual(
+      expect.objectContaining({
+        type: 'vm_kill_switch_released',
+        reason: 'all clear',
+        engagedReason: 'incident 42',
+        engagedAt: '2026-10-06T00:00:00.000Z',
+      })
+    );
+    await expect(a.create(spec('run-2'))).resolves.toBeDefined();
+    expect(a.releaseKillSwitch('again')).toBe(false);
+  });
+
+  it.each([
+    ['unreadable', '{}', 0o644],
+    ['not JSON', 'oops', 0o600],
+    ['wrongly typed', '{"reason":7,"at":null}', 0o600],
+  ])('releases a marker that is %s, journaling no engagement details', (_label, content, mode) => {
+    const j = journal();
+    fs.mkdirSync(stateDir, { recursive: true });
+    fs.writeFileSync(marker(), content);
+    fs.chmodSync(marker(), mode);
+    expect(adapter({ journal: j }).releaseKillSwitch('all clear')).toBe(true);
+    expect(fs.existsSync(marker())).toBe(false);
+    expect(j.read()).toContainEqual(
+      expect.objectContaining({
+        type: 'vm_kill_switch_released',
+        engagedReason: null,
+        engagedAt: null,
+      })
+    );
+  });
+
+  it('refuses a secret-shaped reason before touching the marker', async () => {
+    const a = adapter();
+    await a.killAll('incident');
+    expect(() => a.releaseKillSwitch('ghp_abcdefghijklmnopqrstuvwxyz0123456789')).toThrow(
+      /credential/
+    );
+    expect(a.killSwitchEngaged()).toBe(true);
+  });
+});
+
+describe('LocalQemuAdapter.reconcile', () => {
+  /** live, stale, crash-orphan (live via pidfile), untrusted, orphan process. */
+  async function scene(a: LocalQemuAdapter) {
+    const live = (await a.create(spec('run-live'))).vmId; // PID
+    const stale = (await a.create(spec('run-stale'))).vmId; // PID + 1
+    host.alive.delete(PID + 1);
+    const crashed = (await a.create(spec('run-crash'))).vmId; // PID + 2
+    crashBeforeRecord(path.join(stateDir, 'vms', crashed), PID + 2);
+    const untrusted = (await a.create(spec('run-untrusted'))).vmId; // PID + 3
+    fs.writeFileSync(path.join(stateDir, 'vms', untrusted, 'qemu.pid'), String(PID + 3));
+    fs.rmSync(path.join(stateDir, 'vms', untrusted, 'vm.json'));
+    const orphaned = (await a.create(spec('run-orphan'))).vmId; // PID + 4
+    fs.rmSync(path.join(stateDir, 'vms', orphaned), { recursive: true });
+    return { live, stale, crashed, untrusted, orphaned };
+  }
+
+  it('classifies VM directories and orphan processes without touching anything', async () => {
+    const j = journal();
+    const a = adapter({ journal: j });
+    expect(await a.reconcile()).toEqual({
+      live: [],
+      staleDirs: [],
+      untrustedDirs: [],
+      orphanProcesses: [],
+      destroyed: [],
+      failed: [],
+    });
+    const ids = await scene(a);
+    const report = await a.reconcile();
+    expect(report.live.sort()).toEqual([ids.live, ids.crashed].sort());
+    expect(report.staleDirs).toEqual([ids.stale]);
+    expect(report.untrustedDirs).toEqual([ids.untrusted]);
+    expect(report.orphanProcesses).toEqual([{ pid: PID + 4, vmId: ids.orphaned }]);
+    expect(report.destroyed).toEqual([]);
+    expect(report.failed).toEqual([]);
+    expect(host.calls.kill).toEqual([]);
+    for (const vmId of [ids.live, ids.stale, ids.crashed, ids.untrusted])
+      expect(fs.existsSync(path.join(stateDir, 'vms', vmId))).toBe(true);
+    const events = (j.read() as Record<string, unknown>[]).filter((e) => e.type === 'vm_reconcile');
+    expect(events.at(-1)).toMatchObject({
+      destroy: false,
+      staleDirs: [ids.stale],
+      untrustedDirs: [ids.untrusted],
+      orphanProcesses: [ids.orphaned],
+    });
+  });
+
+  it('counts a directory whose QEMU owner is unknown as stale, not live', async () => {
+    const a = adapter();
+    const handle = await a.create(spec());
+    host.tokens.set(PID, new Error('EACCES'));
+    expect((await a.reconcile()).staleDirs).toEqual([handle.vmId]);
+  });
+
+  it('with destroy, cleans up stale and untrusted directories and stops orphans', async () => {
+    const j = journal();
+    const a = adapter({ journal: j });
+    const ids = await scene(a);
+    const report = await a.reconcile({ destroy: true });
+    expect(report.destroyed.sort()).toEqual([ids.stale, ids.untrusted, ids.orphaned].sort());
+    expect(report.failed).toEqual([]);
+    expect(host.calls.kill.sort()).toEqual([
+      [PID + 3, 'SIGTERM'],
+      [PID + 4, 'SIGTERM'],
+    ]);
+    expect(fs.readdirSync(path.join(stateDir, 'vms')).sort()).toEqual(
+      [ids.live, ids.crashed].sort()
+    );
+    const events = j.read() as Record<string, unknown>[];
+    expect(events.find((e) => e.type === 'vm_reconcile')).toMatchObject({ destroy: true });
+    expect(events.filter((e) => e.type === 'vm_destroyed').map((e) => e.runId)).toEqual(
+      expect.arrayContaining(['run-stale', 'reconcile'])
+    );
+  });
+
+  it('with destroy, reports what it could not clean up', async () => {
+    const a = adapter();
+    // Untrusted dir whose pidfile PID has unreadable argv: reported, never signalled.
+    const unreadable = (await a.create(spec('run-a'))).vmId; // PID
+    fs.writeFileSync(path.join(stateDir, 'vms', unreadable, 'qemu.pid'), String(PID));
+    fs.rmSync(path.join(stateDir, 'vms', unreadable, 'vm.json'));
+    host.argv.set(PID, new Error('EACCES'));
+    // Stale dir whose teardown hits an unexpected error.
+    const broken = (await a.create(spec('run-b'))).vmId; // PID + 1
+    const alive = host.ops.alive;
+    let probes = 0;
+    host.ops.alive = (pid) => {
+      if (pid === PID + 1 && probes++ > 0) throw new TypeError('proc unavailable');
+      return pid === PID + 1 ? false : alive(pid);
+    };
+    // Orphan that survives SIGKILL.
+    host.state.dieOn = null;
+    const orphaned = (await a.create(spec('run-c'))).vmId; // PID + 2
+    fs.rmSync(path.join(stateDir, 'vms', orphaned), { recursive: true });
+
+    const report = await a.reconcile({ destroy: true });
+    expect(report.untrustedDirs).toEqual([unreadable]);
+    expect(report.staleDirs).toEqual([broken]);
+    expect(report.destroyed).toEqual([]);
+    const byVm = Object.fromEntries(report.failed.map((f) => [f.vmId, f]));
+    expect(byVm[unreadable]).toMatchObject({
+      leftoverPids: [PID],
+      leftoverPaths: [path.join(stateDir, 'vms', unreadable)],
+    });
+    expect(byVm[broken]).toMatchObject({
+      leftoverPids: [],
+      leftoverPaths: [path.join(stateDir, 'vms', broken)],
+    });
+    expect(byVm[orphaned]).toMatchObject({ leftoverPids: [PID + 2], leftoverPaths: [] });
+    expect(byVm[broken]).toBeInstanceOf(VmCleanupError);
+    expect(host.calls.kill.filter(([pid]) => pid === PID)).toEqual([]);
+  });
+});
+
 describe('systemOps', () => {
   let dir: string;
   beforeEach(() => {
@@ -1162,6 +1759,37 @@ describe('systemOps', () => {
       await expect(systemOps.connect(path.join(dir, 'none.sock'))).rejects.toThrow();
     } finally {
       await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  it('cmdline reads argv from /proc, and listProcesses lists PIDs', () => {
+    const argv = systemOps.cmdline(process.pid);
+    expect(argv?.length).toBeGreaterThan(0);
+    expect(argv?.at(-1)).not.toBe('');
+    expect(systemOps.cmdline(2 ** 30)).toBeNull();
+    const pids = systemOps.listProcesses();
+    expect(pids).toContain(process.pid);
+    expect(pids.every((pid) => Number.isSafeInteger(pid) && pid > 0)).toBe(true);
+  });
+
+  it('cmdline keeps empty arguments but drops the trailing terminator', () => {
+    const read = fs.readFileSync;
+    const spy = vi.spyOn(fs, 'readFileSync').mockImplementation(((
+      file: fs.PathOrFileDescriptor,
+      ...rest: unknown[]
+    ) => {
+      if (file === '/proc/12345/cmdline') return 'qemu\0\0-name\0';
+      if (file === '/proc/12346/cmdline') return '';
+      if (file === '/proc/12347/cmdline')
+        throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+      return (read as (...args: unknown[]) => unknown)(file, ...rest);
+    }) as typeof fs.readFileSync);
+    try {
+      expect(systemOps.cmdline(12345)).toEqual(['qemu', '', '-name']);
+      expect(systemOps.cmdline(12346)).toEqual([]);
+      expect(() => systemOps.cmdline(12347)).toThrow('EACCES');
+    } finally {
+      spy.mockRestore();
     }
   });
 
