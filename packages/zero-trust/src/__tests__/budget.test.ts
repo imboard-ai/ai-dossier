@@ -228,8 +228,19 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
       source: 'invoice',
     });
     ledger.reserve('initial', estimate(4), 'teardown');
-    new BudgetLedger(file, 'contribution-1').reserve('initial', estimate(6), 'teardown');
+    const foreignCleanup = new BudgetLedger(file, 'contribution-1').reserve(
+      'initial',
+      estimate(6),
+      'teardown'
+    );
     code(() => ledger.reserve('initial', estimate(1), 'teardown'), 'ceiling_exceeded');
+    code(() => ledger.reserve('initial', estimate(0)), 'persistence_uncertain');
+    ledger.settle(foreignCleanup.id, {
+      money: { currency: 'USD', minor: 6 },
+      tokens: 10,
+      timeMs: 100,
+      source: 'reconciled cleanup invoice',
+    });
     code(() => ledger.reserve('initial', estimate(0)), 'ceiling_exceeded');
     // Public numeric totals continue to reject unrepresentable sums, never cap them.
     code(() => budgetTotals(ledger.snapshot(), 'initial'), 'invalid_budget');

@@ -18,6 +18,12 @@ export class StoreLockedError extends Error {
     this.name = 'StoreLockedError';
   }
 }
+export class StorePersistenceError extends Error {
+  constructor() {
+    super('Store finalization uncertain; stop owner and reconcile before reopening');
+    this.name = 'StorePersistenceError';
+  }
+}
 
 /** Linux-local identity includes the boot ID: start ticks alone repeat after reboot. */
 export function processStartToken(pid: number): string | null {
@@ -29,7 +35,8 @@ export function processStartToken(pid: number): string | null {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       // Missing proc entries alone may reflect restricted proc visibility. ESRCH
-      // independently establishes absence; EPERM and every other error block.
+      // establishes absence only in the SAME recorded PID namespace. EPERM and
+      // every other error block. A foreign namespace must never prove death.
       try {
         process.kill(pid, 0);
       } catch (signalError) {
@@ -54,10 +61,9 @@ function privateFile(fd: number): void {
 }
 
 /** Called only with the store's permanent guard held. */
-export function lockRecoveries(directory: string, create = false): LockRecovery[] {
+export function lockRecoveries(directory: string): LockRecovery[] {
   const exists = fs.existsSync(directory);
-  if ((!exists && !create) || (exists && !fs.existsSync(path.join(directory, 'events.jsonl'))))
-    throw new StoreLockedError();
+  if (!exists || !fs.existsSync(path.join(directory, 'events.jsonl'))) throw new StoreLockedError();
   const journal = new Journal(directory);
   try {
     const result: LockRecovery[] = [];
@@ -65,7 +71,7 @@ export function lockRecoveries(directory: string, create = false): LockRecovery[
       if (isLockRecovery(event)) result.push(event);
       else if (!isTailRecovery(event)) throw new StoreLockedError();
     }
-    if (!create && result.length === 0) throw new StoreLockedError();
+    if (result.length === 0) throw new StoreLockedError();
     return result;
   } finally {
     journal.close();
@@ -77,13 +83,19 @@ export function recordLockReclaim(
   owner: LockOwner,
   pendingReservations: string[]
 ): void {
-  const prior = lockRecoveries(directory, true).find((event) => event.owner.id === owner.id);
+  const exists = fs.existsSync(directory);
+  const prior = exists
+    ? lockRecoveries(directory).find((event) => event.owner.id === owner.id)
+    : undefined;
   if (prior) {
     if (prior.lock !== path.basename(lock) || JSON.stringify(prior.owner) !== JSON.stringify(owner))
       throw new StoreLockedError();
     return;
   }
-  const journal = new Journal(directory);
+  // A first audit is published as a COMPLETE directory. Crash debris stays in
+  // an unpublished unique staging directory, never masquerading as lost history.
+  const staging = exists ? directory : `${directory}.staging-${randomUUID()}`;
+  const journal = new Journal(staging);
   try {
     const event: LockRecovery = {
       v: 1,
@@ -98,6 +110,33 @@ export function recordLockReclaim(
   } finally {
     journal.close();
   }
+  if (!exists) {
+    syncDirectory(staging);
+    fs.renameSync(staging, directory);
+  }
+  syncDirectory(path.dirname(directory));
+}
+
+function pidNamespace(): string {
+  const namespace = fs.readlinkSync('/proc/self/ns/pid');
+  const self = fs.readFileSync('/proc/self/stat', 'utf8');
+  if (!/^pid:\[\d+\]$/.test(namespace) || Number(self.slice(0, self.indexOf(' '))) !== process.pid)
+    throw new StoreLockedError();
+  return namespace;
+}
+
+function publishOwner(file: string, owner: LockOwner): void {
+  const tmp = `${file}.owner-${randomUUID()}`;
+  const fd = fs.openSync(tmp, 'wx', 0o600);
+  try {
+    fs.writeFileSync(fd, `${JSON.stringify(owner)}\n`);
+    fs.fsyncSync(fd);
+    fs.renameSync(tmp, file);
+  } finally {
+    fs.closeSync(fd);
+    fs.rmSync(tmp, { force: true });
+  }
+  syncDirectory(path.dirname(file));
 }
 
 /** The permanent guard must NEVER be unlinked. Kernel flock protects the entire
@@ -117,9 +156,10 @@ export function withStoreLock<T>(
     fs.constants.O_CREAT | fs.constants.O_RDWR | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
     0o600
   );
-  let fd: number | undefined;
   let retain = false;
   let published = false;
+  let keepGuard = false;
+  let owner: LockOwner | undefined;
   try {
     privateFile(guard);
     const result = spawnSync('/usr/bin/flock', ['-x', '-w', String(timeoutMs / 1000), '3'], {
@@ -140,6 +180,7 @@ export function withStoreLock<T>(
       if (fs.fstatSync(ownerFd).size > 4096) throw new StoreLockedError();
       const owner: unknown = JSON.parse(fs.readFileSync(ownerFd, 'utf8'));
       if (!isLockOwner(owner)) throw new StoreLockedError();
+      if (owner.pidNamespace !== pidNamespace()) throw new StoreLockedError();
       const token = processStartToken(owner.pid);
       if (token === owner.startToken) throw new StoreLockedError();
       reclaim(owner); // Must fsync its audit before removing the old lock.
@@ -152,25 +193,17 @@ export function withStoreLock<T>(
     }
     const startToken = processStartToken(process.pid);
     if (!startToken) throw new StoreLockedError();
-    const owner: LockOwner = {
+    owner = {
       pid: process.pid,
       startToken,
       createdAt: new Date().toISOString(),
       id: randomUUID(),
+      pidNamespace: pidNamespace(),
     };
     // Publish only a fully fsynced owner record. A crash never leaves an empty
     // lock whose missing identity would prevent automatic recovery forever.
-    const tmp = `${file}.owner-${owner.id}`;
-    fd = fs.openSync(tmp, 'wx', 0o600);
-    try {
-      fs.writeFileSync(fd, `${JSON.stringify(owner)}\n`);
-      fs.fsyncSync(fd);
-      fs.renameSync(tmp, file);
-      published = true;
-    } finally {
-      fs.rmSync(tmp, { force: true });
-    }
-    syncDirectory(path.dirname(file));
+    publishOwner(file, owner);
+    published = true;
     try {
       return work();
     } catch (error) {
@@ -179,16 +212,25 @@ export function withStoreLock<T>(
     }
   } finally {
     try {
-      if (fd !== undefined) {
-        fs.closeSync(fd);
-        if (published && !retain) {
-          // A failed owner publication may not have created the named lock.
+      if (published && !retain && owner) {
+        try {
           fs.rmSync(file, { force: true });
           syncDirectory(path.dirname(file));
+        } catch {
+          // Work may already have committed. Restore the SAME live owner while
+          // still holding the guard. If storage will not persist the fence, keep
+          // the kernel guard open until process death, denying every contender.
+          try {
+            publishOwner(file, owner);
+          } catch {
+            keepGuard = true;
+          }
+          // biome-ignore lint/correctness/noUnsafeFinally: Failed durable finalization MUST override a successful authorization return.
+          throw new StorePersistenceError();
         }
       }
     } finally {
-      fs.closeSync(guard);
+      if (!keepGuard) fs.closeSync(guard);
     }
   }
 }

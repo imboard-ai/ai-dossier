@@ -21,6 +21,7 @@ import {
 import { Journal, JournalError } from '../journal';
 import { SecretRedactionError } from '../redaction';
 import { createRun, ReasonCode, RUN_STATES, type RunRecord, transitionRun } from '../state';
+import { compiledFixture } from './compiled-fixture';
 
 const timestamp = '2026-10-05T00:00:00.000Z';
 const gating = createRun(
@@ -1157,10 +1158,10 @@ describe('fail-closed journal durability', () => {
     expect(() => other.read()).toThrow(JournalError);
   });
   it('survives real process death after durable attempt and external effect', async () => {
-    // The package build precedes this test; the child uses the exact compiled public API.
+    // Compile current source; pool dist may describe an older controller.
     const dir = directory();
     const artifact = path.join(dir, 'remote-artifact');
-    const modulePath = path.resolve(__dirname, '../../dist/index.js');
+    const modulePath = compiledFixture(dir, 'index');
     const code = `const fs=require('node:fs'); const {Journal,IntentDriver}=require(${JSON.stringify(modulePath)});
       const j=new Journal(${JSON.stringify(path.join(dir, 'journal'))});
       const d=new IntentDriver(j,{reconcile:async()=>({kind:'unknown'}),mutate:async()=>{

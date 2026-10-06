@@ -5,6 +5,7 @@ export interface LockOwner {
   startToken: string;
   createdAt: string;
   id: string;
+  pidNamespace: string;
 }
 export interface TailRecovery {
   v: 1;
@@ -35,13 +36,15 @@ function uuid(value: unknown): boolean {
 export function isLockOwner(value: unknown): value is LockOwner {
   return (
     record(value) &&
-    keys(value, 'createdAt,id,pid,startToken') &&
+    keys(value, 'createdAt,id,pid,pidNamespace,startToken') &&
     Number.isSafeInteger(value.pid) &&
     (value.pid as number) > 0 &&
     typeof value.startToken === 'string' &&
     /^[a-f0-9-]{36}:\d+$/.test(value.startToken) &&
     isTimestamp(value.createdAt) &&
-    uuid(value.id)
+    uuid(value.id) &&
+    typeof value.pidNamespace === 'string' &&
+    /^pid:\[\d+\]$/.test(value.pidNamespace)
   );
 }
 export function isTailRecovery(value: unknown): value is TailRecovery {

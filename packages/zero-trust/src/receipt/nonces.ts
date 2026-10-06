@@ -1,9 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { publishPrivate, readPrivate, syncDirectory } from '../durable-fs';
 import { Journal } from '../journal';
 import { recordLockReclaim, StoreLockedError, withStoreLock } from '../lock';
 import { isTailRecovery } from '../recovery';
 import { canonicalJson, ReceiptError, snapshotJson } from './schema';
+
+const HEADER = Buffer.from('{"v":1,"type":"receipt-nonces"}\n');
 
 export interface NonceConsumption {
   nonce: string;
@@ -26,25 +29,76 @@ export class ReceiptNonceStore {
   }
   initialize(): void {
     this.locked(() => {
-      if (fs.existsSync(path.join(this.directory, 'events.jsonl')))
-        throw new ReceiptError('store_exists');
-      const journal = new Journal(this.directory);
-      try {
-        journal.append({ v: 1, type: 'receipt-nonces' });
-      } finally {
+      const file = path.join(this.directory, 'events.jsonl');
+      const marker = path.join(this.directory, 'nonce-initializing');
+      if (!fs.existsSync(file)) {
+        // A write-ahead creation intent distinguishes interrupted initialization
+        // from missing established history. The header itself publishes whole.
+        publishPrivate(marker, HEADER);
+        publishPrivate(file, HEADER);
+      } else if (!fs.existsSync(marker)) {
+        const { journal, recoveredInitialization } = this.openJournal();
         journal.close();
+        if (!recoveredInitialization) throw new ReceiptError('store_exists');
+        return;
       }
+      const { journal } = this.openJournal();
+      journal.close();
     });
+  }
+
+  private openJournal(): { journal: Journal; recoveredInitialization: boolean } {
+    const file = path.join(this.directory, 'events.jsonl');
+    const marker = path.join(this.directory, 'nonce-initializing');
+    const initializing = fs.existsSync(marker);
+    if (initializing && !readPrivate(marker).equals(HEADER))
+      throw new ReceiptError('corrupt_store');
+    if (!fs.existsSync(file)) {
+      if (!initializing) throw new ReceiptError('missing_store');
+      publishPrivate(file, HEADER);
+    }
+    const journal = new Journal(this.directory);
+    try {
+      const events = journal.read();
+      const domain = events.filter((event) => !isTailRecovery(event));
+      let recoveredInitialization = initializing;
+      if (!domain.length) {
+        // Legacy torn first headers have no creation marker. No authorization
+        // could have returned without the complete header. Recover ONLY a byte
+        // prefix of that fixed header, backed by offset-zero quarantine evidence.
+        const initial = events.find((event) => isTailRecovery(event) && event.offset === 0);
+        const tail = isTailRecovery(initial)
+          ? readPrivate(path.join(this.directory, initial.quarantine))
+          : undefined;
+        if (
+          !initializing &&
+          (!tail || tail.length >= HEADER.length || !HEADER.subarray(0, tail.length).equals(tail))
+        )
+          throw new ReceiptError('corrupt_store');
+        journal.append({ v: 1, type: 'receipt-nonces' });
+        recoveredInitialization = true;
+      } else if (canonicalJson(domain[0]) !== '{"type":"receipt-nonces","v":1}') {
+        throw new ReceiptError('corrupt_store');
+      }
+      if (initializing) {
+        // No row is authorized until initialization finalization is durable.
+        if (domain.length > 1) throw new ReceiptError('corrupt_store');
+        fs.unlinkSync(marker);
+        syncDirectory(this.directory);
+      }
+      return { journal, recoveredInitialization };
+    } catch (error) {
+      journal.close();
+      throw error;
+    }
   }
   consume(input: NonceConsumption): void {
     const row = snapshotJson(input);
     validateRow(row);
     this.locked(() => {
-      if (!fs.existsSync(path.join(this.directory, 'events.jsonl')))
-        throw new ReceiptError('missing_store');
-      const journal = new Journal(this.directory);
+      const { journal } = this.openJournal();
       try {
-        const events = journal.read();
+        const events = journal.read().filter((event) => !isTailRecovery(event));
         if (canonicalJson(events[0]) !== '{"type":"receipt-nonces","v":1}')
           throw new ReceiptError('corrupt_store');
         const nonces = new Set<string>();

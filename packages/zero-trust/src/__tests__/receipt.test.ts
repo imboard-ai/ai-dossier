@@ -18,6 +18,7 @@ import { renderReceipt } from '../receipt/render';
 import { canonicalJson, parseReceipt, RECEIPT_TTL_MS } from '../receipt/schema';
 import { authorizeShipping, type ReceiptContext, verifyReceipt } from '../receipt/verify';
 import { createRun, ReasonCode, transitionRun } from '../state';
+import { compiledFixture } from './compiled-fixture';
 
 const SHA = 'a'.repeat(40);
 const CANDIDATE = 'b'.repeat(40);
@@ -574,7 +575,7 @@ describe('controller nonce durability — concurrent processes and crash boundar
     );
   });
   it('retains a durable consumed record after real controller SIGKILL following authorization', async () => {
-    const code = `const {ReceiptNonceStore}=require(${JSON.stringify(path.resolve(__dirname, '../../dist/receipt/nonces.js'))});new ReceiptNonceStore(process.argv[1]).consume(${JSON.stringify(row)});process.send('consumed');setInterval(()=>{},1000)`;
+    const code = `const {ReceiptNonceStore}=require(${JSON.stringify(compiledFixture(directory, 'receipt/nonces'))});new ReceiptNonceStore(process.argv[1]).consume(${JSON.stringify(row)});process.send('consumed');setInterval(()=>{},1000)`;
     const child = spawn(process.execPath, ['-e', code, path.join(directory, 'nonces')], {
       stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
     });
@@ -595,7 +596,7 @@ describe('controller nonce durability — concurrent processes and crash boundar
     expect(() => store.consume(row)).toThrow('replayed_nonce');
   });
   it('admits at most one of separate processes racing the same nonce', async () => {
-    const code = `const {ReceiptNonceStore}=require(${JSON.stringify(path.resolve(__dirname, '../../dist/receipt/nonces.js'))});try{new ReceiptNonceStore(process.argv[1]).consume(${JSON.stringify(row)});process.exit(0)}catch{process.exit(2)}`;
+    const code = `const {ReceiptNonceStore}=require(${JSON.stringify(compiledFixture(directory, 'receipt/nonces'))});try{new ReceiptNonceStore(process.argv[1]).consume(${JSON.stringify(row)});process.exit(0)}catch{process.exit(2)}`;
     const results = await Promise.all(
       Array.from(
         { length: 8 },

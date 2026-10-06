@@ -207,6 +207,10 @@ recovery adds all pending IDs to that barrier and its durable audit. New **work*
 is fenced until every old hold is explicitly settled or released. Missing or empty
 established recovery journals fail closed; losing the sidecar never frees holds.
 `settle(id, null)` does not clear the fence;
+Every guarded admission also checks the freshly loaded rows: holds not acknowledged
+by a successful complete transaction of that exact ledger instance require
+reconciliation, even when the handle opened before another writer's final hold.
+Locally acknowledged holds may coexist; their full estimates still count.
 teardown remains available within its existing accounting limits.
 Never infer safe lock removal from age or a PID alone. Leftover temp files are
 not committed state. Filesystem errors propagate; after write uncertainty reload
@@ -214,6 +218,10 @@ and reconcile before retrying an action. A write/fsync failure poisons the live
 instance (`persistence_uncertain`); the complete state may already have committed.
 Its owner lock is retained on uncertain persistence, so another instance cannot
 steal it while that process is live. After owner death, reconcile before admission.
+Finalization errors after a committed mutation poison the caller and restore the
+same owner record before releasing the kernel guard. If that fence cannot be
+persisted, the guard remains held until process termination. Stop the failed
+controller before reopening; retrying a live poisoned instance is not recovery.
 Directory aliases resolve to one canonical lock path; ledger symlinks are refused.
 Use a pre-provisioned durable local
 directory exclusively controlled by the controller; no network filesystem or
@@ -227,6 +235,11 @@ unlink/replace guard files. The inherited open description keeps the lock held
 after flock exits, and kernel process death releases it. Unsupported platforms,
 missing flock or unreadable process identity fail closed. This is local controller
 storage, not a distributed lease.
+All store participants must share a stable PID namespace and a matching `/proc`
+mount. Owner records bind that namespace; mismatches and namespace-less legacy
+owner records fail closed. Never share controller stores across isolated container
+PID namespaces. First reclaim audits publish from a complete fsynced staging
+directory; unpublished staging remnants are not committed history.
 
 ## Canonical source and candidate identity
 
@@ -342,6 +355,10 @@ durable retry after reconciliation proved absence; it still requires a fresh gra
 
 Provision the nonce directory first; call `initialize()` only on first creation.
 Never initialize/reset it on resume. Missing/corrupt complete history fails closed;
+Initialization publishes a durable `nonce-initializing` intent before the complete
+atomic header. A restart completes that intent before authorization. Legacy torn
+first headers recover only with offset-zero quarantine evidence matching an exact
+prefix of the fixed header; unknown or populated corrupt histories never reset.
 the final torn-line recovery above preserves all completed consumptions.
 The same Linux ownership proof and permanent kernel guard serialize independent
 processes. Dead-owner reclaim is fsynced to `lock-recovery/events.jsonl` in the nonce

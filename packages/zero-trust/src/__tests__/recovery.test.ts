@@ -31,7 +31,13 @@ function token(pid = process.pid): string {
   }`;
 }
 function owner(pid = 2147483647, startToken = token()) {
-  return { pid, startToken, createdAt: '2000-01-01T00:00:00.000Z', id: randomUUID() };
+  return {
+    pid,
+    startToken,
+    createdAt: '2000-01-01T00:00:00.000Z',
+    id: randomUUID(),
+    pidNamespace: fs.readlinkSync('/proc/self/ns/pid'),
+  };
 }
 const rate: BudgetRate = {
   resource: 'model',

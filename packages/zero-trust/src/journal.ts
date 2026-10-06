@@ -1,9 +1,9 @@
 /** Durable controller-owned JSONL. Corruption and uncertain writes fail closed. */
 
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import * as path from 'node:path';
-import { syncDirectory } from './durable-fs';
+import { publishPrivate, readPrivate, syncDirectory } from './durable-fs';
 import { isTailRecovery, type TailRecovery } from './recovery';
 
 const openPaths = new Set<string>();
@@ -122,8 +122,8 @@ export class Journal {
         prefixSha256: hash(prefix),
         quarantine: `events.jsonl.quarantine-${offset}-${sha256}`,
       };
-      persistPrivate(path.join(path.dirname(this.filePath), marker.quarantine), tail);
-      persistPrivate(markerPath, Buffer.from(`${JSON.stringify(marker)}\n`));
+      publishPrivate(path.join(path.dirname(this.filePath), marker.quarantine), tail);
+      publishPrivate(markerPath, Buffer.from(`${JSON.stringify(marker)}\n`));
     }
     const prefix = bytes.subarray(0, marker.offset);
     if (prefix.length !== marker.offset || hash(prefix) !== marker.prefixSha256)
@@ -213,45 +213,4 @@ function parseComplete(bytes: Buffer): unknown[] {
         .split('\n')
         .map((line) => JSON.parse(line))
     : [];
-}
-function readPrivate(file: string): Buffer {
-  const fd = fs.openSync(
-    file,
-    fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK
-  );
-  try {
-    const stat = fs.fstatSync(fd);
-    if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0) throw new JournalError();
-    return fs.readFileSync(fd);
-  } finally {
-    fs.closeSync(fd);
-  }
-}
-function persistPrivate(file: string, bytes: Buffer): void {
-  // One controller owns the journal directory (store users hold their kernel
-  // guard). Reuse only exact existing evidence; publish with ONE link atomically.
-  try {
-    if (!readPrivate(file).equals(bytes)) throw new JournalError();
-    const existing = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-    try {
-      fs.fsyncSync(existing);
-    } finally {
-      fs.closeSync(existing);
-    }
-    syncDirectory(path.dirname(file));
-    return;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-  }
-  const tmp = `${file}.tmp-${randomUUID()}`;
-  const fd = fs.openSync(tmp, 'wx', 0o600);
-  try {
-    fs.writeFileSync(fd, bytes);
-    fs.fsyncSync(fd);
-    fs.renameSync(tmp, file);
-  } finally {
-    fs.closeSync(fd);
-    fs.rmSync(tmp, { force: true });
-  }
-  syncDirectory(path.dirname(file));
 }
