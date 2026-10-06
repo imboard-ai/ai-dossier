@@ -270,6 +270,13 @@ export function createCandidate(
     inspectTree(git, baseTree(git, input.baseSha), limits);
     const treeSha = buildTree(git, manifest);
     const candidateSha = commit(git, input, treeSha);
+    // mktree/commit-tree do not fsck. Independently check every candidate object
+    // before issuing an authority binding or pack, even if export validation regresses.
+    try {
+      git.run(['fsck', '--strict', '--full', '--no-dangling', candidateSha]);
+    } catch {
+      throw new CanonicalError('invalid_path');
+    }
     const record = Object.freeze({
       version: 1 as const,
       ...input,

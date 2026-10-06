@@ -20,6 +20,22 @@ import {
 } from '../index';
 
 const temps: string[] = [];
+const gitAliases = [
+  '.git ',
+  '.git.',
+  '.git . ',
+  'git~1',
+  'GIT~1',
+  '.g\u200cit',
+  '.gi\u200dt',
+  '.git\ufeff',
+];
+const hfsIgnorables = [
+  ...Array.from({ length: 4 }, (_, i) => String.fromCodePoint(0x200c + i)),
+  ...Array.from({ length: 5 }, (_, i) => String.fromCodePoint(0x202a + i)),
+  ...Array.from({ length: 6 }, (_, i) => String.fromCodePoint(0x206a + i)),
+  '\ufeff',
+];
 function temp(): string {
   const path = fs.mkdtempSync(join(tmpdir(), 'canonical-test-'));
   temps.push(path);
@@ -100,6 +116,46 @@ function baseline(
 }
 
 describe('canonical filesystem export', () => {
+  it.each(gitAliases)('rejects NTFS/HFS dotgit alias %j at every path depth', (name) => {
+    for (const path of [name, `${name}/hooks`, `src/${name}`, `src/${name}/config`]) {
+      rejects(() => validateSourcePath(path), 'invalid_path');
+    }
+    rejects(() => createManifest([file(name)]), 'invalid_path');
+  });
+  it.each(hfsIgnorables)('rejects every Git HFS ignorable %j in dotgit', (char) => {
+    rejects(() => validateSourcePath(`.g${char}it`), 'invalid_path');
+    rejects(() => validateSourcePath(`src/${char}.git${char}/config`), 'invalid_path');
+  });
+  it.each(hfsIgnorables)('detects every Git HFS ignorable %j collision', (char) => {
+    rejects(() => createManifest([file('ab'), file(`a${char}b`)]), 'path_collision');
+    rejects(
+      () => createManifest([file('ab', '', '040000'), file(`a${char}b`, '', '040000')]),
+      'path_collision'
+    );
+  });
+  it.each(['.git ', '.git.'])('rejects real dotgit alias directory %j', (name) => {
+    for (const prefix of ['', 'src']) {
+      const root = temp();
+      const hooks = join(root, prefix, name, 'hooks');
+      fs.mkdirSync(hooks, { recursive: true });
+      fs.writeFileSync(join(hooks, 'post-checkout'), '#!/bin/sh\necho forbidden\n', {
+        mode: 0o755,
+      });
+      rejects(() => exportSource(root), 'invalid_path');
+    }
+  });
+  it.each([
+    '.gitignore',
+    '.gitattributes',
+    '.gitmodules',
+    '.github',
+    '.git.txt',
+    'git~10',
+    'legit',
+  ])('preserves legitimate lookalike %j without normalizing its bytes', (name) => {
+    expect(() => validateSourcePath(`src/${name}`)).not.toThrow();
+    expect(createManifest([file(name)]).entries[0]?.path).toBe(name);
+  });
   it('entry limit stops streaming enumeration without reading the full directory', () => {
     const root = temp();
     for (let i = 0; i < 100; i++) fs.writeFileSync(join(root, `file-${i}`), 'bytes');
@@ -317,6 +373,62 @@ describe('canonical filesystem export', () => {
 });
 
 describe('canonical Git reconstruction', () => {
+  it.each([
+    '.git ',
+    'GIT~1',
+    '.g\u200cit',
+  ])('strict fsck rejects injected tree alias %j after path validation, without returning a pack', (name) => {
+    const base = baseline();
+    const source = createManifest([
+      file('safe-dir', '', '040000'),
+      file('safe-dir/hooks', '', '040000'),
+      file('safe-dir/hooks/post-checkout', '#!/bin/sh\necho forbidden\n', '100755'),
+    ]);
+    const original = TrustedGit.prototype.run;
+    let injected = false;
+    let fsckCalled = false;
+    let fsckArgs: readonly string[] | undefined;
+    let fsckFailure: unknown;
+    let packCalled = false;
+    let directory = '';
+    vi.spyOn(TrustedGit.prototype, 'run').mockImplementation(function (
+      this: TrustedGit,
+      args,
+      input,
+      identity
+    ) {
+      directory = this.directory;
+      if (args[0] === 'mktree' && Buffer.isBuffer(input)) {
+        const treeInput = input.toString();
+        if (treeInput.includes('\tsafe-dir\u0000')) {
+          injected = true;
+          input = Buffer.from(treeInput.replace('\tsafe-dir\u0000', `\t${name}\u0000`));
+        }
+      }
+      if (args[0] === 'fsck') {
+        fsckCalled = true;
+        fsckArgs = [...args];
+      }
+      if (args[0] === 'pack-objects') packCalled = true;
+      try {
+        return original.call(this, args, input, identity);
+      } catch (error) {
+        if (args[0] === 'fsck') fsckFailure = error;
+        throw error;
+      }
+    });
+    rejects(() => createCandidate(source, approved(base.baseSha), base.pack), 'invalid_path');
+    // Assert outside createCandidate's catch boundary: a failed assertion in
+    // the spy must never masquerade as the expected real Git rejection.
+    expect(fsckArgs).toContain('--strict');
+    expect(fsckArgs).toContain('--full');
+    expect(fsckFailure).toBeInstanceOf(CanonicalError);
+    expect((fsckFailure as CanonicalError).reason).toBe('git_failed');
+    expect(injected).toBe(true);
+    expect(fsckCalled).toBe(true);
+    expect(packCalled).toBe(false);
+    expect(fs.existsSync(directory)).toBe(false);
+  });
   it('cleans its private directory after initialization failure', () => {
     const original = fs.mkdtempSync;
     let created = '';
