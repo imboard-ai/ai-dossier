@@ -501,7 +501,8 @@ hand-offs. `ForkCredentialBroker` has a typed operation API and no generic token
   refused before any network call. A token GitHub does not confirm as repository-selected
   with exactly that permission is revoked and refused.
 - `take(lease)` hands out the lease's `GitPushCredential` once, inside the window;
-  `revoke(lease)` ends it. `withForkPush(intent, target, operation, cancel?)` does all
+  `revoke(lease)` ends it. `revoke` refuses the unscoped user token
+  (`user_token_run_scoped`): only `endRun`, cancellation or `killAll` revoke it. `withForkPush(intent, target, operation, cancel?)` does all
   three and is the preferred entry point. It revokes on success, failure, throw and
   cancellation (including a cancel that arrives during the mint). A timer also revokes
   the token 15 minutes after the mint request, even mid-operation. GitHub's 1 h / 8 h

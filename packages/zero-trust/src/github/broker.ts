@@ -70,6 +70,7 @@ export const BROKER_REFUSALS = Object.freeze([
   'overbroad_token',
   'window_expired',
   'token_reused',
+  'user_token_run_scoped',
 ] as const);
 export type BrokerRefusal = (typeof BROKER_REFUSALS)[number];
 
@@ -464,7 +465,14 @@ export class ForkCredentialBroker {
     });
     const token = await this.issue(tokenId, parent, requestedAt);
     this.vault.set(tokenId, token.value);
-    this.record({ v: 1, type: 'token_minted', id: tokenId, expiresAt: token.expiresAt });
+    try {
+      this.record({ v: 1, type: 'token_minted', id: tokenId, expiresAt: token.expiresAt });
+    } catch (error) {
+      // The journal is gone, so revoke with no record; recovery still sees `requested`.
+      const kind = via === 'installation' ? 'installation' : 'user';
+      if ((await this.deleteAndProbe(kind, token.value)).ok) this.vault.delete(tokenId);
+      throw error;
+    }
     if (!this.narrowedAsRequested(via, token)) {
       this.record({ v: 1, type: 'token_overbroad', id: tokenId, at: this.iso() });
       await this.revoke(tokenId);
@@ -607,9 +615,17 @@ export class ForkCredentialBroker {
     return outcome.value;
   }
 
-  /** Revokes one token, retrying with backoff; final failure blocks cleanup. */
+  /** Revokes one operation token (installation or scoped child), retrying with backoff;
+   * final failure blocks cleanup. The unscoped user token is refused: revoking it ends
+   * its refresh chain, so only `endRun`, cancellation or `killAll` may do that. */
   revoke(lease: ForkPushLease | string): Promise<void> {
     const tokenId = typeof lease === 'string' ? lease : lease.tokenId;
+    if (this.ledger.tokens.get(tokenId)?.kind === 'user')
+      return Promise.reject(new CredentialBrokerError('user_token_run_scoped'));
+    return this.revokeAny(tokenId);
+  }
+
+  private revokeAny(tokenId: string): Promise<void> {
     const pending = this.revoking.get(tokenId);
     if (pending) return pending;
     const work = this.revokeOnce(tokenId).finally(() => this.revoking.delete(tokenId));
@@ -618,7 +634,7 @@ export class ForkCredentialBroker {
   }
 
   private revokeQuietly(tokenId: string): Promise<void> {
-    return this.revoke(tokenId).catch(() => undefined);
+    return this.revokeAny(tokenId).catch(() => undefined);
   }
 
   /** Re-read after every await: a grant deletion may have ended the token meanwhile. */
@@ -774,7 +790,7 @@ export class ForkCredentialBroker {
       for (const token of this.outstanding())
         if (token.kind === kind)
           try {
-            await this.revoke(token.id);
+            await this.revokeAny(token.id);
             revoked.push(token.id);
           } catch {
             failed.push(token.id);

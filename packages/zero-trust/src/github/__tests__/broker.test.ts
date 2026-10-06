@@ -651,9 +651,21 @@ describe('AC9 scoped user tokens are independent credentials', () => {
       repositoryId: FORK_ID,
       via: 'user_scoped',
     });
-    await r.broker.revoke(parentId);
-    expect(ledgerOf(r).tokens.get(child.tokenId)?.status).toBe('live');
     const childValue = [...r.fake.tokens.entries()].find(([, t]) => t.kind === 'user_scoped')?.[0];
+    // Run end: the child's own DELETE fails and the grant cannot be deleted, so the
+    // parent is revoked while the child is still live.
+    r.fake.override(
+      `DELETE /applications/${CLIENT_ID}/token`,
+      { status: 500, json: null },
+      MAX_REVOKE_ATTEMPTS
+    );
+    // Both held candidates (parent, then child) are refused the grant.
+    r.fake.override(`DELETE /applications/${CLIENT_ID}/grant`, { status: 404, json: null }, 2);
+    await expect(r.broker.endRun()).rejects.toBeInstanceOf(CredentialCleanupError);
+    const tokens = ledgerOf(r).tokens;
+    expect(tokens.get(parentId)?.status).toBe('revoked');
+    expect(r.fake.live(user)).toBe(false);
+    expect(tokens.get(child.tokenId)?.status).toBe('live');
     expect(r.fake.live(childValue as string)).toBe(true);
     // Each child is revoked on its own with DELETE /applications/{client_id}/token.
     await r.broker.revoke(child);
@@ -662,6 +674,19 @@ describe('AC9 scoped user tokens are independent credentials', () => {
       path: `/applications/${CLIENT_ID}/token`,
       token: childValue,
     });
+  });
+
+  it('refuses to revoke the unscoped user token outside run end, cancel or kill', async () => {
+    const r = await ready();
+    const user = r.fake.authorizeUser();
+    const parentId = r.broker.registerUserToken(
+      user,
+      new Date(r.clock.ms + 8 * 3600_000).toISOString()
+    );
+    await expect(r.broker.revoke(parentId)).rejects.toEqual(refusal('user_token_run_scoped'));
+    expect(r.fake.calls).toEqual([]);
+    expect(ledgerOf(r).tokens.get(parentId)?.status).toBe('live');
+    expect(ledgerOf(r).reauthorizationRequired).toBe(false);
   });
 
   it('marks a rotated parent only once observed dead; children stay live', async () => {
@@ -1190,5 +1215,38 @@ describe('lead follow-ups: target binding, operator settlement, diagnostics', ()
     await r.broker.killAll();
     expect(failures).toEqual([new Error('disk full')]);
     expect(r.blocked).toHaveLength(0);
+  });
+});
+
+describe('lead follow-ups: kill-switch failure and lost mint writes', () => {
+  it('a failed installation revocation during killAll leaves the report incomplete', async () => {
+    const r = await ready();
+    r.broker.registerUserToken(
+      r.fake.authorizeUser(),
+      new Date(r.clock.ms + 8 * 3600_000).toISOString()
+    );
+    const install = await r.broker.mintForkPush(intentOf(r.intents), { repositoryId: FORK_ID });
+    r.fake.override('DELETE /installation/token', { status: 500, json: null }, MAX_REVOKE_ATTEMPTS);
+    const report = await r.broker.killAll();
+    expect(report.grant.deleted).toBe(true);
+    expect(report.installationTokens).toEqual({ revoked: [], failed: [install.tokenId] });
+    expect(report.complete).toBe(false);
+    expect(ledgerOf(r).tokens.get(install.tokenId)?.status).toBe('live');
+    expect(r.blocked[0]?.outstanding.map((t) => t.id)).toEqual([install.tokenId]);
+  });
+
+  it('revokes a minted token when its journal write fails, then rethrows', async () => {
+    const r = await ready();
+    const append = r.store.journal.append.bind(r.store.journal);
+    vi.spyOn(r.store.journal, 'append').mockImplementation((event) => {
+      if ((event as { type: string }).type === 'token_minted') throw new Error('disk gone');
+      append(event);
+    });
+    await expect(
+      r.broker.mintForkPush(intentOf(r.intents), { repositoryId: FORK_ID })
+    ).rejects.toThrow('disk gone');
+    const issued = [...r.fake.tokens.keys()].find((k) => k.startsWith('ghs_')) as string;
+    expect(r.fake.live(issued)).toBe(false);
+    expect(r.vault.has([...ledgerOf(r).tokens.keys()][0] as string)).toBe(false);
   });
 });
