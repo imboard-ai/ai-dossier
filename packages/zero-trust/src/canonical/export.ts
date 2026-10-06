@@ -54,6 +54,18 @@ export function sourceLimits(overrides: Partial<SourceLimits> = {}): SourceLimit
     if (!Number.isSafeInteger(value) || value <= 0) throw new CanonicalError('limit_exceeded');
   return Object.freeze(result);
 }
+/** Git's HFS+ ignorable set (utf8.c:is_hfs_dotgit); used for comparisons only. */
+function stripHfsIgnorables(value: string): string {
+  return value.replace(/[\u200c-\u200f\u202a-\u202e\u206a-\u206f\ufeff]/gu, '');
+}
+function isGitComponent(part: string): boolean {
+  // NTFS trims ASCII spaces/dots and resolves 8.3 short names. Reject the
+  // combined HFS/NTFS aliases too, without changing the captured path bytes.
+  const name = stripHfsIgnorables(part)
+    .replace(/[ .]+$/u, '')
+    .toLowerCase();
+  return name === '.git' || /^git~[0-9]$/u.test(name);
+}
 /** Reject rather than normalize. Windows separators/drive paths are unsafe on Linux too. */
 export function validateSourcePath(path: string): void {
   if (
@@ -64,9 +76,7 @@ export function validateSourcePath(path: string): void {
     // biome-ignore lint/suspicious/noControlCharactersInRegex: Reject tree/commit delimiters and filesystem controls.
     /[\u0000-\u001f\u007f]/u.test(path) ||
     Buffer.from(path).toString('utf8') !== path ||
-    path
-      .split('/')
-      .some((part) => !part || part === '.' || part === '..' || part.toLowerCase() === '.git')
+    path.split('/').some((part) => !part || part === '.' || part === '..' || isGitComponent(part))
   )
     throw new CanonicalError('invalid_path');
 }
@@ -96,7 +106,11 @@ export function validateManifest(
     validateSourcePath(path);
     if (path.split('/').length > limits.depth) throw new CanonicalError('limit_exceeded');
     // Expanding folds (ß/SS, final sigma) and compatibility aliases are unsafe too.
-    const key = path.normalize('NFKC').toUpperCase().toLowerCase().normalize('NFKC');
+    const key = stripHfsIgnorables(path)
+      .normalize('NFKC')
+      .toUpperCase()
+      .toLowerCase()
+      .normalize('NFKC');
     if (seen.has(key)) throw new CanonicalError('path_collision');
     seen.set(key, path);
     if (!['040000', '100644', '100755'].includes(mode) || typeof bytes !== 'string')
