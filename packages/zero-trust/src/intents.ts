@@ -33,6 +33,8 @@ export interface Intent extends IntentInput {
   readonly attempts: number;
   readonly retryReady: boolean;
   readonly artifactRef: string | null;
+  /** Durable proven absence after the final attempt; never admits a retry. */
+  readonly exhaustedAbsent?: true;
 }
 export type ReconcileResult =
   | { readonly kind: 'found'; readonly artifactRef: string; readonly remoteSha?: string }
@@ -137,7 +139,7 @@ type Event =
   | { v: 1; type: 'run'; run: RunRecord; contributionId: string }
   | { v: 1; type: 'run_update'; run: RunRecord }
   | { v: 1; type: 'intended'; input: IntentInput }
-  | { v: 1; type: 'attempted' | 'ambiguous' | 'absent'; key: string }
+  | { v: 1; type: 'attempted' | 'ambiguous' | 'absent' | 'exhausted'; key: string }
   | { v: 1; type: 'confirmed'; key: string; artifactRef: string; remoteSha?: string }
   | { v: 1; type: 'blocked'; run: RunRecord; reason: WriteBlockReason };
 
@@ -190,7 +192,9 @@ function reduce(state: IntentState | undefined, raw: unknown): IntentState {
   if (raw.type === 'blocked') {
     if (!WRITE_BLOCK_REASONS.includes(raw.reason as WriteBlockReason)) throw new IntentError();
     const run = restoreRun(raw.run);
-    const expected = transitionRun(state.run, ReasonCode.PolicyBlocked, run.updatedAt);
+    const expected = permittedTransitions(state.run.state)[ReasonCode.PolicyBlocked]
+      ? transitionRun(state.run, ReasonCode.PolicyBlocked, run.updatedAt)
+      : state.run;
     if (JSON.stringify(expected) !== JSON.stringify(run)) throw new IntentError();
     return { ...state, run, blockedReason: raw.reason as WriteBlockReason };
   }
@@ -214,7 +218,16 @@ function reduce(state: IntentState | undefined, raw: unknown): IntentState {
     const intent = typeof raw.key === 'string' ? intents.get(raw.key) : undefined;
     if (!intent) throw new IntentError();
     let next: Intent;
+    if (intent.exhaustedAbsent) throw new IntentError();
     switch (raw.type) {
+      case 'exhausted':
+        if (
+          !['attempted', 'ambiguous'].includes(intent.status) ||
+          intent.attempts !== MAX_WRITE_ATTEMPTS
+        )
+          throw new IntentError();
+        next = { ...intent, status: 'ambiguous', retryReady: false, exhaustedAbsent: true };
+        break;
       case 'attempted':
         if (
           !(intent.status === 'intended' || intent.retryReady) ||
@@ -320,10 +333,10 @@ export class IntentDriver {
   private block(reason: WriteBlockReason = 'unknown'): never {
     // Latch before clock/transition/persistence: even a failed hand-off blocks admission.
     this.failed = true;
-    if (permittedTransitions(this.state.run.state)[ReasonCode.PolicyBlocked]) {
-      const run = transitionRun(this.state.run, ReasonCode.PolicyBlocked, this.now());
-      this.persist({ v: 1, type: 'blocked', run, reason });
-    }
+    const run = permittedTransitions(this.state.run.state)[ReasonCode.PolicyBlocked]
+      ? transitionRun(this.state.run, ReasonCode.PolicyBlocked, this.now())
+      : this.state.run;
+    this.persist({ v: 1, type: 'blocked', run, reason });
     throw new WriteBlockedError();
   }
   private confirm(intent: Intent, result: MutationResult): void {
@@ -342,7 +355,7 @@ export class IntentDriver {
   }
   private async reconcileAll(): Promise<void> {
     for (const intent of this.state.intents.values()) {
-      if (!['attempted', 'ambiguous'].includes(intent.status)) continue;
+      if (intent.exhaustedAbsent || !['attempted', 'ambiguous'].includes(intent.status)) continue;
       let result: ReconcileResult;
       try {
         const observed = await this.adapter.reconcile(intent);
@@ -363,7 +376,10 @@ export class IntentDriver {
           this.block('invalid_evidence');
         }
       } else if (result.kind === 'absent') {
-        if (intent.attempts >= MAX_WRITE_ATTEMPTS) this.block('retry_exhausted');
+        if (intent.attempts >= MAX_WRITE_ATTEMPTS) {
+          this.persist({ v: 1, type: 'exhausted', key: intent.key });
+          this.block('retry_exhausted');
+        }
         if (!intent.retryReady) this.persist({ v: 1, type: 'absent', key: intent.key });
       } else this.block('invalid_evidence');
     }

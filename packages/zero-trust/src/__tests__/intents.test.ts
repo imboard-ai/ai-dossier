@@ -542,6 +542,44 @@ const deniedRuns = lifecycleRuns.filter((r) =>
 );
 
 describe('current controller lifecycle admission', () => {
+  it.each([
+    ReasonCode.UserCancelled,
+    ReasonCode.CleanupFailed,
+  ])('durably records exhausted absence after %s without renewing retries', async (reason) => {
+    const dir = directory();
+    let j = journal(dir);
+    const fake = new FakeAdapter();
+    fake.mode = 'fail';
+    const d = driver(j, fake);
+    await expect(d.execute(input)).rejects.toThrow(MutationUncertainError);
+    await expect(d.execute(input)).rejects.toThrow(MutationUncertainError);
+    const current = advance(run, reason);
+    d.observeRun(current);
+    await expect(d.resume()).rejects.toThrow(WriteBlockedError);
+    expect(d.snapshot().blockedReason).toBe('retry_exhausted');
+    expect(d.snapshot().run).toEqual(current);
+    expect(d.snapshot().intents.get(idempotencyKey(input))).toMatchObject({
+      attempts: 2,
+      retryReady: false,
+      exhaustedAbsent: true,
+    });
+    expect(j.read()).toContainEqual({ v: 1, type: 'exhausted', key: idempotencyKey(input) });
+    j.close();
+    j = journal(dir);
+    const restored = driver(j, fake, current);
+    const events = j.read().length;
+    const reads = fake.reads;
+    await restored.resume();
+    await expect(restored.execute(input)).rejects.toThrow(WriteBlockedError);
+    expect(fake.writes).toBe(2);
+    expect(fake.reads).toBe(reads);
+    expect(j.read()).toHaveLength(events);
+    expect(restored.snapshot().blockedReason).toBe('retry_exhausted');
+    expect(replayIntents(j.read())).toEqual(restored.snapshot());
+    expect(() =>
+      replayIntents([...j.read(), { v: 1, type: 'attempted', key: idempotencyKey(input) }])
+    ).toThrow(IntentError);
+  });
   it('covers every lifecycle state', () => {
     expect(new Set(lifecycleRuns.map((r) => r.state))).toEqual(new Set(RUN_STATES));
   });

@@ -126,7 +126,9 @@ matching marker via `parseEngagementMarker`, with contributor/target checks.
 Only one retry is available after proven absence, including across restarts.
 Unknown reconciliation denies all further writes and persists a `PolicyBlocked`
 transition from the current run when that edge is legal. Terminal/cleanup states
-remain unchanged rather than inventing an illegal transition.
+remain unchanged rather than inventing an illegal transition, but the bounded
+reason is still journaled. Proven absence after the final attempt is journaled as
+`exhausted`; it cannot enable a retry or repeatedly reconcile on restart.
 `snapshot().blockedReason` on a persisted block preserves the bounded reason
 (`unknown`, `reconciliation_error`, `invalid_evidence`, `unexpected_remote_sha`,
 or `retry_exhausted`) without storing provider exception text.
