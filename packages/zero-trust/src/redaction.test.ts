@@ -29,6 +29,10 @@ describe('shared credential rejection policy', () => {
     String.raw`Authorization:\ttoken\tx`,
     String.raw`Authorization:\x09token\x20x`,
     String.raw`Authorization:\u0009token\u0020x`,
+    String.raw`Authorization:\040token\040x`,
+    String.raw`Authorization:\011token\012x`,
+    String.raw`Authorization:\x9token\u20x`,
+    String.raw`Authorization:\U00000009token\U00000020x`,
     JSON.stringify({ header: 'Authorization:\ttoken\tx' }),
   ])('rejects synthetic credential %# without echoing input', (credential) => {
     for (const text of [credential, credential.toUpperCase(), `prefix ${credential} suffix`]) {

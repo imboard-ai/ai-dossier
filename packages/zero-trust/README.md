@@ -53,7 +53,8 @@ detection is intentionally conservative; ordinary `task-ready`/`risk-budget` tex
 is allowed. `Bearer` followed by whitespace and `Authorization: token` followed
 by whitespace are rejected (spaces/tabs before the colon, whitespace after it).
 Literal JSON/shell whitespace escapes (`\t`, `\n`, `\r`, `\v`, `\f`, and
-ASCII whitespace in `\xHH`/`\uHHHH` forms) are scanned in a normalized view;
+ASCII whitespace in bounded octal, `\xHH`, `\uHHHH`, and `\UHHHHHHHH`
+forms, including shell short forms) are scanned in a normalized view;
 input is never executed. Rejection raises `SecretRedactionError` containing no
 input. Other malformed facts raise
 `InvalidStatusError`. Pattern detection is a defense-in-depth guard, not proof
