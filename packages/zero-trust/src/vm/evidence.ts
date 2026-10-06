@@ -1,6 +1,12 @@
 /** Host-side evaluation of hostile-fixture evidence (scenario 4, canary design).
- * Fixture reports are untrusted guest output: they can only make the verdict
- * worse. Canary leaks and listener connections are measured on the host. */
+ *
+ * Trust model: everything a fixture reports about itself (records, outcomes,
+ * coverage) is untrusted guest output. A compromised guest can lie, so reports
+ * can only make the verdict worse — a malformed report, a non-denied outcome or
+ * missing coverage fails the gate, but a clean report proves nothing alone.
+ * The real gate is what the host measures itself: canary values (raw, base64,
+ * hex) absent from every byte the guest returned, zero connections on the
+ * planted host listeners, and host-side broker rejections. */
 
 export const ATTACK_CATEGORIES = Object.freeze([
   'host-env',
@@ -39,6 +45,8 @@ export interface BoundaryInput {
   readonly listenerConnections: number;
   /** Host-side broker-abuse checks (request rejected before reaching the guest). */
   readonly brokerChecks: readonly { readonly attempt: string; readonly rejected: boolean }[];
+  /** Marker lines that failed to parse (`parseReports().malformed`); any is a failure. */
+  readonly malformedReports: number;
   readonly requiredCategories?: readonly string[];
 }
 
@@ -88,10 +96,32 @@ export function parseReport(value: unknown): ProbeReport {
   return v;
 }
 
+/** Encodings of a canary to look for in guest output: raw, hex (both cases) and
+ * the base64 text of the canary at each of the three byte alignments it can
+ * take inside a longer encoded blob (only characters fully determined by the
+ * canary bytes are kept, so the fragment matches wherever the canary sits).
+ * Other transforms (URL-safe base64, compression, splitting, encryption) are
+ * not detected; that limit is recorded in the decision record. */
+export function canaryForms(canary: string): string[] {
+  const bytes = Buffer.from(canary, 'utf8');
+  const hex = bytes.toString('hex');
+  const forms = new Set([canary, hex, hex.toUpperCase()]);
+  for (let pad = 0; pad < 3; pad++) {
+    const encoded = Buffer.concat([Buffer.alloc(pad), bytes]).toString('base64');
+    const first = Math.ceil((8 * pad) / 6);
+    const end = Math.floor((8 * (pad + bytes.length)) / 6);
+    forms.add(encoded.slice(first, end));
+  }
+  return [...forms];
+}
+
 export function evaluateBoundary(input: BoundaryInput): BoundaryEvidence {
   const violations: string[] = [];
   const coverage: Record<string, number> = {};
   let attempts = 0;
+  // A report the host cannot parse is treated as a hidden attempt, never skipped.
+  if (!Number.isSafeInteger(input.malformedReports) || input.malformedReports !== 0)
+    violations.push(`malformed probe reports: ${input.malformedReports}`);
   for (const report of input.reports) {
     for (const record of report.records) {
       attempts++;
@@ -116,7 +146,7 @@ export function evaluateBoundary(input: BoundaryInput): BoundaryEvidence {
   if (input.canaries.some((c) => c.length < 16))
     violations.push('canary too short to be meaningful');
   for (const canary of input.canaries)
-    if (input.guestOutputs.some((out) => out.includes(canary)))
+    if (canaryForms(canary).some((form) => input.guestOutputs.some((out) => out.includes(form))))
       violations.push('canary value leaked into guest output');
   if (input.listenerConnections !== 0)
     violations.push(`host listeners accepted ${input.listenerConnections} connection(s)`);

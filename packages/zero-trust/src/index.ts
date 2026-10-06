@@ -17,6 +17,7 @@ export * from './vm/adapter';
 export * from './vm/bake';
 export * from './vm/broker';
 export * from './vm/cloud-init';
+export * from './vm/evidence';
 export * from './vm/host';
 export * from './vm/local-qemu';
 export * from './vm/profile';
