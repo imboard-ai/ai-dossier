@@ -190,6 +190,38 @@ describe('teardownVm — bounded cleanup (AC3 / scenario 20)', () => {
     expect(events.every((e) => e.leftoverPaths[0] === 'unknown:vm-1')).toBe(true);
   });
 
+  it('journals the error class as the cause, never its message', async () => {
+    let calls = 0;
+    const outcome = await teardownVm(
+      {
+        destroy: async () => {
+          calls++;
+          if (calls === 1) throw new TypeError('/secret/path/in/message');
+          if (calls === 2) throw new VmCleanupError([7], ['/x'], 'vm-1');
+          throw 'a bare string';
+        },
+      },
+      HANDLE,
+      runIn('shipping'),
+      { journal, now, retryDelayMs: 0, sleep: async () => {} }
+    );
+    expect(outcome.kind).toBe('blocked_cleanup');
+    const failures = (journal.read() as { type: string; cause?: string }[]).filter(
+      (e) => e.type === 'vm_cleanup_attempt_failed'
+    );
+    expect(failures.map((e) => e.cause)).toEqual(['TypeError', 'VmCleanupError', 'string']);
+    expect(JSON.stringify(failures)).not.toContain('/secret/path');
+  });
+
+  it('names the VM in a normalized cleanup error', async () => {
+    const error = new VmCleanupError([], ['unknown:vm-1'], 'vm-1');
+    expect(error.vmId).toBe('vm-1');
+    expect(error.message).toContain('for vm-1');
+    expect(new VmCleanupError([1], []).message).toBe(
+      'VM teardown incomplete: 1 process(es) [1], 0 path(s) [] left behind'
+    );
+  });
+
   it('uses the default timer-based sleep when none is injected', async () => {
     let calls = 0;
     const outcome = await teardownVm(

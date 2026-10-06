@@ -1,5 +1,5 @@
 import { Ed25519Verifier, isSupportedPublicKey, publicKeysMatch } from '@ai-dossier/core';
-import { type Intent, idempotencyKey } from '../intents';
+import { type Intent, idempotencyKey, MAX_ATTEMPT_SEQUENCE } from '../intents';
 import { receiptDigest, type SignedReceipt } from './issue';
 import type { ReceiptNonceStore } from './nonces';
 import {
@@ -133,7 +133,7 @@ export async function authorizeShipping(
     intent.candidateSha !== receipt.candidateSha ||
     !Number.isSafeInteger(intent.attempts) ||
     intent.attempts < 1 ||
-    intent.attempts > 2
+    intent.attempts > MAX_ATTEMPT_SEQUENCE
   )
     throw new ReceiptError('unjournaled_operation');
   const grant = receipt.permittedShippingOperations.find(

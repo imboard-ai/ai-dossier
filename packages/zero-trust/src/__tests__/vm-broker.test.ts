@@ -681,3 +681,37 @@ describe('BrokerClient put/get', () => {
     await rejectsCode(client.get('a', 1000), 'stream_closed');
   });
 });
+
+describe('BrokerClient taint reporting', () => {
+  it('reports the taint code once, however often the client fails afterwards', async () => {
+    const guest = guestPair();
+    const codes: string[] = [];
+    const client = new BrokerClient(guest.stream, (code) => codes.push(code));
+    clients.push(client);
+    const ready = client.waitReady(1000);
+    await guest.next();
+    guest.send({ v: 1, id: 7, hello: BROKER_PROTOCOL, scope: 'container' });
+    const first = await ready.then(
+      () => null,
+      (e: BrokerError) => e.code
+    );
+    expect(first).toBeTruthy();
+    client.taint('later');
+    client.close();
+    await expect.poll(() => guest.stream.destroyed).toBe(true);
+    expect(codes).toEqual([first]);
+    expect(client.tainted?.code).toBe(first);
+  });
+
+  it('stays tainted when the taint listener throws', async () => {
+    const guest = guestPair();
+    const client = new BrokerClient(guest.stream, () => {
+      throw new Error('journal unavailable');
+    });
+    clients.push(client);
+    const ready = client.waitReady(1000);
+    client.taint('stream_error');
+    await rejectsCode(ready, 'stream_error');
+    await rejectsCode(client.get('a', 1000), 'stream_error');
+  });
+});

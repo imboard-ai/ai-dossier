@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { publishPrivate, readPrivate, syncDirectory } from '../durable-fs';
+import { MAX_ATTEMPT_SEQUENCE } from '../intents';
 import { Journal } from '../journal';
 import { recordLockReclaim, StoreLockedError, withStoreLock } from '../lock';
 import { isTailRecovery } from '../recovery';
@@ -161,7 +162,7 @@ function validateRow(raw: unknown): asserts raw is NonceConsumption {
     !/^[a-f0-9]{64}$/.test(row.receiptDigest) ||
     !Number.isSafeInteger(row.attempt) ||
     row.attempt < 1 ||
-    row.attempt > 2
+    row.attempt > MAX_ATTEMPT_SEQUENCE
   )
     throw new ReceiptError('corrupt_store');
 }

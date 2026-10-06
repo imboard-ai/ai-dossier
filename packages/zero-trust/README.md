@@ -163,7 +163,13 @@ nothing; `resume()`/`execute()` rethrow it and a later resume reads again. Only 
 evidence blocks. Likewise a `mutate` that throws `MutationDeferredError` (it proved nothing
 was sent and no single-use authority was consumed, e.g. a rate-limited preflight or a
 busy nonce-store lock) gets its attempt withdrawn (`withdrawn` event), so transient
-failures never spend the one retry.
+failures never spend the one retry. A `mutate` that proved nothing was written but whose single-use authority
+for the attempt is spent (a consumed receipt nonce, a journaled token mint) throws
+`MutationVoidedError`: the driver journals `voided` with its reason. The attempt number is
+used up, so the next attempt needs a fresh receipt, but the retry budget is untouched. At
+most `MAX_VOIDED_ATTEMPTS` (3) attempts are voided; past that a void counts like any
+ambiguous attempt, so attempt numbers stay within `MAX_ATTEMPT_SEQUENCE` (5), which the
+receipt and nonce store accept.
 Every intent and attempt is fsynced before the adapter runs;
 confirmation is fsynced before success returns. File and ancestor directory entries
 are fsynced on open. Write uncertainty poisons the live driver; recover from disk
@@ -559,7 +565,8 @@ QEMU flags, network design, measured overhead and residual risks:
   unsupported OS or architecture, missing QEMU tools, or a forced `kvm` without `/dev/kvm`.
   There is no host-container fallback.
 - `LocalQemuAdapter` implements the provider-neutral `VmAdapter` (create, exec, putFile,
-  getFile, destroy, listByRun) plus the `killAll` incident kill switch. QEMU runs rootless with
+  getFile, destroy, listByRun) plus the `killAll` incident kill switch, `reconcile` and
+  `releaseKillSwitch`. QEMU runs rootless with
   `restrict=on` user-mode networking, no forwards and no shared folders; the broker
   (`BrokerClient`, `vm-guest/agent.py`) is the only data path.
 - `teardownVm` caps deletion at three attempts, then moves the run to `blocked_cleanup` and
@@ -583,10 +590,12 @@ npm run build
 node scripts/zt-vm.mjs bake  --profile-dir <dir> --cache-dir <dir> [--accel auto|kvm|tcg]
 node scripts/zt-vm.mjs smoke --profile-dir <dir> --state-dir <dir> [--accel ...] [--timings-out f]
 node scripts/zt-vm.mjs kill-all --state-dir <dir> --reason <text>   # exit 2: a VM was left behind
+node scripts/zt-vm.mjs reconcile --state-dir <dir> [--destroy]      # orphans; --destroy after kill-all
+node scripts/zt-vm.mjs release --state-dir <dir> --reason <text>    # lift the kill switch
 ZT_VM_E2E=1 ZT_PROFILE_DIR=<abs dir> npx vitest run src/__tests__/vm-gate.e2e.test.ts
 ```
 
-The kill switch stays engaged until an operator deletes `<state-dir>/KILL_SWITCH`.
+The kill switch stays engaged until `release` lifts it, which is refused while any VM remains.
 
 The hostile fixtures live in `fixtures/hostile/`; `.github/workflows/zero-trust-vm.yml` runs
 the gate under KVM, plus a TCG smoke test, on every PR touching this package.
@@ -695,7 +704,8 @@ or, when the mint response was journaled, `settleExpired` after its native expir
    policy) blocks with `authorization_refused` before any token is minted. A failed
    `authorize` callback or a nonce-store refusal raised before the store appends
    withdraws the attempt; a failed append leaves it ambiguous. A retry needs a fresh
-   receipt.
+   receipt. If the broker never hands the credential to git (the mint failed, was refused
+   or was cancelled), nothing can have been pushed: the attempt is voided, not counted.
 3. `push_intended` (branch, candidate, expected remote SHA) is appended to the push
    ledger, its own `Journal`, scoped to the fork's repository id.
 4. Inside `broker.withForkPush`, git pushes exactly the candidate from a fresh

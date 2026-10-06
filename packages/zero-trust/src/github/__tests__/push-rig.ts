@@ -28,7 +28,7 @@ export const FORK = Object.freeze({ repositoryId: FORK_ID, owner: OWNER, repo: '
 export const BRANCH = 'fix-1066';
 export const TARGET = `fork:${FORK_ID}:branch:${BRANCH}`;
 export const DIGEST = 'c'.repeat(64);
-const MINT = `POST /app/installations/${INSTALLATION_ID}/access_tokens`;
+export const MINT = `POST /app/installations/${INSTALLATION_ID}/access_tokens`;
 const iso = () => new Date().toISOString();
 const author = Object.freeze({
   login: OWNER,
