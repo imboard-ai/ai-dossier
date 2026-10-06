@@ -754,7 +754,6 @@ export class LocalQemuAdapter implements VmAdapter {
     const vmDir = path.join(this.vmsDir, handle.vmId);
     this.closeChannel(handle.vmId, handle.runId, 'destroy');
     const leftoverPids: number[] = [];
-    this.closeChannel(handle.vmId, handle.runId, 'destroy');
     const { pid, ownership } = this.resolveProcess(handle.vmId, record);
     if (ownership === 'unknown' && pid) leftoverPids.push(pid);
     if (ownership === 'owned' && pid && (await this.stop(pid))) leftoverPids.push(pid);
