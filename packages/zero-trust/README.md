@@ -466,3 +466,50 @@ claim is limited to the exact candidate and is not proof of patch correctness.
 
 Fixtures with known bugs live in `fixtures/ecosystem/`. CI self-checks them
 (`scripts/zero-trust-fixtures-selfcheck.mjs`); that is the only host-side install/test run.
+
+## Fork-side GitHub credential broker
+
+`src/github/` is the only code that holds GitHub credentials. It is controller-only:
+the package index does not export it, and `src/github/__tests__/isolation.test.ts`
+fails if any module outside `src/github/` (including the worker broker) can reach it
+through an import chain. Import it by path from trusted controller code.
+
+Under the hybrid hand-off ([decision record](../../docs/features/zero-trust-full-cycle/decisions/github-credentials.md))
+the broker performs fork pushes only. Upstream comments and PRs are contributor
+hand-offs. `ForkCredentialBroker` has a typed operation API and no generic token call:
+
+- `recover()` must run first. It revokes every journaled token without a recorded
+  revocation before any admission. Values held in process memory (`TokenVault`) are
+  revoked one by one. User-chain tokens whose values were lost are ended by deleting
+  the grant with a live user token. An installation token whose value was lost cannot be
+  revoked through any API, so the broker enters `blocked_cleanup` and reports its id and
+  native expiry for the operator. It never records that token as revoked.
+- `mintForkPush(intent, { repositoryId, via })` mints one token for one journaled
+  `push_branch` intent attempt. The token is narrowed to the verified fork's repository
+  id with `contents:write`, as an installation token (default) or a scoped user token
+  minted from the unscoped user token. A different repository, an unjournaled or
+  non-push intent, a second mint for the same attempt, or scoping from a scoped token is
+  refused before any network call. A token GitHub returns broader than requested is
+  revoked and refused.
+- `withForkPush(intent, target, operation, cancel?)` hands the operation a
+  `GitPushCredential` exactly once. The credential is a git environment
+  (`http.extraheader` via `GIT_CONFIG_*`, credential helper and global/system config off)
+  that redacts itself in JSON and `inspect`. The token is revoked on success, failure,
+  throw and cancellation. A timer also revokes it 15 minutes after the mint request,
+  even mid-operation. GitHub's 1 h / 8 h lifetimes are recorded but never relied on.
+- Revocation is retried up to three times. Each attempt is followed by a liveness read
+  that must return 401. Final failure journals the attempts, closes admission, and calls
+  `onCleanupBlocked` so the controller moves the run to `blocked_cleanup`.
+- `endRun()` revokes scoped children individually, then the unscoped user token last.
+  Revoking the user token ends its refresh chain, so the journal records that the next
+  run needs a new contributor authorization. Revoking or rotating a parent never counts
+  as revoking a child.
+- `killAll()` closes admission, deletes the contributor's grant with an unexpired,
+  unrevoked user-chain token *before* revoking anything else, then revokes installation
+  tokens. A 404 from the grant endpoint means "not deleted". With no live user token,
+  the report says the grant needs a contributor re-authorization or a manual revoke.
+
+The token journal (`token-journal.ts`) uses a `Journal` in its own controller
+directory. Each event is replay-validated and scanned with `assertNoSecrets`, and token
+values are never written. Tests replay the gate-3 probe's recorded status codes through
+an in-memory fake (`__tests__/github-fake.ts`), so CI makes no GitHub calls.
