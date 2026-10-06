@@ -92,6 +92,7 @@ export type UnsupportedDetail =
   | 'kvm_unavailable'
   | 'profile_image_missing'
   | 'profile_image_mismatch'
+  | 'profile_image_untrusted'
   | 'socket_path_too_long'
   | 'kill_switch_engaged';
 
@@ -109,10 +110,12 @@ export class UnsupportedEnvironmentError extends Error {
 export class VmCleanupError extends Error {
   constructor(
     readonly leftoverPids: readonly number[],
-    readonly leftoverPaths: readonly string[]
+    readonly leftoverPaths: readonly string[],
+    /** The VM this failure belongs to, when known. */
+    readonly vmId?: string
   ) {
     super(
-      `VM teardown incomplete: ${leftoverPids.length} process(es) [${leftoverPids.join(', ')}], ` +
+      `VM teardown incomplete${vmId ? ` for ${vmId}` : ''}: ${leftoverPids.length} process(es) [${leftoverPids.join(', ')}], ` +
         `${leftoverPaths.length} path(s) [${leftoverPaths.join(', ')}] left behind`
     );
     this.name = 'VmCleanupError';

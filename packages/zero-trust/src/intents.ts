@@ -33,6 +33,14 @@ const isContributorConfirmed = (kind: OperationKind) =>
   (CONTRIBUTOR_CONFIRMED_OPERATIONS as readonly OperationKind[]).includes(kind);
 /** Initial attempt plus one retry after proven absence. */
 export const MAX_WRITE_ATTEMPTS = 2;
+/** Voided attempts (proven to have written nothing, but with their single-use authority
+ * spent) do not count against MAX_WRITE_ATTEMPTS. Attempt numbers stay unique, so the
+ * sequence is bounded separately. */
+export const MAX_VOIDED_ATTEMPTS = 3;
+export const MAX_ATTEMPT_SEQUENCE = MAX_WRITE_ATTEMPTS + MAX_VOIDED_ATTEMPTS;
+/** Attempts that count against the retry budget. */
+export const countedAttempts = (intent: Pick<Intent, 'attempts' | 'voided'>): number =>
+  intent.attempts - (intent.voided ?? 0);
 export interface IntentInput {
   readonly contributionId: string;
   readonly target: string;
@@ -48,6 +56,8 @@ export interface Intent extends IntentInput {
   readonly artifactRef: string | null;
   /** Durable proven absence after the final attempt; never admits a retry. */
   readonly exhaustedAbsent?: true;
+  /** Attempts voided by the adapter: nothing written, their attempt number used up. */
+  readonly voided?: number;
 }
 export type ReconcileResult =
   | { readonly kind: 'found'; readonly artifactRef: string; readonly remoteSha?: string }
@@ -135,6 +145,22 @@ export class MutationDeferredError extends Error {
     this.name = 'MutationDeferredError';
   }
 }
+/** Thrown by `mutate` when it proved nothing was written but its single-use authority for
+ * this attempt (e.g. a consumed receipt nonce, a journaled token mint) is spent: the driver
+ * voids the attempt. The retry budget is untouched; the next attempt has a new number and
+ * needs fresh authority. `reason` is a short secret-free code. */
+export class MutationVoidedError extends Error {
+  constructor(
+    readonly reason: string,
+    options?: ErrorOptions
+  ) {
+    super(
+      `Zero-trust write voided (${reason}); nothing was written, fresh authority required`,
+      options
+    );
+    this.name = 'MutationVoidedError';
+  }
+}
 export class MutationUncertainError extends Error {
   /** `cause` is the adapter's own error, for diagnostics. */
   constructor(options?: ErrorOptions) {
@@ -203,6 +229,7 @@ type Event =
   | { v: 1; type: 'run_update'; run: RunRecord }
   | { v: 1; type: 'intended'; input: IntentInput }
   | { v: 1; type: 'attempted' | 'ambiguous' | 'absent' | 'exhausted' | 'withdrawn'; key: string }
+  | { v: 1; type: 'voided'; key: string; reason: string }
   | { v: 1; type: 'confirmed'; key: string; artifactRef: string; remoteSha?: string }
   | { v: 1; type: 'blocked'; run: RunRecord; reason: WriteBlockReason };
 
@@ -292,7 +319,7 @@ function reduce(state: IntentState | undefined, raw: unknown): IntentState {
       case 'exhausted':
         if (
           !['attempted', 'ambiguous'].includes(intent.status) ||
-          intent.attempts !== MAX_WRITE_ATTEMPTS
+          countedAttempts(intent) !== MAX_WRITE_ATTEMPTS
         )
           throw new IntentError();
         next = { ...intent, status: 'ambiguous', retryReady: false, exhaustedAbsent: true };
@@ -300,7 +327,8 @@ function reduce(state: IntentState | undefined, raw: unknown): IntentState {
       case 'attempted':
         if (
           !(intent.status === 'intended' || intent.retryReady) ||
-          intent.attempts >= MAX_WRITE_ATTEMPTS
+          countedAttempts(intent) >= MAX_WRITE_ATTEMPTS ||
+          intent.attempts >= MAX_ATTEMPT_SEQUENCE
         )
           throw new IntentError();
         next = { ...intent, status: 'attempted', attempts: intent.attempts + 1, retryReady: false };
@@ -308,6 +336,23 @@ function reduce(state: IntentState | undefined, raw: unknown): IntentState {
       case 'ambiguous':
         if (intent.status !== 'attempted') throw new IntentError();
         next = { ...intent, status: 'ambiguous' };
+        break;
+      case 'voided':
+        // Nothing was written, but the attempt number and its authority are spent: the
+        // next attempt needs a fresh number (and receipt) without spending the budget.
+        if (
+          intent.status !== 'attempted' ||
+          (intent.voided ?? 0) >= MAX_VOIDED_ATTEMPTS ||
+          typeof raw.reason !== 'string' ||
+          !/^[a-z_:0-9]{1,64}$/u.test(raw.reason)
+        )
+          throw new IntentError();
+        next = {
+          ...intent,
+          status: 'ambiguous',
+          retryReady: true,
+          voided: (intent.voided ?? 0) + 1,
+        };
         break;
       case 'withdrawn':
         // Undo the attempt exactly: back to `intended`, or to the admitted retry.
@@ -320,7 +365,7 @@ function reduce(state: IntentState | undefined, raw: unknown): IntentState {
       case 'absent':
         if (
           !['attempted', 'ambiguous'].includes(intent.status) ||
-          intent.attempts >= MAX_WRITE_ATTEMPTS
+          countedAttempts(intent) >= MAX_WRITE_ATTEMPTS
         )
           throw new IntentError();
         next = { ...intent, status: 'ambiguous', retryReady: true };
@@ -464,7 +509,7 @@ export class IntentDriver {
           this.block('invalid_evidence');
         }
       } else if (result.kind === 'absent') {
-        if (intent.attempts >= MAX_WRITE_ATTEMPTS) {
+        if (countedAttempts(intent) >= MAX_WRITE_ATTEMPTS) {
           this.persist({ v: 1, type: 'exhausted', key: intent.key });
           this.block('retry_exhausted');
         }
@@ -504,6 +549,11 @@ export class IntentDriver {
         if (error instanceof WriteRefusedError) this.block(error.reason, error);
         if (error instanceof MutationDeferredError) {
           this.persist({ v: 1, type: 'withdrawn', key });
+          throw error;
+        }
+        // Past the void allowance, a voided attempt counts like any ambiguous one.
+        if (error instanceof MutationVoidedError && (intent.voided ?? 0) < MAX_VOIDED_ATTEMPTS) {
+          this.persist({ v: 1, type: 'voided', key, reason: error.reason });
           throw error;
         }
         this.persist({ v: 1, type: 'ambiguous', key });
