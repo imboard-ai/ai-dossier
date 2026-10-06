@@ -3,6 +3,8 @@
 //   zt-vm.mjs bake  --profile-dir D --cache-dir C [--accel auto|kvm|tcg]
 //   zt-vm.mjs smoke --profile-dir D --state-dir S [--accel auto|kvm|tcg] [--timings-out F]
 //   zt-vm.mjs kill-all --state-dir S --reason R   (exit 2: a VM was left behind)
+//   zt-vm.mjs reconcile --state-dir S [--destroy]  (exit 2: something is or was left behind)
+//   zt-vm.mjs release --state-dir S --reason R    (lifts the kill switch once no VM remains)
 //   zt-vm.mjs diagnose --profile-dir D --out-dir O [--accel kvm|tcg] [--scope container|vm-root]
 //     boots the baked image once with the run-VM arguments plus a serial log; no fixture code runs
 import { execFileSync, spawn } from 'node:child_process';
@@ -24,6 +26,31 @@ function arg(name, fallback) {
 }
 
 const log = (m) => console.error(`[zt-vm] ${m}`);
+
+// Teardown commands need neither QEMU nor a current profile: only the state dir.
+// Their lifecycle events go to the VM journal under it (not a run's intent journal).
+function teardownAdapter() {
+  const stateDir = arg('state-dir');
+  return new zt.LocalQemuAdapter({
+    profileDir: arg('profile-dir', '.'),
+    stateDir,
+    verifyImage: false,
+    journal: new zt.Journal(path.join(stateDir, 'vm-journal')),
+  });
+}
+
+/** Cleanup errors as plain objects, so JSON output keeps their message. */
+function printable(result) {
+  return {
+    ...result,
+    failed: result.failed.map((e) => ({
+      vmId: e.vmId ?? null,
+      leftoverPids: e.leftoverPids,
+      leftoverPaths: e.leftoverPaths,
+      message: e.message,
+    })),
+  };
+}
 const command = process.argv[2];
 
 try {
@@ -72,15 +99,23 @@ try {
     if (out) fs.writeFileSync(out, `${JSON.stringify(timings, null, 2)}\n`);
     console.log(JSON.stringify(timings, null, 2));
   } else if (command === 'kill-all') {
-    // Needs neither QEMU nor a current profile: only the VM records in the state dir.
-    const adapter = new zt.LocalQemuAdapter({
-      profileDir: arg('profile-dir', '.'),
-      stateDir: arg('state-dir'),
-      verifyImage: false,
-    });
-    const result = await adapter.killAll(arg('reason'));
-    console.log(JSON.stringify(result, null, 2));
+    const result = await teardownAdapter().killAll(arg('reason'));
+    console.log(JSON.stringify(printable(result), null, 2));
     if (result.failed.length) process.exitCode = 2;
+  } else if (command === 'reconcile') {
+    const destroy = process.argv.includes('--destroy');
+    const report = await teardownAdapter().reconcile({ destroy });
+    console.log(JSON.stringify(printable(report), null, 2));
+    const leftover = destroy
+      ? report.failed.length
+      : report.staleDirs.length +
+        report.unverifiedDirs.length +
+        report.untrustedDirs.length +
+        report.orphanProcesses.length;
+    if (leftover) process.exitCode = 2;
+  } else if (command === 'release') {
+    const released = teardownAdapter().releaseKillSwitch(arg('reason'));
+    console.log(released ? 'kill switch released' : 'kill switch was not engaged');
   } else if (command === 'diagnose') {
     const profileDir = arg('profile-dir');
     const outDir = arg('out-dir');
@@ -116,7 +151,7 @@ try {
     console.log(reply);
     qemu.kill('SIGKILL');
   } else {
-    console.error('usage: zt-vm.mjs bake|smoke|kill-all|diagnose ...');
+    console.error('usage: zt-vm.mjs bake|smoke|kill-all|reconcile|release|diagnose ...');
     process.exitCode = 64;
   }
 } catch (error) {
