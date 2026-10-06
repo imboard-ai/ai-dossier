@@ -132,7 +132,13 @@ export interface BrokerOptions {
   readonly sleep?: (ms: number) => Promise<void>;
   /** Controller hook: transition the run with `ReasonCode.CleanupFailed`. */
   readonly onCleanupBlocked?: (report: CleanupReport) => void;
+  /** Called once when a journal write fails and the broker latches closed; the error
+   * is the store's own (disk, permissions), never a GitHub failure. */
+  readonly onJournalFailed?: (error: unknown) => void;
 }
+
+/** Shipping targets name the fork by id: `fork:<repositoryId>:branch:<name>`. */
+const FORK_TARGET = /^fork:([0-9]{1,20}):branch:./u;
 
 const CREDENTIAL_REDACTED = '[GitPushCredential redacted]';
 
@@ -198,8 +204,9 @@ export interface KillSwitchReport {
     | { readonly deleted: true /** Token id the deletion was made with. */; readonly via: string }
     | { readonly deleted: false; readonly action: 'contributor_reauthorization_or_manual_revoke' };
   readonly installationTokens: { readonly revoked: string[]; readonly failed: string[] };
-  /** Scoped children revoked one by one because the grant could not be deleted. */
+  /** User-chain tokens revoked one by one because the grant could not be deleted. */
   readonly scopedTokens: { readonly revoked: string[]; readonly failed: string[] };
+  readonly userTokens: { readonly revoked: string[]; readonly failed: string[] };
   /** True only when every revocation was observed. */
   readonly complete: boolean;
 }
@@ -279,6 +286,12 @@ export class ForkCredentialBroker {
     try {
       this.journal.record(event);
     } catch (error) {
+      if (!this.failed)
+        try {
+          this.options.onJournalFailed?.(error);
+        } catch {
+          // A hook failure cannot reopen admission.
+        }
       this.failed = true;
       throw error;
     }
@@ -393,6 +406,9 @@ export class ForkCredentialBroker {
       journaled.attempts !== intent.attempts
     )
       throw new CredentialBrokerError('invalid_intent');
+    // The journaled target must name the same fork the token is narrowed to.
+    if (Number(FORK_TARGET.exec(journaled.target)?.[1]) !== this.options.fork.repositoryId)
+      throw new CredentialBrokerError('repository_not_fork');
     if (hasTokenFor(this.ledger.tokens, journaled.key, journaled.attempts))
       throw new CredentialBrokerError('duplicate_mint');
     return journaled;
@@ -450,6 +466,7 @@ export class ForkCredentialBroker {
     this.vault.set(tokenId, token.value);
     this.record({ v: 1, type: 'token_minted', id: tokenId, expiresAt: token.expiresAt });
     if (!this.narrowedAsRequested(via, token)) {
+      this.record({ v: 1, type: 'token_overbroad', id: tokenId, at: this.iso() });
       await this.revoke(tokenId);
       throw new CredentialBrokerError('overbroad_token');
     }
@@ -496,18 +513,19 @@ export class ForkCredentialBroker {
         this.record({ v: 1, type: 'token_mint_failed', id: tokenId, status: NO_RESPONSE });
         throw new CredentialBrokerError('app_credentials_invalid');
       }
-      return this.uncertainMint();
+      return this.uncertainMint(tokenId, NO_RESPONSE);
     }
     if (result.kind === 'refused' && result.status < 500) {
       this.record({ v: 1, type: 'token_mint_failed', id: tokenId, status: result.status });
       throw new CredentialBrokerError('mint_refused');
     }
     // Outcome unknown (5xx, malformed 2xx): GitHub may hold a live token we never saw.
-    if (result.kind !== 'issued') return this.uncertainMint();
+    if (result.kind !== 'issued') return this.uncertainMint(tokenId, result.status);
     return result.token;
   }
 
-  private uncertainMint(): never {
+  private uncertainMint(tokenId: string, status: number): never {
+    this.record({ v: 1, type: 'token_mint_uncertain', id: tokenId, status });
     const report = this.unresolved();
     if (report) this.blockCleanup(report);
     throw new CredentialBrokerError('mint_uncertain');
@@ -721,8 +739,8 @@ export class ForkCredentialBroker {
   }
 
   /** Run end or cancellation (PRD §5.8): children first, the unscoped user token last. */
-  async endRun(): Promise<void> {
-    this.closeAdmissions('run_ended');
+  async endRun(reason: 'completed' | 'cancelled' = 'completed'): Promise<void> {
+    this.closeAdmissions('run_ended', reason);
     await this.settleMints();
     if (this.outstanding().some((t) => isUserChain(t.kind) && !this.vault.has(t.id)))
       await this.deleteGrantWithLiveToken();
@@ -763,9 +781,11 @@ export class ForkCredentialBroker {
           }
       return { revoked, failed };
     };
-    // Without the grant, end the children one by one; the parent stays so a later
-    // kill switch can still delete the grant with it.
-    const scopedTokens = via ? { revoked: [], failed: [] } : await sweep('user_scoped');
+    // Without the grant, end every tracked user-chain token one by one: children
+    // first (they outlive their parent), then the unscoped user token.
+    const none = { revoked: [], failed: [] };
+    const scopedTokens = via ? none : await sweep('user_scoped');
+    const userTokens = via ? none : await sweep('user');
     const installationTokens = await sweep('installation');
     const report = this.unresolved();
     if (report) this.blockCleanup(report);
@@ -777,8 +797,34 @@ export class ForkCredentialBroker {
       grant,
       installationTokens,
       scopedTokens,
+      userTokens,
+      // Without the grant, an untracked or value-lost token of it may still live.
       complete: Boolean(via) && installationTokens.failed.length === 0 && !report,
     });
+  }
+
+  /** The owner confirmed by hand (e.g. GitHub settings) that this token is dead.
+   * Returns what is still unresolved. */
+  resolveByOperator(tokenId: string): CleanupReport | undefined {
+    this.record({ v: 1, type: 'operator_resolved', id: tokenId, at: this.iso() });
+    this.vault.delete(tokenId);
+    return this.unresolved();
+  }
+
+  /** Settles unresolved tokens whose JOURNALED native expiry has passed. A token
+   * without a recorded `expiresAt` is never settled by time. */
+  settleExpired(): CleanupReport | undefined {
+    const now = this.now();
+    for (const token of this.tokens())
+      if (
+        UNRESOLVED.includes(token.status) &&
+        token.expiresAt !== null &&
+        Date.parse(token.expiresAt) <= now
+      ) {
+        this.record({ v: 1, type: 'token_expired', id: token.id, at: this.iso(now) });
+        this.vault.delete(token.id);
+      }
+    return this.unresolved();
   }
 
   /** Stops this instance's timers and writes, so a successor can take over the journal. */
@@ -791,10 +837,16 @@ export class ForkCredentialBroker {
     this.closed = true;
   }
 
-  private closeAdmissions(reason: AdmissionCloser): void {
+  private closeAdmissions(reason: AdmissionCloser, detail?: 'completed' | 'cancelled'): void {
     if (this.failed || this.ledger.admissionsClosed) return;
     try {
-      this.record({ v: 1, type: 'admissions_disabled', reason, at: this.iso() });
+      this.record({
+        v: 1,
+        type: 'admissions_disabled',
+        reason,
+        ...(detail ? { detail } : {}),
+        at: this.iso(),
+      });
     } catch {
       // `record` already latched `failed`, which closes admission in memory.
     }

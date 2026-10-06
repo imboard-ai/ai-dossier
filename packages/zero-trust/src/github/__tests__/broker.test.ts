@@ -40,7 +40,7 @@ const shipping = [
 const sha = 'b'.repeat(40);
 const pushInput: IntentInput = {
   contributionId: 'c-1',
-  target: `fork:${FORK_ID}/refs/heads/fix`,
+  target: `fork:${FORK_ID}:branch:fix`,
   operationKind: 'push_branch',
   candidateSha: sha,
 };
@@ -141,6 +141,7 @@ function rig(
     now: clock.now,
     setTimer: clock.setTimer,
     sleep: async () => undefined,
+    onJournalFailed: overrides.onJournalFailed,
     onCleanupBlocked: (report) => {
       blocked.push(report);
       overrides.onCleanupBlocked?.(report);
@@ -585,6 +586,7 @@ describe('AC6/AC12 kill switch', () => {
       grant: { deleted: true, via: expect.any(String) },
       installationTokens: { revoked: [install.tokenId], failed: [] },
       scopedTokens: { revoked: [], failed: [] },
+      userTokens: { revoked: [], failed: [] },
       complete: true,
     });
     const tokens = ledgerOf(r).tokens;
@@ -625,15 +627,17 @@ describe('AC6/AC12 kill switch', () => {
     expect(grantCalls).toHaveLength(1);
     expect(grantCalls[0]?.token).not.toBe(stale);
     expect(report.grant.deleted).toBe(false);
-    // Without the grant, the child is ended on its own; the parent stays for a later attempt.
+    // Without the grant, every tracked user-chain token is ended on its own.
     expect(report.scopedTokens).toEqual({ revoked: [child.tokenId], failed: [] });
+    expect(report.userTokens.revoked).toHaveLength(1);
     expect(ledgerOf(r).tokens.get(child.tokenId)).toMatchObject({
       status: 'revoked',
       revokedVia: 'token',
     });
-    expect(r.fake.live(stale)).toBe(true);
+    expect(r.fake.live(stale)).toBe(false);
+    // An untracked token of the grant may still live, so the switch never claims completion.
     expect(report.complete).toBe(false);
-    expect(r.blocked).toHaveLength(1);
+    expect(r.blocked).toHaveLength(0);
   });
 });
 
@@ -1028,8 +1032,9 @@ describe('review regressions: races and fail-closed paths', () => {
     r.broker.registerUserToken(user, expires);
     const rotation = r.broker.rotateUserToken(fake.refresh(user), expires);
     await g.reached;
-    await r.broker.killAll();
+    const kill = r.broker.killAll();
     g.release();
+    await kill;
     await expect(rotation).rejects.toEqual(refusal('admission_closed'));
     expect(ledgerOf(r).tokens.size).toBe(1);
   });
@@ -1105,5 +1110,85 @@ describe('review regressions: races and fail-closed paths', () => {
     expect(() => r.broker.registerUserToken(r.fake.authorizeUser(), timestamp)).toThrow(
       refusal('user_token_held')
     );
+  });
+});
+
+describe('lead follow-ups: target binding, operator settlement, diagnostics', () => {
+  it('refuses an intent whose journaled target names another fork, before any call', async () => {
+    const other: IntentInput = { ...pushInput, target: `fork:${UPSTREAM_ID}:branch:fix` };
+    const state = intentsWith(1, other);
+    const r = await ready({ intents: state });
+    await expect(
+      r.broker.mintForkPush(intentOf(state, other), { repositoryId: FORK_ID })
+    ).rejects.toEqual(refusal('repository_not_fork'));
+    expect(r.fake.calls).toEqual([]);
+    expect(r.broker.status().admissions).toBe('open');
+  });
+
+  it('an operator resolution or a journaled, passed expiry settles a lost token', async () => {
+    const first = await ready();
+    await first.broker.mintForkPush(intentOf(first.intents), { repositoryId: FORK_ID });
+    first.store.journal.close();
+    const second = rig({ dir: first.store.dir, fake: first.fake, clock: first.clock });
+    const blocked = await second.broker.recover();
+    const lost = blocked.report?.outstanding[0];
+    expect(lost?.expiresAt).not.toBeNull();
+    // Not yet expired: time alone settles nothing.
+    expect(second.broker.settleExpired()?.outstanding).toHaveLength(1);
+    second.clock.ms = Date.parse(lost?.expiresAt as string);
+    expect(second.broker.settleExpired()).toBeUndefined();
+    expect(ledgerOf(second).tokens.get(lost?.id as string)?.status).toBe('expired');
+  });
+
+  it('never settles a token without a recorded expiry by time; the operator can', async () => {
+    const first = await ready();
+    first.fake.override('POST /app/installations', 'throw');
+    await first.broker
+      .mintForkPush(intentOf(first.intents), { repositoryId: FORK_ID })
+      .catch(() => undefined);
+    const events = first.store.journal.read() as { type: string; status?: number }[];
+    expect(events.find((e) => e.type === 'token_mint_uncertain')).toMatchObject({ status: 0 });
+    first.clock.ms += 365 * 24 * 3600_000;
+    const pending = first.broker.settleExpired();
+    expect(pending?.outstanding).toHaveLength(1);
+    expect(first.broker.resolveByOperator(pending?.outstanding[0]?.id as string)).toBeUndefined();
+    expect([...ledgerOf(first).tokens.values()][0]?.status).toBe('operator_resolved');
+  });
+
+  it('journals why an overbroad token was revoked and how a run ended', async () => {
+    const r = await ready();
+    r.fake.override('POST /app/installations', {
+      status: 201,
+      json: {
+        token: r.fake.issue('installation'),
+        expires_at: new Date(r.clock.ms + 3600_000).toISOString(),
+        permissions: { contents: 'write', administration: 'write' },
+        repository_selection: 'selected',
+        repositories: [{ id: FORK_ID }],
+      },
+    });
+    await r.broker
+      .mintForkPush(intentOf(r.intents), { repositoryId: FORK_ID })
+      .catch(() => undefined);
+    await r.broker.endRun('cancelled');
+    const types = (r.store.journal.read() as { type: string; detail?: string }[]).map((e) =>
+      e.type === 'admissions_disabled' ? `${e.type}:${e.detail}` : e.type
+    );
+    expect(types).toContain('token_overbroad');
+    expect(types.at(-1)).toBe('admissions_disabled:cancelled');
+  });
+
+  it('reports a journal failure through its own hook, once', async () => {
+    const failures: unknown[] = [];
+    const r = await ready({ onJournalFailed: (error) => failures.push(error) });
+    vi.spyOn(r.store.journal, 'append').mockImplementation(() => {
+      throw new Error('disk full');
+    });
+    await r.broker
+      .mintForkPush(intentOf(r.intents), { repositoryId: FORK_ID })
+      .catch(() => undefined);
+    await r.broker.killAll();
+    expect(failures).toEqual([new Error('disk full')]);
+    expect(r.blocked).toHaveLength(0);
   });
 });

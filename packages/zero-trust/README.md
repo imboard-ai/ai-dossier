@@ -493,7 +493,8 @@ hand-offs. `ForkCredentialBroker` has a typed operation API and no generic token
   journaled `push_branch` intent attempt and returns a `ForkPushLease`. The token is
   narrowed to the verified fork's repository id with `contents:write`: an installation
   token (the default `via`) or a scoped user token minted from the unscoped user token
-  (`scopeFrom`, default the newest held one). A different repository, an unjournaled or
+  (`scopeFrom`, default the newest held one). The journaled intent's target must name the
+  same fork (`fork:<repositoryId>:branch:<name>`). A different repository, an unjournaled or
   non-push intent, a second mint for the same attempt, or scoping from a scoped token is
   refused before any network call. A token GitHub does not confirm as repository-selected
   with exactly that permission is revoked and refused.
@@ -513,7 +514,7 @@ hand-offs. `ForkCredentialBroker` has a typed operation API and no generic token
   waits (1 s, then 4 s). After three failures the broker closes admission and calls
   `onCleanupBlocked`, so the controller moves the run to `blocked_cleanup`.
   `CredentialCleanupError.report` lists what is still outstanding.
-- `endRun()` (run end or cancellation) revokes installation tokens and scoped children
+- `endRun(reason?)` (run end or cancellation, journaled as `completed` or `cancelled`) revokes installation tokens and scoped children
   individually, deletes the grant if a child will not die, and revokes the unscoped user
   token last. Revoking the user token ends its refresh chain, so the journal records that
   the next run needs a new contributor authorization. Revoking or rotating a parent
@@ -523,8 +524,15 @@ hand-offs. `ForkCredentialBroker` has a typed operation API and no generic token
   It then revokes installation tokens. A 404 from the grant endpoint means "not
   deleted". If no held token can delete the grant (none held, or every attempt
   refused), `grant.deleted` is false and the report asks for a contributor
-  re-authorization or a manual revoke. Scoped children are then revoked one by one, the
-  parent stays outstanding, and `complete` is false.
+  re-authorization or a manual revoke. Every tracked scoped child, then the user token,
+  is revoked one by one, and `complete` is false: a token of the grant the broker does
+  not hold may still be live.
+- `resolveByOperator(tokenId)` journals that the owner confirmed by hand that a token is
+  dead. `settleExpired()` settles unresolved tokens whose *journaled* native `expiresAt`
+  has passed; a token with no recorded expiry is never settled by time. Both return
+  what is still unresolved, so the controller can complete cleanup.
+- `onJournalFailed` reports a journal write failure (disk, permissions) separately from
+  GitHub cleanup failures; `status()` then shows `journal_failed`.
 - `status()` is safe to log: ids, kinds, states, times and failure counts only.
   `close()` stops an instance's timers and writes before a successor in the same process
   takes over the journal and vault.
@@ -534,6 +542,6 @@ directory. Each event is replay-validated and scanned with `assertNoSecrets`, an
 values are never written. Tests replay the gate-3 probe's recorded status codes through
 an in-memory fake (`__tests__/github-fake.ts`), so CI makes no GitHub calls.
 
-Known limitation: an installation token whose value was lost in a full process crash
-keeps the run in `blocked_cleanup` until an operator revokes the installation's access
-or the token's native expiry passes. No journal event clears it yet.
+An installation token whose value was lost in a full process crash cannot be revoked
+through any GitHub API. The run stays in `blocked_cleanup` until `resolveByOperator`
+or, when the mint response was journaled, `settleExpired` after its native expiry.

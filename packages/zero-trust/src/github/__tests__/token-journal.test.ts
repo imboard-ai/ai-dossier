@@ -103,6 +103,44 @@ describe('token journal replay', () => {
     expect(() => replayTokens(events)).toThrow(TokenJournalError);
   });
 
+  it('names the rejected event position and type', () => {
+    expect(() => replayTokens([...base, { v: 1, type: 'token_revoked', id: install, at }])).toThrow(
+      'Invalid credential broker journal event #6 (token_revoked)'
+    );
+    expect(() => replayTokens([{ v: 1, type: 'bogus' }])).toThrow('#0 (unknown)');
+  });
+
+  it('settles by expiry only when the recorded expiry has passed', () => {
+    const lost = [...base, { v: 1, type: 'token_unrevocable', id: install, at }];
+    expect(() =>
+      replayTokens([
+        ...lost,
+        { v: 1, type: 'token_expired', id: install, at: '2026-10-06T11:00:00.000Z' },
+      ])
+    ).toThrow(TokenJournalError);
+    const pending = [requested(other, 'installation', { intentKey: 'k3' })];
+    expect(() =>
+      replayTokens([...pending, { v: 1, type: 'token_expired', id: other, at }])
+    ).toThrow(TokenJournalError);
+    expect(
+      replayTokens([...lost, { v: 1, type: 'token_expired', id: install, at }]).tokens.get(install)
+        ?.status
+    ).toBe('expired');
+  });
+
+  it('accepts a run-end detail only on run_ended', () => {
+    expect(() =>
+      replayTokens([
+        { v: 1, type: 'admissions_disabled', reason: 'kill_switch', detail: 'cancelled', at },
+      ])
+    ).toThrow(TokenJournalError);
+    expect(
+      replayTokens([
+        { v: 1, type: 'admissions_disabled', reason: 'run_ended', detail: 'cancelled', at },
+      ]).admissionsClosed
+    ).toBe('run_ended');
+  });
+
   it('marks the token mint failed, rotated or unrevocable', () => {
     const ledger = replayTokens([
       ...base,

@@ -20,7 +20,11 @@ export type TokenStatus =
   /** Unscoped user token replaced by a refresh; observed dead, children unaffected. */
   | 'rotated'
   /** Value lost and no API can revoke it; blocks admission until an operator acts. */
-  | 'unrevocable';
+  | 'unrevocable'
+  /** The owner confirmed it dead by hand (journaled `operator_resolved`). */
+  | 'operator_resolved'
+  /** Its journaled native `expiresAt` has passed; never inferred without that record. */
+  | 'expired';
 export const ADMISSION_CLOSERS = Object.freeze([
   'kill_switch',
   'cleanup_blocked',
@@ -79,9 +83,24 @@ export type TokenEvent =
   | { v: 1; type: 'token_revoked'; id: string; verified: true; at: string }
   | { v: 1; type: 'token_rotated'; id: string; at: string }
   | { v: 1; type: 'token_unrevocable'; id: string; at: string }
+  /** Mint outcome unknown (transport failure, 5xx, malformed 2xx); `status` 0 = no response. */
+  | { v: 1; type: 'token_mint_uncertain'; id: string; status: number }
+  /** GitHub issued a token broader than requested; it is revoked next. */
+  | { v: 1; type: 'token_overbroad'; id: string; at: string }
+  /** The owner confirmed by hand (GitHub settings) that this token is dead. */
+  | { v: 1; type: 'operator_resolved'; id: string; at: string }
+  /** Settled by the journaled native expiry, observed passed at `at`. */
+  | { v: 1; type: 'token_expired'; id: string; at: string }
   | { v: 1; type: 'grant_deleted'; via: string; at: string }
   | { v: 1; type: 'grant_delete_refused'; via: string; status: number; at: string }
-  | { v: 1; type: 'admissions_disabled'; reason: AdmissionCloser; at: string }
+  | {
+      v: 1;
+      type: 'admissions_disabled';
+      reason: AdmissionCloser;
+      /** `run_ended` only: whether the run completed or was cancelled. */
+      detail?: 'completed' | 'cancelled';
+      at: string;
+    }
   | { v: 1; type: 'reauthorization_required'; at: string };
 export const REVOKE_STAGES = Object.freeze(['delete', 'probe'] as const);
 export type RevokeStage = (typeof REVOKE_STAGES)[number];
@@ -92,9 +111,34 @@ export interface TokenLedger {
   readonly reauthorizationRequired: boolean;
 }
 
+const EVENT_TYPES = Object.freeze([
+  'token_requested',
+  'token_minted',
+  'token_mint_failed',
+  'token_mint_uncertain',
+  'token_overbroad',
+  'token_used',
+  'token_revoke_failed',
+  'token_revoked',
+  'token_rotated',
+  'token_unrevocable',
+  'operator_resolved',
+  'token_expired',
+  'grant_deleted',
+  'grant_delete_refused',
+  'admissions_disabled',
+  'reauthorization_required',
+]);
+
 export class TokenJournalError extends Error {
-  constructor() {
-    super('Invalid credential broker journal event');
+  /** Position of the rejected event in the journal (replay) and its type when known. */
+  constructor(where?: { index?: number; type?: string }) {
+    const type = EVENT_TYPES.includes(where?.type as string) ? where?.type : 'unknown';
+    super(
+      where
+        ? `Invalid credential broker journal event${where.index === undefined ? '' : ` #${where.index}`} (${type})`
+        : 'Invalid credential broker journal event'
+    );
     this.name = 'TokenJournalError';
   }
 }
@@ -201,6 +245,28 @@ function reduceToken(ledger: TokenLedger, raw: unknown): TokenLedger {
       httpStatus(event.status);
       update(event.id, ['requested'], () => ({ status: 'mint_failed' }));
       break;
+    case 'token_mint_uncertain':
+      httpStatus(event.status);
+      update(event.id, ['requested'], (current) => ({ status: current.status }));
+      break;
+    case 'token_overbroad':
+      at(event.at);
+      update(event.id, ['live'], (current) => ({ status: current.status }));
+      break;
+    case 'operator_resolved':
+      at(event.at);
+      update(event.id, UNRESOLVED, () => ({ status: 'operator_resolved' }));
+      break;
+    case 'token_expired': {
+      const observed = at(event.at);
+      // Only a recorded native expiry, already passed, may settle a token.
+      update(event.id, UNRESOLVED, (current) =>
+        current.expiresAt !== null && Date.parse(current.expiresAt) <= Date.parse(observed)
+          ? { status: 'expired' }
+          : fail()
+      );
+      break;
+    }
     case 'token_used':
       at(event.at);
       if (tokens.get(id(event.id))?.kind === 'user') fail();
@@ -249,6 +315,12 @@ function reduceToken(ledger: TokenLedger, raw: unknown): TokenLedger {
     case 'admissions_disabled':
       at(event.at);
       if (!ADMISSION_CLOSERS.includes(event.reason as AdmissionCloser)) fail();
+      if (
+        event.detail !== undefined &&
+        (event.reason !== 'run_ended' ||
+          !['completed', 'cancelled'].includes(event.detail as string))
+      )
+        fail();
       // The first closer is kept; later ones never reopen or relabel admission.
       admissionsClosed ??= event.reason as AdmissionCloser;
       break;
@@ -268,7 +340,17 @@ export function replayTokens(events: readonly unknown[]): TokenLedger {
     admissionsClosed: null,
     reauthorizationRequired: false,
   });
-  for (const event of events) if (!isRecoveryEvent(event)) ledger = reduceToken(ledger, event);
+  events.forEach((event, index) => {
+    if (isRecoveryEvent(event)) return;
+    try {
+      ledger = reduceToken(ledger, event);
+    } catch {
+      throw new TokenJournalError({
+        index,
+        type: isRecord(event) ? String(event.type) : undefined,
+      });
+    }
+  });
   return ledger;
 }
 
@@ -292,7 +374,12 @@ export class TokenJournal {
     if (event.type === 'token_requested' && event.intentKey !== null)
       assertNoSecrets(event.intentKey);
     assertNoSecrets(JSON.stringify(event));
-    const next = reduceToken(this.ledger, event);
+    let next: TokenLedger;
+    try {
+      next = reduceToken(this.ledger, event);
+    } catch {
+      throw new TokenJournalError({ type: event.type });
+    }
     this.store.append(event);
     this.ledger = next;
     return next;
