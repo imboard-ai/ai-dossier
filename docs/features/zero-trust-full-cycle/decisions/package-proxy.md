@@ -99,9 +99,11 @@ allowlisted host, a redirect off the registry, and a lockfile hash mismatch
 **TLS inspection mode.** Squid peeks at the client hello, stares at the server
 certificate, then bumps. Bumping at the first step generates a bare certificate with no
 Authority Key Identifier, and Python 3.13+ (proxpi's runtime) rejects it under strict
-verification. Staring lets Squid mimic the origin certificate, which carries one. A
-denied `CONNECT` is still refused before any server connection; Squid bumps it only to
-deliver the error page.
+verification. Staring lets Squid mimic the origin certificate, which carries one. Staring
+means Squid completes a TLS handshake with an allowlisted registry host before it sees the
+request inside the tunnel; a request the path rules refuse then fetches nothing. A
+`CONNECT` to any other host is logged `TCP_DENIED`; Squid bumps it only to deliver its
+error page.
 
 ## Decision 3: supported ecosystems (MVP)
 
@@ -290,9 +292,9 @@ registries; that proves the fixtures and plans. The isolated proof is below.
 
 ## Evidence
 
-CI run RUN2_LINK (GitHub-hosted `ubuntu-24.04`), job "Package proxy proof (KVM)", artifact
+CI run [37524097751](https://github.com/imboard-ai/ai-dossier/actions/runs/37524097751) (GitHub-hosted `ubuntu-24.04`), job "Package proxy proof (KVM)", artifact
 `zero-trust-proxy-evidence-kvm` (evidence JSON, policy checks, Squid access log, mirror
-logs). The first full run, RUN1_LINK, produced the same results; its only failure was the
+logs). The first full run, [37520527415](https://github.com/imboard-ai/ai-dossier/actions/runs/37520527415), produced the same results; its only failure was the
 test's own receipt construction, fixed since. The gate 1 hostile suite passed again on the
 rebaked image in the same runs.
 
@@ -368,18 +370,19 @@ the policy evaluator, none was denied, and none was a redirect; the hosts were e
 
 ## Timings and the TCG timeout scale
 
-KVM (RUN2_SHORT): VM boot about 9–10 s (16 s for the first), provisioning 1.2–1.5 s (npm),
-5.0–5.5 s (pip, mostly `venv`), 1.5 s (uv); phase switch 10–11 s; offline tests
-0.5–1.2 s. TCG (job "Package proxy timings (TCG)", npm fixture): boot 103–106 s, phase
-switch 119–128 s, `npm ci` 16.1–18.5 s, `npm rebuild` 13.6–14.5 s, `npm test` 7.3–7.9 s.
+Two CI runs ([37520527415](https://github.com/imboard-ai/ai-dossier/actions/runs/37520527415), [37524097751](https://github.com/imboard-ai/ai-dossier/actions/runs/37524097751)), GitHub-hosted `ubuntu-24.04`. KVM: VM boot
+8.9–9.9 s (about 16 s for the first VM of a job), provisioning 1.2–1.5 s (npm), 5.0–5.5 s
+(pip, mostly `venv`), 1.5–1.6 s (uv), phase switch 9.9–11 s, offline tests 0.5–1.2 s; the
+proxy stack starts in about 30 s. TCG ran the npm fixture (job "Package proxy timings
+(TCG)"):
 
 | Step | KVM | TCG | TCG / KVM |
 |---|---|---|---|
-| VM boot | 9.0–9.9 s | 103–106 s | 10.4–11.8× |
-| Phase switch (power off, relaunch, hello) | 10.0–10.3 s | 119–128 s | 11.6–12.9× |
-| `npm ci` through the proxy | 1.22–1.47 s | 16.1–18.5 s | 11.1–15.2× |
-| `npm rebuild` | 1.12 s | 13.6–14.5 s | 12.1–12.9× |
-| `npm test` | 0.52–0.57 s | 7.3–7.9 s | 12.9–15.2× |
+| VM boot | 8.9–9.9 s | 88–106 s | 8.9–11.9× |
+| Phase switch (power off, relaunch, hello) | 10.0–10.8 s | 108–128 s | 10.0–12.9× |
+| `npm ci` through the proxy | 1.22–1.47 s | 14.4–18.5 s | 9.8–15.2× |
+| `npm rebuild` | 1.12–1.17 s | 12.1–14.5 s | 10.3–12.9× |
+| `npm test` | 0.52–0.57 s | 6.4–7.9 s | 11.3–15.2× |
 
 With #1009's 8.8–15× for short container commands, the old ×4 command-timeout scale was
 too small: a command needing more than a quarter of its budget under KVM would time out
