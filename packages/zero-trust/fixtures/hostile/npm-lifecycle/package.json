@@ -1,0 +1,11 @@
+{
+  "name": "zt-hostile-npm-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Hostile fixture: lifecycle scripts and tests attack planted canaries",
+  "scripts": {
+    "preinstall": "node probe.js preinstall",
+    "postinstall": "node probe.js postinstall",
+    "test": "node probe.js test"
+  }
+}

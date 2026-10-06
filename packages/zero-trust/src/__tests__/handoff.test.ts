@@ -98,7 +98,12 @@ function receipt(commands: CommandEvidence[] = [command()], candidateSha = CANDI
     candidateSha,
     profileDigest: DIGEST,
     policyDigest: DIGEST,
-    profile: { name: 'node-22', runtime: '22.0.0', imageDigest: `sha256:${DIGEST}` },
+    profile: {
+      name: 'node-22',
+      runtime: '22.0.0',
+      imageDigest: `sha256:${DIGEST}`,
+      accelerator: 'kvm',
+    },
     commands,
     networkPolicy: {
       acquisition: 'source-broker',

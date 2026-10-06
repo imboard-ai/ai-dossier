@@ -1,7 +1,7 @@
 import Ajv from 'ajv';
 import { assertNoSecrets } from '../redaction';
 
-export const RECEIPT_VERSION = 'ztfc-receipt-v1' as const;
+export const RECEIPT_VERSION = 'ztfc-receipt-v2' as const;
 export const RECEIPT_TTL_MS = 15 * 60 * 1000;
 export const SHIPPING_KINDS = ['push_branch', 'pr_create', 'pr_update'] as const;
 export type ShippingKind = (typeof SHIPPING_KINDS)[number];
@@ -37,7 +37,8 @@ export interface Receipt {
   candidateSha: string;
   profileDigest: string;
   policyDigest: string;
-  profile: { name: string; runtime: string; imageDigest: string };
+  /** `accelerator` records how the VM ran: same isolation, different speed. */
+  profile: { name: string; runtime: string; imageDigest: string; accelerator: 'kvm' | 'tcg' };
   commands: CommandEvidence[];
   networkPolicy: {
     acquisition: string;
@@ -90,6 +91,7 @@ export const RECEIPT_SCHEMA = object({
     name: text,
     runtime: text,
     imageDigest: { type: 'string', pattern: '^sha256:[a-f0-9]{64}$' },
+    accelerator: { enum: ['kvm', 'tcg'] },
   }),
   commands: {
     type: 'array',

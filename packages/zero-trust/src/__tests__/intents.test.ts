@@ -10,6 +10,7 @@ import {
   IntentError,
   type IntentInput,
   idempotencyKey,
+  isAdmitted,
   MutationUncertainError,
   OPERATION_KINDS,
   parseEngagementMarker,
@@ -1206,4 +1207,39 @@ describe('fail-closed journal durability', () => {
     expect(mutate).not.toHaveBeenCalled();
     expect(reconcile).toHaveBeenCalledTimes(1);
   }, 15000);
+});
+
+describe('isAdmitted', () => {
+  it('admits nothing in blocked_cleanup or any terminal state', () => {
+    for (const kind of OPERATION_KINDS) {
+      expect(isAdmitted(kind, 'blocked_cleanup')).toBe(false);
+      expect(isAdmitted(kind, 'blocked')).toBe(false);
+    }
+  });
+
+  it('admits every shipping write while shipping', () => {
+    for (const kind of [
+      'fork_ensure',
+      'push_branch',
+      'pr_create',
+      'pr_update',
+      'pr_close',
+    ] as const)
+      expect(isAdmitted(kind, 'shipping')).toBe(true);
+    expect(isAdmitted('engagement_comment', 'shipping')).toBe(false);
+  });
+
+  it('admits pr_update but not push_branch while revising', () => {
+    expect(isAdmitted('pr_update', 'revising')).toBe(true);
+    expect(isAdmitted('pr_close', 'revising')).toBe(true);
+    expect(isAdmitted('push_branch', 'revising')).toBe(false);
+    expect(isAdmitted('pr_create', 'revising')).toBe(false);
+  });
+
+  it('only admits push_branch in shipping', () => {
+    expect(RUN_STATES.filter((state) => isAdmitted('push_branch', state))).toEqual(['shipping']);
+    expect(RUN_STATES.filter((state) => isAdmitted('pr_close', state)).sort()).toEqual(
+      ['accepted', 'awaiting_review', 'revising', 'shipping', 'submitted'].sort()
+    );
+  });
 });

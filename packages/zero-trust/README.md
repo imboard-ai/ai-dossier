@@ -388,7 +388,8 @@ and the actual `@ai-dossier/core` `Signer` interface. Only Ed25519 is admitted. 
 controller owns the private key and signer; neither belongs in worker/model tools.
 The signature covers canonical sorted-key JSON bytes, including all identity,
 profile/policy, command, network and operation bindings. `receiptDigest` hashes those
-same bytes with SHA-256. Schema version is `ztfc-receipt-v1`.
+same bytes with SHA-256. Schema version is `ztfc-receipt-v2` (v2 added the required
+`profile.accelerator`, `kvm` or `tcg`).
 
 `verifyReceipt(envelope, trustedControllerKey, context, now)` verifies integrity,
 controller key material, exact authenticated identity/SHA bindings, and the trusted
@@ -450,7 +451,8 @@ claim is limited to the exact candidate and is not proof of patch correctness.
 - `selectProfile(detection)` picks a runtime from the versioned `profiles.json` that
   satisfies every project declaration and never substitutes a version.
   `recordProfileSelection` / `loadProfileRecord` store the choice once per run and
-  re-verify it before execution. `profileReceiptBinding` gives the receipt's profile fields.
+  re-verify it before execution. `profileReceiptBinding(record, accelerator)` gives the receipt's
+  profile fields, with the accelerator taken from the VM handle.
 - `buildCommandPlan(manager, proxy, options?)` returns provisioning (`package_proxy`) and
   verification (`none`) commands as argv data. `options` sets test targets (e.g. the
   regression test), timeouts, the profile's interpreter and an environment directory
@@ -466,6 +468,48 @@ claim is limited to the exact candidate and is not proof of patch correctness.
 
 Fixtures with known bugs live in `fixtures/ecosystem/`. CI self-checks them
 (`scripts/zero-trust-fixtures-selfcheck.mjs`); that is the only host-side install/test run.
+
+## Local VM execution profile (gate 1)
+
+`src/vm/` runs untrusted code in a disposable local QEMU VM; Linux x86_64 hosts only. Design,
+QEMU flags, network design, measured overhead and residual risks:
+[execution-profile decision record](../../docs/features/zero-trust-full-cycle/decisions/execution-profile.md).
+
+- `preflightHost(request)` refuses closed (`unsupported_environment` + detail) on an
+  unsupported OS or architecture, missing QEMU tools, or a forced `kvm` without `/dev/kvm`.
+  There is no host-container fallback.
+- `LocalQemuAdapter` implements the provider-neutral `VmAdapter` (create, exec, putFile,
+  getFile, destroy, listByRun) plus the `killAll` incident kill switch. QEMU runs rootless with
+  `restrict=on` user-mode networking, no forwards and no shared folders; the broker
+  (`BrokerClient`, `vm-guest/agent.py`) is the only data path.
+- `teardownVm` caps deletion at three attempts, then moves the run to `blocked_cleanup` and
+  hands it to `observeRun`; `assertPublicationPermitted(run, operationKind)` applies the intent
+  admission table, which admits no GitHub write in `blocked_cleanup`.
+- `bakeProfile` / `ensureBaseImage` build the hash-pinned image (`PROFILE_PINS`,
+  `BAKE_RECIPE_VERSION`, `BAKED_DISK_GIB`); `parseManifest` and `assertStandaloneQcow2` check it.
+  `DEFAULT_LIMITS` holds the PRD §5.1 defaults.
+- Errors: `UnsupportedEnvironmentError` (`.detail` is an `UnsupportedDetail`), `VmCleanupError`,
+  `BrokerError`, `BoundaryBreachError`, `PublicationDeniedError`. VM lifecycle events go to a
+  journal dedicated to them, not the run's intent journal.
+- `admitModelAction` (`src/authority.ts`) admits only a closed set of model actions bound to
+  controller targets.
+- `evaluateBoundary` / `assertBoundaryHeld` (`src/vm/evidence.ts`) judge hostile-fixture runs
+  from host-side measurements; fixture reports are untrusted.
+
+From `packages/zero-trust`:
+
+```bash
+npm run build
+node scripts/zt-vm.mjs bake  --profile-dir <dir> --cache-dir <dir> [--accel auto|kvm|tcg]
+node scripts/zt-vm.mjs smoke --profile-dir <dir> --state-dir <dir> [--accel ...] [--timings-out f]
+node scripts/zt-vm.mjs kill-all --state-dir <dir> --reason <text>   # exit 2: a VM was left behind
+ZT_VM_E2E=1 ZT_PROFILE_DIR=<abs dir> npx vitest run src/__tests__/vm-gate.e2e.test.ts
+```
+
+The kill switch stays engaged until an operator deletes `<state-dir>/KILL_SWITCH`.
+
+The hostile fixtures live in `fixtures/hostile/`; `.github/workflows/zero-trust-vm.yml` runs
+the gate under KVM, plus a TCG smoke test, on every PR touching this package.
 
 ## Fork-side GitHub credential broker
 
