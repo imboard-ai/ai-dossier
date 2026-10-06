@@ -98,6 +98,34 @@ describe('evidence command', () => {
       expect(console.log).toHaveBeenCalledWith('  refs: claude-code:sess-1#evt-1 @host-a ctx=abc');
     });
 
+    it('should render entries without a host', async () => {
+      const record = {
+        ...existingRecord,
+        entries: [
+          {
+            anchor: 'Section B',
+            rationale: 'Because Y',
+            created_at: '2026-01-01T00:00:00.000Z',
+            evidence: [{ provider: 'claude-code' as const, session: 'sess-2' }],
+          },
+        ],
+      };
+      vi.mocked(multiRegistry.multiRegistryGetEvidence).mockResolvedValue({
+        result: {
+          evidence: JSON.stringify(record),
+          checksum: `sha256:${dossierChecksum}`,
+          _registry: 'public',
+        },
+        errors: [],
+      });
+
+      const program = createTestProgram();
+      registerEvidenceCommand(program);
+      await program.parseAsync(['node', 'dossier', 'evidence', 'show', 'org/test-dossier']);
+
+      expect(console.log).toHaveBeenCalledWith('  refs: claude-code:sess-2');
+    });
+
     it('should print the raw record with --json', async () => {
       vi.mocked(multiRegistry.multiRegistryGetEvidence).mockResolvedValue({
         result: {
@@ -213,7 +241,36 @@ describe('evidence command', () => {
   });
 
   describe('add', () => {
-    it('should append an entry with defaults (provider, hostname)', async () => {
+    it('should record the host only when --host is passed', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockImplementation(((p: unknown) =>
+        String(p).endsWith('.evidence.json')
+          ? JSON.stringify(existingRecord)
+          : dossierWithChecksum) as typeof fs.readFileSync);
+
+      const program = createTestProgram();
+      registerEvidenceCommand(program);
+      await program.parseAsync([
+        'node',
+        'dossier',
+        'evidence',
+        'add',
+        'test.ds.md',
+        '--anchor',
+        'Section A',
+        '--rationale',
+        'Because X',
+        '--session',
+        VALID_SESSION,
+        '--host',
+        'host-a',
+      ]);
+
+      const written = JSON.parse(vi.mocked(mockedFs.writeFileSync).mock.calls[0][1] as string);
+      expect(written.entries[0].evidence[0].host).toBe('host-a');
+    });
+
+    it('should append an entry with defaults (provider, no host)', async () => {
       mockedFs.existsSync.mockReturnValue(true);
       mockedFs.readFileSync.mockImplementation(((p: unknown) =>
         String(p).endsWith('.evidence.json')
@@ -244,7 +301,7 @@ describe('evidence command', () => {
       const written = JSON.parse(vi.mocked(mockedFs.writeFileSync).mock.calls[0][1] as string);
       expect(written.entries).toHaveLength(1);
       expect(written.entries[0].evidence[0].provider).toBe('claude-code');
-      expect(written.entries[0].evidence[0].host).toBe(os.hostname());
+      expect(written.entries[0].evidence[0]).not.toHaveProperty('host');
       expect(written.entries[0].evidence[0].session).toBe(VALID_SESSION);
     });
 

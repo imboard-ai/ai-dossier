@@ -441,7 +441,10 @@ function registerAddSubcommand(cmd: Command): void {
         .default('claude-code')
     )
     .option('--event <id>', 'Provider-native per-message/tool-call id')
-    .option('--host <name>', 'Machine the session ran on (defaults to os.hostname())')
+    .option(
+      '--host <name>',
+      'Machine the session ran on (omitted unless given — sidecars are published publicly)'
+    )
     .option('--extra <k=v...>', 'Tool-specific locator ids, repeatable')
     .option(
       '--namespace <namespace>',
@@ -492,7 +495,7 @@ function registerAddSubcommand(cmd: Command): void {
         provider: options.provider,
         session,
         ...(options.event ? { event: options.event } : {}),
-        host: options.host || os.hostname(),
+        ...(options.host ? { host: options.host } : {}),
         ...(extra ? { extra } : {}),
       };
 
