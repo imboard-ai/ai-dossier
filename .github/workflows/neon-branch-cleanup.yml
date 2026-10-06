@@ -56,7 +56,7 @@ permissions:
 
 env:
   AWS_REGION: us-east-1
-  ROLE_ARN: arn:aws:iam::942039714848:role/github-dossier-neon-cleanup
+  ROLE_ARN: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/github-dossier-neon-cleanup
   SSM_API_KEY: /dossier/neon_api_key
   SSM_PROJECT_ID: /dossier/neon_project_id
 
