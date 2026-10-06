@@ -5,7 +5,7 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   applyPrepWindows,
   batchPrepTokens,
@@ -26,6 +26,7 @@ function tmpDir(): string {
 }
 afterEach(() => {
   for (const d of tmp.splice(0)) fs.rmSync(d, { recursive: true, force: true });
+  vi.unstubAllEnvs();
 });
 
 const SESSION = '11111111-2222-3333-4444-555555555555';
@@ -291,6 +292,9 @@ describe('prep-start marker (#899)', () => {
   });
 
   it('splits a multi-batch enqueue by member count: per-batch sums equal the window total', () => {
+    // The split hashes each row's key, which includes the collecting host. Pin it, or
+    // which batch wins each of the 12 rows depends on the machine running the test (#1071).
+    vi.stubEnv('DOSSIER_USAGE_HOST', 'h');
     const home = tmpDir();
     const schedRoot = path.join(home, 'sched');
     const schedDir = path.join(schedRoot, 'proj');
@@ -321,7 +325,7 @@ describe('prep-start marker (#899)', () => {
     const b = out.get('b-2');
     expect((a?.billable_tokens ?? 0) + (b?.billable_tokens ?? 0)).toBe(12 * 135);
     expect((a?.messages ?? 0) + (b?.messages ?? 0)).toBe(12);
-    expect(a?.messages).toBeGreaterThan(b?.messages ?? 99); // 3:1 weights
+    expect(a?.messages).toBeGreaterThan(b?.messages ?? 99); // 3:1 weights (10:2 for host 'h')
     expect(a?.split && b?.split).toBe(true);
     // Asking for one batch must not hand it its sibling's share.
     expect(batchPrepTokens(schedDir, ['b-2'], paths).get('b-2')?.billable_tokens).toBe(
