@@ -16,6 +16,7 @@ describe('createExecResumeSeeder', () => {
     const seeder = createExecResumeSeeder(
       (file, args) => {
         calls.push([file, ...args]);
+        if (file === 'git' && args[0] === 'rev-parse') return '/repo/.git\n';
         return args[1] === 'mint' ? 'r-840-abc123\n' : '';
       },
       { repoDir: '/repo' }
@@ -43,7 +44,8 @@ describe('createExecResumeSeeder', () => {
       ],
     ]);
     expect(calls[4]).toEqual(['ai-dossier', 'runstate', 'mint', '--issue', '840']);
-    const post = calls[5] ?? [];
+    expect(calls[5]?.slice(0, 2)).toEqual(['git', 'rev-parse']);
+    const post = calls[6] ?? [];
     expect(post.slice(0, 11)).toEqual([
       'ai-dossier',
       'runstate',
@@ -59,7 +61,8 @@ describe('createExecResumeSeeder', () => {
     ]);
     for (const kv of [
       'branch=batch/b-840-m1-840',
-      'worktree=/repo/worktrees/batch-b-840-m1-840',
+      // #1085: the seeder posts the portable form itself, never the absolute path.
+      'worktree=<repo>/worktrees/batch-b-840-m1-840',
       'pool_claimed=false',
       'base_branch=main',
       'remote=pushed',

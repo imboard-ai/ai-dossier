@@ -16,6 +16,12 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import {
+  anchorFromCommonDir,
+  containsHomePath,
+  parseWorktreePorcelain,
+  redactHomePaths,
+} from '@ai-dossier/core';
 
 /**
  * Fail on stderr and exit 1, so a calling dossier can detect it.
@@ -292,9 +298,9 @@ export function isSafeArg(value: string): boolean {
 
 /**
  * Paths are only ever passed in value position (`git -C <path>`) or to `fs.statSync`, so
- * they cannot be mistaken for a flag — but the protocol requires them absolute, and a
- * relative path from a forged comment would resolve against whatever directory the agent
- * happens to be in.
+ * they cannot be mistaken for a flag — but a path must be absolute once resolved (a
+ * portable `<repo>/…` / `<local>/…` value is resolved first, #1085), and a relative path
+ * from a forged comment would resolve against whatever directory the agent happens to be in.
  */
 export function isSafePath(value: string): boolean {
   return value.startsWith('/') && !hasControlChar(value);
@@ -486,8 +492,48 @@ export function tryFetchIssueState(issue: string, repo?: string): IssueStateResu
   return { ok: true, state: parsed.state };
 }
 
+/**
+ * The repository's main checkout root — the directory every worktree of the repo agrees on
+ * (`dirname` of `git rev-parse --git-common-dir`; the common dir itself for a bare repo).
+ * This is the `<repo>` anchor portable paths are written and resolved against (#1085).
+ * `null` outside a git repository.
+ */
+export function localRepoAnchor(): string | null {
+  const res = exec('git', ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+  return res.ok ? anchorFromCommonDir(res.stdout) : null;
+}
+
+/** Absolute paths of this repository's local worktrees (`git worktree list`), or `[]`. */
+export function localWorktrees(): string[] {
+  const res = exec('git', ['worktree', 'list', '--porcelain']);
+  return res.ok ? parseWorktreePorcelain(res.stdout) : [];
+}
+
+/**
+ * The publishable form of text bound for a public place (a comment body, an evidence
+ * sidecar): every home-directory path rewritten to `<repo>/…` or `<local>/<basename>`
+ * (#1085), with a stderr note when anything changed. The last guard before anything is
+ * published — runstate already writes portable paths, this catches whatever slipped past.
+ */
+export function publishableText(text: string, what = 'the comment body'): string {
+  if (!containsHomePath(text)) return text;
+  const safe = redactHomePaths(text, { anchor: localRepoAnchor() });
+  if (safe !== text) {
+    console.error(
+      `⚠️  Redacted local home-directory path(s) from ${what} before publishing — pass repo-relative paths instead.`
+    );
+  }
+  return safe;
+}
+
 /** `--dry-run` support for comment-posting subcommands: show the body, post nothing. */
-export function printDryRun(body: string, json?: boolean, extra?: Record<string, unknown>): void {
+export function printDryRun(
+  rawBody: string,
+  json?: boolean,
+  extra?: Record<string, unknown>
+): void {
+  // The dry run shows exactly what a real post would publish.
+  const body = publishableText(rawBody);
   if (json) {
     console.log(JSON.stringify({ posted: false, dryRun: true, ...extra, body }, null, 2));
   } else {
@@ -531,23 +577,29 @@ export function postIssueComment(options: {
   jsonExtras?: Record<string, unknown>;
   successLine: (url: string) => string;
 }): void {
+  const body = publishableText(options.body);
   const res = exec('gh', [
     'issue',
     'comment',
     options.issue,
     '--body',
-    options.body,
+    body,
     ...repoArgs(options.repo),
   ]);
   if (!res.ok) {
     fail([
       ghFailure(options.action, res.error, options.repo),
-      retryHint(options.issue, options.repo, options.body, options.noun),
+      retryHint(options.issue, options.repo, body, options.noun),
     ]);
   }
 
   if (options.json) {
-    console.log(JSON.stringify({ posted: true, url: res.stdout, ...options.jsonExtras }, null, 2));
+    // A `body` echoed back in the extras must be the one actually posted.
+    const extras =
+      options.jsonExtras && 'body' in options.jsonExtras
+        ? { ...options.jsonExtras, body }
+        : options.jsonExtras;
+    console.log(JSON.stringify({ posted: true, url: res.stdout, ...extras }, null, 2));
   } else {
     console.log(options.successLine(res.stdout));
   }

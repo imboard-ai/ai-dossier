@@ -18,6 +18,7 @@
  * No dossier change is needed: the seed speaks the contract every resumed run
  * (cross-machine redispatch, a takeover) already relies on.
  */
+import { anchorFromCommonDir, toPortablePath } from '@ai-dossier/core';
 import { SAFE_REF_RE } from './attribution';
 import type { ExecFn } from './project';
 
@@ -99,6 +100,13 @@ export function createExecResumeSeeder(
     if (run === undefined || !RUN_ID_RE.test(run)) {
       return { ok: false, reason: `'${bin} runstate mint' returned no run id` };
     }
+    // Post the portable form (#1085) rather than relying on the installed CLI to rewrite
+    // it: an older CLI would publish the absolute path; it refuses the token loudly instead.
+    const worktree = toPortablePath(seed.worktree, {
+      anchor: anchorFromCommonDir(
+        exec('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], opts.repoDir)
+      ),
+    });
     const posted = exec(
       bin,
       [
@@ -115,7 +123,7 @@ export function createExecResumeSeeder(
         '--kv',
         `branch=${seed.branch}`,
         '--kv',
-        `worktree=${seed.worktree}`,
+        `worktree=${worktree}`,
         '--kv',
         'pool_claimed=false',
         '--kv',

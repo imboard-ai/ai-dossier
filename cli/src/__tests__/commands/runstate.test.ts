@@ -1,5 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { procStartTime } from '@ai-dossier/sched';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FENCED_EXIT_CODE, registerRunstateCommand } from '../../commands/runstate';
@@ -2468,5 +2470,189 @@ describe('#683: fence lifecycle — release, bind, stale-on-read (AC1–AC4)', (
     expect(code).toBe(1);
     expect(mockedExec).not.toHaveBeenCalled();
     expect(errored().join('\n')).toContain('generation 0 means');
+  });
+});
+
+// #1085: a milestone is a public comment — it must never carry a local home-directory path.
+describe('runstate portable paths (#1085)', () => {
+  const ANCHOR = '/home/alice/projects/acme/main';
+
+  /** gh/git stub for `post`: an empty trail, a fixed anchor (or none), a comment URL. */
+  function postStub(anchor: string | null) {
+    execHandles((file, args) => {
+      if (file === 'gh' && args[0] === 'issue' && args[1] === 'view') return commentsPayload([]);
+      if (file === 'gh' && args[0] === 'issue' && args[1] === 'comment') return 'url\n';
+      if (file === 'git' && args[0] === 'rev-parse') {
+        if (anchor === null)
+          throw Object.assign(new Error('not a git repository'), { status: 128 });
+        return `${anchor}/.git\n`;
+      }
+      throw new Error(`unexpected ${file} ${args.join(' ')}`);
+    });
+  }
+
+  const setupArgs = (worktree: string) => [
+    'runstate',
+    'post',
+    '--issue',
+    '440',
+    '--phase',
+    'setup',
+    '--status',
+    'done',
+    '--run',
+    'r-440-ab56',
+    '--kv',
+    'branch=feature/440',
+    '--kv',
+    `worktree=${worktree}`,
+    '--kv',
+    'pool_claimed=false',
+    '--kv',
+    'base_branch=main',
+  ];
+
+  it('posts a sibling worktree as <repo>/../… — never the home path', async () => {
+    postStub(ANCHOR);
+    await run(setupArgs('/home/alice/projects/acme/worktrees/feature-440'));
+    const body = postedBody();
+    expect(body).toContain('worktree=<repo>/../worktrees/feature-440');
+    expect(body).not.toContain('/home/');
+  });
+
+  it('posts a path inside the checkout as <repo>/<relative>', async () => {
+    postStub(ANCHOR);
+    await run(setupArgs(`${ANCHOR}/sub/dir`));
+    expect(postedBody()).toContain('worktree=<repo>/sub/dir');
+  });
+
+  it('redacts a path outside the repository to <local>/<basename>', async () => {
+    postStub(ANCHOR);
+    await run(setupArgs('/srv/pool/wt-9'));
+    expect(postedBody()).toContain('worktree=<local>/wt-9');
+  });
+
+  it('accepts a cwd-relative path and rewrites it against the repository', async () => {
+    postStub(process.cwd());
+    await run(setupArgs('worktrees/feature-440'));
+    expect(postedBody()).toContain('worktree=<repo>/worktrees/feature-440');
+  });
+
+  it('redacts outside a git repository too', async () => {
+    postStub(null);
+    await run(setupArgs('/home/alice/projects/acme/worktrees/feature-440'));
+    const body = postedBody();
+    expect(body).toContain('worktree=<local>/feature-440');
+    expect(body).not.toContain('alice');
+  });
+
+  it('guards every other value: a home path in any key never reaches the posted body', async () => {
+    postStub(null);
+    await run([
+      'runstate',
+      'post',
+      '--issue',
+      '440',
+      '--phase',
+      'report',
+      '--status',
+      'done',
+      '--run',
+      'r-440-ab56',
+      '--kv',
+      'pr=12',
+      '--kv',
+      'traps_added=0',
+      '--kv',
+      'log=/Users/bob/runs/log.txt',
+    ]);
+    const body = postedBody();
+    expect(body).toContain('log=<local>/log.txt');
+    expect(body).not.toMatch(/\/Users\/|bob/);
+  });
+
+  it('shows the rewritten body on --dry-run', async () => {
+    postStub(ANCHOR);
+    await run([...setupArgs('/home/alice/projects/acme/worktrees/feature-440'), '--dry-run']);
+    const printed = stdoutWrites().join('');
+    expect(printed).toContain('worktree=<repo>/../worktrees/feature-440');
+    expect(printed).not.toContain('/home/');
+    expect(commentCall()).toBeUndefined();
+  });
+
+  describe('verify resolves the portable form against THIS machine', () => {
+    let base: string;
+    beforeEach(() => {
+      base = fs.mkdtempSync(path.join(os.tmpdir(), 'runstate-1085-'));
+      fs.mkdirSync(path.join(base, 'main'));
+      fs.mkdirSync(path.join(base, 'worktrees', 'feature-440'), { recursive: true });
+    });
+    afterEach(() => {
+      fs.rmSync(base, { recursive: true, force: true });
+    });
+
+    function verifyStub(worktree: string) {
+      const setup = milestoneBody(
+        'setup',
+        'done',
+        'r-440-ab56',
+        '2026-08-24T10:01:00Z',
+        { branch: 'feature/440', worktree, pool_claimed: 'false', base_branch: 'main' },
+        'plan'
+      );
+      execHandles((file, args) => {
+        if (file === 'gh' && args[0] === 'issue') return commentsPayload([GATE_MILESTONE, setup]);
+        if (file === 'git' && args[0] === 'ls-remote') return '';
+        if (file === 'git' && args[0] === 'rev-parse') return `${path.join(base, 'main')}/.git\n`;
+        if (file === 'git' && args[0] === 'worktree') {
+          return `worktree ${path.join(base, 'main')}\nworktree ${path.join(base, 'worktrees', 'feature-440')}\n`;
+        }
+        throw new Error(`unexpected ${file} ${args.join(' ')}`);
+      });
+    }
+
+    it('finds a <repo>/../… worktree and reports its local path', async () => {
+      verifyStub('<repo>/../worktrees/feature-440');
+      await run(['runstate', 'verify', '--issue', '440', '--json']);
+      const parsed = JSON.parse(logged()[0]);
+      expect(parsed.resume_from).toBe('plan');
+      expect(parsed.local_worktree).toBe('present');
+      expect(parsed.resolved_paths.worktree).toBe(path.join(base, 'worktrees', 'feature-440'));
+    });
+
+    it('finds a <local>/<name> worktree through the local worktree list', async () => {
+      verifyStub('<local>/feature-440');
+      await run(['runstate', 'verify', '--issue', '440', '--json']);
+      const parsed = JSON.parse(logged()[0]);
+      expect(parsed.local_worktree).toBe('present');
+      expect(parsed.resolved_paths.worktree).toBe(path.join(base, 'worktrees', 'feature-440'));
+    });
+
+    it('prints resolved_<key>= in text mode, distinct from local_worktree=', async () => {
+      verifyStub('<repo>/../worktrees/feature-440');
+      await run(['runstate', 'verify', '--issue', '440']);
+      const lines = logged();
+      expect(lines).toContain('local_worktree=present');
+      expect(lines).toContain(`resolved_worktree=${path.join(base, 'worktrees', 'feature-440')}`);
+      expect(lines.filter((l) => l.startsWith('local_worktree='))).toHaveLength(1);
+    });
+
+    it('still resolves a legacy absolute worktree= that exists here', async () => {
+      const wt = path.join(base, 'worktrees', 'feature-440');
+      verifyStub(wt);
+      await run(['runstate', 'verify', '--issue', '440', '--json']);
+      const parsed = JSON.parse(logged()[0]);
+      expect(parsed.local_worktree).toBe('present');
+      expect(parsed.resolved_paths.worktree).toBe(wt);
+    });
+
+    it('reports absent, not an error, when the worktree is not on this machine', async () => {
+      verifyStub('<local>/somewhere-else');
+      await run(['runstate', 'verify', '--issue', '440', '--json']);
+      const parsed = JSON.parse(logged()[0]);
+      expect(parsed.resume_from).toBe('plan');
+      expect(parsed.local_worktree).toBe('absent');
+      expect(parsed.resolved_paths).toBeUndefined();
+    });
   });
 });

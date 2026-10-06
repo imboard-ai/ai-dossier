@@ -8,7 +8,14 @@
  */
 
 import fs from 'node:fs';
-import { isTrustedAuthorAssociation } from '@ai-dossier/core';
+import path from 'node:path';
+import {
+  isPortablePath,
+  isTrustedAuthorAssociation,
+  LOCAL_PATH_TOKEN,
+  resolvePortablePath,
+  toPortablePath,
+} from '@ai-dossier/core';
 import { procStartTime } from '@ai-dossier/sched';
 import type { Command } from 'commander';
 import { formatDurationCell } from '../duration';
@@ -19,6 +26,8 @@ import {
   fail,
   isSafeArg,
   isSafePath,
+  localRepoAnchor,
+  localWorktrees,
   parseGhJson,
   postIssueComment,
   printDryRun,
@@ -51,11 +60,13 @@ import {
   fenceGeneration,
   generationOf,
   isKnownPhase,
+  isPathKey,
   MAX_BODY_LENGTH,
   MAX_GENERATION,
   mintRunId,
   nextFenceGeneration,
   nowStamp,
+  PATH_KEYS,
   type ParsedMilestone,
   PHASES,
   parseDispatchedAt,
@@ -238,6 +249,28 @@ function parseKvPairs(raw: string[]): { pairs: Array<[string, string]>; errors: 
   return { pairs, errors };
 }
 
+/**
+ * Rewrite path-valued keys (`worktree=`, `planning=`) into their portable form before
+ * anything is validated or posted (#1085): an absolute or cwd-relative path becomes
+ * `<repo>/<relative>` inside the repository and `<local>/<basename>` elsewhere, so a
+ * public milestone never carries the operator's home directory. Git is asked for the
+ * anchor only when there is a path to rewrite.
+ */
+function portablePathPairs(pairs: Array<[string, string]>): Array<[string, string]> {
+  const rewrite = ([k, v]: [string, string]) =>
+    isPathKey(k) && v !== '' && !isPortablePath(v) && !/[\r\n]/.test(v);
+  if (!pairs.some(rewrite)) return pairs;
+  const anchor = localRepoAnchor();
+  if (anchor === null) {
+    console.error(
+      "⚠️  Could not find this repository's main checkout (git rev-parse --git-common-dir failed) — path keys are posted as <local>/<basename>, which a resume can match only by worktree name."
+    );
+  }
+  return pairs.map((pair) =>
+    rewrite(pair) ? [pair[0], toPortablePath(pair[1], { anchor, cwd: process.cwd() })] : pair
+  );
+}
+
 /** A trail read, or the one reason it could not be read. */
 type TrailResult = { ok: true; milestones: ParsedMilestone[] } | { ok: false; error: string };
 
@@ -359,16 +392,52 @@ function probeBranchOnRemote(branch: string, warn: WarnOnce): boolean {
  * `dirExists` — whether the recorded worktree directory is present on this machine.
  * Informational only (`local_worktree=`): no resume decision depends on it.
  */
-function probeDirExists(path: string, warn: WarnOnce): boolean {
-  if (!isSafePath(path)) {
-    warn(`milestone worktree '${path}' is not an absolute path — ${TREATED_MISSING}`);
+function probeDirExists(recorded: string, warn: WarnOnce): boolean {
+  const dir = isPortablePath(recorded) ? resolveRecordedPath(recorded) : recorded;
+  if (dir === null) {
+    warn(
+      `milestone worktree '${recorded}' does not resolve to a directory on this machine — ${TREATED_MISSING}`
+    );
+    return false;
+  }
+  if (!isSafePath(dir)) {
+    warn(`milestone worktree '${recorded}' is not an absolute path — ${TREATED_MISSING}`);
     return false;
   }
   try {
-    return fs.statSync(path).isDirectory();
+    return fs.statSync(dir).isDirectory();
   } catch {
     return false;
   }
+}
+
+/**
+ * Resolve a recorded `worktree=`/`planning=` value against THIS machine (#1085): `<repo>/…`
+ * against the local main checkout, `<local>/<name>` against the local worktree list, a
+ * legacy absolute path as is. Never against the posted string's own machine.
+ */
+function resolveRecordedPath(recorded: string): string | null {
+  if (!isPortablePath(recorded)) return path.isAbsolute(recorded) ? recorded : null;
+  return resolvePortablePath(recorded, {
+    anchor: localRepoAnchor(),
+    worktrees: recorded.startsWith(`${LOCAL_PATH_TOKEN}/`) ? localWorktrees() : [],
+  });
+}
+
+/**
+ * The recorded path keys of `context` resolved for this machine, kept only when they exist
+ * here — what a resuming agent `cd`s into or reads, since the posted values are portable
+ * tokens, not local paths.
+ */
+function resolvedContextPaths(context: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const key of PATH_KEYS) {
+    const value = context[key];
+    if (!value) continue;
+    const resolved = resolveRecordedPath(value);
+    if (resolved !== null && fs.existsSync(resolved)) out[key] = resolved;
+  }
+  return out;
 }
 
 /** `git merge-base --is-ancestor` exits 1 for "not an ancestor" — an answer, not a fault. */
@@ -921,7 +990,8 @@ function registerPostSubcommand(cmd: Command): void {
         ]);
       }
       const gen = requireGeneration(options.gen, '--gen');
-      const { pairs, errors: kvErrors } = parseKvPairs(options.kv ?? []);
+      const { pairs: rawPairs, errors: kvErrors } = parseKvPairs(options.kv ?? []);
+      const pairs = portablePathPairs(rawPairs);
 
       // A generation above the default is recorded on the milestone itself, so the trail
       // shows which generation did the work. Appended rather than merged: an explicit
@@ -1099,6 +1169,7 @@ function registerVerifySubcommand(cmd: Command): void {
         makeProbe(options.issue, options.repo, warnings),
         dispatchedAt
       );
+      const localPaths = resolvedContextPaths(result.resume_context);
 
       if (options.json) {
         console.log(
@@ -1110,6 +1181,7 @@ function registerVerifySubcommand(cmd: Command): void {
               verified: result.verified,
               resume_context: result.resume_context,
               local_worktree: result.local_worktree,
+              ...(Object.keys(localPaths).length > 0 ? { resolved_paths: localPaths } : {}),
               ...(result.slot_trail ? { slot_trail: true } : {}),
               ...(result.hard_block ? { hard_block: result.hard_block } : {}),
               ...(result.note ? { note: result.note } : {}),
@@ -1127,6 +1199,9 @@ function registerVerifySubcommand(cmd: Command): void {
         console.log(`generation=${result.generation}`);
         console.log(`verified=${result.verified.length > 0 ? result.verified.join(',') : 'none'}`);
         console.log(`local_worktree=${result.local_worktree}`);
+        for (const [key, value] of Object.entries(localPaths)) {
+          console.log(`resolved_${key}=${value}`);
+        }
         if (result.slot_trail) console.log('slot_trail=present');
         if (result.hard_block) console.log(`hard_block=${result.hard_block}`);
         if (result.note) console.log(`note=${result.note}`);

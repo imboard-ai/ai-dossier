@@ -480,8 +480,25 @@ describe('validateMilestone', () => {
       ],
     });
     expect(errors).toEqual([
-      "Key 'worktree' must be an absolute path, got 'worktrees/feature-440'",
+      "Key 'worktree' must be a <repo>/… or <local>/… path (runstate post rewrites absolute and cwd-relative paths into that form), got 'worktrees/feature-440'",
     ]);
+  });
+
+  it('accepts the portable <repo>/… and <local>/… path forms (#1085)', () => {
+    for (const worktree of ['<repo>/../worktrees/feature-440', '<local>/feature-440']) {
+      const errors = validateMilestone({
+        phase: 'setup',
+        status: 'done',
+        run: 'r-440-ab56',
+        keys: [
+          ['branch', 'feature/440'],
+          ['worktree', worktree],
+          ['pool_claimed', 'true'],
+          ['base_branch', 'main'],
+        ],
+      });
+      expect(errors).toEqual([]);
+    }
   });
 
   it('rejects a malformed run id and points at mint', () => {

@@ -24,6 +24,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { isPortablePath } from '@ai-dossier/core';
 import type { SetupInfo } from './groundtruth';
 import type { ExecFn } from './project';
 import type { CleanupStatus } from './types';
@@ -126,7 +127,9 @@ export function runTeardown(
   if (info.worktree.includes('\0') || !path.isAbsolute(info.worktree)) {
     return {
       cleanup: 'failed-invalid-worktree',
-      detail: `worktree path rejected (must be absolute): ${info.worktree}`,
+      detail: isPortablePath(info.worktree)
+        ? `worktree ${info.worktree} did not resolve to a worktree of this repository on this machine (#1085) — nothing removed`
+        : `worktree path rejected (must be absolute): ${info.worktree}`,
     };
   }
   if (info.poolClaimed) {

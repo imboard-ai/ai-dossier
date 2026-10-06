@@ -702,6 +702,38 @@ describe('evidence command', () => {
       expect(console.error).not.toHaveBeenCalled();
     });
 
+    it('should redact a home-directory path from --rationale and --extra (#1085)', async () => {
+      mockedFs.existsSync.mockReturnValue(true);
+      mockedFs.readFileSync.mockImplementation(((p: unknown) =>
+        String(p).endsWith('.evidence.json')
+          ? JSON.stringify(existingRecord)
+          : dossierWithChecksum) as typeof fs.readFileSync);
+
+      const program = createTestProgram();
+      registerEvidenceCommand(program);
+      await program.parseAsync([
+        'node',
+        'dossier',
+        'evidence',
+        'add',
+        'test.ds.md',
+        '--anchor',
+        'A',
+        '--rationale',
+        'Seen in /home/alice/runs/trace.log during the run.',
+        '--extra',
+        'log=/Users/bob/x/out.txt',
+        '--session',
+        VALID_SESSION,
+      ]);
+
+      const raw = vi.mocked(mockedFs.writeFileSync).mock.calls[0][1] as string;
+      expect(raw).not.toMatch(/alice|bob/);
+      const written = JSON.parse(raw);
+      expect(written.entries.at(-1).rationale).toContain('<local>/trace.log');
+      expect(written.entries.at(-1).evidence[0].extra.log).toBe('<local>/out.txt');
+    });
+
     it('should land --extra k=v pairs in extra', async () => {
       mockedFs.existsSync.mockReturnValue(true);
       mockedFs.readFileSync.mockImplementation(((p: unknown) =>
