@@ -10,7 +10,8 @@
     "preview": "astro preview",
     "test": "node --test \"src/lib/*.test.mjs\"",
     "check:links": "node scripts/check-links.mjs",
-    "check:canonical": "node scripts/check-canonical.mjs"
+    "check:canonical": "node scripts/check-canonical.mjs",
+    "check:discovery": "node scripts/check-discovery.mjs"
   },
   "engines": {
     "node": ">=22.12.0"

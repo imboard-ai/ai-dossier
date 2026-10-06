@@ -70,9 +70,9 @@ Two more gotchas:
 
 ---
 
-## SSM via chamber: everything is a SecureString
+## SSM via the secret store CLI: everything is a SecureString
 
-`chamber write` stores values encrypted. Reading without `--with-decryption` returns
+A secret-store write stores values encrypted. Reading without `--with-decryption` returns
 the **KMS ciphertext**, not the value:
 
 ```bash

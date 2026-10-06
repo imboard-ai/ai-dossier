@@ -12,6 +12,31 @@ export function isExcluded(docRelPath) {
   return EXCLUDED.some((re) => re.test(docRelPath));
 }
 
+// Docs that are published (and reachable by URL) but are internal operator notes: they stay
+// out of every discovery surface (sitemap, llms.txt, llms-full.txt). Entries are content ids,
+// i.e. docs-relative paths without `.md`; a directory entry covers everything under it.
+// Single source for the sitemap filter, the llms.txt SKIP list and the post-build guard.
+export const INTERNAL_DOC_PATHS = [
+  'reports',
+  'agent-traps',
+  'how-to/autonomous-pipeline',
+  'explanation/infrastructure-lessons',
+  'contributing/worktrees',
+  'contributing/pr-guide',
+  'contributing/mcp',
+];
+
+/** True when a docs content id (`reports/batch-pilot`, `agent-traps`) is an internal doc. */
+export function isInternalDoc(id) {
+  return INTERNAL_DOC_PATHS.some((p) => id === p || id.startsWith(`${p}/`));
+}
+
+/** True when a site pathname (`/docs/reports/x/`) belongs to an internal doc. */
+export function isInternalDocUrl(pathname) {
+  const m = /^\/docs\/(.+?)\/?$/.exec(pathname);
+  return m ? isInternalDoc(m[1]) : false;
+}
+
 /** docs-relative markdown path -> content id: `guides/README.md` -> `guides`, `index.md` -> ``. */
 export function docId(docRelPath) {
   let id = docRelPath.replace(/\\/g, '/').replace(/\.md$/i, '');

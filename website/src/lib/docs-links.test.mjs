@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { docId, docUrl, isExcluded, rewriteLink } from './docs-links.mjs';
+import {
+  docId,
+  docUrl,
+  INTERNAL_DOC_PATHS,
+  isExcluded,
+  isInternalDoc,
+  isInternalDocUrl,
+  rewriteLink,
+} from './docs-links.mjs';
 
 const repoRoot = '/r';
 const docsDir = '/r/docs';
@@ -23,6 +31,21 @@ test('docId maps README and index to directory routes', () => {
 test('excludes planning internals', () => {
   assert.ok(isExcluded('planning/roadmap.md'));
   assert.ok(!isExcluded('reports/model-scorecard.md'));
+});
+
+test('internal docs match by id and by site URL, including nested paths', () => {
+  for (const p of INTERNAL_DOC_PATHS) {
+    assert.ok(isInternalDoc(p), p);
+    assert.ok(isInternalDocUrl(`/docs/${p}/`), p);
+    assert.ok(isInternalDocUrl(`/docs/${p}/child/`), p);
+  }
+  assert.ok(isInternalDoc('reports/evidence/agent-logs-summary'));
+  assert.ok(!isInternalDoc('reports-overview'));
+  assert.ok(!isInternalDoc('how-to/autonomous-pipelines'));
+  assert.ok(!isInternalDoc('guides/signing-dossiers'));
+  assert.ok(!isInternalDocUrl('/docs/'));
+  assert.ok(!isInternalDocUrl('/docs/contributing/'));
+  assert.ok(!isInternalDocUrl('/'));
 });
 
 test('relative md links become docs routes and keep anchors', () => {

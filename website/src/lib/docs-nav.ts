@@ -11,6 +11,8 @@ const ORDER = [
   'contributing',
   'reports',
 ];
+// Pillar pages listed first in their section, ahead of the alphabetical rest.
+const FEATURED = ['explanation/model-driven-orchestration'];
 const LABELS: Record<string, string> = {
   'getting-started': 'Getting started',
   'how-to': 'How-to',
@@ -40,7 +42,10 @@ export async function docsNav() {
       key: top,
       label: LABELS[top] ?? top.charAt(0).toUpperCase() + top.slice(1),
       items: items.sort(
-        (a, b) => Number(b.index) - Number(a.index) || a.title.localeCompare(b.title)
+        (a, b) =>
+          Number(b.index) - Number(a.index) ||
+          Number(FEATURED.includes(b.id)) - Number(FEATURED.includes(a.id)) ||
+          a.title.localeCompare(b.title)
       ),
     }));
 }

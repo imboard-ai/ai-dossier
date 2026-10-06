@@ -7,14 +7,14 @@ here** — the GO/NO-GO gate with the 7-day regression window is
 first batch PR merges.
 
 This file covers **all four pilot runs** — three under #526 (attempt 2) and one under #590 (attempt 4). Part I is run `r-526-1248` (blocked before any batch
-could dispatch); [Part II](#part-ii--run-r-526-9313-2026-09-01-2257--2026-09-02-hcc2) is run
+could dispatch); [Part II](#part-ii--run-r-526-9313-2026-09-01-2257--2026-09-02-the-runner-host) is run
 `r-526-9313`, which dispatched three batches and is where the bulk of the execution data lives;
-[Part III](#part-iii--run-r-526-eba7-2026-09-02-1214z-hcc2) is run `r-526-eba7`, the first run whose
+[Part III](#part-iii--run-r-526-eba7-2026-09-02-1214z-the-runner-host) is run `r-526-eba7`, the first run whose
 batch actually reached execution — a warm worktree in under a second and both members' agents run —
 before both members were evicted, one by a `plan validate` gap (#579, fixed mid-run by PR #581) and
 one by the incremental member gate (#583, fixed by #585).
 
-[Part IV](#part-iv--run-r-590-84e0-2026-09-03-04090720z-hcc2) is attempt 4, run `r-590-84e0` under
+[Part IV](#part-iv--run-r-590-84e0-2026-09-03-04090720z-the-runner-host) is attempt 4, run `r-590-84e0` under
 the fresh issue #590 — the first run to dispatch **three** batches at once, all warmed in the same
 second, and the run that root-causes why no batch has ever completed: the incremental member gate is a
 constant function in this environment (#594, imboard-monorepo#3996).
@@ -46,7 +46,7 @@ never wired up. The fix landed one link short of the chain.
 
 | | |
 |---|---|
-| host | hcc2 |
+| host | the runner host |
 | repo under test | `imboard-ai/imboard-monorepo` (cohort source, per the owner's 2026-09-01 decision on #526) |
 | report home | `imboard-ai/ai-dossier` |
 | scheduler | `imboard-ai-imboard-monorepo`, `max_slots=3`, cron tick every 2 min via `~/.dossier/reset-fleet/tick.sh` |
@@ -277,14 +277,14 @@ whole across all three runs. Run 1 alone met none of AC1–AC3 and delivered Par
   [#3887](https://github.com/imboard-ai/imboard-monorepo/issues/3887#issuecomment-5500138003),
   [#3820](https://github.com/imboard-ai/imboard-monorepo/issues/3820#issuecomment-5500138405)
 - Runstate trail for this run: `r-526-1248` on [#526](https://github.com/imboard-ai/ai-dossier/issues/526)
-- Batch-prep audit + manifest: `~/.dossier/logs/batch-prep/imboard-ai-imboard-monorepo/` (hcc2, machine-local)
-- Scheduler journal: `~/.dossier/sched/imboard-ai-imboard-monorepo/events.jsonl` (hcc2, machine-local)
+- Batch-prep audit + manifest: `~/.dossier/logs/batch-prep/imboard-ai-imboard-monorepo/` (the runner host, machine-local)
+- Scheduler journal: `~/.dossier/sched/imboard-ai-imboard-monorepo/events.jsonl` (the runner host, machine-local)
 - Scheduler state backups taken before the CLI upgrade: `state.json.pre-0.24-upgrade-20260901` in
   both project directories
 
 ---
 
-# Part II — run `r-526-9313` (2026-09-01 22:57 → 2026-09-02, hcc2)
+# Part II — run `r-526-9313` (2026-09-01 22:57 → 2026-09-02, the runner host)
 
 Part I above records run `r-526-1248`, which ended before any batch could dispatch. Both blockers
 it root-caused were then fixed and released — B2a → [#545](https://github.com/imboard-ai/ai-dossier/pull/545)
@@ -313,7 +313,7 @@ reading.
 
 | | |
 |---|---|
-| host | hcc2 (this box) |
+| host | the runner host (this box) |
 | engine | `@ai-dossier/cli` 0.25.0, `@ai-dossier/sched` 0.12.1 — both carry #545 and #539 |
 | tick | `~/.dossier/reset-fleet/tick.sh`, cron every 2 min, `sched start --once` per project |
 | projects | `imboard-ai-ai-dossier` (`max_slots=3`), `imboard-ai-imboard-monorepo` (`max_slots=3`) |
@@ -615,13 +615,13 @@ after run 3. AC2 and AC3 changed.*
 - Classify records: #540, #541, #542, #543 (fresh, mechanical tier); #487, #488, #489 (reused)
 - `plan:v1` artifacts posted by this run: #540, #541, #542, #543
 - Batch-prep audit + manifests: `~/.dossier/logs/batch-prep/imboard-ai-ai-dossier/` and
-  `.../imboard-ai-imboard-monorepo/` (hcc2, machine-local)
+  `.../imboard-ai-imboard-monorepo/` (the runner host, machine-local)
 - Scheduler journals: `~/.dossier/sched/<project>/events.jsonl`; raw dispatch logs with the
   `modelUsage` this report's numbers were parsed from: `~/.dossier/sched/<project>/runs/*.log`
 
 ---
 
-# Part III — run `r-526-eba7` (2026-09-02 12:14Z, hcc2)
+# Part III — run `r-526-eba7` (2026-09-02 12:14Z, the runner host)
 
 The third run of attempt 2 — called "attempt 3" in #526's comments and in this branch's name.
 Dispatched by the scheduler as a strong-tier `full` unit on
@@ -642,7 +642,7 @@ way in. All three carry reproductions and acceptance criteria.
 
 | | |
 |---|---|
-| host | hcc2 (this box) |
+| host | the runner host (this box) |
 | `@ai-dossier/cli` | 0.30.0 (npm latest at dispatch) |
 | `@ai-dossier/sched` | 0.19.0 (npm latest; the tick's step-0b nested-dependency upgrade had already run) |
 | pilot project | `imboard-ai-imboard-monorepo`, `max_slots=3`, `stall_timeout_ms=10800000` |
@@ -995,7 +995,7 @@ full-cycle ready.
 - Classify records: `r-1026-a195`, `r-2687-42fb`, `r-3966-2b7f` (all fresh, mechanical tier)
 - `plan:v1` artifacts posted by this run: imboard #1026, #2687, #3966
 - Batch-prep audit + manifest: `~/.dossier/logs/batch-prep/imboard-ai-imboard-monorepo/BATCH-PLAN-20260902-122327.md.gz`
-  and `manifest-20260902-122327.json` (hcc2, machine-local)
+  and `manifest-20260902-122327.json` (the runner host, machine-local)
 - Raw dispatch logs: `~/.dossier/sched/imboard-ai-imboard-monorepo/runs/batch-b-20260902-01-m1-1026.log`,
   `...-m2-2687.log`; journal `~/.dossier/sched/imboard-ai-imboard-monorepo/events.jsonl`
 - Blockers from this run: [#583](https://github.com/imboard-ai/ai-dossier/issues/583) — incremental gate
@@ -1007,7 +1007,7 @@ full-cycle ready.
   `plan validate` misread exit 128 as a git failure (**fixed mid-run**, PR #581 `c4a4740`).
 
 
-# Part IV — run `r-590-84e0` (2026-09-03 04:09→07:20Z, hcc2)
+# Part IV — run `r-590-84e0` (2026-09-03 04:09→07:20Z, the runner host)
 
 Attempt 4, run under a **fresh issue** — [#590](https://github.com/imboard-ai/ai-dossier/issues/590)
 supersedes the closed #526, whose trail was three completed runs deep and whose every re-enqueue
@@ -1032,7 +1032,7 @@ bookkeeping that cannot be reconciled with the spawn sequence and that dissolved
 
 | | |
 |---|---|
-| host | hcc2 (this box) |
+| host | the runner host (this box) |
 | `@ai-dossier/cli` | 0.33.0 (npm latest at dispatch) |
 | `@ai-dossier/sched` | 0.21.0 (npm latest) |
 | pilot project | `imboard-ai-imboard-monorepo`, `max_slots=3`, `stall_timeout_ms=10800000` |
@@ -1447,7 +1447,7 @@ merges, never on issue closure.
 - `plan:v1` artifacts posted by this run: imboard #3985, #3393, #3416, #1512, #340, #826, #47
 - Pre-registered readiness prediction (before enqueue):
   [#590 comment](https://github.com/imboard-ai/ai-dossier/issues/590#issuecomment-5520939662)
-- Batch-prep audit + manifest (hcc2, machine-local):
+- Batch-prep audit + manifest (the runner host, machine-local):
   `~/.dossier/logs/batch-prep/imboard-ai-imboard-monorepo/BATCH-PLAN-20260903-052500.md.gz` and
   `manifest-20260903-052500.json`
 - Gate logs — the core evidence, three 765-byte files differing only in one path segment:
