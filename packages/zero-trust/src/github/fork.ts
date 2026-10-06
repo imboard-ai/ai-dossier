@@ -11,11 +11,19 @@ import {
   type RunRecord,
   transitionRun,
 } from '../state';
-import { isGitHubLogin } from './handoff';
+import { HandoffError, isGitHubLogin, sameLogin, upstreamIssueBinding } from './handoff';
 import type { GitHubRead } from './reconcile';
 
+export const FORK_ERRORS = Object.freeze([
+  'invalid_binding',
+  'invalid_app',
+  'admission_state',
+] as const);
+export type ForkErrorCode = (typeof FORK_ERRORS)[number];
+
+/** Fixed message: never echoes the run, a repository name or a GitHub response. */
 export class ForkError extends Error {
-  constructor(readonly code: string) {
+  constructor(readonly code: ForkErrorCode) {
     super(`Zero-trust fork check rejected: ${code}`);
     this.name = 'ForkError';
   }
@@ -24,6 +32,10 @@ export class ForkError extends Error {
 const PAGE_SIZE = 100;
 /** Newest forks first: a fork the contributor just created is on the first page. */
 export const MAX_FORK_PAGES = 10;
+const FULL_NAME = /^([A-Za-z0-9-]{1,39})\/([A-Za-z0-9._-]{1,100})$/u;
+
+export const UNREADABLE_ACTION =
+  'GitHub could not be read, so nothing was recorded. Resume the run to check again.';
 
 export interface UpstreamRepository {
   readonly owner: string;
@@ -34,6 +46,8 @@ export interface UpstreamRepository {
 export interface ForkRepository {
   readonly repositoryId: number;
   readonly owner: string;
+  /** The fork's own repository name (it may differ from the upstream's). */
+  readonly repo: string;
   readonly fullName: string;
 }
 
@@ -53,27 +67,26 @@ export type ForkDiscovery =
   | { readonly kind: 'invalid'; readonly reason: ForkBlockReason; readonly fullName: string }
   | { readonly kind: 'unknown' };
 
-const sameLogin = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
-const positiveId = (value: unknown): value is number =>
+export const isPositiveId = (value: unknown): value is number =>
   Number.isSafeInteger(value) && (value as number) > 0;
 const enc = encodeURIComponent;
 
 type Read = { ok: true; status: number; body: unknown } | { ok: false };
-/** A credential-side read that throws counts as unreadable. */
-async function settle<T>(read: () => Promise<T>): Promise<T | null> {
-  try {
-    return await read();
-  } catch {
-    return null;
-  }
-}
-
 async function get(read: GitHubRead, path: string): Promise<Read> {
   try {
     const response = await read(path);
     return { ok: true, status: response.status, body: response.body };
   } catch {
     return { ok: false };
+  }
+}
+
+/** A credential-side read that throws counts as unreadable. */
+async function settle<T>(read: () => Promise<T>): Promise<T | null> {
+  try {
+    return await read();
+  } catch {
+    return null;
   }
 }
 
@@ -88,14 +101,16 @@ function verdict(body: unknown, upstream: UpstreamRepository, contributor: strin
   const owner = isRecord(body.owner) ? body.owner.login : undefined;
   const parent = isRecord(body.parent) ? body.parent.id : undefined;
   const source = isRecord(body.source) ? body.source.id : undefined;
-  const fullName = body.full_name;
+  const name = typeof body.full_name === 'string' ? FULL_NAME.exec(body.full_name) : null;
   if (
     body.fork !== true ||
-    !positiveId(body.id) ||
-    typeof fullName !== 'string' ||
-    !isGitHubLogin(owner)
+    !isPositiveId(body.id) ||
+    !name ||
+    !isGitHubLogin(owner) ||
+    !sameLogin(name[1] as string, owner)
   )
     return { kind: 'unrelated' };
+  const fullName = name[0];
   // Another project of the same name is simply not the fork; only the upstream's own
   // network can hold a wrong-parent fork.
   if (parent !== upstream.repositoryId && source !== upstream.repositoryId)
@@ -104,18 +119,22 @@ function verdict(body: unknown, upstream: UpstreamRepository, contributor: strin
     return { kind: 'invalid', reason: 'fork_wrong_owner', fullName };
   if (parent !== upstream.repositoryId)
     return { kind: 'invalid', reason: 'fork_wrong_parent', fullName };
-  return { kind: 'fork', fork: Object.freeze({ repositoryId: body.id, owner, fullName }) };
+  return {
+    kind: 'fork',
+    fork: Object.freeze({ repositoryId: body.id, owner, repo: name[2] as string, fullName }),
+  };
 }
 
 /** Credential-free discovery: the contributor's same-name repository first, then the
- * upstream's fork listing filtered by owner; every candidate is re-read and bound by id. */
+ * upstream's fork listing filtered by owner; every candidate is re-read and bound by id.
+ * Absence is reported only when the reads prove it; otherwise the answer is `unknown`. */
 export async function discoverFork(
   read: GitHubRead,
   upstream: UpstreamRepository,
   contributor: string,
   expectedForkId?: number
 ): Promise<ForkDiscovery> {
-  if (!isGitHubLogin(contributor) || !positiveId(upstream.repositoryId))
+  if (!isGitHubLogin(contributor) || !isPositiveId(upstream.repositoryId))
     throw new ForkError('invalid_binding');
   const judge = (v: Verdict): ForkDiscovery | null => {
     if (v.kind === 'invalid') return { kind: 'invalid', reason: v.reason, fullName: v.fullName };
@@ -127,30 +146,39 @@ export async function discoverFork(
 
   // A renamed fork answers the old name with a redirect; the listing below still finds it.
   const direct = await get(read, `/repos/${enc(contributor)}/${enc(upstream.repo)}`);
+  const directAnswered = direct.ok && (direct.status === 200 || direct.status === 404);
   if (direct.ok && direct.status === 200) {
     const found = judge(verdict(direct.body, upstream, contributor));
     if (found) return found;
   }
 
   const listing = `/repos/${enc(upstream.owner)}/${enc(upstream.repo)}/forks?sort=newest`;
-  for (let page = 1; page <= MAX_FORK_PAGES; page++) {
+  let complete = false;
+  for (let page = 1; page <= MAX_FORK_PAGES && !complete; page++) {
     const response = await get(read, `${listing}&per_page=${PAGE_SIZE}&page=${page}`);
     if (!response.ok || response.status !== 200 || !Array.isArray(response.body))
       return { kind: 'unknown' };
     for (const item of response.body) {
       const owner = isRecord(item) && isRecord(item.owner) ? item.owner.login : undefined;
-      const fullName = isRecord(item) ? item.full_name : undefined;
-      if (typeof owner !== 'string' || !sameLogin(owner, contributor)) continue;
-      if (typeof fullName !== 'string' || !/^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/u.test(fullName))
-        continue;
-      const [name, repo] = fullName.split('/') as [string, string];
-      const candidate = await get(read, `/repos/${enc(name)}/${enc(repo)}`);
+      const name =
+        isRecord(item) && typeof item.full_name === 'string'
+          ? FULL_NAME.exec(item.full_name)
+          : null;
+      if (typeof owner !== 'string' || !sameLogin(owner, contributor) || !name) continue;
+      const candidate = await get(
+        read,
+        `/repos/${enc(name[1] as string)}/${enc(name[2] as string)}`
+      );
       if (!candidate.ok || candidate.status !== 200) return { kind: 'unknown' };
       const found = judge(verdict(candidate.body, upstream, contributor));
       if (found) return found;
     }
-    if (response.body.length < PAGE_SIZE) break;
+    complete = response.body.length < PAGE_SIZE;
   }
+  // Not found. A complete listing proves it. A capped listing proves nothing about a bound
+  // fork (it may be older or renamed), and nothing at all when the direct read failed too;
+  // a first-time contributor with no same-name repository is still told to fork.
+  if (!complete && (expectedForkId !== undefined || !directAnswered)) return { kind: 'unknown' };
   return expectedForkId === undefined
     ? { kind: 'missing' }
     : // The bound fork is gone: deleted forks block (PRD §5.9 permission freshness).
@@ -192,7 +220,8 @@ export type InstallationCheck =
   | { readonly kind: 'limited'; readonly installationId: number }
   /** Selection and permissions are fine; the repository set still needs the user token. */
   | { readonly kind: 'unconfirmed'; readonly installationId: number }
-  | { readonly kind: 'missing' }
+  /** `suspendedId`: installed on the fork's account but suspended. */
+  | { readonly kind: 'missing'; readonly suspendedId?: number }
   | {
       readonly kind: 'too_broad';
       readonly detail: TooBroadDetail;
@@ -212,19 +241,17 @@ function exceeds(
 
 /** The installation on the fork must select exactly the fork and grant no more than the App
  * declares. Pure: the reads happen on the credential side. Without `repositoryIds` it checks
- * everything except the selected set. */
+ * everything except the selected set. None, a suspended installation, or one on another
+ * account than the fork owner's counts as missing. */
 export function checkInstallation(
   installation: InstallationSummary | 'none',
   fork: ForkRepository,
   declared: Readonly<Record<string, PermissionLevel>>,
   repositoryIds?: readonly number[]
 ): InstallationCheck {
-  if (
-    installation === 'none' ||
-    installation.suspended ||
-    !sameLogin(installation.account, fork.owner)
-  )
+  if (installation === 'none' || !sameLogin(installation.account, fork.owner))
     return { kind: 'missing' };
+  if (installation.suspended) return { kind: 'missing', suspendedId: installation.id };
   const installationId = installation.id;
   if (installation.repositorySelection !== 'selected')
     return { kind: 'too_broad', detail: 'all_repositories', installationId };
@@ -270,6 +297,7 @@ export type ReadinessOutcome =
       readonly link: string;
       readonly nextPermittedAction: string;
     }
+  /** The run records `installation_too_broad`, or `policy_blocked` for a fork reason. */
   | {
       readonly kind: 'blocked';
       readonly run: RunRecord;
@@ -291,20 +319,21 @@ export type ReadinessOutcome =
 
 /** The upstream comes from the run's own issue URL, never from the caller. */
 export function upstreamOf(run: RunRecord, upstreamId: number): UpstreamRepository {
-  const match = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/issues\/[1-9][0-9]{0,15}$/u.exec(
-    run.upstreamIssue
-  );
-  if (
-    !match ||
-    !isGitHubLogin(match[1]) ||
-    !/^[A-Za-z0-9._-]{1,100}$/u.test(match[2] as string) ||
-    !positiveId(upstreamId)
-  )
-    throw new ForkError('invalid_binding');
-  return Object.freeze({ owner: match[1], repo: match[2] as string, repositoryId: upstreamId });
+  let upstream: { owner: string; repo: string };
+  try {
+    upstream = upstreamIssueBinding(run.upstreamIssue).upstream;
+  } catch (error) {
+    if (error instanceof HandoffError) throw new ForkError('invalid_binding');
+    throw error;
+  }
+  if (!isPositiveId(upstreamId)) throw new ForkError('invalid_binding');
+  return Object.freeze({ owner: upstream.owner, repo: upstream.repo, repositoryId: upstreamId });
 }
 
 const SLUG = /^[a-z0-9](?:[a-z0-9-]{0,98}[a-z0-9])?$/u;
+export function isAppSlug(value: unknown): value is string {
+  return typeof value === 'string' && SLUG.test(value);
+}
 const checked = (text: string): string => {
   assertNoSecrets(text);
   return text;
@@ -314,27 +343,47 @@ export function forkLink(upstream: UpstreamRepository): string {
   return checked(`https://github.com/${enc(upstream.owner)}/${enc(upstream.repo)}/fork`);
 }
 export function installLink(appSlug: string): string {
-  if (!SLUG.test(appSlug)) throw new ForkError('invalid_app');
+  if (!isAppSlug(appSlug)) throw new ForkError('invalid_app');
   return checked(`https://github.com/apps/${appSlug}/installations/new`);
 }
+const settingsLink = (installationId?: number) =>
+  checked(
+    installationId === undefined
+      ? 'https://github.com/settings/installations'
+      : `https://github.com/settings/installations/${installationId}`
+  );
 
-/** Status text for a persisted fork/installation wait, re-derived from the run alone. The
- * action is one line and carries the exact link, since status shows only that line. */
-export function prerequisiteAction(
-  run: RunRecord,
+interface Action {
+  readonly link: string;
+  readonly nextPermittedAction: string;
+}
+
+function waitAction(
+  reasonCode: ReasonCode,
+  contributor: string,
   upstream: UpstreamRepository,
   appSlug: string,
-  forkName?: string
-): { readonly link: string; readonly nextPermittedAction: string } | null {
-  if (prerequisiteWaitOrigin(run) === null) return null;
+  forkName?: string,
+  suspendedId?: number
+): Action {
   const repo = `${upstream.owner}/${upstream.repo}`;
-  if (run.reasonCode === ReasonCode.ForkMissing) {
+  if (reasonCode === ReasonCode.ForkMissing) {
     const link = forkLink(upstream);
     return {
       link,
       nextPermittedAction: checked(
-        `Fork ${repo} into your own account (${run.contributor}) at ${link}, then resume the ` +
+        `Fork ${repo} into your own account (${contributor}) at ${link}, then resume the ` +
           'run. Forking is a one-time manual step; nothing runs until you resume.'
+      ),
+    };
+  }
+  if (suspendedId !== undefined) {
+    const link = settingsLink(suspendedId);
+    return {
+      link,
+      nextPermittedAction: checked(
+        `The ${appSlug} GitHub App installation on ${contributor} is suspended. Unsuspend it ` +
+          `at ${link}, then resume the run.`
       ),
     };
   }
@@ -343,58 +392,74 @@ export function prerequisiteAction(
   return {
     link,
     nextPermittedAction: checked(
-      `Install the ${appSlug} GitHub App on your account (${run.contributor}) at ${link}, ` +
+      `Install the ${appSlug} GitHub App on your account (${contributor}) at ${link}, ` +
         `choosing "Only select repositories" with only ${target}, then resume the run.`
     ),
   };
 }
 
-const TOO_BROAD: Readonly<Record<TooBroadDetail, string>> = Object.freeze({
-  all_repositories: 'it has access to all repositories',
-  extra_repositories: 'it selects repositories besides the fork',
-  extra_permissions: 'it grants permissions beyond those the App declares',
-  upstream_installation: 'the App is installed on the upstream repository',
-});
+/** Status line for a persisted fork/installation wait, re-derived from the run plus the
+ * upstream binding and App slug. The action is one line and carries the exact link, since
+ * status shows only that line. Null outside such a wait. */
+export function prerequisiteAction(
+  run: RunRecord,
+  upstream: UpstreamRepository,
+  appSlug: string,
+  forkName?: string
+): Action | null {
+  if (prerequisiteWaitOrigin(run) === null) return null;
+  return waitAction(run.reasonCode, run.contributor, upstream, appSlug, forkName);
+}
+
+const TOO_BROAD: Readonly<Record<Exclude<TooBroadDetail, 'upstream_installation'>, string>> =
+  Object.freeze({
+    all_repositories: 'it has access to all repositories',
+    extra_repositories: 'it selects repositories besides the fork',
+    extra_permissions: 'it grants permissions beyond those the App declares',
+  });
+
+type Block =
+  | { readonly reason: ForkBlockReason; readonly fullName: string }
+  | {
+      readonly reason: 'installation_too_broad';
+      readonly detail: TooBroadDetail;
+      readonly fullName: string;
+      readonly installationId?: number;
+    };
 
 function blockedAction(
-  reason: ReadinessBlock,
+  block: Block,
   upstream: UpstreamRepository,
   contributor: string,
-  appSlug: string,
-  fullName: string,
-  detail?: TooBroadDetail,
-  installationId?: number
-): { link: string; nextPermittedAction: string } {
+  appSlug: string
+): Action {
   const repo = `${upstream.owner}/${upstream.repo}`;
-  if (detail === 'upstream_installation') {
-    const link = checked(`https://github.com/${enc(upstream.owner)}/${enc(upstream.repo)}`);
-    return {
-      link,
-      nextPermittedAction: checked(
-        `The ${appSlug} GitHub App is installed on ${repo} (${link}); it may only ever be ` +
-          "installed on the contributor's fork. Its owner must uninstall it before a new run."
-      ),
-    };
-  }
-  if (reason === 'installation_too_broad') {
-    const link = checked(
-      installationId === undefined
-        ? 'https://github.com/settings/installations'
-        : `https://github.com/settings/installations/${installationId}`
-    );
+  const { fullName } = block;
+  if (block.reason === 'installation_too_broad') {
+    if (block.detail === 'upstream_installation') {
+      const link = checked(`https://github.com/${enc(upstream.owner)}/${enc(upstream.repo)}`);
+      return {
+        link,
+        nextPermittedAction: checked(
+          `The ${appSlug} GitHub App is installed on ${repo} (${link}); it may only ever be ` +
+            "installed on the contributor's fork. Its owner must uninstall it before a new run."
+        ),
+      };
+    }
+    const link = settingsLink(block.installationId);
     return {
       link,
       nextPermittedAction: checked(
         `The ${appSlug} installation on ${contributor} is broader than the fork: ` +
-          `${TOO_BROAD[detail as TooBroadDetail]}. At ${link}, choose "Only select ` +
-          `repositories" with only ${fullName} and accept no extra permissions, then start a new run.`
+          `${TOO_BROAD[block.detail]}. At ${link}, choose "Only select repositories" with ` +
+          `only ${fullName} and accept no extra permissions, then start a new run.`
       ),
     };
   }
   const because =
-    reason === 'fork_wrong_parent'
+    block.reason === 'fork_wrong_parent'
       ? `${fullName} is a fork of another fork, not of ${repo}`
-      : reason === 'fork_wrong_owner'
+      : block.reason === 'fork_wrong_owner'
         ? `${fullName} is not owned by ${contributor}`
         : `the fork bound earlier in this run is gone or was replaced (${fullName})`;
   const link = forkLink(upstream);
@@ -408,7 +473,10 @@ function blockedAction(
 }
 
 /** One explicit check of every prerequisite. Moves the run into, within, or out of the
- * durable wait; the caller persists the returned run. Never schedules anything. */
+ * durable wait; the caller persists the returned run. Never schedules anything. Throws
+ * `ForkError`: `admission_state` outside gating, shipping or a fork/installation wait (a
+ * pending link hand-off included); `invalid_binding` / `invalid_app` on a bad issue URL,
+ * upstream id or App slug. */
 export async function checkForkReadiness(
   input: ReadinessInput,
   deps: ReadinessDeps
@@ -417,63 +485,57 @@ export async function checkForkReadiness(
   const origin = prerequisiteWaitOrigin(run);
   if (origin === null && run.state !== 'gating' && run.state !== 'shipping')
     throw new ForkError('admission_state');
-  installLink(appSlug);
+  if (!isAppSlug(appSlug)) throw new ForkError('invalid_app');
   const upstream = upstreamOf(run, input.upstreamId);
   const move = (reason: ReasonCode) => transitionRun(run, reason, deps.now());
   const unknown = (): ReadinessOutcome => ({
     kind: 'unknown',
     run,
-    nextPermittedAction:
-      'GitHub could not be read, so nothing was recorded. Resume the run to check again.',
+    nextPermittedAction: UNREADABLE_ACTION,
   });
-  const wait = (reason: WaitReason, forkName?: string): ReadinessOutcome => {
-    const code =
-      reason === 'fork_missing' ? ReasonCode.ForkMissing : ReasonCode.InstallationMissing;
+  const wait = (
+    code: ReasonCode.ForkMissing | ReasonCode.InstallationMissing,
+    fork?: ForkRepository,
+    suspendedId?: number
+  ): ReadinessOutcome => {
     // The same wait observed again records nothing new.
     const next = origin !== null && run.reasonCode === code ? run : move(code);
-    const action = prerequisiteAction(next, upstream, appSlug, forkName);
     return {
       kind: 'awaiting_contributor',
       run: next,
-      reason,
-      ...(action as NonNullable<typeof action>),
+      reason: code === ReasonCode.ForkMissing ? 'fork_missing' : 'installation_missing',
+      ...waitAction(code, run.contributor, upstream, appSlug, fork?.fullName, suspendedId),
     };
   };
-  const block = (
-    reason: ReadinessBlock,
-    fullName: string,
-    detail?: TooBroadDetail,
-    installationId?: number
-  ): ReadinessOutcome => ({
+  const blocked = (block: Block): ReadinessOutcome => ({
     kind: 'blocked',
     run: move(
-      reason === 'installation_too_broad'
+      block.reason === 'installation_too_broad'
         ? ReasonCode.InstallationTooBroad
         : ReasonCode.PolicyBlocked
     ),
-    reason,
-    ...(detail ? { detail } : {}),
-    ...blockedAction(reason, upstream, run.contributor, appSlug, fullName, detail, installationId),
+    reason: block.reason,
+    ...('detail' in block ? { detail: block.detail } : {}),
+    ...blockedAction(block, upstream, run.contributor, appSlug),
   });
 
   const discovery = await discoverFork(deps.read, upstream, run.contributor, input.expectedForkId);
   if (discovery.kind === 'unknown') return unknown();
-  if (discovery.kind === 'invalid') return block(discovery.reason, discovery.fullName);
-  if (discovery.kind === 'missing') return wait('fork_missing');
+  if (discovery.kind === 'invalid')
+    return blocked({ reason: discovery.reason, fullName: discovery.fullName });
+  if (discovery.kind === 'missing') return wait(ReasonCode.ForkMissing);
   const { fork } = discovery;
+  const tooBroad = (detail: TooBroadDetail, installationId?: number) =>
+    blocked({ reason: 'installation_too_broad', detail, fullName: fork.fullName, installationId });
 
-  const declared = input.declaredPermissions;
   const source = deps.installations;
   const onUpstream = await settle(() => source.installationFor(upstream));
   if (onUpstream === null) return unknown();
-  if (onUpstream !== 'none') {
-    // Any installation on the upstream is too broad, whoever made it (PRD §5.9).
-    return block('installation_too_broad', fork.fullName, 'upstream_installation');
-  }
-  const summary = await settle(() =>
-    source.installationFor({ owner: fork.owner, repo: fork.fullName.split('/')[1] as string })
-  );
+  // Any installation on the upstream is too broad, whoever made it (PRD §5.9).
+  if (onUpstream !== 'none') return tooBroad('upstream_installation');
+  const summary = await settle(() => source.installationFor(fork));
   if (summary === null) return unknown();
+  const declared = input.declaredPermissions;
   let installation = checkInstallation(summary, fork, declared);
   if (installation.kind === 'unconfirmed') {
     const installationId = installation.installationId;
@@ -491,22 +553,22 @@ export async function checkForkReadiness(
       };
     installation = checkInstallation(summary, fork, declared, ids);
   }
-  if (installation.kind === 'missing') return wait('installation_missing', fork.fullName);
-  if (installation.kind === 'too_broad')
-    return block(
-      'installation_too_broad',
-      fork.fullName,
-      installation.detail,
-      installation.installationId
-    );
-  if (installation.kind !== 'limited') return unknown();
-  const ready = Object.freeze({ ...fork, installationId: installation.installationId });
-  return {
-    kind: 'ready',
-    run:
-      origin === null
-        ? run
-        : move(origin === 'gating' ? ReasonCode.ResumeGating : ReasonCode.ResumeShipping),
-    fork: ready,
-  };
+  switch (installation.kind) {
+    case 'missing':
+      return wait(ReasonCode.InstallationMissing, fork, installation.suspendedId);
+    case 'too_broad':
+      return tooBroad(installation.detail, installation.installationId);
+    case 'unconfirmed':
+      // checkInstallation with repository ids never answers `unconfirmed`.
+      throw new ForkError('invalid_binding');
+    case 'limited':
+      return {
+        kind: 'ready',
+        run:
+          origin === null
+            ? run
+            : move(origin === 'gating' ? ReasonCode.ResumeGating : ReasonCode.ResumeShipping),
+        fork: Object.freeze({ ...fork, installationId: installation.installationId }),
+      };
+  }
 }

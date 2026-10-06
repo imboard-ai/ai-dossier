@@ -142,7 +142,12 @@ describe('fork discovery (AC2)', () => {
     const reader = withFork();
     expect(await discoverFork(reader.read, upstream, 'contributor')).toEqual({
       kind: 'found',
-      fork: { repositoryId: FORK_ID, owner: 'contributor', fullName: 'contributor/fixture' },
+      fork: {
+        repositoryId: FORK_ID,
+        owner: 'contributor',
+        repo: 'fixture',
+        fullName: 'contributor/fixture',
+      },
     });
     // The reader interface carries no credential; only public repository paths are read.
     expect(reader.paths.every((p) => p.startsWith('/repos/'))).toBe(true);
@@ -250,8 +255,28 @@ describe('fork discovery (AC2)', () => {
         owner: { login: `u${i}` },
       })),
     ];
+    // Capped listing, but the same-name read answered 404: a first-time contributor is told to fork.
     expect(await discoverFork(reader.read, upstream, 'contributor')).toEqual({ kind: 'missing' });
     expect(reader.paths.filter((p) => p.includes('/forks?'))).toHaveLength(MAX_FORK_PAGES);
+    // A capped listing never proves a bound fork gone, nor anything when the direct read failed.
+    expect(await discoverFork(reader.read, upstream, 'contributor', FORK_ID)).toEqual({
+      kind: 'unknown',
+    });
+    reader.set('/repos/contributor/fixture', { status: 502, body: null });
+    expect(await discoverFork(reader.read, upstream, 'contributor')).toEqual({ kind: 'unknown' });
+  });
+
+  it('a failed same-name read is harmless when the listing is complete', async () => {
+    const reader = new Reader().set('/repos/contributor/fixture', 'throw');
+    expect(await discoverFork(reader.read, upstream, 'contributor')).toEqual({ kind: 'missing' });
+  });
+
+  it('a full_name that disagrees with its owner is not the fork', async () => {
+    const reader = new Reader().set('/repos/contributor/fixture', {
+      status: 200,
+      body: repo({ full_name: 'someone-else/fixture' }),
+    });
+    expect(await discoverFork(reader.read, upstream, 'contributor')).toEqual({ kind: 'missing' });
   });
 
   it('rejects an invalid binding before reading', async () => {
@@ -265,7 +290,12 @@ describe('fork discovery (AC2)', () => {
 });
 
 describe('installation scope (AC5)', () => {
-  const fork = { repositoryId: FORK_ID, owner: 'contributor', fullName: 'contributor/fixture' };
+  const fork = {
+    repositoryId: FORK_ID,
+    owner: 'contributor',
+    repo: 'fixture',
+    fullName: 'contributor/fixture',
+  };
   it.each([
     ['installation all', summary({ repositorySelection: 'all' }), undefined, 'all_repositories'],
     ['installation with an extra repo', summary(), [FORK_ID, 7], 'extra_repositories'],
@@ -299,6 +329,7 @@ describe('installation scope (AC5)', () => {
     expect(checkInstallation('none', fork, DECLARED)).toEqual({ kind: 'missing' });
     expect(checkInstallation(summary({ suspended: true }), fork, DECLARED)).toEqual({
       kind: 'missing',
+      suspendedId: 99,
     });
     expect(checkInstallation(summary({ account: 'someone' }), fork, DECLARED)).toEqual({
       kind: 'missing',
@@ -373,6 +404,16 @@ describe('durable readiness wait (AC3, AC4, AC5)', () => {
     );
   });
 
+  it('a suspended installation waits with the settings link, not the install page', async () => {
+    const outcome = await check(withFork(), source({ fork: summary({ suspended: true }) }));
+    expect(outcome).toMatchObject({
+      kind: 'awaiting_contributor',
+      reason: 'installation_missing',
+      link: 'https://github.com/settings/installations/99',
+    });
+    expect((outcome as { nextPermittedAction: string }).nextPermittedAction).toContain('Unsuspend');
+  });
+
   it('installation missing from a fresh check enters the wait from gating', async () => {
     const outcome = await check(withFork(), source({ selected: [] }), base);
     expect(outcome).toMatchObject({ kind: 'awaiting_contributor', reason: 'installation_missing' });
@@ -388,6 +429,7 @@ describe('durable readiness wait (AC3, AC4, AC5)', () => {
       fork: {
         repositoryId: FORK_ID,
         owner: 'contributor',
+        repo: 'fixture',
         fullName: 'contributor/fixture',
         installationId: 99,
       },

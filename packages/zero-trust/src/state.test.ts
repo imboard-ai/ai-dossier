@@ -83,8 +83,9 @@ const routes: Record<RunState, R[]> = {
 const at = (state: RunState) => routes[state].reduce(move, initial());
 
 // Independent product-level adjacency expectation, not copied from exported table.
-const failTargets = ['blocked', 'blocked', 'unsupported', 'failed', 'cancelled', 'blocked_cleanup'];
-const prerequisiteWaits = ['awaiting_contributor', 'awaiting_contributor'];
+const failTargets = ['blocked', 'unsupported', 'failed', 'cancelled', 'blocked_cleanup'];
+// fork_missing and installation_missing wait; installation_too_broad blocks (#1065).
+const prerequisiteWaits = ['awaiting_contributor', 'awaiting_contributor', 'blocked'];
 const expected: Record<RunState, string[]> = {
   gating: [
     ...failTargets,
@@ -168,8 +169,7 @@ describe('lifecycle contract', () => {
         // Prerequisite re-checks and resumes leave a fork/installation wait, not a link wait.
         if (
           state === 'awaiting_contributor' &&
-          to &&
-          ['awaiting_contributor', 'gating'].includes(to)
+          (to === 'awaiting_contributor' || to === 'gating' || reason === R.InstallationTooBroad)
         )
           run = move(at('gating'), R.ForkMissing);
         if (state === 'awaiting_contributor' && to === 'shipping')
@@ -296,10 +296,14 @@ describe('lifecycle contract', () => {
     expect(() => move(install, R.PublicationObserved)).toThrow(IllegalTransitionError);
     expect(() => move(install, R.EngagementObserved)).toThrow(IllegalTransitionError);
     expect(move(install, R.InstallationTooBroad).state).toBe('blocked');
+    // Only the fork/installation check blocks as too broad: not a link wait, not other phases.
+    expect(() => move(at('accepted'), R.InstallationTooBroad)).toThrow(IllegalTransitionError);
+    expect(() => move(at('planning'), R.InstallationTooBroad)).toThrow(IllegalTransitionError);
     // A pending link cannot be skipped by a resume or relabelled as a prerequisite wait.
     const link = move(at('shipping'), R.ContributorHandoff);
     expect(() => move(link, R.ResumeShipping)).toThrow(IllegalTransitionError);
     expect(() => move(link, R.ForkMissing)).toThrow(IllegalTransitionError);
+    expect(() => move(link, R.InstallationTooBroad)).toThrow(IllegalTransitionError);
     // After the resume, a later link hand-off is judged by its own entry.
     const resumed = move(install, R.ResumeShipping);
     const later = move(resumed, R.ContributorHandoff);

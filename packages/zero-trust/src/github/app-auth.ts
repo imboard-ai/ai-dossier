@@ -127,43 +127,59 @@ export interface GitHubResponse {
 /** Injected transport: tests replay recorded responses, never live GitHub. */
 export type GitHubHttp = (request: GitHubRequest) => Promise<GitHubResponse>;
 
+const USER_AGENT = 'ai-dossier-zero-trust-broker';
+
+/** One bounded request: no redirects, a timeout, at most 1 MiB of JSON read back. */
+async function send(
+  fetchImpl: typeof fetch,
+  url: string,
+  init: { method: string; headers: Record<string, string>; body?: string },
+  timeoutMs: number
+): Promise<GitHubResponse> {
+  let response: Response;
+  let text: string;
+  try {
+    response = await fetchImpl(url, {
+      ...init,
+      headers: { 'User-Agent': USER_AGENT, ...init.headers },
+      redirect: 'error',
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    text = await response.text();
+  } catch {
+    // No cause chaining: a transport error may carry request details.
+    throw new GitHubTransportError();
+  }
+  let json: unknown = null;
+  try {
+    json = text && text.length <= MAX_RESPONSE_BYTES ? JSON.parse(text) : null;
+  } catch {
+    json = null;
+  }
+  return { status: response.status, json };
+}
+
 export function fetchGitHubHttp(
   base = GITHUB_API,
   fetchImpl: typeof fetch = fetch,
   timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS
 ): GitHubHttp {
-  return async (request) => {
-    let response: Response;
-    let text: string;
-    try {
-      response = await fetchImpl(`${base}${request.path}`, {
+  return (request) =>
+    send(
+      fetchImpl,
+      `${base}${request.path}`,
+      {
         method: request.method,
         headers: {
           Accept: 'application/vnd.github+json',
           'X-GitHub-Api-Version': GITHUB_API_VERSION,
-          'User-Agent': 'ai-dossier-zero-trust-broker',
           Authorization: request.authorization,
           ...(request.body === undefined ? {} : { 'Content-Type': 'application/json' }),
         },
-        body: request.body === undefined ? undefined : JSON.stringify(request.body),
-        redirect: 'error',
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-      text = await response.text();
-    } catch {
-      // No cause chaining: a transport error may carry request details.
-      throw new GitHubTransportError();
-    }
-    return { status: response.status, json: parseJson(text) };
-  };
-}
-
-function parseJson(text: string): unknown {
-  try {
-    return text && text.length <= MAX_RESPONSE_BYTES ? JSON.parse(text) : null;
-  } catch {
-    return null;
-  }
+        ...(request.body === undefined ? {} : { body: JSON.stringify(request.body) }),
+      },
+      timeoutMs
+    );
 }
 
 /** `POST https://github.com/login/oauth/access_token`; errors arrive as 200 with `error`.
@@ -175,27 +191,17 @@ export function fetchOAuthHttp(
   fetchImpl: typeof fetch = fetch,
   timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS
 ): OAuthHttp {
-  return async (form) => {
-    let response: Response;
-    let text: string;
-    try {
-      response = await fetchImpl(`${base}${OAUTH_TOKEN_PATH}`, {
+  return (form) =>
+    send(
+      fetchImpl,
+      `${base}${OAUTH_TOKEN_PATH}`,
+      {
         method: 'POST',
-        headers: {
-          Accept: 'application/json',
-          'Content-Type': 'application/json',
-          'User-Agent': 'ai-dossier-zero-trust-broker',
-        },
+        headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
         body: JSON.stringify(form),
-        redirect: 'error',
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-      text = await response.text();
-    } catch {
-      throw new GitHubTransportError();
-    }
-    return { status: response.status, json: parseJson(text) };
-  };
+      },
+      timeoutMs
+    );
 }
 
 export const bearer = (token: string): string => `Bearer ${token}`;

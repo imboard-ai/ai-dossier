@@ -42,18 +42,20 @@ const HANDOFF_ORIGIN: Readonly<Partial<Record<ReasonCode, string>>> = Object.fre
   [ReasonCode.EngagementObserved]: 'gating',
   [ReasonCode.PublicationObserved]: 'shipping',
 });
-/** Manual contributor prerequisites (#1065): a durable wait, re-checked only on explicit resume. */
+/** Manual contributor prerequisites (#1065): a durable wait, re-checked only on explicit
+ * resume. Only the fork/installation check produces these, so they leave only the phases it
+ * runs in: gating, shipping, and the wait itself. */
+const prerequisites = {
+  [ReasonCode.ForkMissing]: 'awaiting_contributor',
+  [ReasonCode.InstallationMissing]: 'awaiting_contributor',
+  [ReasonCode.InstallationTooBroad]: 'blocked',
+} as const;
 const PREREQUISITE_REASONS: readonly ReasonCode[] = Object.freeze([
   ReasonCode.ForkMissing,
   ReasonCode.InstallationMissing,
 ]);
-const prerequisites = {
-  [ReasonCode.ForkMissing]: 'awaiting_contributor',
-  [ReasonCode.InstallationMissing]: 'awaiting_contributor',
-} as const;
 const failures = {
   [ReasonCode.PolicyBlocked]: 'blocked',
-  [ReasonCode.InstallationTooBroad]: 'blocked',
   [ReasonCode.UnsupportedEnvironment]: 'unsupported',
   [ReasonCode.ExecutionFailed]: 'failed',
   [ReasonCode.UserCancelled]: 'cancelled',
@@ -304,7 +306,8 @@ function applyTransition(run: RunRecord, reasonCode: ReasonCode, timestamp: stri
     // it; a prerequisite wait only by a re-check, and a resume returns to its own phase.
     const entry = waitEntry(run);
     const legal = PREREQUISITE_REASONS.includes(entry.reasonCode)
-      ? HANDOFF_ORIGIN[reasonCode] === undefined && (to === run.state || to === entry.from)
+      ? HANDOFF_ORIGIN[reasonCode] === undefined &&
+        (to === run.state || to === entry.from || reasonCode === ReasonCode.InstallationTooBroad)
       : HANDOFF_ORIGIN[reasonCode] === entry.from;
     if (!legal) throw new IllegalTransitionError(run.state, reasonCode);
   }

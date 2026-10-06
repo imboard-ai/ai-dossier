@@ -1,9 +1,10 @@
 /** #1065 contributor authorization against the stateful GitHub fake (probe-observed status
  * codes and token shapes). No network beyond a loopback socket. */
 import { createHash, generateKeyPairSync } from 'node:crypto';
+import http from 'node:http';
 import { inspect } from 'node:util';
-import { describe, expect, it } from 'vitest';
-import { createRun, ReasonCode, transitionRun } from '../../state';
+import { describe, expect, it, vi } from 'vitest';
+import { createRun, IllegalTransitionError, ReasonCode, transitionRun } from '../../state';
 import { AppCredentials } from '../app-auth';
 import { CredentialBrokerError, ForkCredentialBroker } from '../broker';
 import {
@@ -206,14 +207,61 @@ describe('authorization web flow', () => {
     expect(env.broker.status().tokens).toEqual([]);
   });
 
-  it('a second live authorization is refused and its token revoked at once', async () => {
+  it('re-authorizing while a token is held rotates the new one into the broker', async () => {
     const env = await authorized();
+    const { code, state } = approve(env);
+    expect(await env.auth.complete({ code, state }, run)).toMatchObject({ kind: 'bound' });
+    const users = env.broker.status().tokens.filter((t) => t.kind === 'user');
+    expect(users).toHaveLength(2);
+    expect(env.auth.status().authorization).toBe('authorized');
+  });
+
+  it('a token the broker refuses is revoked at once and never kept', async () => {
+    const env = setup();
+    vi.spyOn(env.broker, 'registerUserToken').mockImplementation(() => {
+      throw new CredentialBrokerError('admission_closed');
+    });
     const { code, state } = approve(env);
     await expect(env.auth.complete({ code, state }, run)).rejects.toBeInstanceOf(
       CredentialBrokerError
     );
-    const users = [...env.fake.tokens].filter(([, t]) => t.kind === 'user');
-    expect(users.filter(([, t]) => t.live)).toHaveLength(1);
+    expect([...env.fake.tokens.values()].some((t) => t.live)).toBe(false);
+    expect(env.auth.status().authorization).toBe('not_authorized');
+  });
+
+  it('the login is read before the broker sees the token; an unread login revokes it', async () => {
+    const env = setup();
+    env.fake.override('GET /user', { status: 502, json: null });
+    let { code, state } = approve(env);
+    expect(await env.auth.complete({ code, state }, run)).toMatchObject({ kind: 'unknown' });
+    expect(env.broker.status().tokens).toEqual([]);
+    expect([...env.fake.tokens.values()].some((t) => t.live)).toBe(false);
+    env.fake.override('GET /user', { status: 401, json: null });
+    ({ code, state } = approve(env));
+    expect(await env.auth.complete({ code, state }, run)).toMatchObject({ kind: 'reauthorize' });
+    // A token that cannot even be revoked is reported, never silently dropped.
+    env.fake.override('GET /user', 'throw');
+    env.fake.override(`DELETE /applications/${CLIENT_ID}/token`, { status: 500, json: null });
+    ({ code, state } = approve(env));
+    await expect(env.auth.complete({ code, state }, run)).rejects.toMatchObject({
+      code: 'revoke_failed',
+    });
+  });
+
+  it('an App that is misconfigured is named, and a non-expiring token is revoked', async () => {
+    const env = setup();
+    env.fake.override('OAUTH', { status: 200, json: { error: 'redirect_uri_mismatch' } });
+    let { code, state } = approve(env);
+    await expect(env.auth.complete({ code, state }, run)).rejects.toMatchObject({
+      code: 'app_misconfigured',
+    });
+    const forever = env.fake.issue('user');
+    env.fake.override('OAUTH', { status: 200, json: { access_token: forever, scope: '' } });
+    ({ code, state } = approve(env));
+    const error = await env.auth.complete({ code, state }, run).catch((e: Error) => e);
+    expect(error).toMatchObject({ code: 'app_misconfigured' });
+    expect((error as Error).message).toContain('expiring user tokens');
+    expect(env.fake.live(forever)).toBe(false);
   });
 
   it('rejects a bad contributor login or App slug at construction', () => {
@@ -229,20 +277,45 @@ describe('authorization web flow', () => {
 });
 
 describe('login binding (AC1, scenario 17)', () => {
-  it('another account authorizing blocks the run and revokes its authorization', async () => {
+  it('another account authorizing blocks the run; its token never reaches the broker', async () => {
     const env = setup();
     env.fake.login = 'mallory';
     const { code, state } = approve(env);
     const outcome = await env.auth.complete({ code, state }, run);
-    expect(outcome).toMatchObject({ kind: 'blocked', reason: 'contributor_mismatch' });
+    expect(outcome).toMatchObject({
+      kind: 'blocked',
+      reason: 'contributor_mismatch',
+      tokenRevoked: true,
+    });
     const blocked = outcome as Extract<typeof outcome, { kind: 'blocked' }>;
     expect(blocked.run.state).toBe('blocked');
     expect(blocked.run.reasonCode).toBe(ReasonCode.PolicyBlocked);
     expect([...env.fake.tokens.values()].some((t) => t.live)).toBe(false);
-    expect(env.auth.status().authorization).toBe('reauthorization_required');
+    expect(env.broker.status().tokens).toEqual([]);
+    expect(env.auth.status().authorization).toBe('not_authorized');
     expect(env.fake.oauthCalls).toHaveLength(1);
     expect(await env.auth.refresh()).toMatchObject({ kind: 'reauthorize' });
     expect(env.fake.oauthCalls).toHaveLength(1);
+  });
+
+  it('a mismatch whose token GitHub will not revoke says how to revoke it by hand', async () => {
+    const env = setup();
+    env.fake.login = 'mallory';
+    env.fake.override(`DELETE /applications/${CLIENT_ID}/token`, { status: 500, json: null });
+    const { code, state } = approve(env);
+    const outcome = await env.auth.complete({ code, state }, run);
+    expect(outcome).toMatchObject({ kind: 'blocked', tokenRevoked: false });
+    expect((outcome as { nextPermittedAction: string }).nextPermittedAction).toContain(
+      'https://github.com/settings/applications'
+    );
+  });
+
+  it('on resume, a mismatch revokes before the run transitions, even when it cannot', async () => {
+    const env = await authorized();
+    env.fake.login = 'mallory';
+    const terminal = transitionRun(run, ReasonCode.UserCancelled, time);
+    await expect(env.auth.bindLogin(terminal)).rejects.toBeInstanceOf(IllegalTransitionError);
+    expect([...env.fake.tokens.values()].some((t) => t.live)).toBe(false);
   });
 
   it('on resume, a changed login or account id blocks', async () => {
@@ -344,12 +417,37 @@ describe('refresh rotation (AC6, AC7)', () => {
     expect(await env.auth.refresh()).toMatchObject({ kind: 'refreshed' });
   });
 
-  it('a token the broker cannot accept is revoked and the chain dropped', async () => {
+  it('after a kill switch the chain is dead without another exchange', async () => {
     const env = await authorized();
     const killed = await env.broker.killAll();
     expect(killed.grant.deleted).toBe(true);
     expect(await env.auth.refresh()).toMatchObject({ kind: 'reauthorize' });
     expect(env.fake.oauthCalls).toHaveLength(1);
+  });
+
+  it('atomic: when the broker refuses the refreshed token, it is revoked and the chain dropped', async () => {
+    const env = await authorized();
+    vi.spyOn(env.broker, 'rotateUserToken').mockRejectedValue(
+      new CredentialBrokerError('admission_closed')
+    );
+    const outcome = await env.auth.refresh();
+    expect(outcome).toMatchObject({ kind: 'reauthorize' });
+    // The pair the refresh produced is dead, and its refresh token was never stored.
+    const latest = [...env.fake.refreshTokens.entries()].at(-1) as [
+      string,
+      { access: string; live: boolean },
+    ];
+    expect(env.fake.live(latest[1].access)).toBe(false);
+    expect(await env.auth.refresh()).toMatchObject({ kind: 'reauthorize' });
+    expect(env.fake.oauthCalls).toHaveLength(2);
+    expect(env.auth.status().authorization).not.toBe('authorized');
+  });
+
+  it('a rotation keeps every token, code and refresh token out of the journal', async () => {
+    const env = await authorized();
+    expect(await env.auth.refresh()).toMatchObject({ kind: 'refreshed' });
+    const journal = JSON.stringify(env.store.events);
+    for (const secret of secrets(env)) expect(journal).not.toContain(secret);
   });
 });
 
@@ -361,8 +459,9 @@ describe('installation reads', () => {
     const source = installationSource({ http: env.fake.http, app, contributor: env.auth });
     expect(await source.selectedRepositories(INSTALLATION_ID)).toEqual(ids);
     expect(await source.selectedRepositories(0)).toBeNull();
-    // Unknown installation, malformed body, an unreadable transport.
-    expect(await source.selectedRepositories(5)).toBeNull();
+    // An installation the token cannot see covers nothing of the contributor's.
+    expect(await source.selectedRepositories(5)).toEqual([]);
+    // Malformed body, an unreadable transport.
     env.fake.override('GET /user/installations', { status: 200, json: { repositories: [{}] } });
     expect(await source.selectedRepositories(INSTALLATION_ID)).toBeNull();
     env.fake.override('GET /user/installations', 'throw');
@@ -373,7 +472,8 @@ describe('installation reads', () => {
       INSTALLATION_ID,
       Array.from({ length: 1000 }, (_, i) => i + 1)
     );
-    expect(await source.selectedRepositories(INSTALLATION_ID)).toBeNull();
+    // Past the page bound: what was read is returned, which the check reports as too broad.
+    expect(await source.selectedRepositories(INSTALLATION_ID)).toHaveLength(1000);
   });
 
   it('answers authorize without a contributor or after the token was revoked', async () => {
@@ -483,12 +583,41 @@ describe('installation reads', () => {
   });
 });
 
+/** A raw request, so the target and Host header reach the server exactly as written. */
+function raw(
+  redirectUri: string,
+  target: string,
+  host?: string
+): Promise<{ status: number; body: string }> {
+  const url = new URL(redirectUri);
+  return new Promise((resolve, reject) => {
+    const request = http.request(
+      {
+        host: '127.0.0.1',
+        port: url.port,
+        path: target,
+        method: 'GET',
+        headers: { Host: host ?? url.host },
+      },
+      (response) => {
+        let body = '';
+        response.on('data', (chunk) => {
+          body += chunk;
+        });
+        response.on('end', () => resolve({ status: response.statusCode ?? 0, body }));
+      }
+    );
+    request.on('error', reject);
+    request.end();
+  });
+}
+
 describe('loopback receiver', () => {
   it('receives one callback, echoes nothing and sends no referrer', async () => {
     const receiver = await listenLoopback();
     expect(isLoopbackRedirect(receiver.redirectUri)).toBe(true);
     const miss = await fetch(new URL('/other', receiver.redirectUri));
-    expect(miss.status).toBe(404);
+    expect(miss.status).toBe(400);
     const response = await fetch(`${receiver.redirectUri}?code=secret-code-123&state=st&extra=1`);
     const page = await response.text();
     expect(response.status).toBe(200);
@@ -499,12 +628,46 @@ describe('loopback receiver', () => {
     receiver.close();
   });
 
+  it('survives malformed and forged requests and waits for the expected state', async () => {
+    const env = setup();
+    const receiver = await listenLoopback({ isExpected: (s) => env.auth.matchesPending(s) });
+    const { url } = env.auth.begin(receiver.redirectUri);
+    const state = new URL(url).searchParams.get('state') as string;
+    const path = new URL(receiver.redirectUri).pathname;
+    // A target that `new URL` cannot parse must not take the process down.
+    expect((await raw(receiver.redirectUri, '//%zz/a')).status).toBe(400);
+    expect((await raw(receiver.redirectUri, `${path}?code=c`)).status).toBe(400);
+    expect((await raw(receiver.redirectUri, `${path}?code=c&state=forged`)).status).toBe(400);
+    // DNS rebinding: the right path and state under a foreign Host header.
+    expect(
+      (await raw(receiver.redirectUri, `${path}?code=c&state=${state}`, 'evil.example:80')).status
+    ).toBe(400);
+    const good = await raw(receiver.redirectUri, `${path}?code=c&state=${state}`);
+    expect(good.status).toBe(200);
+    expect(await receiver.callback).toEqual({ code: 'c', state });
+    expect(env.auth.matchesPending('forged')).toBe(false);
+    receiver.close();
+  });
+
   it('carries a denial and times out when nobody returns', async () => {
-    const denied = await listenLoopback({ path: '/cb' });
+    const denied = await listenLoopback({ path: '/cb', isExpected: () => true });
     await fetch(`${denied.redirectUri}?error=access_denied&state=s`);
     expect(await denied.callback).toEqual({ error: 'access_denied', state: 's' });
+    const throwing = await listenLoopback({
+      isExpected: () => {
+        throw new Error('broken predicate');
+      },
+    });
+    expect((await raw(throwing.redirectUri, '/callback?code=c&state=s')).status).toBe(400);
+    throwing.close();
+    await expect(throwing.callback).rejects.toMatchObject({ code: 'authorization_expired' });
     const idle = await listenLoopback({ timeoutMs: 5 });
     await expect(idle.callback).rejects.toMatchObject({ code: 'authorization_expired' });
     expect(() => listenLoopback({ path: 'no-slash' })).toThrow(ContributorAuthError);
+  });
+
+  it('refusals carry a fixed next step and never the input', () => {
+    const error = new ContributorAuthError('state_mismatch');
+    expect(error.message).toContain('start a new one');
   });
 });

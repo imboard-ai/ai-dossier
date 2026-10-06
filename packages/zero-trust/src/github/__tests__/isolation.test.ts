@@ -1,6 +1,6 @@
 /** AC8: the credential broker is controller-only. No module outside the
  * credential-holding set, including the package index, the credential-free
- * hand-off modules beside it in src/github/ and the worker broker under src/vm/,
+ * hand-off and fork modules beside it in src/github/ and the worker broker under src/vm/,
  * may reach it through any chain of static or dynamic imports. */
 import fs from 'node:fs';
 import * as path from 'node:path';

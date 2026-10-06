@@ -25,6 +25,7 @@ import {
   type PrBinding,
   type PreparedLink,
   prBinding,
+  upstreamIssueBinding,
 } from './handoff';
 import { buildPrContent, type PrContentInput } from './pr-body';
 import { type AmbiguityReason, type GitHubRead, reconcileComment, reconcilePr } from './reconcile';
@@ -176,11 +177,7 @@ function continuation(previous: RunRecord, value: unknown): RunRecord {
 
 /** The upstream comes from the run's own issue URL, not from the link request. */
 function upstreamIssue(run: RunRecord): IssueBinding {
-  const match = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/issues\/([1-9][0-9]{0,15})$/u.exec(
-    run.upstreamIssue
-  );
-  if (!match) throw new HandoffError('invalid_binding');
-  return issueBinding({ upstream: { owner: match[1], repo: match[2] }, issue: Number(match[3]) });
+  return upstreamIssueBinding(run.upstreamIssue);
 }
 
 function sameRepo(a: IssueBinding['upstream'], b: IssueBinding['upstream']): boolean {

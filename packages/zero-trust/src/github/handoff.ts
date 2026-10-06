@@ -40,6 +40,11 @@ export function isGitHubLogin(value: unknown): value is string {
   return typeof value === 'string' && OWNER.test(value);
 }
 
+/** GitHub logins and repository names compare case-insensitively. */
+export function sameLogin(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase();
+}
+
 /** A strict subset of git ref names, so a ref can never carry URL syntax. */
 export function isSafeRef(value: unknown): value is string {
   return (
@@ -71,6 +76,14 @@ export function prBinding(value: unknown): PrBinding {
   if (!isSafeRef(v.base) || !isSafeRef(v.branch) || !isGitHubLogin(v.headOwner))
     throw new HandoffError('invalid_binding');
   return Object.freeze({ upstream, base: v.base, headOwner: v.headOwner, branch: v.branch });
+}
+
+/** The upstream issue a run's `upstreamIssue` URL names; the run, never a caller, is the
+ * source of the target. */
+export function upstreamIssueBinding(url: string): IssueBinding {
+  const match = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/issues\/([1-9][0-9]{0,15})$/u.exec(url);
+  if (!match) throw new HandoffError('invalid_binding');
+  return issueBinding({ upstream: { owner: match[1], repo: match[2] }, issue: Number(match[3]) });
 }
 
 export function issueBinding(value: unknown): IssueBinding {

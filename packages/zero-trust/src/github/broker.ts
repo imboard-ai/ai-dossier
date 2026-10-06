@@ -1,5 +1,6 @@
-/** Fork-side GitHub credential broker (#1064). The only component that holds
- * GitHub credentials. Controller-only: never import it from worker-facing code.
+/** Fork-side GitHub credential broker (#1064). It holds every token it mints and the
+ * contributor's user token; `contributor.ts` (#1065) holds only the refresh token and hands
+ * each access token here. Controller-only: never import it from worker-facing code.
  *
  * Under the hybrid hand-off the broker performs fork pushes only; upstream
  * writes are contributor hand-offs. Every token is narrowed to the verified
