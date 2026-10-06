@@ -1,13 +1,15 @@
 /** #1068: upstream PR tracking and revisions. GitHub is a mocked, GET-only HTTP fake; the
  * revision round trip pushes to a local bare repository through the #1066 CAS rig. No
  * network, no real credentials. */
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { IntentDriver, IntentError, type IntentInput } from '../../intents';
-import { Journal } from '../../journal';
+import type { Journal } from '../../journal';
 import { createRun, ReasonCode, type RunRecord, transitionRun } from '../../state';
 import { forkTarget } from '../fork-ref';
-import { handoffMarker, type PrBinding } from '../handoff';
+import { HandoffError, handoffMarker, type PrBinding } from '../handoff';
+import type { HandoffRecord } from '../handoff-driver';
 import type { GitHubRead } from '../reconcile';
 import {
   observeCi,
@@ -18,8 +20,8 @@ import {
   replayTrack,
   type TrackDeps,
   TrackError,
-  type TrackedPr,
   type TrackOutcome,
+  trackFromHandoff,
   upstreamOutcome,
 } from '../track';
 import { FORK_ID, OWNER } from './github-fake';
@@ -41,13 +43,24 @@ const prIntent: IntentInput = {
   candidateSha: SHA1,
 };
 const MARKER = handoffMarker(prIntent);
-const TRACKED: TrackedPr = Object.freeze({
+/** The #1067 hand-off record of the observed PR: the tracker's starting point. */
+const OBSERVED = {
+  key: 'k',
+  intentId: 'i',
+  input: prIntent,
   binding: BINDING,
-  fork: FORK,
+  link: 'https://github.com/up/proj/compare',
+  linkKind: 'prefilled',
+  bodyFile: '/controller/bodies/i.md',
+  bodyDigest: 'd',
+  status: 'observed',
+  issuedAt: '2026-10-06T09:00:00.000Z',
+  artifactRef: PR_URL,
   number: 5,
-  url: PR_URL,
-  marker: MARKER,
-});
+  headSha: SHA1,
+  prState: 'open',
+} as unknown as HandoffRecord;
+const { pr: TRACKED } = trackFromHandoff(OBSERVED, FORK);
 
 let clock = Date.parse('2026-10-06T10:00:00.000Z');
 const now = () => {
@@ -86,8 +99,8 @@ interface Pull {
 class Upstream {
   readonly calls: string[] = [];
   pulls: Pull[] = [{ number: 5, state: 'open', title: 'Fix range()', body: `Body\n${MARKER}` }];
-  checkRuns: unknown[] = [];
-  workflowRuns: unknown[] = [];
+  checkRuns: Record<string, unknown>[] = [];
+  workflowRuns: Record<string, unknown>[] = [];
   status: { state: string; total_count: number } = { state: 'pending', total_count: 0 };
   reviews: unknown[] = [];
   reviewComments: unknown[] = [];
@@ -135,9 +148,12 @@ class Upstream {
       status: 200,
       body: items.slice((page - 1) * 100, page * 100),
     });
-    const keyed = (key: string, items: unknown[]) => ({
+    const keyed = (key: string, sha: string, items: Record<string, unknown>[]) => ({
       status: 200,
-      body: { total_count: items.length, [key]: items.slice((page - 1) * 100, page * 100) },
+      body: {
+        total_count: items.length,
+        [key]: items.slice((page - 1) * 100, page * 100).map((i) => ({ head_sha: sha, ...i })),
+      },
     });
     if (route.startsWith(`/repos/${OWNER}/fixture`)) {
       if (this.fork) return this.fork.fork.read(p);
@@ -158,17 +174,22 @@ class Upstream {
     if (/\/pulls\/\d+\/comments$/u.test(route)) return paged(this.reviewComments);
     if (/\/issues\/\d+\/comments$/u.test(route)) return paged(this.comments);
     m = /^\/repos\/up\/proj\/commits\/([a-f0-9]{40})\/(check-runs|status)$/u.exec(route);
-    if (m?.[2] === 'check-runs') return keyed('check_runs', this.checkRuns);
+    if (m?.[2] === 'check-runs') return keyed('check_runs', m[1] as string, this.checkRuns);
     if (m?.[2] === 'status') return { status: 200, body: this.status };
-    if (route === '/repos/up/proj/actions/runs') return keyed('workflow_runs', this.workflowRuns);
+    const headSha = /[?&]head_sha=([a-f0-9]{40})/u.exec(p)?.[1] as string;
+    if (route === '/repos/up/proj/actions/runs')
+      return keyed('workflow_runs', headSha, this.workflowRuns);
     return { status: 404, body: null };
   };
 }
 
-function review(id: number, author = 'maintainer', updated = '2026-10-06T11:00:00Z') {
+function maintainer(login = 'maintainer', association = 'MEMBER') {
+  return { user: { login, type: 'User' }, author_association: association };
+}
+function review(id: number, updated = '2026-10-06T11:00:00Z', who = maintainer()) {
   return {
     id,
-    user: { login: author, type: 'User' },
+    ...who,
     body: 'Please also cover the empty range.',
     state: 'CHANGES_REQUESTED',
     submitted_at: updated,
@@ -176,10 +197,10 @@ function review(id: number, author = 'maintainer', updated = '2026-10-06T11:00:0
     html_url: `${PR_URL}#pullrequestreview-${id}`,
   };
 }
-function remark(id: number, author = 'maintainer', updated = '2026-10-06T11:00:00Z') {
+function remark(id: number, updated = '2026-10-06T11:00:00Z', who = maintainer()) {
   return {
     id,
-    user: { login: author, type: 'User' },
+    ...who,
     body: 'Rename this variable.',
     updated_at: updated,
     commit_id: SHA1,
@@ -201,16 +222,8 @@ const admitAll = (): RevisionAdmission & { calls: string[] } => {
   };
 };
 
-const journals: Journal[] = [];
-afterEach(() => {
-  vi.restoreAllMocks();
-  for (const j of journals.splice(0)) j.close();
-});
-function trackJournal(dir = temp('zt-track-')): Journal {
-  const j = new Journal(dir);
-  journals.push(j);
-  return j;
-}
+/** `push-rig`'s hooks close these journals and remove the directories after each test. */
+const trackJournal = (dir = temp('zt-track-')): Journal => journal(dir);
 function tracker(
   up: Upstream,
   options: { admission?: RevisionAdmission; run?: RunRecord; j?: Journal; bodies?: string } = {}
@@ -225,8 +238,7 @@ function tracker(
   const t = new PrTracker(j, deps, {
     run: options.run ?? submitted,
     contributionId: 'contribution-1',
-    pr: TRACKED,
-    headSha: SHA1,
+    ...trackFromHandoff(OBSERVED, FORK),
   });
   return { t, j, deps };
 }
@@ -260,7 +272,7 @@ describe('PR observation and state mapping (AC1)', () => {
     expect(await observePr(up.read, TRACKED)).toEqual({ kind: 'gone', reason: 'fork_replaced' });
     up.forkId = FORK_ID;
     up.failing.add('/pulls/5');
-    expect(upstreamOutcome(await observePr(up.read, TRACKED))).toBe('unknown');
+    expect(await observePr(up.read, TRACKED)).toEqual({ kind: 'unknown', detail: 'pull:500' });
   });
 
   it('only an observed merge is merged: a closed PR with a merge-like title is declined', async () => {
@@ -269,6 +281,18 @@ describe('PR observation and state mapping (AC1)', () => {
     const track = await observePr(up.read, TRACKED);
     expect(track).toMatchObject({ kind: 'observed', merged: false, state: 'closed' });
     expect(upstreamOutcome(track)).toBe('declined');
+  });
+
+  it('starts only from an observed pr_create hand-off', () => {
+    expect(TRACKED).toMatchObject({ number: 5, url: PR_URL, marker: MARKER, fork: FORK });
+    for (const patch of [
+      { status: 'link_issued' },
+      { input: { ...prIntent, operationKind: 'engagement_comment', candidateSha: null } },
+      { headSha: 'short' },
+    ])
+      expect(() =>
+        trackFromHandoff({ ...OBSERVED, ...patch } as unknown as HandoffRecord, FORK)
+      ).toThrow(HandoffError);
   });
 
   it('reads only on explicit resume, and every read is a GET of a repository path', async () => {
@@ -291,9 +315,19 @@ describe('PR observation and state mapping (AC1)', () => {
     });
     Object.assign(up.pr(), { state: 'closed', merged: true });
     expect(await t.resume()).toMatchObject({ kind: 'merged', status: { state: 'merged' } });
+    expect(t.snapshot().outcomeSha).toBe(SHA1);
     const reads = up.calls.length;
     expect(kind(await t.resume())).toBe('merged');
     expect(up.calls.length).toBe(reads);
+  });
+
+  it('a merge at a head the run never verified is recorded and said so', async () => {
+    const up = new Upstream();
+    Object.assign(up.pr(), { state: 'closed', merged: true, headSha: OTHER });
+    const { t } = tracker(up);
+    expect(await t.resume()).toMatchObject({ kind: 'merged' });
+    expect(t.snapshot().outcomeSha).toBe(OTHER);
+    expect(t.status().nextPermittedAction).toMatch(/not the verified/u);
   });
 
   it('closed without merge → declined; a deleted PR, fork or branch blocks', async () => {
@@ -320,12 +354,15 @@ describe('PR observation and state mapping (AC1)', () => {
     expect(await tracker(branchless).t.resume()).toMatchObject({ reason: 'branch_deleted' });
   });
 
-  it('a head SHA moved out of band blocks (scenario 13)', async () => {
+  it('a head SHA moved out of band blocks (scenario 13), and its CI is not reported', async () => {
     const up = new Upstream();
     up.pr().headSha = OTHER;
-    expect(await tracker(up).t.resume()).toMatchObject({
+    up.checkRuns = [{ status: 'completed', conclusion: 'success' }];
+    const { t } = tracker(up);
+    expect(await t.resume()).toMatchObject({
       kind: 'blocked',
       reason: 'unexpected_head_sha',
+      status: { ci: 'not_observed' },
     });
     const moved = new Upstream();
     moved.branch = OTHER;
@@ -337,7 +374,11 @@ describe('PR observation and state mapping (AC1)', () => {
     up.failing.add('/pulls/5');
     const { t, j } = tracker(up);
     const before = j.read().length;
-    expect(await t.resume()).toMatchObject({ kind: 'unknown', status: { state: 'submitted' } });
+    expect(await t.resume()).toMatchObject({
+      kind: 'unknown',
+      detail: 'pull:500',
+      status: { state: 'submitted' },
+    });
     expect(j.read().length).toBe(before);
   });
 });
@@ -348,46 +389,36 @@ describe('upstream CI as observed (AC7, scenario 12)', () => {
     Object.assign(up, patch);
     return observeCi(up.read, BINDING, SHA1);
   };
+  const done = (conclusion: string) => ({ status: 'completed', conclusion });
+
   it('reports none, pending, awaiting approval, failed and passed from what GitHub shows', async () => {
     expect(await ci({})).toBe('none');
     expect(await ci({ status: { state: 'pending', total_count: 0 } })).toBe('none');
     expect(await ci({ checkRuns: [{ status: 'in_progress', conclusion: null }] })).toBe('pending');
     expect(await ci({ status: { state: 'pending', total_count: 2 } })).toBe('pending');
-    expect(
-      await ci({ workflowRuns: [{ status: 'completed', conclusion: 'action_required' }] })
-    ).toBe('awaiting_approval');
+    expect(await ci({ workflowRuns: [done('action_required')] })).toBe('awaiting_approval');
     expect(await ci({ workflowRuns: [{ status: 'waiting', conclusion: null }] })).toBe(
       'awaiting_approval'
     );
-    expect(
-      await ci({
-        checkRuns: [
-          { status: 'completed', conclusion: 'success' },
-          { status: 'completed', conclusion: 'failure' },
-        ],
-      })
-    ).toBe('failed');
+    expect(await ci({ checkRuns: [done('success'), done('failure')] })).toBe('failed');
     expect(await ci({ status: { state: 'error', total_count: 1 } })).toBe('failed');
     expect(
       await ci({
-        checkRuns: [
-          { status: 'completed', conclusion: 'success' },
-          { status: 'completed', conclusion: 'skipped' },
-        ],
-        workflowRuns: [{ status: 'completed', conclusion: 'success' }],
+        checkRuns: [done('success'), done('skipped')],
+        workflowRuns: [done('success')],
         status: { state: 'success', total_count: 1 },
       })
     ).toBe('passed');
   });
 
-  it('never infers green: an unreadable source or an unknown conclusion is unknown', async () => {
+  it('never infers green: skipped-only, another commit, unreadable or unknown is not passed', async () => {
+    expect(await ci({ checkRuns: [done('skipped'), done('neutral')] })).toBe('none');
+    expect(await ci({ checkRuns: [{ ...done('success'), head_sha: OTHER }] })).toBe('unknown');
     const up = new Upstream();
-    up.checkRuns = [{ status: 'completed', conclusion: 'success' }];
+    up.checkRuns = [done('success')];
     up.failing.add('/actions/runs');
     expect(await observeCi(up.read, BINDING, SHA1)).toBe('unknown');
-    expect(await ci({ checkRuns: [{ status: 'completed', conclusion: 'mystery' }] })).toBe(
-      'unknown'
-    );
+    expect(await ci({ checkRuns: [done('mystery')] })).toBe('unknown');
     // A listing claiming more items than it returns is truncated, not complete.
     const truncated = new Upstream();
     const read: GitHubRead = async (p) =>
@@ -396,7 +427,7 @@ describe('upstream CI as observed (AC7, scenario 12)', () => {
             status: 200,
             body: {
               total_count: 5000,
-              check_runs: Array(100).fill({ status: 'completed', conclusion: 'success' }),
+              check_runs: Array(100).fill({ ...done('success'), head_sha: SHA1 }),
             },
           }
         : truncated.read(p);
@@ -404,8 +435,8 @@ describe('upstream CI as observed (AC7, scenario 12)', () => {
   });
 
   it('status says what the contributor does next and never calls pending or unread checks green', async () => {
-    for (const [patch, ci, text] of [
-      [{}, 'none', /No upstream checks are reported/u],
+    for (const [patch, state, text] of [
+      [{}, 'none', /No upstream check has run/u],
       [{ checkRuns: [{ status: 'queued', conclusion: null }] }, 'pending', /still running/u],
       [
         { workflowRuns: [{ status: 'action_required', conclusion: null }] },
@@ -418,7 +449,7 @@ describe('upstream CI as observed (AC7, scenario 12)', () => {
       Object.assign(up, patch);
       const { t } = tracker(up);
       const { status } = await t.resume();
-      expect(status).toMatchObject({ state: 'awaiting_review', ci, ciSha: SHA1 });
+      expect(status).toMatchObject({ state: 'awaiting_review', ci: state, ciSha: SHA1 });
       expect(status.nextPermittedAction).toMatch(text);
       expect(status.nextPermittedAction).not.toMatch(/checks passed/u);
     }
@@ -502,8 +533,6 @@ describe('withdrawal (AC4)', () => {
     expect(body).toMatch(
       /<!-- ai-dossier:ztfc contribution=contribution-1 intent=[a-f0-9]{32} op=pr_close -->/u
     );
-    expect(issued.action.instructions).toMatch(/Nothing is deleted/u);
-    expect(issued.action.instructions).toMatch(/sends no follow-up/u);
     // Not closed yet: still awaiting review, no claim.
     expect(await t.resume()).toMatchObject({
       kind: 'tracking',
@@ -513,6 +542,42 @@ describe('withdrawal (AC4)', () => {
     expect(await t.resume()).toMatchObject({ kind: 'declined', status: { state: 'declined' } });
     expect(t.status().action).toBeUndefined();
     expect(replayTrack(j.read())).toEqual(t.snapshot());
+  });
+
+  it('after declined: nothing is read, journaled, pushed, deleted or scheduled', async () => {
+    const r = await new Rig().start(shipping);
+    r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
+    await r.driver.execute({
+      contributionId: 'contribution-1',
+      target: forkTarget(FORK, BRANCH),
+      operationKind: 'push_branch',
+      candidateSha: SHA1,
+    });
+    const up = new Upstream(r);
+    const timers = [vi.spyOn(globalThis, 'setTimeout'), vi.spyOn(globalThis, 'setInterval')];
+    const { t, j } = tracker(up);
+    await t.resume();
+    const issued = await t.requestWithdrawal({ reason: 'user_instruction', explanation: 'Stop.' });
+    up.pr().state = 'closed';
+    expect(kind(await t.resume())).toBe('declined');
+    // Every request the tracker ever made is a repository GET: its only port is `read`.
+    expect(up.calls.every((p) => p.startsWith('/repos/'))).toBe(true);
+    const reads = up.calls.length;
+    const events = j.read().length;
+    expect(kind(await t.resume())).toBe('declined');
+    expect(kind(await t.beginRevision())).toBe('declined');
+    expect(
+      kind(await t.requestWithdrawal({ reason: 'user_instruction', explanation: 'Again.' }))
+    ).toBe('declined');
+    expect(up.calls.length).toBe(reads);
+    expect(j.read().length).toBe(events);
+    // Nothing upstream or on the fork was touched: the PR still exists and the branch is put.
+    expect(up.pr()).toMatchObject({ state: 'closed' });
+    expect(up.pr().deleted).toBeUndefined();
+    expect(r.fork.sha()).toBe(SHA1);
+    expect(issued.kind === 'action' && fs.existsSync(issued.action.bodyFile as string)).toBe(true);
+    // No follow-up is ever scheduled.
+    for (const timer of timers) expect(timer).not.toHaveBeenCalled();
   });
 
   it('a pending withdrawal does not chase a replacement PR, and a merge overtakes it', async () => {
@@ -525,14 +590,21 @@ describe('withdrawal (AC4)', () => {
     expect(up.calls.some((p) => p.startsWith('/repos/up/proj/pulls?'))).toBe(false);
   });
 
-  it('is refused while revising and never brokered', async () => {
+  it('can be cancelled before the close, and is refused while revising', async () => {
     const up = new Upstream();
     up.reviews = [review(1)];
     const { t } = tracker(up);
-    await t.beginRevision();
+    await t.requestWithdrawal({ reason: 'user_instruction', explanation: 'Stop.' });
+    await expect(t.beginRevision()).rejects.toThrow(/action_pending/u);
+    expect(await t.cancelAction()).toMatchObject({ kind: 'tracking' });
+    await expect(t.cancelAction()).rejects.toThrow(/no_action/u);
+    expect(kind(await t.beginRevision())).toBe('revising');
     await expect(
       t.requestWithdrawal({ reason: 'user_instruction', explanation: 'stop' })
-    ).rejects.toThrow(TrackError);
+    ).rejects.toThrow(/withdraw_in_revising/u);
+  });
+
+  it('PR edits and close are never brokered writes', () => {
     const d = new IntentDriver(
       journal(temp('zt-track-intents-')),
       { reconcile: vi.fn(), mutate: vi.fn() },
@@ -551,6 +623,46 @@ describe('withdrawal (AC4)', () => {
   });
 });
 
+describe('maintainer feedback', () => {
+  it('counts only maintainers: not strangers, bots, the contributor, approvals or deleted accounts', async () => {
+    const up = new Upstream();
+    up.reviews = [
+      review(1),
+      { ...review(2), state: 'APPROVED', body: '' },
+      { ...review(3), state: 'PENDING', submitted_at: null },
+    ];
+    up.reviewComments = [
+      remark(10, undefined, maintainer('stranger', 'NONE')),
+      remark(11, undefined, maintainer('drive-by', 'CONTRIBUTOR')),
+      remark(12, undefined, maintainer(OWNER, 'OWNER')),
+      { ...remark(13), user: { login: 'ci[bot]', type: 'Bot' } },
+      { ...remark(14), user: null },
+      remark(15, undefined, maintainer('lead', 'OWNER')),
+    ];
+    up.comments = [
+      {
+        ...remark(20, undefined, maintainer('lead', 'COLLABORATOR')),
+        html_url: `${PR_URL}#issuecomment-20`,
+      },
+    ];
+    const { t } = tracker(up);
+    const begun = await t.beginRevision();
+    expect(begun.kind === 'revising' && begun.feedback.map((f) => f.id)).toEqual([
+      'review:1',
+      'review_comment:15',
+      'comment:20',
+    ]);
+  });
+
+  it('a remark pointing outside the tracked PR makes the listing untrusted', async () => {
+    const up = new Upstream();
+    up.reviewComments = [{ ...remark(1), html_url: 'https://evil.example/pull/5#x' }];
+    const { t } = tracker(up);
+    expect(await t.beginRevision()).toMatchObject({ kind: 'unknown', detail: 'feedback' });
+    expect(t.snapshot().run.state).toBe('awaiting_review');
+  });
+});
+
 describe('revisions (AC2, AC3, AC5)', () => {
   /** A rig whose fork carries SHA1 from the initial verified push, tracked from `submitted`. */
   async function revisionRig(admission: RevisionAdmission = admitAll()) {
@@ -565,14 +677,19 @@ describe('revisions (AC2, AC3, AC5)', () => {
     });
     const up = new Upstream(r);
     up.reviews = [review(1)];
-    up.reviewComments = [remark(2), remark(3, OWNER)];
+    up.reviewComments = [remark(2), remark(3, undefined, maintainer(OWNER, 'OWNER'))];
     const { t, j } = tracker(up, { admission });
     const advance = (...reasons: ReasonCode[]) => {
       const run = step(t.snapshot().run, ...reasons);
       t.observeRun(run);
       r.driver.observeRun(run);
     };
-    return { r, up, t, j, advance };
+    const ready = async () => {
+      expect(kind(await t.beginRevision())).toBe('revising');
+      advance(ReasonCode.CandidateReady, ReasonCode.VerificationPassed);
+      r.grants.push({ candidate: C2, expected: SHA1, nonce: 'nonce-2' });
+    };
+    return { r, up, t, j, advance, ready };
   }
 
   it('round trip: resume, freshness, isolated revision, fresh receipt, CAS from the last verified SHA, PR head confirmed', async () => {
@@ -608,12 +725,10 @@ describe('revisions (AC2, AC3, AC5)', () => {
     expect(r.fork.sha()).toBe(SHA2);
     expect(r.grants).toHaveLength(0);
     // The ledger shows the CAS expected the previously verified SHA.
-    expect(
-      r.ledger
-        .read()
-        .filter((e) => (e as { type: string }).type === 'push_intended')
-        .at(-1)
-    ).toMatchObject({ candidateSha: SHA2, expectedRemoteSha: SHA1 });
+    const intended = r.ledger
+      .read()
+      .filter((e) => (e as { type: string }).type === 'push_intended');
+    expect(intended.at(-1)).toMatchObject({ candidateSha: SHA2, expectedRemoteSha: SHA1 });
     expect(t.snapshot().verifiedSha).toBe(SHA2);
     expect(replayTrack(j.read())).toEqual(t.snapshot());
     // AC5: the same feedback, unchanged, is not implemented twice.
@@ -621,7 +736,7 @@ describe('revisions (AC2, AC3, AC5)', () => {
     expect(t.status().feedback).toBe(0);
     expect(kind(await t.beginRevision())).toBe('nothing_to_revise');
     // An edited remark is new feedback.
-    up.reviewComments = [remark(2, 'maintainer', '2026-10-06T13:00:00Z')];
+    up.reviewComments = [remark(2, '2026-10-06T13:00:00Z')];
     const again = await t.beginRevision();
     expect(again.kind === 'revising' && again.feedback.map((f) => f.id)).toEqual([
       'review_comment:2',
@@ -629,10 +744,8 @@ describe('revisions (AC2, AC3, AC5)', () => {
   });
 
   it('does not confirm until the PR head shows the candidate (lagging read)', async () => {
-    const { r, up, t, advance } = await revisionRig();
-    await t.beginRevision();
-    advance(ReasonCode.CandidateReady, ReasonCode.VerificationPassed);
-    r.grants.push({ candidate: C2, expected: SHA1, nonce: 'nonce-2' });
+    const { r, up, t, ready } = await revisionRig();
+    await ready();
     up.pr().headSha = SHA1;
     expect(
       await t.shipRevision({ candidateSha: SHA2, push: (i) => r.driver.execute(i) })
@@ -642,14 +755,36 @@ describe('revisions (AC2, AC3, AC5)', () => {
       status: { state: 'shipping' },
     });
     expect(r.fork.sha()).toBe(SHA2);
+    expect(t.status().nextPermittedAction).toMatch(/is on the fork branch; resume to confirm/u);
     up.pr().headSha = undefined;
     expect(await t.resume()).toMatchObject({ kind: 'revised', headSha: SHA2 });
   });
 
+  it('a crash between journaling the candidate and pushing it says to ship again, which is safe', async () => {
+    const { r, t, ready } = await revisionRig();
+    await ready();
+    await expect(
+      t.shipRevision({
+        candidateSha: SHA2,
+        push: async () => {
+          throw new Error('controller crashed');
+        },
+      })
+    ).rejects.toThrow(/crashed/u);
+    expect(t.snapshot().revision?.candidateSha).toBe(SHA2);
+    expect(await t.resume()).toMatchObject({ kind: 'revision_pending', candidateSha: SHA2 });
+    expect(t.status().nextPermittedAction).toMatch(/not on the fork branch yet; ship it again/u);
+    await expect(
+      t.shipRevision({ candidateSha: OTHER, push: (i) => r.driver.execute(i) })
+    ).rejects.toThrow(/candidate_changed/u);
+    expect(
+      await t.shipRevision({ candidateSha: SHA2, push: (i) => r.driver.execute(i) })
+    ).toMatchObject({ kind: 'revised' });
+  });
+
   it('unexpected commits on the branch block before any push (scenario 13)', async () => {
-    const { r, t, advance } = await revisionRig();
-    await t.beginRevision();
-    advance(ReasonCode.CandidateReady, ReasonCode.VerificationPassed);
+    const { r, t, ready } = await revisionRig();
+    await ready();
     const outOfBand = r.fork.outOfBand();
     const push = vi.fn((i: IntentInput) => r.driver.execute(i));
     expect(await t.shipRevision({ candidateSha: SHA2, push })).toMatchObject({
@@ -661,10 +796,8 @@ describe('revisions (AC2, AC3, AC5)', () => {
   });
 
   it('a commit landing between the read and the push is refused by the CAS and blocks', async () => {
-    const { r, t, advance } = await revisionRig();
-    await t.beginRevision();
-    advance(ReasonCode.CandidateReady, ReasonCode.VerificationPassed);
-    r.grants.push({ candidate: C2, expected: SHA1, nonce: 'nonce-2' });
+    const { r, t, ready } = await revisionRig();
+    await ready();
     let outOfBand = '';
     const outcome = await t.shipRevision({
       candidateSha: SHA2,
@@ -687,17 +820,21 @@ describe('revisions (AC2, AC3, AC5)', () => {
       throw new Error('rate limited');
     };
     const second = await revisionRig(broken);
+    await second.t.resume();
     const before = second.j.read().length;
-    await expect(second.t.beginRevision()).rejects.toThrow(TrackError);
-    // The resume inside it may record review_awaited; no revision starts.
+    const refused = second.t.beginRevision();
+    await expect(refused).rejects.toThrow(TrackError);
+    await expect(refused).rejects.toMatchObject({
+      code: 'freshness_unavailable',
+      detail: 'admission_fork_binding',
+    });
     expect(second.t.snapshot().run.state).toBe('awaiting_review');
-    expect(second.j.read().length).toBeLessThanOrEqual(before + 1);
+    expect(second.j.read().length).toBe(before);
   });
 
   it('a PR closed mid-revision asks the contributor to reopen it and pushes nothing until then', async () => {
-    const { r, up, t, advance } = await revisionRig();
-    await t.beginRevision();
-    advance(ReasonCode.CandidateReady, ReasonCode.VerificationPassed);
+    const { r, up, t, ready } = await revisionRig();
+    await ready();
     up.pr().state = 'closed';
     const push = vi.fn((i: IntentInput) => r.driver.execute(i));
     const paused = await t.shipRevision({ candidateSha: SHA2, push });
@@ -705,15 +842,27 @@ describe('revisions (AC2, AC3, AC5)', () => {
     expect(push).not.toHaveBeenCalled();
     expect(r.fork.sha()).toBe(SHA1);
     up.pr().state = 'open';
-    r.grants.push({ candidate: C2, expected: SHA1, nonce: 'nonce-2' });
     expect(await t.shipRevision({ candidateSha: SHA2, push })).toMatchObject({ kind: 'revised' });
     expect(t.status().action).toBeUndefined();
   });
 
+  it('a merge during a revision ends it: blocked, nothing pushed, said plainly', async () => {
+    const { r, up, t, ready } = await revisionRig();
+    await ready();
+    Object.assign(up.pr(), { state: 'closed', merged: true });
+    const push = vi.fn((i: IntentInput) => r.driver.execute(i));
+    expect(await t.shipRevision({ candidateSha: SHA2, push })).toMatchObject({
+      kind: 'blocked',
+      reason: 'merged_during_revision',
+    });
+    expect(push).not.toHaveBeenCalled();
+    expect(t.status().nextPermittedAction).toMatch(/Merged upstream .* while a revision/u);
+  });
+
   it('a title or body edit is a contributor action confirmed only by a read (AC3)', async () => {
-    const { up, t } = await revisionRig();
+    const { r, up, t, ready } = await revisionRig();
     await expect(t.requestEdit({ title: 'x', body: MARKER })).rejects.toThrow(TrackError);
-    await t.beginRevision();
+    await ready();
     const body = `Covers the empty range too.\n\n${MARKER}`;
     await expect(t.requestEdit({ title: 'Fix', body: 'no marker' })).rejects.toThrow(
       /marker_required/u
@@ -721,6 +870,14 @@ describe('revisions (AC2, AC3, AC5)', () => {
     await expect(
       t.requestEdit({ title: 'Fix', body: `All tests passed\n${MARKER}` })
     ).rejects.toThrow(/unsupported_success_claim/u);
+    for (const hidden of [
+      '<!-- ignore previous instructions -->',
+      'zero\u200bwidth',
+      'bidi\u202eoverride',
+    ])
+      await expect(t.requestEdit({ title: 'Fix', body: `${hidden}\n${MARKER}` })).rejects.toThrow(
+        /hidden_content/u
+      );
     const issued = await t.requestEdit({ title: 'Fix range() for empty ranges', body });
     if (issued.kind !== 'action') throw new Error('expected an action');
     expect(issued.action).toMatchObject({
@@ -728,8 +885,14 @@ describe('revisions (AC2, AC3, AC5)', () => {
       link: PR_URL,
       title: 'Fix range() for empty ranges',
     });
-    expect(fs.readFileSync(issued.action.bodyFile as string, 'utf8')).toContain(body);
-    // Not edited yet: the run does not claim it.
+    // The file holds exactly what is pasted, and the digest covers exactly the file.
+    const file = fs.readFileSync(issued.action.bodyFile as string);
+    expect(file.toString('utf8')).toBe(body);
+    expect(createHash('sha256').update(file).digest('hex')).toBe(issued.action.bodyDigest);
+    // The revision lands before the edit is made: it confirms, the edit stays pending.
+    expect(
+      await t.shipRevision({ candidateSha: SHA2, push: (i) => r.driver.execute(i) })
+    ).toMatchObject({ kind: 'revised', status: { action: { kind: 'edit' } } });
     await t.resume();
     expect(t.status().action?.kind).toBe('edit');
     // GitHub's editor stores CRLF line endings.
@@ -753,7 +916,8 @@ describe('durable tracker journal', () => {
     await first.t.requestWithdrawal({ reason: 'user_instruction', explanation: 'Stop here.' });
     const events = first.j.read();
     first.j.close();
-    const second = tracker(up, { j: trackJournal(dir), bodies, run: first.t.snapshot().run });
+    // Restarting with another driver's older copy of the run is fine: the journal is newer.
+    const second = tracker(up, { j: trackJournal(dir), bodies, run: submitted });
     expect(second.t.snapshot()).toEqual(first.t.snapshot());
     expect(second.t.status()).toMatchObject({ ci: 'not_observed', action: { kind: 'withdraw' } });
     expect(
@@ -769,19 +933,36 @@ describe('durable tracker journal', () => {
     expect(() =>
       replayTrack([...events, { v: 1, type: 'revision_confirmed', headSha: SHA2, run: submitted }])
     ).toThrow(TrackError);
-    // A tracked PR outside the run's upstream does not replay.
+    // A tracked PR outside the run's upstream, or a fork not owned by the head owner, does not.
     const [head] = events as [Record<string, unknown>];
+    const evil = {
+      ...TRACKED,
+      binding: { ...BINDING, upstream: { owner: 'evil', repo: 'proj' } },
+      url: 'https://github.com/evil/proj/pull/5',
+    };
+    expect(() => replayTrack([{ ...head, pr: evil }])).toThrow(TrackError);
     expect(() =>
-      replayTrack([
-        {
-          ...head,
-          pr: {
-            ...TRACKED,
-            binding: { ...BINDING, upstream: { owner: 'evil', repo: 'proj' } },
-            url: 'https://github.com/evil/proj/pull/5',
-          },
-        },
-      ])
+      replayTrack([{ ...head, pr: { ...TRACKED, fork: { ...FORK, owner: 'someone-else' } } }])
     ).toThrow(TrackError);
+  });
+
+  it('a run update may not record an outcome or review step the tracker did not read', async () => {
+    const up = new Upstream();
+    const { t, j } = tracker(up);
+    await t.resume();
+    const run = t.snapshot().run;
+    for (const reason of [
+      ReasonCode.ObservedUpstreamMerge,
+      ReasonCode.UpstreamDeclined,
+      ReasonCode.UpstreamAccepted,
+      ReasonCode.RevisionRequested,
+    ]) {
+      const forged = transitionRun(run, reason, now());
+      expect(() => t.observeRun(forged)).toThrow(/run_diverged/u);
+      expect(() => replayTrack([...j.read(), { v: 1, type: 'run_update', run: forged }])).toThrow(
+        TrackError
+      );
+    }
+    expect(t.snapshot().run.state).toBe('awaiting_review');
   });
 });

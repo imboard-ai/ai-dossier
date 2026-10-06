@@ -88,8 +88,8 @@ function baseline(): { baseSha: string; pack: Buffer } {
     git.close();
   }
 }
-export const BASE = baseline();
-export function candidateWith(content: string): CanonicalCandidate {
+const BASE = baseline();
+function candidateWith(content: string): CanonicalCandidate {
   const bytes = Buffer.from(content);
   return createCandidate(
     createManifest([

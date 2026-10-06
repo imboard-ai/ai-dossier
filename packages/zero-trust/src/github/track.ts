@@ -5,10 +5,8 @@
  * pushed with the #1066 CAS to the same fork branch, which updates the PR. Title or body
  * edits, withdrawal and reopening are contributor actions the run confirms by reading the
  * PR again; it never writes upstream and never claims what it has not observed. */
-import { createHash } from 'node:crypto';
-import fs from 'node:fs';
 import path from 'node:path';
-import { replacePrivate } from '../durable-fs';
+import { writePrivateFile } from '../durable-fs';
 import { type IntentInput, isAdmitted, WriteBlockedError } from '../intents';
 import type { Journal } from '../journal';
 import type { CommandEvidence } from '../receipt/schema';
@@ -16,21 +14,26 @@ import { isRecoveryEvent } from '../recovery';
 import { assertNoSecrets } from '../redaction';
 import {
   isRecord,
+  isRunContinuation,
   permittedTransitions,
   ReasonCode,
   type RunRecord,
   type RunState,
   restoreRun,
+  sameRunRecord,
   TERMINAL_STATES,
   transitionRun,
 } from '../state';
 import { type ForkRef, ForkRefError, forkTarget, isCommitSha, readForkBranch } from './fork-ref';
 import {
+  bodyDigest,
   findHandoffMarkers,
   handoffIntentId,
   handoffMarker,
   hasOnlyMarker,
   MAX_BODY_LENGTH,
+  MAX_PR_TITLE_LENGTH,
+  markerOperation,
   type PrBinding,
   prBinding,
   prTitle,
@@ -50,12 +53,16 @@ export interface TrackedPr {
   readonly marker: string;
 }
 
-/** Upstream checks as observed at one head SHA (scenario 12). `none`: nothing reported
- * yet; `unknown`: a read failed or an answer was not understood. Only `passed` is green. */
+/** Upstream checks as observed at one head SHA (scenario 12). `none`: nothing ran or
+ * reported yet; `unknown`: a read failed or an answer was not understood. Only `passed`
+ * (at least one success, nothing failing or outstanding) is green. */
 export type CiState = 'none' | 'pending' | 'awaiting_approval' | 'failed' | 'passed' | 'unknown';
 
-/** One reviewer remark. Its body is untrusted text: data for the isolated revision, never an
- * instruction to the controller (PRD §5.8). */
+/** Accounts whose remarks are maintainer feedback (PRD §5.9 permission authority). */
+export const MAINTAINER_ASSOCIATIONS = Object.freeze(['OWNER', 'MEMBER', 'COLLABORATOR'] as const);
+
+/** One maintainer remark. Its body is untrusted text: data for the isolated revision, never
+ * an instruction to the controller (PRD §5.8). */
 export interface FeedbackItem {
   /** `review:<id>`, `review_comment:<id>` or `comment:<id>`. */
   readonly id: string;
@@ -68,7 +75,9 @@ export interface FeedbackItem {
   readonly commitSha?: string;
 }
 
+/** Why a tracked PR can no longer be followed; each blocks the run (PRD §5.9). */
 export type GoneReason = 'pr_deleted' | 'fork_deleted' | 'fork_replaced' | 'branch_deleted';
+/** One credential-free read of the tracked PR. */
 export type PrTrack =
   | {
       readonly kind: 'observed';
@@ -88,21 +97,21 @@ export type PrTrack =
       readonly feedback?: readonly FeedbackItem[] | null;
     }
   | { readonly kind: 'gone'; readonly reason: GoneReason }
-  | { readonly kind: 'unknown' };
+  /** `detail` is secret-free: which read failed and its HTTP status. */
+  | { readonly kind: 'unknown'; readonly detail?: string };
+type Observed = Extract<PrTrack, { kind: 'observed' }>;
 
 const PAGE_SIZE = 100;
 const MAX_CHECK_PAGES = 10;
 const MAX_FEEDBACK_PAGES = 30;
 const MAX_FEEDBACK_BODY = 65536;
+export const MAX_WITHDRAWAL_EXPLANATION = 2000;
 
 function enc(value: string): string {
   return encodeURIComponent(value);
 }
 function repoPath(binding: PrBinding): string {
   return `/repos/${enc(binding.upstream.owner)}/${enc(binding.upstream.repo)}`;
-}
-function loginOf(value: unknown): string | null {
-  return isRecord(value) && typeof value.login === 'string' ? value.login : null;
 }
 async function get(read: GitHubRead, p: string) {
   try {
@@ -116,10 +125,8 @@ async function get(read: GitHubRead, p: string) {
 async function listKeyed(read: GitHubRead, p: string, key: string): Promise<unknown[] | null> {
   const items: unknown[] = [];
   for (let page = 1; page <= MAX_CHECK_PAGES; page++) {
-    const response = await get(
-      read,
-      `${p}${p.includes('?') ? '&' : '?'}per_page=${PAGE_SIZE}&page=${page}`
-    );
+    const separator = p.includes('?') ? '&' : '?';
+    const response = await get(read, `${p}${separator}per_page=${PAGE_SIZE}&page=${page}`);
     const body = response?.status === 200 && isRecord(response.body) ? response.body : null;
     const list = body?.[key];
     if (!body || !Array.isArray(list) || !Number.isSafeInteger(body.total_count)) return null;
@@ -129,24 +136,33 @@ async function listKeyed(read: GitHubRead, p: string, key: string): Promise<unkn
   return null;
 }
 
-type Verdict = 'passed' | 'failed' | 'awaiting_approval' | 'pending' | 'unknown';
-const PASSED = ['success', 'neutral', 'skipped'];
+type Verdict = 'passed' | 'skipped' | 'failed' | 'awaiting_approval' | 'pending' | 'unknown';
+const SKIPPED = ['neutral', 'skipped'];
 const FAILED = ['failure', 'timed_out', 'cancelled', 'startup_failure'];
 
-function runVerdict(item: unknown): Verdict {
-  if (!isRecord(item)) return 'unknown';
+/** One check run or workflow run; an item for another commit is not evidence for `sha`. */
+function runVerdict(item: unknown, sha: string): Verdict {
+  if (!isRecord(item) || item.head_sha !== sha) return 'unknown';
   const { status, conclusion } = item;
   // A fork PR's workflows wait for a maintainer's approval before anything runs.
   if (status === 'action_required' || status === 'waiting' || conclusion === 'action_required')
     return 'awaiting_approval';
   if (status !== 'completed') return typeof status === 'string' ? 'pending' : 'unknown';
-  if (PASSED.includes(conclusion as string)) return 'passed';
+  if (conclusion === 'success') return 'passed';
+  if (SKIPPED.includes(conclusion as string)) return 'skipped';
   if (FAILED.includes(conclusion as string)) return 'failed';
   return conclusion === 'stale' ? 'pending' : 'unknown';
 }
 
+function statusVerdict(state: unknown): Verdict {
+  if (state === 'success') return 'passed';
+  if (state === 'pending') return 'pending';
+  return state === 'failure' || state === 'error' ? 'failed' : 'unknown';
+}
+
 /** Upstream CI at `sha`, from check runs, workflow runs and commit statuses. Never inferred:
- * a check that has not run is not green, and an unreadable answer is `unknown`. */
+ * a check that has not run is not green, everything skipped is `none`, and an unreadable
+ * answer is `unknown`. */
 export async function observeCi(
   read: GitHubRead,
   binding: PrBinding,
@@ -161,68 +177,77 @@ export async function observeCi(
   ]);
   const status = combined?.status === 200 && isRecord(combined.body) ? combined.body : null;
   if (!checks || !runs || !status || !Number.isSafeInteger(status.total_count)) return 'unknown';
-  const verdicts: Verdict[] = [...checks, ...runs].map(runVerdict);
+  const verdicts = [...checks, ...runs].map((item) => runVerdict(item, sha));
   // GitHub reports `pending` for a commit with no statuses at all: count only real ones.
-  if ((status.total_count as number) > 0)
-    verdicts.push(
-      status.state === 'success'
-        ? 'passed'
-        : status.state === 'pending'
-          ? 'pending'
-          : status.state === 'failure' || status.state === 'error'
-            ? 'failed'
-            : 'unknown'
-    );
-  if (verdicts.length === 0) return 'none';
+  if ((status.total_count as number) > 0) verdicts.push(statusVerdict(status.state));
   for (const verdict of ['failed', 'awaiting_approval', 'pending', 'unknown'] as const)
     if (verdicts.includes(verdict)) return verdict;
-  return 'passed';
+  return verdicts.includes('passed') ? 'passed' : 'none';
 }
 
-/** Reviews, review comments and conversation comments on the PR; null when unreadable. */
+const FEEDBACK_SOURCES = Object.freeze([
+  ['review', 'pulls', 'reviews'],
+  ['review_comment', 'pulls', 'comments'],
+  ['comment', 'issues', 'comments'],
+] as const);
+
+/** One remark as GitHub lists it; null when malformed, undefined when not feedback. */
+function feedbackItem(
+  kind: (typeof FEEDBACK_SOURCES)[number][0],
+  raw: unknown,
+  prUrl: string
+): FeedbackItem | null | undefined {
+  if (!isRecord(raw)) return null;
+  // A pending review is not visible yet; a deleted account (no user) cannot be a maintainer.
+  if ((kind === 'review' && raw.state === 'PENDING') || !isRecord(raw.user)) return undefined;
+  const author = raw.user.login;
+  const updatedAt = kind === 'review' ? raw.submitted_at : raw.updated_at;
+  if (
+    !Number.isSafeInteger(raw.id) ||
+    typeof author !== 'string' ||
+    typeof updatedAt !== 'string' ||
+    typeof raw.html_url !== 'string' ||
+    !raw.html_url.toLowerCase().startsWith(`${prUrl.toLowerCase()}#`) ||
+    (raw.body !== null && typeof raw.body !== 'string')
+  )
+    return null;
+  const body = ((raw.body as string | null) ?? '').slice(0, MAX_FEEDBACK_BODY);
+  if (
+    raw.user.type === 'Bot' ||
+    !(MAINTAINER_ASSOCIATIONS as readonly unknown[]).includes(raw.author_association) ||
+    // Approvals and empty comment-only reviews carry nothing to address.
+    (kind === 'review' && raw.state !== 'CHANGES_REQUESTED' && !body.trim())
+  )
+    return undefined;
+  return Object.freeze({
+    id: `${kind}:${raw.id}`,
+    author,
+    updatedAt,
+    url: raw.html_url,
+    body,
+    ...(isCommitSha(raw.commit_id) ? { commitSha: raw.commit_id } : {}),
+  });
+}
+
+/** Maintainer reviews, review comments and conversation comments on the PR; null when
+ * a listing is unreadable or an entry is malformed. */
 export async function observeFeedback(
   read: GitHubRead,
-  pr: Pick<TrackedPr, 'binding' | 'number'>
+  pr: Pick<TrackedPr, 'binding' | 'number' | 'url'>
 ): Promise<FeedbackItem[] | null> {
   const repo = repoPath(prBinding(pr.binding));
-  const sources = [
-    ['review', `${repo}/pulls/${pr.number}/reviews?sort=created`],
-    ['review_comment', `${repo}/pulls/${pr.number}/comments?sort=created`],
-    ['comment', `${repo}/issues/${pr.number}/comments?sort=created`],
-  ] as const;
-  const lists = await Promise.all(sources.map(([, p]) => listAll(read, p, MAX_FEEDBACK_PAGES)));
   const items: FeedbackItem[] = [];
-  for (const [index, list] of lists.entries()) {
-    if (!list) return null;
-    const kind = sources[index]?.[0] as string;
-    for (const raw of list) {
-      if (!isRecord(raw)) return null;
-      const author = loginOf(raw.user);
-      const updatedAt = kind === 'review' ? raw.submitted_at : raw.updated_at;
-      if (
-        !Number.isSafeInteger(raw.id) ||
-        !author ||
-        typeof raw.html_url !== 'string' ||
-        (raw.body !== null && typeof raw.body !== 'string')
-      )
-        return null;
-      // A pending review has no submission time yet and is not visible feedback.
-      if (kind === 'review' && raw.state === 'PENDING') continue;
-      if (typeof updatedAt !== 'string') return null;
-      const body = ((raw.body as string | null) ?? '').slice(0, MAX_FEEDBACK_BODY);
-      // Approvals and empty comment-only reviews carry nothing to address.
-      if (kind === 'review' && raw.state !== 'CHANGES_REQUESTED' && !body.trim()) continue;
-      if (isRecord(raw.user) && raw.user.type === 'Bot') continue;
-      items.push(
-        Object.freeze({
-          id: `${kind}:${raw.id}`,
-          author,
-          updatedAt,
-          url: raw.html_url,
-          body,
-          ...(isCommitSha(raw.commit_id) ? { commitSha: raw.commit_id } : {}),
-        })
-      );
+  for (const [kind, scope, list] of FEEDBACK_SOURCES) {
+    const listed = await listAll(
+      read,
+      `${repo}/${scope}/${pr.number}/${list}?sort=created`,
+      MAX_FEEDBACK_PAGES
+    );
+    if (!listed) return null;
+    for (const raw of listed) {
+      const item = feedbackItem(kind, raw, pr.url);
+      if (item === null) return null;
+      if (item) items.push(item);
     }
   }
   return items;
@@ -252,7 +277,7 @@ export async function observePr(read: GitHubRead, pr: TrackedPr): Promise<PrTrac
     typeof body.title !== 'string' ||
     (body.body !== null && typeof body.body !== 'string')
   )
-    return { kind: 'unknown' };
+    return { kind: 'unknown', detail: `pull:${response?.status ?? 'unreachable'}` };
   const merged = body.merged === true || typeof body.merged_at === 'string';
   const facts = {
     kind: 'observed' as const,
@@ -276,7 +301,8 @@ export async function observePr(read: GitHubRead, pr: TrackedPr): Promise<PrTrac
       if (error.status === 404) return { kind: 'gone', reason: 'fork_deleted' };
       if (error.status === 200) return { kind: 'gone', reason: 'fork_replaced' };
     }
-    return { kind: 'unknown' };
+    const status = error instanceof ForkRefError ? (error.status ?? 'unreachable') : 'error';
+    return { kind: 'unknown', detail: `fork_ref:${status}` };
   }
   if (branchSha === null) return { kind: 'gone', reason: 'branch_deleted' };
   if (facts.state === 'closed') return Object.freeze({ ...facts, branchSha });
@@ -298,6 +324,7 @@ export function upstreamOutcome(track: PrTrack): UpstreamOutcome {
   return track.state === 'closed' ? 'declined' : 'awaiting_review';
 }
 
+/** The result of looking for a replacement PR. */
 export type Relocation =
   | { readonly kind: 'none' }
   | { readonly kind: 'found'; readonly number: number; readonly url: string }
@@ -351,9 +378,32 @@ export function trackFromHandoff(
   };
 }
 
+export const TRACK_ERROR_CODES = Object.freeze([
+  /** The journal holds an event this tracker would not have produced. */
+  'invalid_journal',
+  /** The supplied run is not this journal's run, nor a copy of it. */
+  'run_diverged',
+  'journal_in_use',
+  /** The run is terminal in a state this tracker does not report. */
+  'run_closed',
+  'action_pending',
+  'no_action',
+  'admission_state',
+  'invalid_candidate',
+  'candidate_changed',
+  /** A freshness probe could not answer; nothing was recorded. */
+  'freshness_unavailable',
+] as const);
+export type TrackErrorCode = (typeof TRACK_ERROR_CODES)[number];
+
+/** A refused tracking call or an invalid journal. `detail` is secret-free. */
 export class TrackError extends Error {
-  constructor(readonly code: string) {
-    super(`Zero-trust PR tracking refused: ${code}`);
+  constructor(
+    readonly code: TrackErrorCode,
+    readonly detail?: string,
+    options?: ErrorOptions
+  ) {
+    super(`Zero-trust PR tracking refused: ${code}${detail ? ` (${detail})` : ''}`, options);
     this.name = 'TrackError';
   }
 }
@@ -365,12 +415,15 @@ export const TRACK_BLOCK_REASONS = Object.freeze([
   'branch_deleted',
   /** The PR or fork branch moved to a commit no verified push left there (scenario 13). */
   'unexpected_head_sha',
+  /** Upstream merged the PR while a revision was in progress: nothing more is pushed. */
+  'merged_during_revision',
   'admission_policy',
   'admission_contributor',
   'admission_fork_binding',
   /** The CAS push refused or diverged; the intent journal holds the detail. */
   'push_blocked',
 ] as const);
+/** Why tracking stopped; recorded with the run's `policy_blocked` transition. */
 export type TrackBlockReason = (typeof TRACK_BLOCK_REASONS)[number];
 
 /** Freshness before every revision (PRD §5.9): the same probes the PR hand-off admits on. */
@@ -379,6 +432,7 @@ export type RevisionAdmission = Pick<
   'policyFresh' | 'contributorVerified' | 'forkBindingVerified'
 >;
 
+/** What a `PrTracker` reads and writes with; all controller-owned. */
 export interface TrackDeps {
   readonly read: GitHubRead;
   readonly admission: RevisionAdmission;
@@ -387,23 +441,37 @@ export interface TrackDeps {
   readonly now: () => string;
 }
 
-export type ActionKind = 'edit' | 'withdraw' | 'reopen';
-export type WithdrawalReason = 'maintainer_request' | 'user_instruction';
-interface PendingAction {
-  readonly kind: ActionKind;
+export const ACTION_KINDS = Object.freeze(['edit', 'withdraw', 'reopen'] as const);
+/** A contributor action on the PR page: an edit, a withdrawal (comment and close), a reopen. */
+export type ActionKind = (typeof ACTION_KINDS)[number];
+export const WITHDRAWAL_REASONS = Object.freeze([
+  'maintainer_request',
+  'user_instruction',
+] as const);
+/** PRD §5.9: only an explicit maintainer request or user instruction admits a withdrawal. */
+export type WithdrawalReason = (typeof WITHDRAWAL_REASONS)[number];
+
+interface ActionBase {
   readonly input: IntentInput;
   readonly link: string;
-  readonly title?: string;
-  readonly body?: string;
-  readonly bodyFile?: string;
-  readonly bodyDigest?: string;
-  readonly reason?: WithdrawalReason;
 }
+interface PreparedText {
+  /** Exactly what the contributor pastes; the body file holds these bytes. */
+  readonly body: string;
+  readonly bodyFile: string;
+  readonly bodyDigest: string;
+}
+type PendingAction =
+  | (ActionBase & PreparedText & { readonly kind: 'edit'; readonly title: string })
+  | (ActionBase & PreparedText & { readonly kind: 'withdraw'; readonly reason: WithdrawalReason })
+  | (ActionBase & { readonly kind: 'reopen' });
+
 /** A prepared contributor action: the link, the text to submit, and what the run will read
  * back to confirm it. */
 export interface ContributorAction {
   readonly kind: ActionKind;
   readonly link: string;
+  /** Edit only: the exact title to set. */
   readonly title?: string;
   readonly bodyFile?: string;
   readonly bodyDigest?: string;
@@ -416,51 +484,59 @@ interface FeedbackRef {
   readonly updatedAt: string;
 }
 interface Revision {
-  readonly fromSha: string;
+  /** The review items this revision addresses; marked addressed when it is confirmed. */
   readonly feedback: readonly FeedbackRef[];
+  /** Journaled before the push (write-ahead); fixed from then on. */
   readonly candidateSha?: string;
 }
+/** The tracker's durable state, rebuilt from its journal. */
 export interface TrackState {
   readonly run: RunRecord;
   readonly contributionId: string;
   readonly pr: TrackedPr;
-  /** The head the run last confirmed on the PR. */
+  /** The head the run last confirmed on the PR; a revision starts from it. */
   readonly verifiedSha: string;
   /** Feedback id → the `updatedAt` a confirmed revision addressed (AC5). */
   readonly addressed: ReadonlyMap<string, string>;
   readonly revision?: Revision;
   readonly action?: PendingAction;
+  /** The head GitHub reported when the outcome was observed. */
+  readonly outcomeSha?: string;
   readonly blockedReason?: TrackBlockReason;
 }
 
-/** What the last read in this process saw. Never journaled: after a restart CI is
- * `not_observed` until the next explicit resume reads it. */
+/** What the last read in this process saw at a head the run can vouch for. Never journaled:
+ * after a restart CI is `not_observed` until the next explicit read. */
 interface Seen {
   readonly ci: CiState;
   readonly headSha: string;
+  readonly branchSha: string | null;
   readonly actionable: number | null;
 }
 
+/** The run's tracking facts and what the contributor does next. */
 export interface TrackStatus {
   readonly state: RunState;
   readonly pr: string;
   readonly headSha: string;
-  /** As observed at `ciSha`; `not_observed` until a resume in this process reads it. */
+  /** As observed at `ciSha`; `not_observed` until a read in this process. */
   readonly ci: CiState | 'not_observed';
   readonly ciSha?: string;
-  /** Unaddressed review items at the last read; null when not read. */
+  /** Unaddressed maintainer review items at the last read; null when not read. */
   readonly feedback: number | null;
   readonly action?: ContributorAction;
   readonly blockedReason?: TrackBlockReason;
   readonly nextPermittedAction: string;
 }
 
+/** Every call reports the status after it; pass `snapshot().run` to the other drivers
+ * (`IntentDriver.observeRun`, `HandoffDriver.observeRun`) after each one. */
 export type TrackOutcome =
   | { readonly kind: 'tracking'; readonly status: TrackStatus }
   | { readonly kind: 'merged' | 'declined'; readonly status: TrackStatus }
   | { readonly kind: 'blocked'; readonly reason: TrackBlockReason; readonly status: TrackStatus }
   /** GitHub could not be read: nothing was recorded; resume again later. */
-  | { readonly kind: 'unknown'; readonly status: TrackStatus }
+  | { readonly kind: 'unknown'; readonly detail?: string; readonly status: TrackStatus }
   /** Re-detection found several candidate PRs, or one it cannot attribute: a person decides. */
   | {
       readonly kind: 'handoff';
@@ -473,7 +549,7 @@ export type TrackOutcome =
       readonly status: TrackStatus;
     }
   | { readonly kind: 'nothing_to_revise'; readonly status: TrackStatus }
-  /** Pushed (or about to be), but the PR head does not show the candidate yet. */
+  /** Journaled (and maybe pushed), but the PR head does not show the candidate yet. */
   | {
       readonly kind: 'revision_pending';
       readonly candidateSha: string;
@@ -493,49 +569,58 @@ type Event =
     }
   | { v: 1; type: 'run_update'; run: RunRecord }
   | { v: 1; type: 'review_awaited'; run: RunRecord }
-  | { v: 1; type: 'outcome'; outcome: 'merged' | 'declined'; run: RunRecord }
+  | { v: 1; type: 'outcome'; outcome: 'merged' | 'declined'; headSha: string; run: RunRecord }
   | { v: 1; type: 'blocked'; reason: TrackBlockReason; run: RunRecord }
   | { v: 1; type: 'rebound'; number: number; url: string }
   | { v: 1; type: 'revision_started'; feedback: FeedbackRef[]; run: RunRecord }
   | { v: 1; type: 'revision_pushing'; candidateSha: string }
   | { v: 1; type: 'revision_confirmed'; headSha: string; run: RunRecord }
   | { v: 1; type: 'action_issued'; action: PendingAction }
-  | { v: 1; type: 'action_observed' };
+  | { v: 1; type: 'action_observed' }
+  | { v: 1; type: 'action_cancelled' };
 
-function fail(): never {
-  throw new TrackError('invalid_journal');
+function fail(detail?: string): never {
+  throw new TrackError('invalid_journal', detail);
 }
-function sameRun(a: RunRecord, b: RunRecord): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
-}
-function digestOf(text: string): string {
-  return createHash('sha256').update(Buffer.from(text, 'utf8')).digest('hex');
-}
+
 /** GitHub's web editor stores CRLF line endings and may drop trailing whitespace. */
 function sameText(a: string | null, b: string): boolean {
   return (a ?? '').replace(/\r\n?/gu, '\n').trimEnd() === b.replace(/\r\n?/gu, '\n').trimEnd();
 }
 
-/** Only the same controller run or an exact forward continuation may be observed. */
+/** Lifecycle steps recorded elsewhere (isolated revision, verification, pause, failures).
+ * PR outcomes, review and revision edges are the tracker's own: only its reads record them. */
+const EXTERNAL_REASONS: readonly ReasonCode[] = Object.freeze([
+  ReasonCode.CandidateReady,
+  ReasonCode.VerificationPassed,
+  ReasonCode.RepairRequired,
+  ReasonCode.UserPaused,
+  ReasonCode.ResumeRevising,
+  ReasonCode.ResumeVerifying,
+  ReasonCode.ResumeShipping,
+  ReasonCode.PolicyBlocked,
+  ReasonCode.UnsupportedEnvironment,
+  ReasonCode.ExecutionFailed,
+  ReasonCode.UserCancelled,
+  ReasonCode.CleanupFailed,
+  ReasonCode.CleanupCompleted,
+]);
+
+/** The same controller run or an exact forward continuation, advanced only by external
+ * steps. */
 function continuation(previous: RunRecord, value: unknown): RunRecord {
   const run = restoreRun(value);
-  if (
-    run.runId !== previous.runId ||
-    run.upstreamIssue !== previous.upstreamIssue ||
-    run.contributor !== previous.contributor ||
-    run.createdAt !== previous.createdAt ||
-    run.history.length < previous.history.length ||
-    JSON.stringify(run.history.slice(0, previous.history.length)) !==
-      JSON.stringify(previous.history)
-  )
-    fail();
+  if (!isRunContinuation(previous, run)) throw new TrackError('run_diverged');
+  const added = run.history.slice(previous.history.length);
+  const owned = added.find((entry) => !EXTERNAL_REASONS.includes(entry.reasonCode));
+  if (owned) throw new TrackError('run_diverged', `tracker-owned:${owned.reasonCode}`);
   return run;
 }
 
 /** The transition must be exactly `reason` applied to the current run. */
 function stepped(state: TrackState, raw: Record<string, unknown>, reason: ReasonCode): RunRecord {
   const run = restoreRun(raw.run);
-  if (!sameRun(run, transitionRun(state.run, reason, run.updatedAt))) fail();
+  if (!sameRunRecord(run, transitionRun(state.run, reason, run.updatedAt))) fail(String(raw.type));
   return run;
 }
 
@@ -545,25 +630,24 @@ function prUrl(pr: Pick<TrackedPr, 'binding' | 'number'>): string {
 }
 
 function trackedPr(value: unknown): TrackedPr {
-  if (!isRecord(value) || !isRecord(value.fork)) fail();
+  if (!isRecord(value) || !isRecord(value.fork)) fail('pr');
   const binding = prBinding(value.binding);
   const fork = value.fork as unknown as ForkRef;
   try {
     forkTarget(fork, binding.branch); // Validates the fork reference.
   } catch {
-    fail();
+    fail('fork');
   }
   if (
+    !sameLogin(fork.owner, binding.headOwner) ||
     !Number.isSafeInteger(value.number) ||
     (value.number as number) < 1 ||
     typeof value.url !== 'string' ||
     value.url.toLowerCase() !== prUrl({ binding, number: value.number as number }).toLowerCase() ||
     typeof value.marker !== 'string' ||
-    findHandoffMarkers(value.marker).length !== 1 ||
-    findHandoffMarkers(value.marker)[0] !== value.marker ||
-    !value.marker.endsWith(' op=pr_create -->')
+    markerOperation(value.marker) !== 'pr_create'
   )
-    fail();
+    fail('pr');
   return Object.freeze({
     binding,
     fork: Object.freeze({ repositoryId: fork.repositoryId, owner: fork.owner, repo: fork.repo }),
@@ -573,13 +657,38 @@ function trackedPr(value: unknown): TrackedPr {
   });
 }
 
-function actionOf(state: TrackState, raw: unknown, directory: string | null): PendingAction {
-  if (!isRecord(raw) || !isRecord(raw.input)) fail();
+function bodyFileName(input: IntentInput, kind: ActionKind): string {
+  return `${handoffIntentId(input)}-${kind}.md`;
+}
+
+function preparedText(
+  raw: Record<string, unknown>,
+  input: IntentInput,
+  kind: ActionKind,
+  directory: string | null
+): PreparedText {
+  if (
+    typeof raw.body !== 'string' ||
+    raw.bodyDigest !== bodyDigest(raw.body) ||
+    typeof raw.bodyFile !== 'string' ||
+    !path.isAbsolute(raw.bodyFile) ||
+    (directory !== null && path.dirname(raw.bodyFile) !== directory) ||
+    path.basename(raw.bodyFile) !== bodyFileName(input, kind)
+  )
+    fail('action_text');
+  assertNoSecrets(raw.body);
+  return { body: raw.body, bodyFile: raw.bodyFile, bodyDigest: raw.bodyDigest };
+}
+
+/** A journaled action is exactly one the tracker could have issued at that point. */
+function actionOf(state: TrackState, value: unknown, directory: string | null): PendingAction {
+  if (!isRecord(value) || !isRecord(value.input)) fail('action');
+  const raw = value;
   const kind = raw.kind as ActionKind;
   const input = raw.input as unknown as IntentInput;
   const op = kind === 'withdraw' ? 'pr_close' : 'pr_update';
   if (
-    !['edit', 'withdraw', 'reopen'].includes(kind) ||
+    !ACTION_KINDS.includes(kind) ||
     input.operationKind !== op ||
     input.contributionId !== state.contributionId ||
     input.target !== state.pr.url ||
@@ -587,53 +696,42 @@ function actionOf(state: TrackState, raw: unknown, directory: string | null): Pe
     raw.link !== state.pr.url ||
     !isAdmitted(op, state.run.state)
   )
-    fail();
+    fail('action');
   handoffIntentId(input); // Validates shape and secrets.
-  const text = kind !== 'reopen';
-  if (text) {
+  const base = { input: Object.freeze({ ...input }), link: state.pr.url };
+  if (kind === 'reopen') {
+    if (['body', 'bodyFile', 'bodyDigest', 'title', 'reason'].some((k) => raw[k] !== undefined))
+      fail('action');
+    return Object.freeze({ kind, ...base });
+  }
+  const text = preparedText(raw, input, kind, directory);
+  if (kind === 'edit') {
     if (
-      typeof raw.body !== 'string' ||
-      raw.bodyDigest !== digestOf(raw.body) ||
-      typeof raw.bodyFile !== 'string' ||
-      !path.isAbsolute(raw.bodyFile) ||
-      (directory !== null && path.dirname(raw.bodyFile) !== directory) ||
-      path.basename(raw.bodyFile) !== `${handoffIntentId(input)}-${kind}.md`
+      typeof raw.title !== 'string' ||
+      !raw.title ||
+      raw.title.length > MAX_PR_TITLE_LENGTH ||
+      raw.reason !== undefined ||
+      !hasOnlyMarker(text.body, state.pr.marker)
     )
-      fail();
-    assertNoSecrets(raw.body);
-  } else if (raw.body !== undefined || raw.bodyFile !== undefined || raw.title !== undefined)
-    fail();
+      fail('action');
+    return Object.freeze({ kind, ...base, ...text, title: raw.title });
+  }
   if (
-    kind === 'edit' &&
-    (typeof raw.title !== 'string' || !hasOnlyMarker(raw.body, state.pr.marker))
+    !WITHDRAWAL_REASONS.includes(raw.reason as WithdrawalReason) ||
+    raw.title !== undefined ||
+    !hasOnlyMarker(text.body, handoffMarker(input))
   )
-    fail();
-  if (kind === 'withdraw') {
-    if (!['maintainer_request', 'user_instruction'].includes(raw.reason as string)) fail();
-    if (!hasOnlyMarker(raw.body, handoffMarker(input))) fail();
-  } else if (raw.reason !== undefined) fail();
-  return Object.freeze({
-    kind,
-    input: Object.freeze({ ...input }),
-    link: raw.link as string,
-    ...(kind === 'edit' ? { title: raw.title as string } : {}),
-    ...(text
-      ? {
-          body: raw.body as string,
-          bodyFile: raw.bodyFile as string,
-          bodyDigest: raw.bodyDigest as string,
-        }
-      : {}),
-    ...(kind === 'withdraw' ? { reason: raw.reason as WithdrawalReason } : {}),
-  });
+    fail('action');
+  return Object.freeze({ kind, ...base, ...text, reason: raw.reason as WithdrawalReason });
 }
 
 const TRACKING: readonly RunState[] = ['submitted', 'awaiting_review', 'accepted'];
 
 function reduce(state: TrackState | undefined, raw: unknown, directory: string | null): TrackState {
-  if (!isRecord(raw) || raw.v !== 1) fail();
+  if (!isRecord(raw) || raw.v !== 1) fail('event');
   if (raw.type === 'track') {
-    if (state || typeof raw.contributionId !== 'string' || !isCommitSha(raw.verifiedSha)) fail();
+    if (state || typeof raw.contributionId !== 'string' || !isCommitSha(raw.verifiedSha))
+      fail('track');
     const run = restoreRun(raw.run);
     const pr = trackedPr(raw.pr);
     // The run, never a caller, names the target: its issue's repository and contributor.
@@ -644,7 +742,7 @@ function reduce(state: TrackState | undefined, raw: unknown, directory: string |
       !sameLogin(issue.repo, pr.binding.upstream.repo) ||
       !sameLogin(pr.binding.headOwner, run.contributor)
     )
-      fail();
+      fail('track');
     return {
       run,
       contributionId: raw.contributionId,
@@ -653,46 +751,50 @@ function reduce(state: TrackState | undefined, raw: unknown, directory: string |
       addressed: new Map(),
     };
   }
-  if (!state) fail();
+  if (!state) fail('no_track');
   // A block fences everything after it except lifecycle progress made elsewhere.
-  if (state.blockedReason && raw.type !== 'run_update') fail();
+  if (state.blockedReason && raw.type !== 'run_update') fail('after_block');
   switch (raw.type) {
     case 'run_update':
       return { ...state, run: continuation(state.run, raw.run) };
     case 'review_awaited':
-      if (state.run.state !== 'submitted') fail();
+      if (state.run.state !== 'submitted') fail('review_awaited');
       return { ...state, run: stepped(state, raw, ReasonCode.ReviewAwaited) };
     case 'outcome': {
-      if (raw.outcome !== 'merged' && raw.outcome !== 'declined') fail();
+      if ((raw.outcome !== 'merged' && raw.outcome !== 'declined') || !isCommitSha(raw.headSha))
+        fail('outcome');
       const reason =
         raw.outcome === 'merged' ? ReasonCode.ObservedUpstreamMerge : ReasonCode.UpstreamDeclined;
-      // The withdrawal is satisfied by the close it asked for, or overtaken by a merge.
-      return { ...state, run: stepped(state, raw, reason), action: undefined };
+      // A withdrawal is satisfied by the close it asked for, or overtaken by a merge.
+      return {
+        ...state,
+        run: stepped(state, raw, reason),
+        action: undefined,
+        outcomeSha: raw.headSha,
+      };
     }
     case 'blocked':
-      if (!TRACK_BLOCK_REASONS.includes(raw.reason as TrackBlockReason)) fail();
+      if (!TRACK_BLOCK_REASONS.includes(raw.reason as TrackBlockReason)) fail('blocked');
       return {
         ...state,
         run: stepped(state, raw, ReasonCode.PolicyBlocked),
         blockedReason: raw.reason as TrackBlockReason,
       };
-    case 'rebound': {
-      const number = raw.number as number;
-      if (number === state.pr.number || state.action || state.revision) fail();
-      const pr = trackedPr({ ...state.pr, number, url: raw.url });
-      return { ...state, pr };
-    }
+    case 'rebound':
+      if (raw.number === state.pr.number || state.action || state.revision) fail('rebound');
+      return { ...state, pr: trackedPr({ ...state.pr, number: raw.number, url: raw.url }) };
     case 'revision_started': {
       if (state.revision || state.action || !Array.isArray(raw.feedback) || !raw.feedback.length)
-        fail();
+        fail('revision_started');
       const feedback = raw.feedback.map((f) => {
-        if (!isRecord(f) || typeof f.id !== 'string' || typeof f.updatedAt !== 'string') fail();
+        if (!isRecord(f) || typeof f.id !== 'string' || typeof f.updatedAt !== 'string')
+          fail('revision_started');
         return Object.freeze({ id: f.id, updatedAt: f.updatedAt });
       });
       return {
         ...state,
         run: stepped(state, raw, ReasonCode.RevisionRequested),
-        revision: Object.freeze({ fromSha: state.verifiedSha, feedback }),
+        revision: Object.freeze({ feedback }),
       };
     }
     case 'revision_pushing':
@@ -703,14 +805,16 @@ function reduce(state: TrackState | undefined, raw: unknown, directory: string |
         !isCommitSha(raw.candidateSha) ||
         raw.candidateSha === state.verifiedSha
       )
-        fail();
+        fail('revision_pushing');
       return {
         ...state,
         revision: Object.freeze({ ...state.revision, candidateSha: raw.candidateSha }),
       };
     case 'revision_confirmed': {
+      // An edit still pending is independent of the push: it stays pending.
       const revision = state.revision;
-      if (!revision?.candidateSha || raw.headSha !== revision.candidateSha || state.action) fail();
+      if (!revision?.candidateSha || raw.headSha !== revision.candidateSha)
+        fail('revision_confirmed');
       const addressed = new Map(state.addressed);
       for (const f of revision.feedback) addressed.set(f.id, f.updatedAt);
       return {
@@ -722,21 +826,24 @@ function reduce(state: TrackState | undefined, raw: unknown, directory: string |
       };
     }
     case 'action_issued':
-      if (state.action) fail();
+      if (state.action) fail('action_issued');
       return { ...state, action: actionOf(state, raw.action, directory) };
     case 'action_observed':
-      if (!state.action) fail();
+    case 'action_cancelled':
+      if (!state.action) fail(raw.type);
       return { ...state, action: undefined };
     default:
-      return fail();
+      return fail(String(raw.type));
   }
 }
 
+/** Rebuilds a `PrTracker` journal; throws `TrackError('invalid_journal')` on any event the
+ * tracker would not have produced at that point. */
 export function replayTrack(events: readonly unknown[], bodyDirectory?: string): TrackState {
   const directory = bodyDirectory === undefined ? null : path.resolve(bodyDirectory);
   let state: TrackState | undefined;
   for (const event of events) if (!isRecoveryEvent(event)) state = reduce(state, event, directory);
-  if (!state) fail();
+  if (!state) fail('empty');
   return state;
 }
 
@@ -766,17 +873,28 @@ function ciText(ci: CiState | 'not_observed', sha?: string): string {
     case 'failed':
       return `Upstream checks failed${at}.`;
     case 'none':
-      return `No upstream checks are reported${at}; nothing is green.`;
+      return `No upstream check has run${at}; nothing is green.`;
     case 'unknown':
       return `Upstream checks${at} could not be read; nothing is claimed about them.`;
-    default:
+    case 'not_observed':
       return 'Upstream checks have not been read since the run was loaded; resume to read them.';
+    default:
+      return ci satisfies never;
   }
+}
+
+/** Hidden text cannot ride into the PR description: HTML comments (other than the marker)
+ * and invisible or control characters are refused, not silently rewritten. */
+function assertVisibleBody(body: string, marker: string): void {
+  const rest = body.replace(marker, '');
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: Refuse control characters in prepared PR text.
+  if (/<!--|--!?>|\p{Cf}|[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u2028\u2029]/u.test(rest))
+    throw new HandoffError('hidden_content');
 }
 
 const drivenJournals = new WeakSet<Journal>();
 /** One read: the PR as observed, or an ambiguous re-detection a person must settle. */
-type Read = Exclude<PrTrack, { kind: 'unknown' }> | { kind: 'handoff'; reason: AmbiguityReason };
+type Read = PrTrack | { kind: 'handoff'; reason: AmbiguityReason };
 
 /** Serial controller driver over its own journal; the directory is controller-owned. */
 export class PrTracker {
@@ -805,17 +923,22 @@ export class PrTracker {
       journal.append(event);
     } else {
       this.state = replayTrack(events, directory);
-      if (this.state.contributionId !== initial.contributionId) fail();
-      this.observeRun(initial.run);
+      if (this.state.contributionId !== initial.contributionId)
+        throw new TrackError('run_diverged', 'contribution');
+      // Another driver's copy of the run may trail this journal's; only a newer one is news.
+      const run = restoreRun(initial.run);
+      if (!isRunContinuation(run, this.state.run)) this.observeRun(run);
     }
     drivenJournals.add(journal);
   }
 
+  /** The durable state, as replaying the journal yields it. */
   snapshot(): TrackState {
     return { ...this.state, addressed: new Map(this.state.addressed) };
   }
 
-  /** Record lifecycle progress made elsewhere (isolated revision and verification). */
+  /** Record lifecycle progress made elsewhere (isolated revision and verification, pause,
+   * failures). PR outcomes, review and revision steps are refused: only reads record them. */
   observeRun(value: RunRecord): void {
     const run = continuation(this.state.run, value);
     if (run.history.length !== this.state.run.history.length)
@@ -838,52 +961,64 @@ export class PrTracker {
     return transitionRun(this.state.run, reason, this.deps.now());
   }
 
+  /** Current tracking facts; reads nothing. CI is `not_observed` until a read in this
+   * process. */
   status(): TrackStatus {
     const s = this.state;
     const seen = this.seen;
-    const action = s.action && this.describe(s.action);
     const ci: TrackStatus['ci'] = seen?.ci ?? 'not_observed';
-    const facts = {
+    return Object.freeze({
       state: s.run.state,
       pr: s.pr.url,
       headSha: s.verifiedSha,
       ci,
       ...(seen ? { ciSha: seen.headSha } : {}),
       feedback: seen?.actionable ?? null,
-      ...(action ? { action } : {}),
+      ...(s.action ? { action: this.describe(s.action) } : {}),
       ...(s.blockedReason ? { blockedReason: s.blockedReason } : {}),
-    };
-    return Object.freeze({ ...facts, nextPermittedAction: this.next(ci, seen?.headSha) });
+      nextPermittedAction: this.next(seen),
+    });
   }
 
-  private next(ci: CiState | 'not_observed', sha?: string): string {
+  private next(seen: Seen | undefined): string {
     const s = this.state;
-    const checks = ciText(ci, sha);
+    const checks = ciText(seen?.ci ?? 'not_observed', seen?.headSha);
+    if (s.blockedReason === 'merged_during_revision')
+      return `Merged upstream at ${s.pr.url} while a revision was in progress; nothing more is pushed and the run is finished.`;
     if (s.blockedReason)
       return `Blocked (${s.blockedReason}); nothing further runs. Inspect ${s.pr.url} and start a new run if the contribution should continue.`;
     if (s.action) return this.describe(s.action).instructions;
     switch (s.run.state) {
       case 'merged':
-        return `Merged upstream at ${s.pr.url}; nothing further.`;
+        return s.outcomeSha === s.verifiedSha
+          ? `Merged upstream at ${s.pr.url}; nothing further.`
+          : `Merged upstream at ${s.pr.url} with head ${s.outcomeSha}, which is not the verified ${s.verifiedSha}; nothing further.`;
       case 'declined':
         return `Closed without merge at ${s.pr.url}. Reopening it is your action on GitHub; a new run would track it. Nothing is deleted and no follow-up is sent.`;
       case 'submitted':
         return `Submitted at ${s.pr.url}. ${checks} Resume to read the pull request and its checks.`;
       case 'awaiting_review':
       case 'accepted': {
-        const n = this.seen?.actionable;
+        const n = seen?.actionable;
         const feedback = n
-          ? `${n} review item(s) are not addressed at ${s.verifiedSha}; resume with a revision to address them.`
+          ? `${n} maintainer review item(s) are not addressed at ${s.verifiedSha}; resume with a revision to address them.`
           : 'Waiting for maintainer review; no compute runs until you resume.';
         return `${feedback} ${checks}`;
       }
       case 'revising':
       case 'verifying':
         return 'Revision in progress: the candidate is produced and verified in isolation before anything is pushed.';
-      case 'shipping':
-        return s.revision?.candidateSha
-          ? `Revision ${s.revision.candidateSha} is pushed or pushing; resume to confirm the pull request head shows it.`
-          : 'Ship the verified revision to the same fork branch.';
+      case 'shipping': {
+        const candidate = s.revision?.candidateSha;
+        if (!candidate) return 'Ship the verified revision to the same fork branch.';
+        return seen?.branchSha === candidate
+          ? `Revision ${candidate} is on the fork branch; resume to confirm the pull request head shows it.`
+          : `Revision ${candidate} is not on the fork branch yet; ship it again with the same candidate (the CAS push is safe to repeat).`;
+      }
+      case 'paused_user':
+        return 'Paused by the user; resume the paused phase to continue.';
+      case 'awaiting_contributor':
+        return 'Waiting for a contributor prerequisite (fork or App installation); resume re-checks it.';
       default:
         return `Run is ${s.run.state}; the pull request is not tracked in this state.`;
     }
@@ -891,27 +1026,25 @@ export class PrTracker {
 
   private describe(action: PendingAction): ContributorAction {
     const author = this.state.run.contributor;
-    const paste = action.bodyFile ? ` The prepared text is in ${action.bodyFile}.` : '';
+    const paste = 'bodyFile' in action ? ` The prepared text is in ${action.bodyFile}.` : '';
     const instructions = {
-      edit: `Open the pull request at the link, choose Edit, and set the title and description to the prepared text from your own account (${author}).${paste} Keep the hidden ai-dossier marker line. Then resume; the run records the edit only after it reads it back.`,
+      edit: `Open the pull request at the link, choose Edit, set the title to the prepared title, and replace the description with the prepared text, from your own account (${author}).${paste} Keep the hidden ai-dossier marker line. Then resume; the run records the edit only after it reads it back.`,
       withdraw: `Open the pull request at the link, post the prepared comment from your own account (${author}), then close the pull request.${paste} Keep the hidden ai-dossier marker line. Nothing is deleted. Then resume; the run records the contribution declined only after it observes the pull request closed, and sends no follow-up.`,
       reopen: `The pull request was closed while a revision was in progress. To continue, reopen it at the link from your own account (${author}) and resume; otherwise cancel the run. Nothing is pushed while it is closed.`,
     }[action.kind];
     return Object.freeze({
       kind: action.kind,
       link: action.link,
-      ...(action.title === undefined ? {} : { title: action.title }),
-      ...(action.bodyFile ? { bodyFile: action.bodyFile, bodyDigest: action.bodyDigest } : {}),
+      ...(action.kind === 'edit' ? { title: action.title } : {}),
+      ...('bodyFile' in action ? { bodyFile: action.bodyFile, bodyDigest: action.bodyDigest } : {}),
       author,
       instructions,
     });
   }
 
   private block(reason: TrackBlockReason): TrackOutcome {
-    if (
-      !this.state.blockedReason &&
-      permittedTransitions(this.state.run.state)[ReasonCode.PolicyBlocked]
-    )
+    const state = this.state.run.state;
+    if (!this.state.blockedReason && permittedTransitions(state)[ReasonCode.PolicyBlocked])
       this.persist({
         v: 1,
         type: 'blocked',
@@ -926,87 +1059,96 @@ export class PrTracker {
     if (s.blockedReason) return { kind: 'blocked', reason: s.blockedReason, status: this.status() };
     if (s.run.state === 'merged' || s.run.state === 'declined')
       return { kind: s.run.state, status: this.status() };
-    if (TERMINAL_STATES.includes(s.run.state)) throw new TrackError('run_closed');
+    if (TERMINAL_STATES.includes(s.run.state)) throw new TrackError('run_closed', s.run.state);
     return null;
   }
 
-  /** One read of the tracked PR, following a replacement PR when the tracked one is closed
-   * (AC6). `null` means GitHub could not be read and nothing was recorded. */
-  private async observe(): Promise<Read | null> {
-    let track = await observePr(this.deps.read, this.state.pr);
-    if (track.kind === 'unknown') return null;
-    const closed = track.kind === 'observed' && track.state === 'closed' && !track.merged;
-    // A pending withdrawal asked for exactly this close: it is the answer, not a lead.
-    if (closed && this.state.action?.kind !== 'withdraw' && !this.state.revision) {
-      const moved = await relocatePr(this.deps.read, this.state.pr, this.state.run.contributor);
-      if (moved.kind === 'unknown') return null;
-      if (moved.kind === 'ambiguous') return { kind: 'handoff', reason: moved.reason };
-      if (moved.kind === 'found') {
-        this.persist({ v: 1, type: 'rebound', number: moved.number, url: moved.url });
-        track = await observePr(this.deps.read, this.state.pr);
-        if (track.kind === 'unknown') return null;
-      }
-    }
-    if (track.kind === 'observed' && track.ci)
-      this.seen = {
-        ci: track.ci,
-        headSha: track.headSha,
-        actionable: track.feedback ? actionableFeedback(this.state, track.feedback).length : null,
-      };
-    return track as Read;
-  }
-
-  /** The pending contributor action, confirmed only by what the read shows. */
-  private confirmAction(track: Extract<PrTrack, { kind: 'observed' }>): void {
-    const action = this.state.action;
-    if (!action) return;
-    const done =
-      action.kind === 'edit'
-        ? track.title === action.title && sameText(track.body, action.body as string)
-        : action.kind === 'reopen'
-          ? track.state === 'open'
-          : false; // A withdrawal is confirmed by the `declined` outcome itself.
-    if (done) this.persist({ v: 1, type: 'action_observed' });
-  }
-
-  /** Heads the run may see: the last verified one, or its own revision once pushed. */
-  private unexpectedHead(track: Extract<PrTrack, { kind: 'observed' }>): boolean {
-    const allowed = [this.state.verifiedSha, this.state.revision?.candidateSha];
+  /** Heads the run may see: the last verified one, or its own revision once journaled. */
+  private unexpectedHead(track: Observed, candidate = this.state.revision?.candidateSha): boolean {
+    const allowed = [this.state.verifiedSha, candidate];
     return (
       !allowed.includes(track.headSha) ||
       (track.branchSha !== null && !allowed.includes(track.branchSha))
     );
   }
 
+  /** One read of the tracked PR, following a replacement PR when the tracked one is closed
+   * (AC6). Records only a rebind; every other decision is the caller's. */
+  private async observe(): Promise<Read> {
+    let track = await observePr(this.deps.read, this.state.pr);
+    const closed = track.kind === 'observed' && track.state === 'closed' && !track.merged;
+    // A pending withdrawal asked for exactly this close, and a revision follows its own PR.
+    if (closed && this.state.action?.kind !== 'withdraw' && !this.state.revision) {
+      const moved = await relocatePr(this.deps.read, this.state.pr, this.state.run.contributor);
+      if (moved.kind === 'unknown') return { kind: 'unknown', detail: 'relocate' };
+      if (moved.kind === 'ambiguous') return { kind: 'handoff', reason: moved.reason };
+      if (moved.kind === 'found') {
+        this.persist({ v: 1, type: 'rebound', number: moved.number, url: moved.url });
+        track = await observePr(this.deps.read, this.state.pr);
+      }
+    }
+    // CI and feedback are reported only for a head the run can vouch for.
+    if (track.kind === 'observed' && track.ci)
+      this.seen = this.unexpectedHead(track)
+        ? undefined
+        : {
+            ci: track.ci,
+            headSha: track.headSha,
+            branchSha: track.branchSha,
+            actionable: track.feedback
+              ? actionableFeedback(this.state, track.feedback).length
+              : null,
+          };
+    return track;
+  }
+
+  /** What every read settles first: unreadable, ambiguous, gone, and the pending action. */
+  private settle(read: Read): TrackOutcome | Observed {
+    if (read.kind === 'unknown')
+      return {
+        kind: 'unknown',
+        ...(read.detail ? { detail: read.detail } : {}),
+        status: this.status(),
+      };
+    if (read.kind === 'handoff') return { ...read, status: this.status() };
+    if (read.kind === 'gone') return this.block(read.reason);
+    this.confirmAction(read);
+    return read;
+  }
+
+  /** The pending contributor action, confirmed only by what the read shows. */
+  private confirmAction(track: Observed): void {
+    const action = this.state.action;
+    if (!action) return;
+    const done =
+      action.kind === 'edit'
+        ? track.title.trim() === action.title && sameText(track.body, action.body)
+        : action.kind === 'reopen'
+          ? track.state === 'open'
+          : false; // A withdrawal is confirmed by the `declined` outcome itself.
+    if (done) this.persist({ v: 1, type: 'action_observed' });
+  }
+
   /** Explicit resume: the only time the run reads the PR (PRD §5.3; no background polling). */
   resume(): Promise<TrackOutcome> {
-    return this.serial(() => this.track());
+    return this.serial(async () => this.settled() ?? this.apply(await this.observe()));
   }
 
-  private async track(): Promise<TrackOutcome> {
-    const settled = this.settled();
-    if (settled) return settled;
-    return this.apply(await this.observe());
-  }
-
-  /** AC1 on one observation: only what was read moves the run. */
-  private apply(track: Read | null): TrackOutcome {
-    if (!track) return { kind: 'unknown', status: this.status() };
-    if (track.kind === 'handoff') return { ...track, status: this.status() };
-    if (track.kind === 'gone') return this.block(track.reason);
-    this.confirmAction(track);
+  /** AC1 on one read: only what was read moves the run. */
+  private apply(read: Read): TrackOutcome {
+    const track = this.settle(read);
+    if (track.kind !== 'observed') return track;
+    const revision = this.state.revision;
+    if (revision) return this.duringRevision(track, revision);
     const state = this.state.run.state;
-    if (state === 'shipping' && this.state.revision) return this.confirmRevision(track);
     if (!TRACKING.includes(state)) return { kind: 'tracking', status: this.status() };
-    if (track.merged) {
-      const run = this.transition(ReasonCode.ObservedUpstreamMerge);
-      this.persist({ v: 1, type: 'outcome', outcome: 'merged', run });
-      return { kind: 'merged', status: this.status() };
-    }
-    if (track.state === 'closed') {
-      const run = this.transition(ReasonCode.UpstreamDeclined);
-      this.persist({ v: 1, type: 'outcome', outcome: 'declined', run });
-      return { kind: 'declined', status: this.status() };
+    const outcome = upstreamOutcome(track);
+    if (outcome === 'merged' || outcome === 'declined') {
+      const reason =
+        outcome === 'merged' ? ReasonCode.ObservedUpstreamMerge : ReasonCode.UpstreamDeclined;
+      const run = this.transition(reason);
+      this.persist({ v: 1, type: 'outcome', outcome, headSha: track.headSha, run });
+      return { kind: outcome, status: this.status() };
     }
     if (this.unexpectedHead(track)) return this.block('unexpected_head_sha');
     if (state === 'submitted')
@@ -1018,136 +1160,14 @@ export class PrTracker {
     return { kind: 'tracking', status: this.status() };
   }
 
-  /** Freshness immediately before every revision step (PRD §5.9). A probe that answers no
-   * blocks; one that cannot answer refuses without recording anything. */
-  private async fresh(): Promise<TrackBlockReason | null> {
-    const { admission } = this.deps;
-    const probes = [
-      ['admission_policy', () => admission.policyFresh()],
-      ['admission_contributor', () => admission.contributorVerified()],
-      ['admission_fork_binding', () => admission.forkBindingVerified()],
-    ] as const;
-    for (const [reason, probe] of probes) {
-      let ok: boolean;
-      try {
-        ok = (await probe()) === true;
-      } catch {
-        throw new TrackError('freshness_unavailable');
-      }
-      if (!ok) return reason;
-    }
-    return null;
-  }
-
-  /** Explicit resume into a revision (AC2): read the PR, recheck freshness, and start one
-   * only for review items not already addressed at the current head (AC5). The returned
-   * feedback is untrusted input for the isolated revision. */
-  beginRevision(): Promise<TrackOutcome> {
-    return this.serial(async () => {
-      const settled = this.settled();
-      if (settled) return settled;
-      if (this.state.action) throw new TrackError('action_pending');
-      const track = await this.observe();
-      const outcome = this.apply(track);
-      if (outcome.kind !== 'tracking' || !TRACKING.includes(this.state.run.state)) return outcome;
-      if (track?.kind !== 'observed' || !track.feedback)
-        return { kind: 'unknown', status: this.status() };
-      const feedback = actionableFeedback(this.state, track.feedback);
-      if (!feedback.length) return { kind: 'nothing_to_revise', status: this.status() };
-      const stale = await this.fresh();
-      if (stale) return this.block(stale);
-      this.persist({
-        v: 1,
-        type: 'revision_started',
-        feedback: feedback.map((f) => ({ id: f.id, updatedAt: f.updatedAt })),
-        run: this.transition(ReasonCode.RevisionRequested),
-      });
-      return { kind: 'revising', feedback, status: this.status() };
-    });
-  }
-
-  /** Ship the verified revision (AC2): freshness again, then the CAS push from the last
-   * verified SHA through the caller's `IntentDriver.execute` (`ForkPusher`, a fresh
-   * receipt), then the PR head must show the candidate. Unexpected commits block. */
-  shipRevision(request: {
-    candidateSha: string;
-    push: (intent: IntentInput) => Promise<string>;
-  }): Promise<TrackOutcome> {
-    return this.serial(async () => {
-      const settled = this.settled();
-      if (settled) return settled;
-      const { candidateSha } = request;
-      const revision = this.state.revision;
-      if (this.state.run.state !== 'shipping' || !revision) throw new TrackError('admission_state');
-      if (!isCommitSha(candidateSha) || candidateSha === this.state.verifiedSha)
-        throw new TrackError('invalid_candidate');
-      if (revision.candidateSha && revision.candidateSha !== candidateSha)
-        throw new TrackError('candidate_changed');
-      const stale = await this.fresh();
-      if (stale) return this.block(stale);
-      const track = await this.observe();
-      if (!track) return { kind: 'unknown', status: this.status() };
-      if (track.kind === 'handoff') return { ...track, status: this.status() };
-      if (track.kind === 'gone') return this.block(track.reason);
-      this.confirmAction(track);
-      if (track.merged || track.state === 'closed') return this.closedDuringRevision(track);
-      // Only the last verified SHA, or this candidate after a lost push response (scenario 18).
-      const allowed = [revision.fromSha, candidateSha];
-      if (
-        !allowed.includes(track.headSha) ||
-        (track.branchSha !== null && !allowed.includes(track.branchSha))
-      )
-        return this.block('unexpected_head_sha');
-      if (!revision.candidateSha) this.persist({ v: 1, type: 'revision_pushing', candidateSha });
-      if (track.branchSha !== candidateSha) {
-        try {
-          await request.push({
-            contributionId: this.state.contributionId,
-            target: forkTarget(this.state.pr.fork, this.state.pr.binding.branch),
-            operationKind: 'push_branch',
-            candidateSha,
-          });
-        } catch (error) {
-          // The intent journal blocked (diverged remote, refused receipt): so does tracking.
-          if (error instanceof WriteBlockedError) return this.block('push_blocked');
-          throw error;
-        }
-      }
-      const after = await this.observe();
-      if (!after || after.kind === 'handoff')
-        return { kind: 'revision_pending', candidateSha, status: this.status() };
-      if (after.kind === 'gone') return this.block(after.reason);
-      return this.confirmRevision(after);
-    });
-  }
-
-  private pendingAction(): TrackOutcome {
-    return {
-      kind: 'action',
-      action: this.describe(this.state.action as PendingAction),
-      status: this.status(),
-    };
-  }
-
-  /** A merge overtakes the revision; a close pauses it behind a reopen hand-off. */
-  private closedDuringRevision(track: Extract<PrTrack, { kind: 'observed' }>): TrackOutcome {
-    // Merged mid-revision: the outcome is upstream's; the run reports it and pushes nothing.
-    if (track.merged) return { kind: 'tracking', status: this.status() };
-    if (!this.state.action)
-      this.issue({
-        kind: 'reopen',
-        input: this.input('pr_update'),
-        link: this.state.pr.url,
-      });
-    return this.pendingAction();
-  }
-
-  private confirmRevision(track: Extract<PrTrack, { kind: 'observed' }>): TrackOutcome {
-    const revision = this.state.revision as Revision;
-    if (track.merged || track.state === 'closed') return this.closedDuringRevision(track);
+  /** A read while a revision is in progress: a merge ends it, a close pauses it behind a
+   * reopen hand-off, a moved head blocks, and in `shipping` the PR head confirms it. */
+  private duringRevision(track: Observed, revision: Revision): TrackOutcome {
+    if (track.merged) return this.block('merged_during_revision');
+    if (track.state === 'closed') return this.closedDuringRevision();
     if (this.unexpectedHead(track)) return this.block('unexpected_head_sha');
-    // Nothing pushed yet: the revision waits for `shipRevision`.
-    if (!revision.candidateSha) return { kind: 'tracking', status: this.status() };
+    if (this.state.run.state !== 'shipping' || !revision.candidateSha)
+      return { kind: 'tracking', status: this.status() };
     if (track.headSha !== revision.candidateSha)
       return {
         kind: 'revision_pending',
@@ -1164,6 +1184,116 @@ export class PrTracker {
     return { kind: 'revised', headSha: track.headSha, status: this.status() };
   }
 
+  private closedDuringRevision(): TrackOutcome {
+    if (!this.state.action && isAdmitted('pr_update', this.state.run.state))
+      this.persist({
+        v: 1,
+        type: 'action_issued',
+        action: { kind: 'reopen', input: this.input('pr_update'), link: this.state.pr.url },
+      });
+    const action = this.state.action;
+    return action
+      ? { kind: 'action', action: this.describe(action), status: this.status() }
+      : { kind: 'tracking', status: this.status() };
+  }
+
+  /** Freshness immediately before every revision step (PRD §5.9). A probe that answers no
+   * blocks; one that cannot answer refuses without recording anything. */
+  private async fresh(): Promise<TrackBlockReason | null> {
+    const { admission } = this.deps;
+    const probes = [
+      ['admission_policy', () => admission.policyFresh()],
+      ['admission_contributor', () => admission.contributorVerified()],
+      ['admission_fork_binding', () => admission.forkBindingVerified()],
+    ] as const;
+    for (const [reason, probe] of probes) {
+      let ok: boolean;
+      try {
+        ok = (await probe()) === true;
+      } catch (cause) {
+        throw new TrackError('freshness_unavailable', reason, { cause });
+      }
+      if (!ok) return reason;
+    }
+    return null;
+  }
+
+  /** Explicit resume into a revision (AC2): read the PR, recheck freshness, and start one
+   * only for maintainer review items not already addressed at the current head (AC5). The
+   * returned feedback is untrusted input for the isolated revision. */
+  beginRevision(): Promise<TrackOutcome> {
+    return this.serial(async () => {
+      const settled = this.settled();
+      if (settled) return settled;
+      if (this.state.action) throw new TrackError('action_pending', this.state.action.kind);
+      const read = await this.observe();
+      const outcome = this.apply(read);
+      if (outcome.kind !== 'tracking' || !TRACKING.includes(this.state.run.state)) return outcome;
+      if (read.kind !== 'observed' || !read.feedback)
+        return { kind: 'unknown', detail: 'feedback', status: this.status() };
+      const feedback = actionableFeedback(this.state, read.feedback);
+      if (!feedback.length) return { kind: 'nothing_to_revise', status: this.status() };
+      const stale = await this.fresh();
+      if (stale) return this.block(stale);
+      this.persist({
+        v: 1,
+        type: 'revision_started',
+        feedback: feedback.map((f) => ({ id: f.id, updatedAt: f.updatedAt })),
+        run: this.transition(ReasonCode.RevisionRequested),
+      });
+      return { kind: 'revising', feedback, status: this.status() };
+    });
+  }
+
+  /** Ship the verified revision (AC2): freshness again, then the CAS push from the last
+   * verified SHA through the caller's `IntentDriver.execute` (`ForkPusher`, a fresh
+   * receipt), then the PR head must show the candidate. Unexpected commits block. Safe to
+   * repeat with the same candidate after a crash or a lost response. */
+  shipRevision(request: {
+    candidateSha: string;
+    push: (intent: IntentInput) => Promise<string>;
+  }): Promise<TrackOutcome> {
+    return this.serial(async () => {
+      const settled = this.settled();
+      if (settled) return settled;
+      const { candidateSha } = request;
+      const revision = this.state.revision;
+      if (this.state.run.state !== 'shipping' || !revision)
+        throw new TrackError('admission_state', this.state.run.state);
+      if (!isCommitSha(candidateSha) || candidateSha === this.state.verifiedSha)
+        throw new TrackError('invalid_candidate');
+      if (revision.candidateSha && revision.candidateSha !== candidateSha)
+        throw new TrackError('candidate_changed');
+      const stale = await this.fresh();
+      if (stale) return this.block(stale);
+      const track = this.settle(await this.observe());
+      if (track.kind !== 'observed') return track;
+      if (track.merged) return this.block('merged_during_revision');
+      if (track.state === 'closed') return this.closedDuringRevision();
+      // Only the last verified SHA, or this candidate after a lost push response (scenario 18).
+      if (this.unexpectedHead(track, candidateSha)) return this.block('unexpected_head_sha');
+      if (!revision.candidateSha) this.persist({ v: 1, type: 'revision_pushing', candidateSha });
+      if (track.branchSha !== candidateSha) {
+        try {
+          await request.push({
+            contributionId: this.state.contributionId,
+            target: forkTarget(this.state.pr.fork, this.state.pr.binding.branch),
+            operationKind: 'push_branch',
+            candidateSha,
+          });
+        } catch (error) {
+          // The intent journal blocked (diverged remote, refused receipt): so does tracking.
+          if (error instanceof WriteBlockedError) return this.block('push_blocked');
+          throw error;
+        }
+      }
+      const after = await this.observe();
+      if (after.kind === 'unknown' || after.kind === 'handoff')
+        return { kind: 'revision_pending', candidateSha, status: this.status() };
+      return this.apply(after);
+    });
+  }
+
   private input(operationKind: 'pr_update' | 'pr_close'): IntentInput {
     return {
       contributionId: this.state.contributionId,
@@ -1173,18 +1303,18 @@ export class PrTracker {
     };
   }
 
-  private issue(action: PendingAction): void {
-    let stored = action;
-    if (action.body !== undefined) {
-      const directory = path.resolve(this.deps.bodyDirectory);
-      fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-      const bodyFile = path.join(directory, `${handoffIntentId(action.input)}-${action.kind}.md`);
-      const text = action.title === undefined ? action.body : `${action.title}\n\n${action.body}`;
-      // Write-ahead: the prepared text exists before the journal makes the action visible.
-      replacePrivate(bodyFile, Buffer.from(text, 'utf8'));
-      stored = { ...action, bodyFile, bodyDigest: digestOf(action.body) };
-    }
-    this.persist({ v: 1, type: 'action_issued', action: stored });
+  /** Writes the prepared text before the journal makes the action visible (write-ahead). */
+  private prepare(input: IntentInput, kind: ActionKind, body: string): PreparedText {
+    const bodyFile = writePrivateFile(
+      path.resolve(this.deps.bodyDirectory),
+      bodyFileName(input, kind),
+      Buffer.from(body, 'utf8')
+    );
+    return { body, bodyFile, bodyDigest: bodyDigest(body) };
+  }
+
+  private pendingAction(action: PendingAction): TrackOutcome {
+    return { kind: 'action', action: this.describe(action), status: this.status() };
   }
 
   /** AC3: a title or description change during a revision is the contributor's edit on the
@@ -1199,30 +1329,34 @@ export class PrTracker {
       const settled = this.settled();
       if (settled) return settled;
       if (!this.state.revision || !isAdmitted('pr_update', this.state.run.state))
-        throw new TrackError('admission_state');
-      if (this.state.action) return this.pendingAction();
+        throw new TrackError('admission_state', this.state.run.state);
+      if (this.state.action) return this.pendingAction(this.state.action);
       const title = prTitle(request.title);
       const body = request.body;
       if (typeof body !== 'string' || body.length > MAX_BODY_LENGTH)
         throw new HandoffError('invalid_body');
       // The PR stays findable by its marker (AC6) only if the edit keeps it.
       if (!hasOnlyMarker(body, this.state.pr.marker)) throw new HandoffError('marker_required');
+      assertVisibleBody(body, this.state.pr.marker);
       assertNoSecrets(body);
       assertContentPolicy(`${title}\n${body}`, request.evidence);
-      this.issue({
+      const input = this.input('pr_update');
+      const action: PendingAction = {
         kind: 'edit',
-        input: this.input('pr_update'),
+        input,
         link: this.state.pr.url,
         title,
-        body,
-      });
-      return this.pendingAction();
+        ...this.prepare(input, 'edit', body),
+      };
+      this.persist({ v: 1, type: 'action_issued', action });
+      return this.pendingAction(action);
     });
   }
 
   /** AC4: withdrawal on a maintainer request or the user's instruction. The contributor
    * posts the prepared comment and closes the PR; `declined` is recorded only when a later
-   * resume observes it closed. Nothing is deleted and nothing follows up. */
+   * resume observes it closed. Nothing is deleted and nothing follows up. Not during a
+   * revision: finish or cancel it first. */
   requestWithdrawal(request: {
     reason: WithdrawalReason;
     explanation: string;
@@ -1231,24 +1365,39 @@ export class PrTracker {
       const settled = this.settled();
       if (settled) return settled;
       const state = this.state.run.state;
+      if (!WITHDRAWAL_REASONS.includes(request.reason))
+        throw new TrackError('admission_state', 'withdrawal_reason');
       if (
-        !['maintainer_request', 'user_instruction'].includes(request.reason) ||
         !isAdmitted('pr_close', state) ||
         !permittedTransitions(state)[ReasonCode.UpstreamDeclined]
       )
-        throw new TrackError('admission_state');
-      if (this.state.action) return this.pendingAction();
+        throw new TrackError('admission_state', `withdraw_in_${state}`);
+      if (this.state.action) return this.pendingAction(this.state.action);
       const input = this.input('pr_close');
-      const body = `${untrustedText(request.explanation, 2000)}\n\n${handoffMarker(input)}`;
+      const explanation = untrustedText(request.explanation, MAX_WITHDRAWAL_EXPLANATION);
+      const body = `${explanation}\n\n${handoffMarker(input)}`;
       assertContentPolicy(body);
-      this.issue({
+      const action: PendingAction = {
         kind: 'withdraw',
         input,
         link: this.state.pr.url,
-        body,
         reason: request.reason,
-      });
-      return this.pendingAction();
+        ...this.prepare(input, 'withdraw', body),
+      };
+      this.persist({ v: 1, type: 'action_issued', action });
+      return this.pendingAction(action);
+    });
+  }
+
+  /** Drop a pending action the contributor will not perform (a stale edit, a withdrawal
+   * the user no longer wants, a reopen they decline). Nothing upstream changes. */
+  cancelAction(): Promise<TrackOutcome> {
+    return this.serial(async () => {
+      const settled = this.settled();
+      if (settled) return settled;
+      if (!this.state.action) throw new TrackError('no_action');
+      this.persist({ v: 1, type: 'action_cancelled' });
+      return { kind: 'tracking', status: this.status() };
     });
   }
 }
