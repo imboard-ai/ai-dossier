@@ -41,7 +41,7 @@ export interface WorkerHardening {
 export interface ProfileManifest {
   readonly schemaVersion: typeof PROFILE_MANIFEST_VERSION;
   readonly manifestVersion: string;
-  readonly workerHardening?: WorkerHardening;
+  readonly workerHardening: WorkerHardening;
   readonly profiles: readonly RuntimeProfile[];
 }
 
@@ -65,16 +65,19 @@ export class ProfileError extends Error {
 }
 
 const RUNTIME_VERSION = { type: 'string', pattern: '^\\d+\\.\\d+\\.\\d+$' };
+const PROFILE_ID = { type: 'string', pattern: '^[a-z0-9][a-z0-9.-]{0,63}$' };
+const IMAGE = { type: 'string', pattern: '^[a-z0-9.-]+(?::\\d+)?(?:/[a-z0-9._-]+)+$' };
+const DIGEST = { type: 'string', pattern: '^sha256:[a-f0-9]{64}$' };
 const PROFILE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   required: ['id', 'ecosystem', 'runtimeVersion', 'image', 'imageDigest', 'managers'],
   properties: {
-    id: { type: 'string', pattern: '^[a-z0-9][a-z0-9.-]{0,63}$' },
+    id: PROFILE_ID,
     ecosystem: { enum: ['node', 'python'] },
     runtimeVersion: RUNTIME_VERSION,
-    image: { type: 'string', pattern: '^[a-z0-9.-]+(?::\\d+)?(?:/[a-z0-9._-]+)+$' },
-    imageDigest: { type: 'string', pattern: '^sha256:[a-f0-9]{64}$' },
+    image: IMAGE,
+    imageDigest: DIGEST,
     managers: {
       type: 'array',
       minItems: 1,
@@ -84,20 +87,18 @@ const PROFILE_SCHEMA = {
   },
 };
 const MANIFEST_VERSION = { type: 'string', pattern: '^\\d{4}\\.\\d{1,2}\\.\\d+$' };
-const IMAGE = { type: 'string', pattern: '^[a-z0-9.-]+(?::\\d+)?(?:/[a-z0-9._-]+)+$' };
-const DIGEST = { type: 'string', pattern: '^sha256:[a-f0-9]{64}$' };
 const HARDENING_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   required: ['recipe', 'vmProfiles', 'uv'],
   properties: {
-    recipe: { type: 'string', pattern: '^[a-z0-9][a-z0-9.-]{0,63}$' },
+    recipe: PROFILE_ID,
     vmProfiles: {
       type: 'array',
       minItems: 1,
       maxItems: 16,
       uniqueItems: true,
-      items: { type: 'string', pattern: '^[a-z0-9][a-z0-9.-]{0,63}$' },
+      items: PROFILE_ID,
     },
     uv: {
       type: 'object',
@@ -110,7 +111,7 @@ const HARDENING_SCHEMA = {
 const MANIFEST_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['schemaVersion', 'manifestVersion', 'profiles'],
+  required: ['schemaVersion', 'manifestVersion', 'workerHardening', 'profiles'],
   properties: {
     schemaVersion: { const: PROFILE_MANIFEST_VERSION },
     manifestVersion: MANIFEST_VERSION,
@@ -186,7 +187,7 @@ export function validateProfileManifest(value: unknown): ProfileManifest {
     runtimes.add(runtime);
   }
   // Every VM profile must name a profile here, at most one per ecosystem.
-  const vm = manifest.workerHardening?.vmProfiles ?? [];
+  const vm = manifest.workerHardening.vmProfiles;
   const vmEcosystems = vm.map((id) => manifest.profiles.find((p) => p.id === id)?.ecosystem);
   if (vmEcosystems.some((e) => e === undefined) || new Set(vmEcosystems).size !== vm.length)
     throw new ProfileError('invalid_manifest');

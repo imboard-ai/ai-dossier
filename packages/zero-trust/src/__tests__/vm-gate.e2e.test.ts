@@ -8,14 +8,11 @@
  * The verdict comes from host-side measurements (canary values in any guest
  * byte, connections on the planted listeners, broker rejections); fixture
  * reports are untrusted and can only add violations. */
-import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
-import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { AcceleratorRequest, ContainerProfile, VmHandle, VmLimits } from '../vm/adapter';
-import { BrokerError } from '../vm/adapter';
+import type { AcceleratorRequest, ContainerProfile, VmHandle } from '../vm/adapter';
 import { validateRequest } from '../vm/broker';
 import {
   assertBoundaryHeld,
@@ -26,77 +23,37 @@ import {
   parseReports,
 } from '../vm/evidence';
 import { LocalQemuAdapter } from '../vm/local-qemu';
-import { BAKED_DISK_GIB } from '../vm/profile';
+import {
+  HOST_ENFORCED,
+  hex,
+  E2E_LIMITS as LIMITS,
+  type PlantedCanaries,
+  plantCanaries,
+  rejectedByBroker,
+  rootProbeArgv,
+  timer,
+} from './vm-e2e-harness';
 
 const ENABLED = process.env.ZT_VM_E2E === '1';
 const FIXTURES = path.join(__dirname, '..', '..', 'fixtures', 'hostile');
-const LIMITS: VmLimits = {
-  vcpus: 2,
-  memoryMiB: 4096,
-  diskGiB: BAKED_DISK_GIB,
-  commandTimeoutMs: 10 * 60_000,
-};
-/** Categories whose denial must hold even for root inside the VM: they are
- * enforced by QEMU on the host, not by the container runtime. */
-const HOST_ENFORCED = new Set([
-  'host-env',
-  'host-file',
-  'host-loopback',
-  'lan',
-  'metadata',
-  'direct-egress',
-  'dns',
-]);
 /** Every report the fixtures must produce, as results/<probe>-<phase>.json. */
 const CONTAINER_PHASES: Record<string, string[]> = {
   'npm-lifecycle': ['node-preinstall', 'node-postinstall', 'node-test'],
   'pip-setup': ['python-install', 'python-test'],
 };
 
-const hex = (n: number) => randomBytes(n).toString('hex');
-
-function lanAddress(): string {
-  for (const list of Object.values(os.networkInterfaces()))
-    for (const entry of list ?? [])
-      if (entry.family === 'IPv4' && !entry.internal) return entry.address;
-  throw new Error('No non-loopback IPv4 address to plant the LAN listener on');
-}
-
-interface Listener {
-  readonly server: net.Server;
-  readonly port: number;
-  connections: number;
-}
-
-async function listen(host: string): Promise<Listener> {
-  const listener = { connections: 0 } as Listener;
-  const server = net.createServer((socket) => {
-    listener.connections++;
-    socket.destroy();
-  });
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(0, host, () => resolve());
-  });
-  return Object.assign(listener, { server, port: (server.address() as net.AddressInfo).port });
-}
-
 describe.skipIf(!ENABLED)('execution profile gate (real VM)', () => {
-  const canaries: string[] = [];
   const guestOutputs: string[] = [];
   const reports: ProbeReport[] = [];
   const brokerChecks: { attempt: string; rejected: boolean }[] = [];
   const timings: Record<string, number> = {};
   let malformedReports = 0;
   let adapter: LocalQemuAdapter;
-  let hostHome: string;
   let stateDir: string;
   let runtimeDir: string;
-  let envName: string;
-  let loopback: Listener;
-  let lan: Listener;
-  let targets: Record<string, unknown>;
+  let planted: PlantedCanaries;
   let evidence: BoundaryEvidence | undefined;
+  const timed = timer(timings);
 
   beforeAll(async () => {
     const profileDir = process.env.ZT_PROFILE_DIR;
@@ -105,37 +62,7 @@ describe.skipIf(!ENABLED)('execution profile gate (real VM)', () => {
     stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'zt-gate-state-'));
     // Short on purpose: broker socket paths must fit in sun_path.
     runtimeDir = fs.mkdtempSync('/tmp/ztr-');
-    // Planted canaries: a variable in QEMU's parent environment and a secret
-    // file in a temporary host home directory.
-    envName = `ZT_CANARY_${hex(8).toUpperCase()}`;
-    const envCanary = `zt-env-${hex(16)}`;
-    process.env[envName] = envCanary;
-    hostHome = fs.mkdtempSync(path.join(os.tmpdir(), 'zt-gate-home-'));
-    const hostFile = path.join(hostHome, '.zt-canary-secret');
-    const fileCanary = `zt-file-${hex(16)}`;
-    fs.writeFileSync(hostFile, fileCanary, { mode: 0o600 });
-    canaries.push(envCanary, fileCanary);
-    loopback = await listen('127.0.0.1');
-    const lanHost = lanAddress();
-    lan = await listen(lanHost);
-    targets = {
-      envName,
-      hostFile,
-      gateway: '10.0.2.2',
-      loopbackPort: loopback.port,
-      lanHost,
-      lanPort: lan.port,
-      metadata: [
-        ['169.254.169.254', 80],
-        ['fd00:ec2::254', 80],
-      ],
-      egress: [
-        ['1.1.1.1', 443],
-        ['8.8.8.8', 53],
-      ],
-      dnsName: `zt-dns-${hex(8)}.example.com`,
-      dnsServers: ['10.0.2.3', '1.1.1.1', '8.8.8.8'],
-    };
+    planted = await plantCanaries();
     adapter = new LocalQemuAdapter({
       profileDir,
       stateDir,
@@ -145,9 +72,7 @@ describe.skipIf(!ENABLED)('execution profile gate (real VM)', () => {
   });
 
   afterAll(async () => {
-    loopback?.server.close();
-    lan?.server.close();
-    if (envName) delete process.env[envName];
+    planted?.cleanup();
     const out = process.env.ZT_EVIDENCE_OUT;
     if (out && adapter)
       fs.writeFileSync(
@@ -160,7 +85,7 @@ describe.skipIf(!ENABLED)('execution profile gate (real VM)', () => {
             violations: evidence?.violations ?? ['evaluation did not run'],
             coverage: evidence?.coverage ?? {},
             attempts: evidence?.attempts ?? 0,
-            listenerConnections: (loopback?.connections ?? 0) + (lan?.connections ?? 0),
+            listenerConnections: planted?.connections() ?? 0,
             brokerChecks,
             reports: reports.map((r) => ({ probe: r.probe, phase: r.phase, records: r.records })),
           },
@@ -168,18 +93,9 @@ describe.skipIf(!ENABLED)('execution profile gate (real VM)', () => {
           2
         )}\n`
       );
-    for (const dir of [hostHome, stateDir, runtimeDir])
+    for (const dir of [stateDir, runtimeDir])
       if (dir) fs.rmSync(dir, { recursive: true, force: true });
   });
-
-  async function timed<T>(label: string, work: () => Promise<T>): Promise<T> {
-    const started = Date.now();
-    try {
-      return await work();
-    } finally {
-      timings[label] = Date.now() - started;
-    }
-  }
 
   async function upload(vm: VmHandle, fixture: string): Promise<void> {
     for (const name of fs.readdirSync(path.join(FIXTURES, fixture)))
@@ -188,7 +104,11 @@ describe.skipIf(!ENABLED)('execution profile gate (real VM)', () => {
         `${fixture}/${name}`,
         fs.readFileSync(path.join(FIXTURES, fixture, name))
       );
-    await adapter.putFile(vm, `${fixture}/targets.json`, Buffer.from(JSON.stringify(targets)));
+    await adapter.putFile(
+      vm,
+      `${fixture}/targets.json`,
+      Buffer.from(JSON.stringify(planted.targets))
+    );
   }
 
   async function run(
@@ -226,13 +146,7 @@ describe.skipIf(!ENABLED)('execution profile gate (real VM)', () => {
   }
 
   async function rejected(attempt: string, work: () => unknown): Promise<void> {
-    let outcome = false;
-    try {
-      await work();
-    } catch (error) {
-      outcome = error instanceof BrokerError;
-    }
-    brokerChecks.push({ attempt, rejected: outcome });
+    brokerChecks.push({ attempt, rejected: await rejectedByBroker(work) });
   }
 
   it(
@@ -305,29 +219,9 @@ describe.skipIf(!ENABLED)('execution profile gate (real VM)', () => {
       );
       try {
         await upload(vm, 'npm-lifecycle');
-        // vm-root runs argv as root on the VM itself; the node image supplies the
-        // runtime and --network host puts the probe on the VM's own network stack.
+        // vm-root runs argv as root on the VM itself, on the VM's own network stack.
         const result = await timed('vmRootProbeMs', () =>
-          adapter.exec(vm, {
-            profile: 'node',
-            argv: [
-              'docker',
-              'run',
-              '--rm',
-              '--network',
-              'host',
-              '--user',
-              '0:0',
-              '--mount',
-              'type=bind,src=/var/lib/zt/workspace,dst=/workspace',
-              '--workdir',
-              '/workspace/npm-lifecycle',
-              'zt-node:profile',
-              'node',
-              'probe.js',
-              'vm-root',
-            ],
-          })
+          adapter.exec(vm, { profile: 'node', argv: rootProbeArgv('vm-root') })
         );
         guestOutputs.push(result.stdout, result.stderr);
         const parsed = parseReports(result.stdout);
@@ -352,8 +246,8 @@ describe.skipIf(!ENABLED)('execution profile gate (real VM)', () => {
     evidence = evaluateBoundary({
       reports,
       guestOutputs,
-      canaries,
-      listenerConnections: loopback.connections + lan.connections,
+      canaries: planted.canaries,
+      listenerConnections: planted.connections(),
       brokerChecks,
       malformedReports,
     });

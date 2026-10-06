@@ -291,6 +291,11 @@ export class ProxyConfigError extends Error {
 
 const HOSTNAME = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/;
 const ABS_PATH = /^\/[A-Za-z0-9._/-]{0,255}$/;
+/** An absolute path safe to write into a rendered config line: no spaces, no traversal. */
+const isSafeAbsPath = (p: string) => ABS_PATH.test(p) && !p.split('/').includes('..');
+/** Squid's certificate store size and helper count. */
+export const SQUID_CERT_DB_SIZE = '16MB';
+const SQUID_CERTGEN_CHILDREN = 4;
 const IPV4_CIDR = /^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/;
 
 export interface ProxyDeployment {
@@ -319,7 +324,7 @@ function squidUrl(d: ProxyDeployment): string {
     throw new ProxyConfigError('port');
   if (
     ![d.squidCaCertPath, d.squidCaKeyPath, d.verdaccioStorage, d.proxpiCacheDir].every(
-      (p) => ABS_PATH.test(p) && !p.split('/').includes('..')
+      isSafeAbsPath
     )
   )
     throw new ProxyConfigError('path');
@@ -426,7 +431,7 @@ export function renderSquidConfig(
       runtime.accessLog,
       runtime.cacheLog,
       runtime.pidFile,
-    ].every((p) => ABS_PATH.test(p) && !p.split('/').includes('..'))
+    ].every(isSafeAbsPath)
   )
     throw new ProxyConfigError('path');
   const lines = [
@@ -488,8 +493,8 @@ export function renderSquidConfig(
   );
   if (runtime)
     lines.push(
-      `sslcrtd_program ${runtime.certgenProgram} -s ${runtime.certDbDir} -M 16MB`,
-      'sslcrtd_children 4',
+      `sslcrtd_program ${runtime.certgenProgram} -s ${runtime.certDbDir} -M ${SQUID_CERT_DB_SIZE}`,
+      `sslcrtd_children ${SQUID_CERTGEN_CHILDREN}`,
       `logformat ${SQUID_LOG_FORMAT}`,
       `access_log stdio:${runtime.accessLog} ztfc`,
       `cache_log stdio:${runtime.cacheLog}`,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MAX_REPORT_BYTES } from '../vm/broker';
+import { MAX_REPORT_BYTES } from '../vm/adapter';
 import { classifyOutcome } from './classify';
 import { parseJunitReport } from './report';
 
@@ -26,6 +26,27 @@ describe('parseJunitReport', () => {
         '</testsuite></testsuites>'
     );
     expect(parseJunitReport(report)).toEqual({ suites: 1, tests: 3, failures: 1, skipped: 1 });
+  });
+
+  it('counts nested suites that hold cases, and a failure outranks a skip', () => {
+    const report = xml(
+      '<testsuites><testsuite name="outer"><testsuite name="inner">' +
+        '<testcase name="a"><skipped/><failure message="x"/></testcase>' +
+        '</testsuite><testcase name="b"/></testsuite><testsuite name="empty"></testsuite></testsuites>'
+    );
+    expect(parseJunitReport(report)).toEqual({ suites: 2, tests: 2, failures: 1, skipped: 0 });
+  });
+
+  it.each([
+    ['unclosed test cases', '<testcase name="x">'],
+    ['unclosed suites', '<testsuite name="x">'],
+  ])('scans a hostile report linearly (%s)', (_label, unit) => {
+    const body = unit.repeat(Math.floor((MAX_REPORT_BYTES - 64) / unit.length));
+    const started = performance.now();
+    const summary = parseJunitReport(xml(`<testsuites>${body}`));
+    // A quadratic scan of this input takes seconds; a linear one, milliseconds.
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(summary).not.toBeNull();
   });
 
   it('counts zero suites when no test case ran, which classifies as inconclusive', () => {

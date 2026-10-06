@@ -1,6 +1,8 @@
 import net from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
-import { assertProxyTarget, ProvisionChannel } from '../vm/provision-channel';
+import { assertProxyTarget, ProvisionChannel, RELAY_KEY_BYTES } from '../vm/provision-channel';
+
+const KEY = Buffer.alloc(RELAY_KEY_BYTES, 7);
 
 const servers: net.Server[] = [];
 const serverSockets: net.Socket[] = [];
@@ -46,6 +48,7 @@ function start(forwardPort: number, targetPort: number, extra = {}): ProvisionCh
   const channel = new ProvisionChannel({
     forwardPort,
     target: { host: '127.0.0.1', port: targetPort },
+    relayKey: KEY,
     ...extra,
   });
   channels.push(channel);
@@ -78,6 +81,26 @@ describe('ProvisionChannel', () => {
     expect(channel.stats.spliced).toBe(0);
   });
 
+  it('opens every guest connection with the relay key', async () => {
+    const relay = await fakeRelay();
+    start(relay.port, 1, { poolSize: 1 });
+    const guest = await relay.next();
+    const first = await new Promise<Buffer>((resolve) => guest.once('data', resolve));
+    expect(first.subarray(0, RELAY_KEY_BYTES).equals(KEY)).toBe(true);
+  });
+
+  it('records the error of a failed upstream connection', async () => {
+    const port = await server(() => undefined);
+    await new Promise((r) => servers.pop()?.close(r));
+    const relay = await fakeRelay();
+    const channel = start(relay.port, port, { poolSize: 1 });
+    const guest = await relay.next();
+    const ended = hungUp(guest);
+    guest.write('GET / HTTP/1.1\r\n\r\n');
+    await ended;
+    expect(channel.stats).toMatchObject({ upstreamFailures: 1, lastUpstreamError: 'ECONNREFUSED' });
+  });
+
   it('splices a guest connection to the target only once the guest speaks', async () => {
     const upstreamSeen: string[] = [];
     let upstreamConnections = 0;
@@ -95,7 +118,8 @@ describe('ProvisionChannel', () => {
     expect(upstreamConnections).toBe(0); // nothing is dialed for an idle connection
     const reply = read(guest);
     guest.write('GET /ms HTTP/1.1\r\n\r\n');
-    expect(await reply).toBe('HTTP/1.1 200 OK\r\n\r\npong');
+    // The relay key comes first on every connection, then the target's bytes.
+    expect(await reply).toBe(`${KEY.toString()}HTTP/1.1 200 OK\r\n\r\npong`);
     expect(upstreamSeen.join('')).toBe('GET /ms HTTP/1.1\r\n\r\n');
     expect(channel.stats).toMatchObject({ spliced: 1, upstreamFailures: 0 });
     // The used connection is replaced, so the pool stays full.
@@ -152,7 +176,20 @@ describe('ProvisionChannel', () => {
     ])
       expect(() => assertProxyTarget(bad)).toThrow('Invalid provisioning proxy target');
     expect(
-      () => new ProvisionChannel({ forwardPort: 0, target: { host: '1.2.3.4', port: 1 } })
+      () =>
+        new ProvisionChannel({
+          forwardPort: 0,
+          target: { host: '1.2.3.4', port: 1 },
+          relayKey: KEY,
+        })
     ).toThrow('Invalid forward port');
+    expect(
+      () =>
+        new ProvisionChannel({
+          forwardPort: 1,
+          target: { host: '1.2.3.4', port: 1 },
+          relayKey: Buffer.alloc(8),
+        })
+    ).toThrow('Invalid relay key');
   });
 });

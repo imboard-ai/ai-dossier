@@ -1,6 +1,7 @@
 /** Typed command plans for the worker. This module only BUILDS argv data; it has no
  * process API. The isolated worker executes plans under the phase's network policy. */
 import { validateSourcePath } from '../canonical/export';
+import { ENVIRONMENT_ROOT, REPORT_DIR, REPORT_FILE } from '../vm/adapter';
 import type { PackageManager } from './detect';
 
 export type CommandPhase = 'provisioning' | 'verification';
@@ -15,13 +16,13 @@ export interface PlannedCommand {
   readonly env: Readonly<Record<string, string>>;
   readonly timeoutMs: number;
   readonly required: boolean;
-  /** The supervisor gives this command a fresh report directory (`REPORT_PATH`) and
-   * classifies it from the junit report read back from there. */
+  /** The supervisor gives this command a fresh report directory (`REPORT_DIR`) and
+   * classifies it from the junit report it reads back from `REPORT_PATH`. */
   readonly captureReport: boolean;
 }
 /** Where a test command writes its junit report: inside the supervisor's per-command
  * report directory, outside the repository (vm/adapter `REPORT_DIR`/`REPORT_FILE`). */
-export const REPORT_PATH = '/ztfc/report/report.xml';
+export const REPORT_PATH = `${REPORT_DIR}/${REPORT_FILE}`;
 export interface CommandPlan {
   readonly manager: PackageManager;
   readonly provisioning: readonly PlannedCommand[];
@@ -74,8 +75,8 @@ const DEFAULT_VERIFICATION_MS = 15 * 60 * 1000;
 const MIN_TIMEOUT_MS = 1000;
 const MAX_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const DEFAULT_PYTHON = '/usr/local/bin/python';
-const DEFAULT_ENVIRONMENT = '/opt/ztfc/env';
-const DEFAULT_EXPORT = '/opt/ztfc/uv-requirements.txt';
+const DEFAULT_ENVIRONMENT = `${ENVIRONMENT_ROOT}/env`;
+const DEFAULT_EXPORT = `${ENVIRONMENT_ROOT}/uv-requirements.txt`;
 /** Test runners write junit to the supervisor's report path. Node's test runner takes
  * reporters from NODE_OPTIONS whatever `scripts.test` says; pytest from PYTEST_ADDOPTS.
  * A runner that ignores them writes no report, which is inconclusive, never a pass. */

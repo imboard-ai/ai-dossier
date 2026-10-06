@@ -1,7 +1,7 @@
 import { Duplex, PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it } from 'vitest';
 import { SecretRedactionError } from '../redaction';
-import { BrokerError } from '../vm/adapter';
+import { BrokerError, MAX_REPORT_BYTES } from '../vm/adapter';
 import {
   assertWorkspacePath,
   BROKER_PROTOCOL,
@@ -9,7 +9,6 @@ import {
   type BrokerRequest,
   MAX_FILE_BYTES,
   MAX_FRAME_BYTES,
-  MAX_REPORT_BYTES,
   MAX_STREAM_BYTES,
   validateExecArgv,
   validateRequest,

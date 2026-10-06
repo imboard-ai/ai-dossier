@@ -75,9 +75,9 @@ Run VM (untrusted code):
 | `-nodefaults -no-user-config -display none -no-reboot` | No implicit devices, no host config files, no display, reboot ends the VM |
 | `-sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny` | QEMU's own seccomp filter: no privilege change, no helper processes |
 | `-serial none` | No guest-controlled console file on the host (disk-fill vector) |
-| `-netdev user,id=net0,restrict=on` + `virtio-net-pci` | User-mode networking isolated from the host and the outside (below); no `hostfwd`/`guestfwd`. The value is rendered from `RUN_NETWORK_POLICY` |
+| `-netdev user,id=net0,restrict=on` + `virtio-net-pci` | User-mode networking isolated from the host and the outside (below). Build and test: no forwards (`RUN_NETWORK_POLICY`). Provisioning (#1010): exactly one `hostfwd` from host loopback to the guest relay on 7480 (`provisioningNetworkPolicy`), never a `guestfwd` |
 | `virtio-serial-pci` + `-chardev socket,path=<0700 runtime dir>/<vm>.sock,server=on,wait=off` + `virtserialport,name=org.ai-dossier.zt.broker` | The broker channel, the only data path |
-| `-smbios type=11,value=org.ai-dossier.zt.scope:container\|vm-root` | Controller-set execution scope as an SMBIOS OEM string; the guest agent reads it through `dmi_sysfs`, announces it back, and a mismatch taints the VM. (fw_cfg was tried first; the cloud image kernel does not ship `qemu_fw_cfg`, and the agent fell back to `container`, which is the safe default.) |
+| `-smbios type=11,value=org.ai-dossier.zt.scope:container\|vm-root,value=org.ai-dossier.zt.phase:provisioning\|verification` | Controller-set execution scope and network phase as SMBIOS OEM strings; the guest agent reads them through `dmi_sysfs`, announces both back, and a mismatch taints the VM. (fw_cfg was tried first; the cloud image kernel does not ship `qemu_fw_cfg`, and the agent fell back to `container`, which is the safe default.) |
 | `-drive file=<overlay>,if=virtio,format=qcow2,discard=unmap`, `virtio-rng-pci` | Per-run copy-on-write disk on the hash-verified baked image |
 | `-pidfile` | Written for operators and diagnostics; teardown uses the recorded spawn PID and checks its process start token before signalling |
 
@@ -132,11 +132,17 @@ root inside the VM:
 ## Broker
 
 `src/vm/broker.ts` (host) and `vm-guest/agent.py` (guest): JSON lines over virtio-serial with
-three operations — `exec`, `put`, `get` — after a protocol hello. The host validates every request
-before it is sent (operation allowlist, container profile, argv count and size, secret-shaped
-argv, workspace-relative paths without traversal, 1 MiB file cap, timeout bounds) and every
-response it receives (frame size cap, schema, request id, canonical base64, stream caps, short
-error slugs). Any protocol violation by the guest taints the VM permanently; it must be
+four operations — `exec`, `put`, `get` and, since #1010, `shutdown` — after a protocol hello in
+which the guest announces its scope and network phase (and, in provisioning, receives the
+per-boot relay key). `exec` carries a network (`none`, or `package_proxy` in provisioning only),
+a controller-set environment (at most 32 variables, plain names, no `LD_*`, no secret-shaped
+values) and an optional report request. The host validates every request before it is sent
+(operation allowlist, container profile, argv count and size, secret-shaped argv and
+environment values, workspace-relative paths without traversal, 1 MiB file cap, timeout bounds,
+network) and every response it receives (frame size cap, schema, request id, canonical base64,
+stream caps, a report only when one was requested and at most 256 KiB, short error slugs). The
+protocol name stays `zt-broker-v1`: host and guest cannot drift apart, because the guest
+agent's source is part of the profile digest that is checked before any VM starts. Any protocol violation by the guest taints the VM permanently; it must be
 destroyed. A request the host rejects never reaches the guest and does not taint the VM. The
 guest walks workspace paths with `O_NOFOLLOW` from the workspace root and opens files it writes
 non-blocking, so a FIFO planted by worker code cannot wedge it. The VM holds no model, GitHub or
@@ -294,8 +300,8 @@ retargeted intent fails `authorizeShipping`.
 - **`-daemonize` with seccomp.** `-daemonize` cannot be combined with `-sandbox spawn=deny`, so
   the controller detaches QEMU itself (own session, recorded spawn PID, start-token check). A controller crash
   leaves QEMU running until the kill switch or the next teardown reconciles it.
-- **Bake supply chain.** Distro packages and the container base come from the Ubuntu archive and
-  the Microsoft registry (apt signatures, image digest); the resulting image is hash-pinned, but
+- **Bake supply chain.** Distro packages, the container images and uv come from the Ubuntu
+  archive, the Microsoft registry and ghcr.io (apt signatures, image digests); the resulting image is hash-pinned, but
   the bake itself trusts those sources. In CI the baked image is shared through the Actions cache
   of the same repository; a pull request can only write cache entries scoped to its own ref. The
   manifest check is integrity, not authentication: whoever can write the profile directory can

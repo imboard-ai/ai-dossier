@@ -15,11 +15,7 @@ export interface WorkerPin {
   readonly digest: string;
 }
 
-const WORKER_HARDENING = (() => {
-  const hardening = PROFILE_MANIFEST.workerHardening;
-  if (!hardening) throw new Error('profiles.json has no workerHardening section');
-  return hardening;
-})();
+const WORKER_HARDENING = PROFILE_MANIFEST.workerHardening;
 
 function workerPin(ecosystem: ContainerProfile): WorkerPin {
   const profile = PROFILE_MANIFEST.profiles.find(

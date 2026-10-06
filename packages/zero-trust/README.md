@@ -1,8 +1,9 @@
 # @ai-dossier/zero-trust
 
 Private, provider-independent foundation for [PRD-ZTFC-001](../../docs/features/zero-trust-full-cycle/prd.md)
-§5.1, §5.5 and §5.6 (gate 2 prep), §5.7, §5.8 and §5.9. No VM/network/model/GitHub
-calls; receipts use core's Ed25519 signer abstraction and Ajv schema validation.
+§5.1, §5.5 and §5.6 (gate 2), §5.7, §5.8 and §5.9. The core modules make no model or
+GitHub calls; the VM adapter and the proxy scripts are described below. Receipts use core's
+Ed25519 signer abstraction and Ajv schema validation.
 This provides lifecycle/status, durable intent/budget, canonical Git and receipt primitives,
 plus ecosystem detection, runtime profiles, command plans and package-proxy policy
 (see the gate 2 section below).
@@ -449,7 +450,9 @@ Design, evidence and verdict:
 
 - `detectEcosystem(files)` (or `sourceFilesFromManifest(manifest)` first) accepts npm with
   `package-lock.json`, pip with a fully hash-pinned `requirements.txt`, and uv with
-  `uv.lock`. Everything else returns `unsupported_environment` with a specific reason.
+  `uv.lock` (virtual projects only; a project that installs itself is
+  `project_build_required`). Everything else returns `unsupported_environment` with a
+  specific reason.
 - `selectProfile(detection)` picks a runtime from the versioned `profiles.json` that
   satisfies every project declaration and never substitutes a version.
   `recordProfileSelection` / `loadProfileRecord` store the choice once per run and
@@ -492,14 +495,19 @@ QEMU flags, network design, measured overhead and residual risks:
   There is no host-container fallback.
 - `LocalQemuAdapter` implements the provider-neutral `VmAdapter` (create, exec, putFile,
   getFile, endProvisioning, destroy, listByRun) plus the `killAll` incident kill switch. QEMU
-  runs rootless with `restrict=on` user-mode networking, no forwards and no shared folders; the
+  runs rootless with `restrict=on` user-mode networking, no forwards outside the provisioning
+  phase and no shared folders; the
   broker (`BrokerClient`, `vm-guest/agent.py`) is the only data path.
 - Network phases (#1010): `create({ phase: 'provisioning', proxyTarget })` adds exactly one
   `hostfwd` from host loopback to the guest relay; `ProvisionChannel` dials in through it and
   splices each guest connection to the one mirror. Worker commands reach it with
   `exec({ network: 'package_proxy' })` (refused outside provisioning, host-side and in the
   guest). `endProvisioning` powers the guest off and restarts it on the same disk with no
-  forward; the guest announces its phase and a mismatch destroys the VM. `exec` also takes a
+  forward; the guest announces its phase, and a mismatch fails the VM (destroyed on create;
+  on a phase switch `endProvisioning` throws and the caller destroys it). The connector
+  opens every connection with a per-boot relay key handed to the guest in the hello.
+  `assertProfileBaked` refuses a selected profile the VM image does not carry
+  (`profile_not_baked`); `profiles.json`'s `workerHardening` names the ones it does. `exec` also takes a
   validated `env` and `report: true` (a fresh report directory outside the workspace, read
   back by the agent).
 - `teardownVm` caps deletion at three attempts, then moves the run to `blocked_cleanup` and

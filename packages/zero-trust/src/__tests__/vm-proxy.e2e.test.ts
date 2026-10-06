@@ -11,9 +11,8 @@
  * guest says about itself is untrusted; verdicts come from exit codes, supervisor-read
  * reports, Squid's own access log, the mirror caches and host-side measurements. */
 import { spawnSync } from 'node:child_process';
-import { generateKeyPairSync, randomBytes } from 'node:crypto';
+import { generateKeyPairSync } from 'node:crypto';
 import fs from 'node:fs';
-import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { Ed25519Signer } from '@ai-dossier/core';
@@ -27,8 +26,13 @@ import {
   classifyRegression,
   commandEvidence,
 } from '../ecosystem/classify';
-import { buildCommandPlan, type PlannedCommand } from '../ecosystem/commands';
-import { detectEcosystem, type PackageManager, sourceFilesFromManifest } from '../ecosystem/detect';
+import { buildCommandPlan, type PlannedCommand, REPORT_PATH } from '../ecosystem/commands';
+import {
+  detectEcosystem,
+  type PackageManager,
+  type SupportedDetection,
+  sourceFilesFromManifest,
+} from '../ecosystem/detect';
 import {
   PROFILE_MANIFEST,
   profileManifestDigest,
@@ -48,8 +52,7 @@ import { issueReceipt } from '../receipt/issue';
 import type { CommandStatus } from '../receipt/schema';
 import { canonicalJson } from '../receipt/schema';
 import { createRun, ReasonCode as R, type RunRecord, transitionRun } from '../state';
-import type { AcceleratorRequest, ContainerProfile, VmHandle, VmLimits } from '../vm/adapter';
-import { BrokerError } from '../vm/adapter';
+import type { AcceleratorRequest, ContainerProfile, VmHandle } from '../vm/adapter';
 import {
   assertBoundaryHeld,
   type BoundaryEvidence,
@@ -58,8 +61,18 @@ import {
   parseReports,
 } from '../vm/evidence';
 import { LocalQemuAdapter } from '../vm/local-qemu';
-import { assertProfileBaked, BAKED_DISK_GIB } from '../vm/profile';
+import { assertProfileBaked } from '../vm/profile';
 import { WORKER_RELAY } from '../vm/qemu-args';
+import {
+  HOST_ENFORCED,
+  hex,
+  E2E_LIMITS as LIMITS,
+  type PlantedCanaries,
+  plantCanaries,
+  rejectedByBroker,
+  rootProbeArgv,
+  timer,
+} from './vm-e2e-harness';
 
 const ENABLED = process.env.ZT_PROXY_E2E === '1';
 const FULL = process.env.ZT_PROXY_FULL !== '0';
@@ -69,21 +82,10 @@ const HOSTILE = path.join(ROOT, 'fixtures', 'hostile', 'npm-lifecycle');
 const MANAGERS = (process.env.ZT_PROXY_FIXTURES ?? 'npm,pip,uv')
   .split(',')
   .filter(Boolean) as PackageManager[];
-const LIMITS: VmLimits = {
-  vcpus: 2,
-  memoryMiB: 4096,
-  diskGiB: BAKED_DISK_GIB,
-  commandTimeoutMs: 10 * 60_000,
-};
 const REGRESSION: Record<PackageManager, string[]> = {
   npm: ['test/regression.test.js'],
   pip: ['tests/test_regression.py'],
   uv: ['tests/test_regression.py'],
-};
-const LOCKFILE: Record<PackageManager, string> = {
-  npm: 'package-lock.json',
-  pip: 'requirements.txt',
-  uv: 'uv.lock',
 };
 /** The worker sees only the relay; the controller splices it to one mirror. */
 const RELAY = `http://${WORKER_RELAY.host}:${WORKER_RELAY.port}/`;
@@ -96,16 +98,6 @@ const GIT_ENV = {
   GIT_AUTHOR_DATE: '2026-10-06T00:00:00Z',
   GIT_COMMITTER_DATE: '2026-10-06T00:00:00Z',
 };
-/** Categories enforced by QEMU on the host, judged even for root inside the VM. */
-const HOST_ENFORCED = new Set([
-  'host-env',
-  'host-file',
-  'host-loopback',
-  'lan',
-  'metadata',
-  'direct-egress',
-  'dns',
-]);
 const TIME = '2026-10-06T00:00:00.000Z';
 
 interface Endpoints {
@@ -132,9 +124,8 @@ interface CommandRecord {
   failures: number | null;
   status: CommandStatus;
   durationMs: number;
+  captureReport: boolean;
 }
-
-const hex = (n: number) => randomBytes(n).toString('hex');
 
 function git(args: string[], cwd: string): Buffer {
   const r = spawnSync('git', ['-c', 'core.hooksPath=/dev/null', ...args], {
@@ -178,25 +169,19 @@ function commitTree(dir: string, sha: string): { path: string; bytes: Buffer; ex
     });
 }
 
-async function listen(host: string) {
-  const state = { connections: 0, server: null as unknown as net.Server, port: 0 };
-  state.server = net.createServer((socket) => {
-    state.connections++;
-    socket.destroy();
-  });
-  await new Promise<void>((resolve, reject) => {
-    state.server.once('error', reject);
-    state.server.listen(0, host, () => resolve());
-  });
-  state.port = (state.server.address() as net.AddressInfo).port;
-  return state;
-}
-
-function lanAddress(): string {
-  for (const list of Object.values(os.networkInterfaces()))
-    for (const entry of list ?? [])
-      if (entry.family === 'IPv4' && !entry.internal) return entry.address;
-  throw new Error('No non-loopback IPv4 address to plant the LAN listener on');
+/** What detection and profile selection say about a fixture: its lockfile, the worker
+ * image ecosystem, and the selection the receipt binds. Detection is the source. */
+function fixtureInfo(manager: PackageManager) {
+  const detection = detectEcosystem(
+    sourceFilesFromManifest(exportSource(path.join(FIXTURES, manager, 'base')))
+  );
+  if (!detection.supported) throw new Error(`fixture rejected: ${detection.reason}`);
+  if (detection.manager !== manager) throw new Error(`fixture detected as ${detection.manager}`);
+  const selection = selectProfile(detection as SupportedDetection);
+  if (!selection.ok) throw new Error(`no profile: ${selection.reason}`);
+  const profile: ContainerProfile = selection.profile.ecosystem;
+  assertProfileBaked(profile, selection.profile.id);
+  return { lockfile: detection.lockfile, profile, selection };
 }
 
 describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
@@ -208,7 +193,6 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
   const unsupported: Record<string, unknown>[] = [];
   const reports: ProbeReport[] = [];
   const guestOutputs: string[] = [];
-  const canaries: string[] = [];
   const brokerChecks: { attempt: string; rejected: boolean }[] = [];
   const indexes: ReturnType<typeof buildLockIndex>[] = [];
   let uvSyncFrozen: Record<string, unknown> | null = null;
@@ -224,11 +208,8 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
   let recordDir: string;
   let keyDir: string;
   let signer: Ed25519Signer;
-  let envName = '';
-  let hostHome = '';
-  let loopback: Awaited<ReturnType<typeof listen>>;
-  let lan: Awaited<ReturnType<typeof listen>>;
-  let targets: Record<string, unknown>;
+  let planted: PlantedCanaries;
+  const timed = timer(timings);
 
   beforeAll(async () => {
     const profileDir = process.env.ZT_PROFILE_DIR;
@@ -248,35 +229,7 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
     });
     signer = new Ed25519Signer(keyFile);
     // Canaries for the boundary probes, planted fresh (same design as gate 1).
-    envName = `ZT_CANARY_${hex(8).toUpperCase()}`;
-    const envCanary = `zt-env-${hex(16)}`;
-    process.env[envName] = envCanary;
-    hostHome = fs.mkdtempSync(path.join(os.tmpdir(), 'zt-proxy-home-'));
-    const hostFile = path.join(hostHome, '.zt-canary-secret');
-    const fileCanary = `zt-file-${hex(16)}`;
-    fs.writeFileSync(hostFile, fileCanary, { mode: 0o600 });
-    canaries.push(envCanary, fileCanary);
-    loopback = await listen('127.0.0.1');
-    const lanHost = lanAddress();
-    lan = await listen(lanHost);
-    targets = {
-      envName,
-      hostFile,
-      gateway: '10.0.2.2',
-      loopbackPort: loopback.port,
-      lanHost,
-      lanPort: lan.port,
-      metadata: [
-        ['169.254.169.254', 80],
-        ['fd00:ec2::254', 80],
-      ],
-      egress: [
-        ['1.1.1.1', 443],
-        ['8.8.8.8', 53],
-      ],
-      dnsName: `zt-dns-${hex(8)}.example.com`,
-      dnsServers: ['10.0.2.3', '1.1.1.1', '8.8.8.8'],
-    };
+    planted = await plantCanaries();
     adapter = new LocalQemuAdapter({
       profileDir,
       stateDir,
@@ -286,9 +239,7 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
   });
 
   afterAll(() => {
-    loopback?.server.close();
-    lan?.server.close();
-    if (envName) delete process.env[envName];
+    planted?.cleanup();
     const out = process.env.ZT_EVIDENCE_OUT;
     if (out && adapter)
       fs.writeFileSync(
@@ -314,28 +265,22 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
             repairCap,
             unsupported,
             boundary: boundary ?? null,
-            listenerConnections: (loopback?.connections ?? 0) + (lan?.connections ?? 0),
+            listenerConnections: planted?.connections() ?? 0,
             brokerChecks,
           },
           null,
           2
         )}\n`
       );
-    for (const dir of [stateDir, runtimeDir, recordDir, keyDir, hostHome])
+    // Keep the VM journal-free diagnostics (QEMU's own stderr per VM and phase) next
+    // to the evidence: they are host-side output and the only boot trace a run VM has.
+    if (out && stateDir && fs.existsSync(path.join(stateDir, 'diagnostics')))
+      fs.cpSync(path.join(stateDir, 'diagnostics'), `${out}.diagnostics`, { recursive: true });
+    for (const dir of [stateDir, runtimeDir, recordDir, keyDir])
       if (dir) fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  async function timed<T>(label: string, work: () => Promise<T>): Promise<T> {
-    const started = Date.now();
-    try {
-      return await work();
-    } finally {
-      timings[label] = Date.now() - started;
-    }
-  }
-
-  const profileOf = (manager: PackageManager): ContainerProfile =>
-    manager === 'npm' ? 'node' : 'python';
+  const profileOf = (manager: PackageManager): ContainerProfile => fixtureInfo(manager).profile;
   const mirrorOf = (manager: PackageManager) =>
     manager === 'npm' ? endpoints.npm : endpoints.pypi;
 
@@ -399,6 +344,7 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
       failures: summary?.failures ?? null,
       status,
       durationMs: result.durationMs,
+      captureReport: command.captureReport,
     };
     commands.push(record);
     if (status !== 'passed' && process.env.ZT_PROXY_DEBUG === '1')
@@ -429,19 +375,15 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
       });
       await timed(`${label}.phaseSwitchMs`, () => adapter.endProvisioning(vm));
       // The forward is gone: the package proxy network is refused before the guest.
-      let refused = false;
-      try {
-        await adapter.exec(vm, {
-          profile: profileOf(manager),
-          argv: ['true'],
-          network: 'package_proxy',
-        });
-      } catch (error) {
-        refused = error instanceof BrokerError;
-      }
       brokerChecks.push({
         attempt: `${label}:package-proxy-after-provisioning`,
-        rejected: refused,
+        rejected: await rejectedByBroker(() =>
+          adapter.exec(vm, {
+            profile: profileOf(manager),
+            argv: ['true'],
+            network: 'package_proxy',
+          })
+        ),
       });
       return await timed(`${label}.verifyMs`, async () => {
         const out: CommandRecord[] = [];
@@ -454,30 +396,28 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
     }
   }
 
-  const testStatus = (records: CommandRecord[]) =>
-    records.filter((r) => r.id.endsWith('test') || r.id === 'pytest');
+  /** The supervised test commands (the ones classified from a report). */
+  const testStatus = (records: CommandRecord[]) => records.filter((r) => r.captureReport);
 
   for (const manager of MANAGERS)
     it(
       `${manager}: provisions through the proxy, reproduces the bug offline and verifies the fix`,
       async () => {
-        const detection = detectEcosystem(
-          sourceFilesFromManifest(exportSource(path.join(FIXTURES, manager, 'base')))
-        );
-        if (!detection.supported) throw new Error(`fixture rejected: ${detection.reason}`);
-        const selection = selectProfile(detection);
-        if (!selection.ok) throw new Error(`no profile: ${selection.reason}`);
-        assertProfileBaked(profileOf(manager), selection.profile.id);
+        const { lockfile, selection } = fixtureInfo(manager);
         const repo = buildCommits(manager);
         indexes.push(
-          buildLockIndex(manager, fs.readFileSync(path.join(repo.dir, LOCKFILE[manager]), 'utf8'))
+          buildLockIndex(manager, fs.readFileSync(path.join(repo.dir, lockfile), 'utf8'))
         );
         try {
           const baseline = await proveCommit(manager, repo, 'base');
           const onBase = await proveCommit(manager, repo, 'regression', REGRESSION[manager]);
           const onFix = await proveCommit(manager, repo, 'fix', REGRESSION[manager]);
           const fixSuite = await proveCommit(manager, repo, 'fix');
-          const status = (records: CommandRecord[]) => testStatus(records)[0]?.status;
+          const status = (records: CommandRecord[]): CommandStatus => {
+            const [test] = testStatus(records);
+            if (!test) throw new Error('no supervised test command ran');
+            return test.status;
+          };
           // Setup steps of verification (npm rebuild) must succeed on every commit.
           for (const r of [...baseline, ...onBase, ...onFix, ...fixSuite])
             if (!testStatus([r]).length) expect(r.status, `${r.commit} ${r.id}`).toBe('passed');
@@ -485,10 +425,7 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
           expect(status(onBase), 'regression test on base').toBe('failed');
           expect(status(onFix), 'regression test on fix').toBe('passed');
           expect(status(fixSuite), 'suite on fix').toBe('passed');
-          const proof = classifyRegression(
-            status(onBase) as CommandStatus,
-            status(onFix) as CommandStatus
-          );
+          const proof = classifyRegression(status(onBase), status(onFix));
           expect(proof).toBe('reproduced_and_fixed');
           // Receipt (#1008) for the candidate: the supervised test commands.
           const runId = `proxy-${manager}-${hex(4)}`;
@@ -572,7 +509,7 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
       for (const manager of MANAGERS) {
         const repo = buildCommits(manager);
         try {
-          const lockPath = path.join(repo.dir, LOCKFILE[manager]);
+          const lockPath = path.join(repo.dir, fixtureInfo(manager).lockfile);
           const text = fs.readFileSync(lockPath, 'utf8');
           // Flip one digest the package manager will check: an ordinary data change.
           const tampered =
@@ -799,7 +736,7 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
             'unreadable-report',
             {
               ...base,
-              argv: ['sh', '-c', 'echo "<testsuites><testcase" > /ztfc/report/report.xml'],
+              argv: ['sh', '-c', `echo "<testsuites><testcase" > ${REPORT_PATH}`],
             },
             undefined,
           ],
@@ -890,7 +827,7 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
       }));
       probeFiles.push({
         path: 'npm-lifecycle/targets.json',
-        bytes: Buffer.from(JSON.stringify(targets)),
+        bytes: Buffer.from(JSON.stringify(planted.targets)),
         exec: false,
       });
       const collect = (label: string, stdout: string, keep?: (c: string) => boolean) => {
@@ -921,18 +858,23 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
         guestOutputs.push(during.stderr);
         collect('provisioning-container', during.stdout);
         // The relay itself still answers: the one path that exists is the proxy.
+        // An ordinary package-document request to the relay: 0 = answered, 2 = no route.
+        const fetchMirror = [
+          'node',
+          '-e',
+          `fetch(${JSON.stringify(`${RELAY}ms`)}, { signal: AbortSignal.timeout(20000) }).then(r => { console.log('status', r.status); process.exit(r.ok ? 0 : 1) }, e => { console.log('error', e.cause?.code ?? e.name); process.exit(2) })`,
+        ];
         const relay = await adapter.exec(vm, {
           profile: 'node',
-          argv: [
-            'node',
-            '-e',
-            `fetch(${JSON.stringify(`${RELAY}ms`)}).then(r => { console.log('status', r.status); process.exit(r.ok ? 0 : 1) }, e => { console.log('error', e.cause?.code ?? e.message); process.exit(2) })`,
-          ],
+          argv: fetchMirror,
           network: 'package_proxy',
         });
         guestOutputs.push(relay.stdout, relay.stderr);
         expect(relay.exitCode, 'the package mirror is reachable during provisioning').toBe(0);
         await adapter.endProvisioning(vm);
+        const noRelay = await adapter.exec(vm, { profile: 'node', argv: fetchMirror });
+        guestOutputs.push(noRelay.stdout, noRelay.stderr);
+        expect(noRelay.exitCode, 'nothing answers after provisioning').toBe(2);
         const after = await timed('probe.verificationMs', () =>
           adapter.exec(vm, {
             profile: 'node',
@@ -961,23 +903,7 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
         const result = await timed('probe.vmRootMs', () =>
           adapter.exec(root, {
             profile: 'node',
-            argv: [
-              'docker',
-              'run',
-              '--rm',
-              '--network',
-              'host',
-              '--user',
-              '0:0',
-              '--mount',
-              'type=bind,src=/var/lib/zt/workspace,dst=/workspace',
-              '--workdir',
-              '/workspace/npm-lifecycle',
-              'zt-node:profile',
-              'node',
-              'probe.js',
-              'provisioning-root',
-            ],
+            argv: rootProbeArgv('provisioning-root'),
           })
         );
         guestOutputs.push(result.stderr);
@@ -988,8 +914,8 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
       boundary = evaluateBoundary({
         reports,
         guestOutputs,
-        canaries,
-        listenerConnections: loopback.connections + lan.connections,
+        canaries: planted.canaries,
+        listenerConnections: planted.connections(),
         brokerChecks,
         malformedReports,
       });

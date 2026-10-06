@@ -3,19 +3,33 @@
  * a connection: this connector keeps a small pool of connections dialed INTO the guest
  * and, once the guest sends the first bytes on one, opens a connection to the one
  * package-proxy target and splices the two. Bytes are never parsed; the only place
- * guest traffic can go is that target. */
+ * guest traffic can go is that target.
+ *
+ * Every connection starts with the per-boot relay key (sent to the guest over the
+ * broker, never on a command line), so the relay pairs worker connections only with
+ * connections this controller dialed, not with anything else on host loopback. */
 import net from 'node:net';
 import type { ProxyTarget } from './adapter';
+
+/** Length of the relay key preamble, in bytes. */
+export const RELAY_KEY_BYTES = 32;
+export const DEFAULT_POOL_SIZE = 8;
+export const DEFAULT_MAX_CONNECTIONS = 64;
+export const DEFAULT_MAX_PENDING_BYTES = 64 * 1024;
+/** Back-off before refilling the pool after idle connections closed unused. */
+const REDIAL_MS = 250;
 
 export interface ProvisionChannelOptions {
   /** Host loopback port of the VM's provisioning forward. */
   readonly forwardPort: number;
   readonly target: ProxyTarget;
-  /** Idle connections kept open into the guest (default 8). */
+  /** Sent first on every connection; the guest relay drops a connection without it. */
+  readonly relayKey: Buffer;
+  /** Idle connections kept open into the guest. */
   readonly poolSize?: number;
-  /** Ceiling on simultaneous guest connections, idle plus spliced (default 64). */
+  /** Ceiling on simultaneous connections, guest and upstream together. */
   readonly maxConnections?: number;
-  /** Bytes a guest may send before the upstream is connected (default 64 KiB). */
+  /** Bytes a guest may send before the upstream is connected. */
   readonly maxPendingBytes?: number;
   readonly connect?: (port: number, host: string) => net.Socket;
 }
@@ -24,18 +38,17 @@ export interface ProvisionChannelStats {
   dialed: number;
   spliced: number;
   upstreamFailures: number;
+  /** Error code of the last failed upstream connection (e.g. `ECONNREFUSED`). */
+  lastUpstreamError: string | null;
   bytesToTarget: number;
   bytesFromTarget: number;
 }
-
-const REDIAL_MS = 250;
-const IPV4 = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
 
 export function assertProxyTarget(target: ProxyTarget): ProxyTarget {
   if (
     !target ||
     typeof target.host !== 'string' ||
-    !IPV4.test(target.host) ||
+    !net.isIPv4(target.host) ||
     !Number.isSafeInteger(target.port) ||
     target.port < 1 ||
     target.port > 65535
@@ -49,10 +62,12 @@ export class ProvisionChannel {
     dialed: 0,
     spliced: 0,
     upstreamFailures: 0,
+    lastUpstreamError: null,
     bytesToTarget: 0,
     bytesFromTarget: 0,
   };
   private readonly target: ProxyTarget;
+  private readonly relayKey: Buffer;
   private readonly poolSize: number;
   private readonly maxConnections: number;
   private readonly maxPending: number;
@@ -65,20 +80,27 @@ export class ProvisionChannel {
   constructor(private readonly options: ProvisionChannelOptions) {
     if (!Number.isSafeInteger(options.forwardPort) || options.forwardPort < 1)
       throw new Error('Invalid forward port');
+    if (!Buffer.isBuffer(options.relayKey) || options.relayKey.length !== RELAY_KEY_BYTES)
+      throw new Error('Invalid relay key');
     this.target = assertProxyTarget(options.target);
-    this.poolSize = options.poolSize ?? 8;
-    this.maxConnections = options.maxConnections ?? 64;
-    this.maxPending = options.maxPendingBytes ?? 64 * 1024;
+    this.relayKey = Buffer.from(options.relayKey);
+    this.poolSize = options.poolSize ?? DEFAULT_POOL_SIZE;
+    this.maxConnections = options.maxConnections ?? DEFAULT_MAX_CONNECTIONS;
+    this.maxPending = options.maxPendingBytes ?? DEFAULT_MAX_PENDING_BYTES;
     // Half-open so one side's end() is forwarded instead of closing both directions.
     this.connect =
       options.connect ?? ((port, host) => net.connect({ port, host, allowHalfOpen: true }));
+  }
+
+  get isClosed(): boolean {
+    return this.closed;
   }
 
   start(): void {
     this.fill();
   }
 
-  /** Destroys every guest and upstream connection and stops dialing. */
+  /** Destroys every guest and upstream connection and stops dialing. Idempotent. */
   close(): void {
     this.closed = true;
     if (this.redial) clearTimeout(this.redial);
@@ -106,6 +128,7 @@ export class ProvisionChannel {
     this.stats.dialed++;
     this.idle++;
     this.track(guest);
+    guest.write(this.relayKey);
     let pending: Buffer[] = [];
     let pendingBytes = 0;
     let isIdle = true;
@@ -131,35 +154,41 @@ export class ProvisionChannel {
       leaveIdle(true);
       const upstream = this.connect(this.target.port, this.target.host);
       this.track(upstream);
-      upstream.on('error', () => {
+      upstream.on('error', (error: NodeJS.ErrnoException) => {
         this.stats.upstreamFailures++;
+        this.stats.lastUpstreamError = error.code ?? 'error';
         upstream.destroy();
         guest.destroy();
       });
       upstream.once('connect', () => {
         guest.off('data', onFirstData);
-        this.stats.spliced++;
-        for (const buffered of pending) {
-          this.stats.bytesToTarget += buffered.length;
-          upstream.write(buffered);
-        }
+        this.splice(guest, upstream, pending);
         pending = [];
-        guest.on('data', (data: Buffer) => {
-          this.stats.bytesToTarget += data.length;
-          if (!upstream.write(data)) guest.pause();
-        });
-        upstream.on('drain', () => guest.resume());
-        upstream.on('data', (data: Buffer) => {
-          this.stats.bytesFromTarget += data.length;
-          if (!guest.write(data)) upstream.pause();
-        });
-        guest.on('drain', () => upstream.resume());
-        guest.once('end', () => upstream.end());
-        upstream.once('end', () => guest.end());
       });
       upstream.once('close', () => guest.destroy());
       guest.once('close', () => upstream.destroy());
     };
     guest.on('data', onFirstData);
+  }
+
+  /** Byte-for-byte both ways with backpressure; an end on one side ends the other. */
+  private splice(guest: net.Socket, upstream: net.Socket, buffered: Buffer[]): void {
+    this.stats.spliced++;
+    for (const chunk of buffered) {
+      this.stats.bytesToTarget += chunk.length;
+      upstream.write(chunk);
+    }
+    guest.on('data', (data: Buffer) => {
+      this.stats.bytesToTarget += data.length;
+      if (!upstream.write(data)) guest.pause();
+    });
+    upstream.on('drain', () => guest.resume());
+    upstream.on('data', (data: Buffer) => {
+      this.stats.bytesFromTarget += data.length;
+      if (!guest.write(data)) upstream.pause();
+    });
+    guest.on('drain', () => upstream.resume());
+    guest.once('end', () => upstream.end());
+    upstream.once('end', () => guest.end());
   }
 }

@@ -84,9 +84,12 @@ export interface ExecResult {
   readonly report?: Buffer | null;
 }
 
-/** Where a worker command finds its supervisor-owned report directory. */
+/** Where a worker command finds its supervisor-owned report directory (in the
+ * container; `vm-guest/agent.py` mounts it fresh per command), and the file read back. */
 export const REPORT_DIR = '/ztfc/report';
 export const REPORT_FILE = 'report.xml';
+/** Cap on a supervisor-captured test report (junit XML). */
+export const MAX_REPORT_BYTES = 256 * 1024;
 /** Writable worker directory outside the workspace that survives between commands
  * (environments, exported requirements); never part of the repository tree. */
 export const ENVIRONMENT_ROOT = '/opt/ztfc';

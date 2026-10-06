@@ -106,6 +106,7 @@ describe('profile manifest', () => {
       },
     ],
     ['hardening extra field', { ...manifestJson, workerHardening: { ...hardening, sudo: true } }],
+    ['no hardening section', { ...manifestJson, workerHardening: undefined }],
   ])('rejects %s', (_name, value) => {
     expect(() => validateProfileManifest(value)).toThrow(ProfileError);
   });
@@ -223,9 +224,9 @@ describe('selectProfile', () => {
   });
 
   it('refuses a manager no profile supports', () => {
-    const { workerHardening: _vm, ...rest } = manifestJson;
     const only: ProfileManifest = validateProfileManifest({
-      ...rest,
+      ...manifestJson,
+      workerHardening: { ...hardening, vmProfiles: ['node-22'] },
       profiles: manifestJson.profiles.filter((p) => p.ecosystem === 'node'),
     });
     expect(picked(selectProfile(py(['.python-version', '3.12']), only))).toBe(

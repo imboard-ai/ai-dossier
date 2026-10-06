@@ -40,6 +40,16 @@ describe('zero-trust-vm.yml secret isolation', () => {
     for (const step of checkouts) expect(step.with?.['persist-credentials']).toBe(false);
   });
 
+  it('stops guest output from issuing workflow commands in every real-VM suite step', () => {
+    const steps = Object.values(workflow().jobs).flatMap((job) => job.steps);
+    const suites = steps.filter((step) => /vitest run src\/__tests__\/vm-/.test(step.run ?? ''));
+    expect(suites.length).toBeGreaterThanOrEqual(3);
+    for (const step of suites) {
+      expect(step.run).toMatch(/echo "::stop-commands::\$token"/);
+      expect(step.run).toMatch(/echo "::\$token::"/);
+    }
+  });
+
   it('never splices expressions into run scripts', () => {
     const steps = Object.values(workflow().jobs).flatMap((job) => job.steps);
     for (const step of steps) if (step.run) expect(step.run).not.toMatch(/\$\{\{/);

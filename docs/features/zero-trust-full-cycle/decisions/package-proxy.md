@@ -192,11 +192,12 @@ outside the repository and installed from the mirror; the hashes still come from
   `UV_PROJECT_ENVIRONMENT`) and `<export>` the exported requirements (default
   `/opt/ztfc/uv-requirements.txt`). In the VM, `/opt/ztfc` is a worker-writable mount
   outside the workspace that persists across the phase switch. pip gets
-  `PIP_TRUSTED_HOST` for the plain-HTTP mirror; integrity comes from `--require-hashes`. With `-I` the interpreter ignores the working directory
-  and `PYTHON*` variables, so a committed `venv.py`, `pip.py`, `.venv` or `.pth` file
+  `PIP_TRUSTED_HOST` when the mirror is plain HTTP; integrity comes from
+  `--require-hashes`. With `-I` the interpreter ignores the working directory and
+  `PYTHON*` variables, so a committed `venv.py`, `pip.py`, `.venv` or `.pth` file
   cannot run during provisioning. `PIP_CONFIG_FILE=/dev/null` and `uv --no-config` ignore
   repository configuration.
-- `--only-binary` and `--no-build` mean no sdist build (arbitrary code) runs during
+- `--only-binary` (pip, uv) and `UV_NO_BUILD=1` mean no sdist build (arbitrary code) runs during
   provisioning. Detection rejects uv packages with no wheel (`binary_unavailable`). pip
   locks do not say which files exist, so for pip a sdist-only dependency fails
   provisioning, and `applyProvisioning` turns any provisioning failure into
@@ -226,15 +227,6 @@ outside the repository and installed from the mirror; the hashes still come from
   table itself does not count repairs, so the controller must route verification
   verdicts through `applyVerification`.
 
-## Fixtures
-
-Three fixtures (npm, pip, uv), each with a documented bug, a regression patch that fails
-on the base and a fix patch that passes; see the fixtures README. The
-`Zero-trust fixtures` workflow self-checks them on the CI runner, using the package's
-own command plans against the public registries and requiring the runner's Node and
-Python to match the selected profiles. That is the only host-side execution. It proves
-the fixtures and the plans, not isolation.
-
 ## Decision 7: how the VM reaches the proxy
 
 The VM has no egress (#1009: slirp `restrict=on`). The provisioning phase adds exactly one
@@ -248,9 +240,12 @@ forward, and the build/test phase has none.
   `hostfwd=tcp:127.0.0.1:<free port>-:7480`: the host can connect *into* the guest, and the
   guest still cannot open any connection out (`restrict=on` is unchanged).
 - **Connector and relay.** The controller's `ProvisionChannel` keeps a small pool of
-  connections dialed in through the forward. The guest agent's relay (root in the VM,
-  started only in the provisioning phase, accepting host connections only from slirp's
-  host address) pairs each with a worker connection. When the guest sends the first bytes,
+  connections dialed in through the forward, each opening with a per-boot relay key that
+  the controller hands the guest in its broker hello (never on a command line). The guest
+  agent's relay (root in the VM, started only in the provisioning phase and container
+  scope) accepts host connections only from slirp's host address and only with that key,
+  so another process on host loopback cannot stand in for the connector; it pairs each
+  with a worker connection. When the guest sends the first bytes,
   the connector opens a connection to the run's one mirror and splices the two. It never
   parses bytes, and it has no other destination: the mirror's IPv4 literal is fixed
   when the VM is created.
@@ -259,12 +254,16 @@ forward, and the build/test phase has none.
   listener is the relay at its gateway (`172.30.255.1:7481`). Every other command keeps
   `--network none`. `package_proxy` is refused outside provisioning by the controller
   before anything reaches the guest, and again by the guest.
-- **Phase switch.** `endProvisioning` asks the guest to sync and power off (its answer is
-  not trusted), waits for QEMU to exit, kills it otherwise, closes the connector and starts
-  QEMU again on the same overlay disk with the forward-free arguments. Nothing the guest
-  does can keep or add a forward: the new process's arguments are controller policy. The
-  phase travels as a second SMBIOS OEM string; the guest announces it in its hello, and a
-  mismatch destroys the VM. The switch costs one guest boot (about 10 s under KVM).
+- **Phase switch.** `endProvisioning` closes the connector (journaling what it carried),
+  asks the guest to sync and power off (its answer is not trusted), waits for QEMU to exit
+  and kills it otherwise (journaling which), then starts QEMU again on the same overlay
+  disk with the forward-free arguments. Nothing the guest does can keep or add a forward:
+  the new process's arguments are controller policy. The phase travels as a second SMBIOS
+  OEM string and the guest announces it in its hello. A mismatch fails the VM: on create it
+  is destroyed; on a phase switch the relaunched QEMU is killed, `endProvisioning` throws
+  and journals `vm_phase_change_failed`, and the caller destroys the VM. One switch per VM
+  runs at a time. The switch costs one guest boot (10–11 s under KVM, see Timings). A
+  connector whose QEMU dies unexpectedly closes with it.
 - **Rejected alternatives.** A multiplexing protocol over the one `guestfwd` chardev or the
   broker port (custom framing the host would have to parse from an untrusted guest);
   `passt` or `slirp4netns` in a network namespace (more moving parts and host
@@ -288,7 +287,9 @@ runner that ignores `NODE_OPTIONS`/`PYTEST_ADDOPTS` writes nothing, which is
 Three fixtures (npm, pip, uv), each with a documented bug, a regression patch that fails
 on the base and a fix patch that passes; see the fixtures README. The
 `Zero-trust fixtures` workflow self-checks them on the CI runner against the public
-registries; that proves the fixtures and plans. The isolated proof is below.
+registries, requiring the runner's Node and Python to match the selected profiles; that
+is the only host-side execution, and it proves the fixtures and plans, not isolation. The
+isolated proof is below.
 
 ## Evidence
 
@@ -374,7 +375,7 @@ Two CI runs ([37520527415](https://github.com/imboard-ai/ai-dossier/actions/runs
 8.9–9.9 s (about 16 s for the first VM of a job), provisioning 1.2–1.5 s (npm), 5.0–5.5 s
 (pip, mostly `venv`), 1.5–1.6 s (uv), phase switch 9.9–11 s, offline tests 0.5–1.2 s; the
 proxy stack starts in about 30 s. TCG ran the npm fixture (job "Package proxy timings
-(TCG)"):
+(TCG)"); the table compares the same npm steps, so its KVM column is npm-only:
 
 | Step | KVM | TCG | TCG / KVM |
 |---|---|---|---|
@@ -402,10 +403,12 @@ everything in Decision 3.
 
 ## Residual risks
 
-- **Loopback forward port.** The `hostfwd` listens on host `127.0.0.1`; another local
-  process on the controller host could connect into the relay during provisioning. It would
-  only be paired with a worker connection to the mirror; it gains no route into the VM
-  beyond that. A single-user controller host is assumed.
+- **Loopback forward port.** The `hostfwd` listens on host `127.0.0.1`, so another local
+  process on the controller host can connect into the guest during provisioning. The relay
+  drops any connection that does not open with the per-boot relay key, so such a process
+  cannot take the mirror's place, and the relay's pool and worker counts are capped. It can
+  still hold relay threads open until its 10 s key timeout; the controller host is assumed
+  single-user.
 - **Mirror content.** The mirrors serve what the registries serve. Integrity rests on the
   lockfile hashes (checked by the package managers and audited by `checkArtifact`), not on
   the mirror.

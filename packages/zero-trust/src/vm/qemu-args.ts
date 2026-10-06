@@ -159,12 +159,11 @@ export function buildRunArgs(args: RunArgs): string[] {
   if (args.scope !== 'container' && args.scope !== 'vm-root') throw new Error('Invalid scope');
   const phase = args.phase ?? 'verification';
   if (phase !== 'provisioning' && phase !== 'verification') throw new Error('Invalid phase');
-  if ((phase === 'provisioning') !== (args.forwardHostPort !== undefined))
+  const { forwardHostPort } = args;
+  if ((phase === 'provisioning') !== (forwardHostPort !== undefined))
     throw new Error('A forward port is required in, and only in, the provisioning phase');
   const policy =
-    phase === 'provisioning'
-      ? provisioningNetworkPolicy(args.forwardHostPort as number)
-      : RUN_NETWORK_POLICY;
+    forwardHostPort === undefined ? RUN_NETWORK_POLICY : provisioningNetworkPolicy(forwardHostPort);
   return [
     ...common(args),
     '-serial',

@@ -12,12 +12,14 @@ worker connection from the internal provisioning network. The guest never opens
 a connection toward the host; the forward and its absence are host policy.
 """
 import base64
+import hmac
 import json
 import os
 import shutil
 import socket
 import stat
 import subprocess
+import sys
 import threading
 import time
 
@@ -44,12 +46,25 @@ PROV_SUBNET = "172.30.255.0/24"
 PROV_GATEWAY = "172.30.255.1"
 RELAY_WORKER_PORT = 7481
 RELAY_MAX_WORKERS = 64
+RELAY_MAX_POOL = 64
 RELAY_WAIT_S = 60
+RELAY_KEY_BYTES = 32
+RELAY_KEY_TIMEOUT_S = 10
+RELAY_START_WAIT_S = 120
+# Worker environment limits; the host enforces the same (src/vm/broker.ts).
+MAX_ENV_VARS = 32
+MAX_ENV_NAME = 64
+MAX_ENV_VALUE_BYTES = 4096
 IMAGES = {"node": "zt-node:profile", "python": "zt-python:profile"}
 WORKER_UID = 1000
 MAX_LINE = 4 * 1024 * 1024
 MAX_STREAM = 1024 * 1024
 MAX_FILE = 1024 * 1024
+
+
+def log(message):
+    # The agent's stderr goes to the guest journal; never to the host.
+    print("zt-agent: %s" % message, file=sys.stderr, flush=True)
 
 
 def read_flags():
@@ -74,23 +89,62 @@ def read_flags():
 
 
 class Relay:
-    """Pairs host-dialed connections (through the one forward) with worker ones."""
+    """Pairs host-dialed connections (through the one forward) with worker ones.
+
+    Every host connection must open with the per-boot relay key the controller sent
+    in its hello: slirp makes everything through the forward look like 10.0.2.2, so
+    the key is what proves a connection came from the controller's connector and not
+    from some other process on host loopback.
+    """
 
     def __init__(self):
         self.pool = []
         self.cond = threading.Condition()
         self.workers = threading.BoundedSemaphore(RELAY_MAX_WORKERS)
+        self.key = None
+        self.key_set = threading.Event()
+        self.status = "starting"
+        self.settled = threading.Event()
 
     def start(self):
-        subprocess.run(
-            ["docker", "network", "create", "--internal", "--subnet", PROV_SUBNET,
-             "--gateway", PROV_GATEWAY, PROV_NETWORK],
-            check=False, capture_output=True,
-        )
-        host = self.listen("0.0.0.0", RELAY_PORT)
-        worker = self.listen(PROV_GATEWAY, RELAY_WORKER_PORT)
+        """Starts in the background: a relay failure must not hold back the hello."""
+        threading.Thread(target=self._start, daemon=True).start()
+
+    def _start(self):
+        try:
+            self._listen_all()
+        finally:
+            self.settled.set()
+
+    def _listen_all(self):
+        try:
+            created = subprocess.run(
+                ["docker", "network", "create", "--internal", "--subnet", PROV_SUBNET,
+                 "--gateway", PROV_GATEWAY, PROV_NETWORK],
+                check=False, capture_output=True,
+            )
+            if created.returncode != 0 and b"already exists" not in created.stderr:
+                log("relay: docker network create failed: %s" % created.stderr[-300:].decode(errors="replace"))
+            host = self.listen("0.0.0.0", RELAY_PORT)
+            worker = self.listen(PROV_GATEWAY, RELAY_WORKER_PORT)
+        except OSError as error:
+            self.status = "failed"
+            log("relay: %s" % error)
+            return
         threading.Thread(target=self.accept_host, args=(host,), daemon=True).start()
         threading.Thread(target=self.accept_worker, args=(worker,), daemon=True).start()
+        self.status = "up"
+
+    def set_key(self, hex_key):
+        if self.key is not None or not isinstance(hex_key, str):
+            return
+        try:
+            key = bytes.fromhex(hex_key)
+        except ValueError:
+            return
+        if len(key) == RELAY_KEY_BYTES:
+            self.key = key
+            self.key_set.set()
 
     @staticmethod
     def listen(address, port):
@@ -104,7 +158,7 @@ class Relay:
             except OSError:
                 server.close()
                 time.sleep(0.5)
-        raise OSError("relay listen failed")
+        raise OSError("cannot listen on %s:%d" % (address, port))
 
     def accept_host(self, server):
         while True:
@@ -113,17 +167,53 @@ class Relay:
             if peer[0] != SLIRP_HOST:
                 conn.close()
                 continue
-            with self.cond:
-                self.pool.append(conn)
-                self.cond.notify()
+            threading.Thread(target=self.admit, args=(conn,), daemon=True).start()
+
+    def admit(self, conn):
+        """Pools a host connection once it has presented the relay key."""
+        try:
+            conn.settimeout(RELAY_KEY_TIMEOUT_S)
+            got = b""
+            while len(got) < RELAY_KEY_BYTES:
+                chunk = conn.recv(RELAY_KEY_BYTES - len(got))
+                if not chunk:
+                    break
+                got += chunk
+            conn.settimeout(None)
+        except OSError:
+            conn.close()
+            return
+        if not self.key_set.is_set() or not hmac.compare_digest(got, self.key):
+            log("relay: dropped a forward connection without the relay key")
+            conn.close()
+            return
+        with self.cond:
+            if len(self.pool) >= RELAY_MAX_POOL:
+                conn.close()
+                return
+            self.pool.append(conn)
+            self.cond.notify()
 
     def accept_worker(self, server):
         while True:
             conn, _ = server.accept()
             if not self.workers.acquire(blocking=False):
+                log("relay: worker connection refused, %d already open" % RELAY_MAX_WORKERS)
                 conn.close()
                 continue
             threading.Thread(target=self.serve, args=(conn,), daemon=True).start()
+
+    @staticmethod
+    def usable(conn):
+        """Still open and silent: EOF means slirp or the host dropped it, and the host
+        never speaks first after the key."""
+        try:
+            conn.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+        except BlockingIOError:
+            return True
+        except OSError:
+            pass
+        return False
 
     def take(self):
         deadline = time.monotonic() + RELAY_WAIT_S
@@ -131,17 +221,9 @@ class Relay:
             while True:
                 while self.pool:
                     conn = self.pool.pop(0)
-                    try:
-                        # Still open? EOF means slirp or the host dropped it.
-                        if conn.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT) == b"":
-                            conn.close()
-                            continue
-                    except BlockingIOError:
+                    if self.usable(conn):
                         return conn
-                    except OSError:
-                        conn.close()
-                        continue
-                    conn.close()  # the host never speaks first
+                    conn.close()
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return None
@@ -151,6 +233,7 @@ class Relay:
         try:
             host = self.take()
             if host is None:
+                log("relay: no host connection within %d s; worker dropped" % RELAY_WAIT_S)
                 worker.close()
                 return
             pipes = [
@@ -260,26 +343,33 @@ def op_put(request):
     return {"ok": True}
 
 
+def read_regular(parent, name, limit):
+    """Reads a regular file in an open directory without following links and without
+    blocking on a FIFO. Returns (bytes, None) or (None, "not_regular" | "too_large")."""
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return None, "not_regular"
+        if info.st_size > limit:
+            return None, "too_large"
+        raw = os.read(fd, limit + 1)
+        return (None, "too_large") if len(raw) > limit else (raw, None)
+    finally:
+        os.close(fd)
+
+
 def op_get(request):
     parts = valid_path(request.get("path"))
     if parts is None:
         return {"ok": False, "error": "invalid_request"}
     parent = open_parent(parts, create=False)
     try:
-        fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
-        try:
-            info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode):
-                return {"ok": False, "error": "not_regular"}
-            if info.st_size > MAX_FILE:
-                return {"ok": False, "error": "too_large"}
-            raw = os.read(fd, MAX_FILE + 1)
-            if len(raw) > MAX_FILE:
-                return {"ok": False, "error": "too_large"}
-        finally:
-            os.close(fd)
+        raw, error = read_regular(parent, parts[-1], MAX_FILE)
     finally:
         os.close(parent)
+    if error:
+        return {"ok": False, "error": error}
     return {"ok": True, "data": base64.b64encode(raw).decode()}
 
 
@@ -297,20 +387,20 @@ def drain(stream, sink, state):
 def valid_env(value):
     if value is None:
         return {}
-    if not isinstance(value, dict) or len(value) > 32:
+    if not isinstance(value, dict) or len(value) > MAX_ENV_VARS:
         return None
     for key, item in value.items():
         if (
             not isinstance(key, str)
             or not key
-            or len(key) > 64
+            or len(key) > MAX_ENV_NAME
             or not (key[0].isalpha() or key[0] == "_")
             or not all(c.isalnum() or c == "_" for c in key)
             or not key.isascii()
             or key.startswith("LD_")
             or not isinstance(item, str)
             or any(c in item for c in "\0\n\r")
-            or len(item.encode()) > 4096
+            or len(item.encode()) > MAX_ENV_VALUE_BYTES
         ):
             return None
     return value
@@ -329,22 +419,14 @@ def read_report():
     except OSError:
         return None
     try:
-        fd = os.open(REPORT_FILE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+        return read_regular(parent, REPORT_FILE, MAX_REPORT)[0]
     except OSError:
-        os.close(parent)
         return None
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_REPORT:
-            return None
-        raw = os.read(fd, MAX_REPORT + 1)
-        return None if len(raw) > MAX_REPORT else raw
     finally:
-        os.close(fd)
         os.close(parent)
 
 
-def op_exec(request, scope, phase, exec_id):
+def op_exec(request, scope, phase, exec_id, relay=None):
     argv = request.get("argv")
     cwd = valid_path(request.get("cwd", ""), allow_empty=True)
     profile = request.get("profile")
@@ -366,6 +448,11 @@ def op_exec(request, scope, phase, exec_id):
     # The host refuses this too; the guest does not rely on it.
     if network == "package_proxy" and (phase != "provisioning" or scope != "container"):
         return {"ok": False, "error": "network_not_allowed"}
+    if network == "package_proxy" and relay is not None:
+        relay.settled.wait(RELAY_START_WAIT_S)
+    if network == "package_proxy" and (relay is None or relay.status != "up"):
+        # Say so instead of letting the package manager time out on a dead relay.
+        return {"ok": False, "error": "relay_unavailable"}
     name = "zt-exec-%d" % exec_id
     if want_report:
         fresh_report_dir()
@@ -451,8 +538,10 @@ def prepare_env_dir():
 def main():
     scope, phase = read_flags()
     prepare_env_dir()
+    relay = None
     if phase == "provisioning" and scope == "container":
-        Relay().start()
+        relay = Relay()
+        relay.start()
     while not os.path.exists(PORT):
         time.sleep(0.5)
     port = os.open(PORT, os.O_RDWR)
@@ -477,6 +566,8 @@ def main():
                 rid = request.get("id")
                 op = request.get("op")
                 if op == "hello":
+                    if relay is not None:
+                        relay.set_key(request.get("relayKey"))
                     reply({"id": rid, "hello": "zt-broker-v1", "scope": scope, "phase": phase})
                     continue
                 if op == "shutdown":
@@ -486,7 +577,7 @@ def main():
                     continue
                 if op == "exec":
                     exec_id += 1
-                    result = op_exec(request, scope, phase, exec_id)
+                    result = op_exec(request, scope, phase, exec_id, relay)
                 elif op == "put":
                     result = op_put(request)
                 elif op == "get":

@@ -10,14 +10,13 @@ import {
   type ExecNetwork,
   type ExecResult,
   type ExecScope,
+  MAX_REPORT_BYTES,
   type NetworkPhase,
 } from './adapter';
 
 export const BROKER_PROTOCOL = 'zt-broker-v1';
 export const MAX_FILE_BYTES = 1024 * 1024;
 export const MAX_STREAM_BYTES = 1024 * 1024;
-/** A supervisor-captured test report (junit XML). */
-export const MAX_REPORT_BYTES = 256 * 1024;
 /** Two capped streams and a capped report in base64, plus envelope. */
 export const MAX_FRAME_BYTES = 4 * MAX_STREAM_BYTES;
 const MAX_ARGV = 256;
@@ -25,11 +24,17 @@ const MAX_ARG_BYTES = 8192;
 const MAX_ARGV_BYTES = 64 * 1024;
 const MAX_PATH_BYTES = 512;
 const PROFILES: readonly ContainerProfile[] = ['node', 'python'];
-const MAX_ENV_VARS = 32;
-const MAX_ENV_VALUE_BYTES = 4096;
-const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
+/** Worker environment limits; `vm-guest/agent.py` enforces the same. */
+export const MAX_ENV_VARS = 32;
+export const MAX_ENV_NAME_BYTES = 64;
+export const MAX_ENV_VALUE_BYTES = 4096;
+const ENV_NAME = new RegExp(`^[A-Za-z_][A-Za-z0-9_]{0,${MAX_ENV_NAME_BYTES - 1}}$`);
 const NETWORKS: readonly ExecNetwork[] = ['none', 'package_proxy'];
 const PHASES: readonly NetworkPhase[] = ['provisioning', 'verification'];
+const isNetworkPhase = (value: unknown): value is NetworkPhase =>
+  PHASES.includes(value as NetworkPhase);
+const isExecNetwork = (value: unknown): value is ExecNetwork =>
+  NETWORKS.includes(value as ExecNetwork);
 const MIN_EXEC_TIMEOUT_MS = 1000;
 const MAX_EXEC_TIMEOUT_MS = 6 * 3600 * 1000;
 
@@ -124,7 +129,7 @@ export function validateRequest(request: BrokerRequest): BrokerRequest {
         throw new BrokerError('invalid_timeout');
       // No network unless one is named: the restrictive value is the default.
       const network = request.network ?? 'none';
-      if (!NETWORKS.includes(network)) throw new BrokerError('invalid_network');
+      if (!isExecNetwork(network)) throw new BrokerError('invalid_network');
       return {
         op: 'exec',
         profile,
@@ -250,7 +255,7 @@ export class BrokerClient {
         frame.id !== 0 ||
         frame.hello !== BROKER_PROTOCOL ||
         (frame.scope !== 'container' && frame.scope !== 'vm-root') ||
-        !PHASES.includes(frame.phase as NetworkPhase) ||
+        !isNetworkPhase(frame.phase) ||
         !this.helloWaiter
       ) {
         this.taint('unexpected_hello');
@@ -258,7 +263,7 @@ export class BrokerClient {
       }
       this.ready = true;
       this.announcedScope = frame.scope;
-      this.announcedPhase = frame.phase as NetworkPhase;
+      this.announcedPhase = frame.phase;
       this.helloWaiter.resolve();
       this.helloWaiter = null;
       return;
@@ -278,8 +283,9 @@ export class BrokerClient {
   }
 
   /** Sends the protocol hello and resolves with the guest's announced scope.
-   * Data written before the guest opens its port stays queued in the socket. */
-  waitReady(timeoutMs: number): Promise<ExecScope> {
+   * Data written before the guest opens its port stays queued in the socket. In the
+   * provisioning phase the hello also hands the guest its per-boot relay key. */
+  waitReady(timeoutMs: number, relayKey?: Buffer): Promise<ExecScope> {
     if (this.failure) return Promise.reject(this.failure);
     if (this.ready) return Promise.resolve(this.announcedScope as ExecScope);
     if (this.helloWaiter) return Promise.reject(new BrokerError('hello_pending'));
@@ -295,7 +301,8 @@ export class BrokerClient {
           reject(e);
         },
       };
-      this.stream.write(`${JSON.stringify({ v: 1, id: 0, op: 'hello' })}\n`);
+      const hello = relayKey ? { relayKey: relayKey.toString('hex') } : {};
+      this.stream.write(`${JSON.stringify({ v: 1, id: 0, op: 'hello', ...hello })}\n`);
     });
   }
 
