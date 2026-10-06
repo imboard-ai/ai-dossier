@@ -1,8 +1,8 @@
 # @ai-dossier/zero-trust
 
 Private, provider-independent foundation for [PRD-ZTFC-001](../../docs/features/zero-trust-full-cycle/prd.md)
-§5.1, §5.8 and §5.9. No runtime dependencies or VM/network/model/GitHub calls.
-This is a lifecycle/status and durable-intent library, not a complete execution or isolation engine.
+§5.1, §5.7, §5.8 and §5.9. No runtime dependencies or VM/network/model/GitHub calls.
+This provides lifecycle/status, durable intent/budget and canonical Git primitives.
 Publication remains gated on S1 feasibility.
 
 ```ts
@@ -164,3 +164,74 @@ worker write access. The ledger neither invokes nor enforces provider token/time
 limits: execution adapters must honor the admitted maximums, and pricing is an
 estimate rather than a provider billing guarantee. It is not yet an execution
 engine integration or the complete S1 release gate.
+
+## Canonical source and candidate identity
+
+`exportSource(root, limits?)` requires a source-only directory. It rejects `.git`
+at any depth; it never silently omits a checkout's configuration or submodules.
+Export currently requires Linux with `/proc/self/fd` and no-follow directory opens;
+unsupported platforms fail closed. Ancestor directories and children are opened
+without following symlinks, directory enumeration is streamed in bounded batches,
+reads are byte-bounded and identity/metadata changes
+around reads are rejected. The worker supervisor should freeze source before export.
+The snapshot contains copied, immutable base64 bytes, executable modes, directory
+entries and SHA-256 hashes. No shipping operation re-reads the mutable filesystem.
+Hard links are accepted as regular file bytes, never preserved as links.
+
+Default limits: 10 MiB/file, 100 MiB total, 10,000 entries, 64 path components.
+Paths must be valid UTF-8; absolute/traversal paths, controls, Windows separators,
+drive delimiters, `.git`, and Unicode/case-fold aliases are rejected. Collision
+comparison conservatively uses NFKC plus expanding upper/lower case folds; names
+are never silently normalized. Empty directories remain in the manifest binding
+but do not appear in the Git tree, as in ordinary Git commits. `validateManifest`
+revalidates persisted records and returns deep-frozen primitive snapshots.
+
+```ts
+import { exportSource, createCandidate, reconstructCandidate } from '@ai-dossier/zero-trust';
+
+const manifest = exportSource(controllerSuppliedSourceDirectory);
+const candidate = createCandidate(manifest, {
+  baseSha: controllerRecordedUpstreamBaseSha,
+  author: {
+    login: authenticatedContributorLogin,
+    name: approvedAuthorName,
+    email: approvedAuthorEmail,
+    timestamp: '2026-10-05T10:00:00Z',
+  },
+  committerTimestamp: '2026-10-05T10:01:00Z',
+  message: 'fix: approved contribution\n\nLLM-assisted via ai-dossier.\n',
+}, upstreamObjectPack);
+// Persist manifest, record and authority in durable controller-owned storage.
+// Keep authority OUTSIDE worker write access; it is not a worker-supplied hash.
+const rebuilt = reconstructCandidate(manifest, candidate.record, candidate.authority, upstreamObjectPack);
+// Verify and ship ONLY rebuilt.record.candidateSha (and its matching pack).
+```
+
+The caller authenticates contributor approval and upstream base acquisition.
+Pass a complete SHA-1 Git object pack containing the supplied base and its object
+closure (maximum 128 MiB input). A raw pack has no config/refs/hooks/alternates.
+The primitive imports it with strict object validation into a fresh private bare
+repository, validates the baseline with the same source/path/size rules, then
+constructs one tree/commit using `hash-object --no-filters`, `mktree`, `commit-tree`.
+It never opens a worker repository or runs checkout/add/diff/filter drivers.
+In-tree `.gitattributes` is preserved as data and cannot affect blob bytes.
+Git runs from `/usr/bin/git` with an allowlisted environment, private empty home
+under a fresh `/tmp` directory (inherited `TMPDIR` is ignored),
+no templates/system/global config, disabled hooks/credential helpers/attributes,
+no replacements and `protocol.allow=never`. Subprocesses have a 60-second timeout
+and 128 MiB output cap; supervise controller resources independently for large or
+hostile compressed object packs. No protocol exceptions are needed by this API.
+
+Author fields/timestamps and the message are fixed once; UTC timestamps require
+whole seconds. The disclosed fixed committer is `CANONICAL_COMMITTER`. Raw commit
+bytes are checked after creation. Persisted authority binds parent, approved
+contributor and canonical record digest; changed manifest/tree/author/message/SHA
+fails with a non-echoing typed `CanonicalError.reason`. JSON roundtrips reconstruct
+identical SHAs. Creating a new record from edited inputs is a new candidate and
+requires new verification; neither the binding digest nor these primitives issue
+a signed verification receipt or authorize a GitHub write (#1008).
+
+Adversarial tests use real symlink/FIFO/socket/files, malformed raw baseline trees,
+gitlinks, no-follow race injection, and executable malicious filter/hook sentinels
+with positive execution controls. Device rejection uses an actual `/dev/null` stat
+injected at the source lstat boundary so the test requires no mknod privileges.
