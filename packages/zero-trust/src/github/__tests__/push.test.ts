@@ -305,7 +305,7 @@ async function authorization(g: Grant): Promise<ShippingAuthorization> {
     allowedShippingOperations: [
       { kind: 'push_branch', target: TARGET, expectedRemoteSha: g.expected },
     ],
-    boundaryEvidence: evaluateBoundary(HELD_BOUNDARY),
+    boundaryEvidence: evaluateBoundary({ ...HELD_BOUNDARY, runId: bindings.runId }),
     ...g.context,
   };
   return { receipt, context, candidate: g.candidate };
@@ -671,6 +671,14 @@ describe('verified CAS push to the fork (#1066)', () => {
       (g) => ({
         ...g,
         context: { boundaryEvidence: evaluateBoundary({ ...HELD_BOUNDARY, malformedReports: 1 }) },
+      }),
+    ],
+    [
+      "the boundary evidence is another run's (#1076)",
+      'boundary_wrong_run',
+      (g) => ({
+        ...g,
+        context: { boundaryEvidence: evaluateBoundary({ ...HELD_BOUNDARY, runId: 'other-run' }) },
       }),
     ],
     [

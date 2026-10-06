@@ -6,6 +6,7 @@ import {
   type BoundaryInput,
   canaryForms,
   evaluateBoundary,
+  isCleanHeldVerdict,
   type ProbeReport,
   parseReport,
   parseReports,
@@ -330,5 +331,49 @@ describe('canaryForms', () => {
     const canary = 'ünïcödé-canary-värde';
     const forms = canaryForms(canary);
     expect(forms).toContain(Buffer.from(canary, 'utf8').toString('hex'));
+  });
+});
+
+describe('isCleanHeldVerdict / assertBoundaryHeld (#1076)', () => {
+  const clean = { held: true, violations: [], coverage: {}, attempts: 1, runId: 'run-1' };
+  it('accepts only a held verdict with no violations and at least one attempt', () => {
+    expect(isCleanHeldVerdict(clean)).toBe(true);
+    for (const bad of [
+      null,
+      'held',
+      { ...clean, held: false },
+      { ...clean, violations: ['x'] },
+      { ...clean, violations: 'none' },
+      { ...clean, attempts: 0 },
+      { ...clean, attempts: 1.5 },
+    ])
+      expect(isCleanHeldVerdict(bad)).toBe(false);
+  });
+
+  it('assertBoundaryHeld refuses a hand-made held flag that carries violations or no attempts', () => {
+    expect(() => assertBoundaryHeld({ ...clean, violations: ['x'] })).toThrow(BoundaryBreachError);
+    try {
+      assertBoundaryHeld({ ...clean, attempts: 0 });
+    } catch (error) {
+      expect((error as BoundaryBreachError).violations).toEqual([
+        'boundary verdict is not a clean held verdict',
+      ]);
+    }
+    expect(() => assertBoundaryHeld({ ...clean, attempts: 0 })).toThrow(BoundaryBreachError);
+    expect(() => assertBoundaryHeld(clean)).not.toThrow();
+  });
+
+  it('carries the run it was gathered for', () => {
+    const input = {
+      reports: [],
+      guestOutputs: [],
+      canaries: [],
+      listenerConnections: 0,
+      brokerChecks: [{ attempt: 'x', rejected: true }],
+      malformedReports: 0,
+      requiredCategories: ['broker-abuse'],
+    };
+    expect(evaluateBoundary({ ...input, runId: 'run-7' }).runId).toBe('run-7');
+    expect(evaluateBoundary(input).runId).toBeNull();
   });
 });

@@ -394,6 +394,7 @@ describe('end to end: a retargeted intent cannot be authorized for shipping', ()
         brokerChecks: [{ attempt: 'op-outside-set', rejected: true }],
         malformedReports: 0,
         requiredCategories: ['broker-abuse'],
+        runId: bindings.runId,
       }),
       policyPermitsShipping: true,
       allowedShippingOperations: [

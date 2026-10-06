@@ -110,7 +110,7 @@ beforeEach(async () => {
     allowedShippingOperations: [
       { kind: 'push_branch', target: operation.target, expectedRemoteSha: SHA },
     ],
-    boundaryEvidence: evaluateBoundary(HELD_INPUT),
+    boundaryEvidence: evaluateBoundary({ ...HELD_INPUT, runId: bindings.runId }),
   };
   fs.mkdirSync(path.join(directory, 'nonces'));
   store = new ReceiptNonceStore(path.join(directory, 'nonces'));
@@ -184,6 +184,53 @@ describe('shipping requires held boundary evidence (scenario 4, #1076)', () => {
         () => AT
       )
     ).rejects.toThrow(code);
+    expect(consume).not.toHaveBeenCalled();
+  });
+
+  it("refuses another run's held verdict", async () => {
+    const r = await issue();
+    const other = evaluateBoundary({ ...HELD_INPUT, runId: 'some-other-run' });
+    const unbound = evaluateBoundary(HELD_INPUT);
+    for (const boundaryEvidence of [other, unbound])
+      await expect(
+        authorizeShipping(
+          r,
+          publicKey,
+          { ...context, boundaryEvidence },
+          intent,
+          SHA,
+          store,
+          () => AT
+        )
+      ).rejects.toThrow('boundary_wrong_run');
+  });
+
+  it('classifies a breach whose guest text looks like a credential as boundary_not_held', async () => {
+    const r = await issue();
+    const token = `ghp_${'a'.repeat(36)}`;
+    const breach = evaluateBoundary({
+      ...HELD_INPUT,
+      runId: context.runId,
+      reports: [
+        {
+          probe: 'node',
+          phase: 'test',
+          records: [{ category: 'dns', attempt: token, outcome: 'succeeded' }],
+        },
+      ],
+    });
+    const consume = vi.spyOn(store, 'consume');
+    await expect(
+      authorizeShipping(
+        r,
+        publicKey,
+        { ...context, boundaryEvidence: breach },
+        intent,
+        SHA,
+        store,
+        () => AT
+      )
+    ).rejects.toThrow('boundary_not_held');
     expect(consume).not.toHaveBeenCalled();
   });
 

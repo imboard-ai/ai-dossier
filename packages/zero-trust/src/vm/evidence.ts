@@ -48,6 +48,8 @@ export interface BoundaryInput {
   /** Marker lines that failed to parse (`parseReports().malformed`); any is a failure. */
   readonly malformedReports: number;
   readonly requiredCategories?: readonly string[];
+  /** The run the evidence was gathered for; shipping only accepts its own run's verdict. */
+  readonly runId?: string;
 }
 
 export interface BoundaryEvidence {
@@ -55,6 +57,7 @@ export interface BoundaryEvidence {
   readonly violations: readonly string[];
   readonly coverage: Readonly<Record<string, number>>;
   readonly attempts: number;
+  readonly runId: string | null;
 }
 
 export const REPORT_MARKER = 'ZT-PROBE-REPORT ';
@@ -170,7 +173,13 @@ export function evaluateBoundary(input: BoundaryInput): BoundaryEvidence {
       violations.push('canary value leaked into guest output');
   if (input.listenerConnections !== 0)
     violations.push(`host listeners accepted ${input.listenerConnections} connection(s)`);
-  return { held: violations.length === 0, violations, coverage, attempts };
+  return {
+    held: violations.length === 0,
+    violations,
+    coverage,
+    attempts,
+    runId: input.runId ?? null,
+  };
 }
 
 export class BoundaryBreachError extends Error {
@@ -183,5 +192,24 @@ export class BoundaryBreachError extends Error {
 /** Throws on any violation (scenario 4). In production, `authorizeShipping`
  * refuses a context whose `boundaryEvidence` is not a clean held verdict. */
 export function assertBoundaryHeld(evidence: BoundaryEvidence): void {
-  if (!evidence.held) throw new BoundaryBreachError(evidence.violations);
+  if (!isCleanHeldVerdict(evidence))
+    throw new BoundaryBreachError(
+      evidence.violations?.length
+        ? evidence.violations
+        : ['boundary verdict is not a clean held verdict']
+    );
+}
+
+/** The one definition of a passing verdict: held, no violations, at least one
+ * judged attempt. Anything else, including a hand-made `{held: true}`, fails. */
+export function isCleanHeldVerdict(evidence: unknown): boolean {
+  if (typeof evidence !== 'object' || evidence === null) return false;
+  const e = evidence as Partial<BoundaryEvidence>;
+  return (
+    e.held === true &&
+    Array.isArray(e.violations) &&
+    e.violations.length === 0 &&
+    Number.isSafeInteger(e.attempts) &&
+    (e.attempts as number) >= 1
+  );
 }
