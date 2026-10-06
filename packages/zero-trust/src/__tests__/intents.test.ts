@@ -92,22 +92,36 @@ afterEach(() => {
 });
 
 describe('durable provider-independent write intents', () => {
-  it('rejects user-to-server credentials before persistence or provider mutation', () => {
+  it.each([
+    'ghu_syntheticUserToken',
+    '_sk-proj-syntheticKey_',
+    'credential_sk-12345678',
+    String.raw`\nsk-proj-syntheticKey`,
+    String.raw`Authorization:\ttoken\tx`,
+    String.raw`Authorization:\x09token\x20x`,
+    String.raw`Authorization:\u0009token\u0020x`,
+  ])('rejects credentials before persistence or provider mutation %#', (secret) => {
     const fake = new FakeAdapter();
     const j = journal();
     const d = driver(j, fake);
-    const secret = 'ghu_syntheticUserToken';
     const before = fs.readFileSync(j.filePath, 'utf8');
     expect(() => d.execute({ ...input, target: secret })).toThrow(SecretRedactionError);
     expect(() => d.execute({ ...input, target: secret })).not.toThrow(secret);
     expect(fs.readFileSync(j.filePath, 'utf8')).toBe(before);
     expect(fake.writes).toBe(0);
   });
-  it('never persists user-to-server credentials from mutation or reconciliation evidence', async () => {
+  it.each([
+    'ghu_syntheticUserToken',
+    '_sk-proj-syntheticKey_',
+    'credential_sk-12345678',
+    String.raw`\nsk-proj-syntheticKey`,
+    String.raw`Authorization:\ttoken\tx`,
+    String.raw`Authorization:\x09token\x20x`,
+    String.raw`Authorization:\u0009token\u0020x`,
+  ])('never persists credentials from mutation or reconciliation evidence %#', async (secret) => {
     const fake = new FakeAdapter();
     const j = journal();
     const d = driver(j, fake);
-    const secret = 'ghu_syntheticUserToken';
     const mutate = vi.spyOn(fake, 'mutate').mockResolvedValue({ artifactRef: secret });
     await expect(d.execute(input)).rejects.toThrow(MutationUncertainError);
     fake.observation = { kind: 'found', artifactRef: secret };

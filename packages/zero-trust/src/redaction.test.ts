@@ -13,6 +13,12 @@ describe('shared credential rejection policy', () => {
     'sk-',
     'sk-proj-',
     'sk-12345678',
+    '_sk-proj-syntheticKey_',
+    'credential_sk-12345678',
+    'nsk-12345678',
+    '0sk-12345678',
+    String.raw`\nsk-proj-syntheticKey`,
+    String.raw`\u0020sk-12345678`,
     'Bearer x',
     'Bearer\tx',
     'Bearer\nx',
@@ -20,6 +26,10 @@ describe('shared credential rejection policy', () => {
     'Authorization:\ttoken\tx',
     'Authorization : token x',
     'Authorization:\ntoken x',
+    String.raw`Authorization:\ttoken\tx`,
+    String.raw`Authorization:\x09token\x20x`,
+    String.raw`Authorization:\u0009token\u0020x`,
+    JSON.stringify({ header: 'Authorization:\ttoken\tx' }),
   ])('rejects synthetic credential %# without echoing input', (credential) => {
     for (const text of [credential, credential.toUpperCase(), `prefix ${credential} suffix`]) {
       // Repeated calls must not depend on a global/sticky regex lastIndex.
