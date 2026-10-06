@@ -130,7 +130,7 @@ jobs:
             const lines = ["## Zero-trust VM gate (KVM)", ""];
             lines.push(`Boundary held: **${gate ? gate.held === true : "no evidence"}**`);
             // Coverage keys and violations carry guest text: keep them inside a code block.
-            const block = (value) => ["```", JSON.stringify(value, null, 1).replace(/`/g, "'").slice(0, 20000), "```"];
+            const block = (value) => ["```", JSON.stringify(value, null, 1).replace(/`/g, "\u2018").slice(0, 20000), "```"];
             if (gate) {
               lines.push(`Attempts: ${Number(gate.attempts)}; host listener connections: ${Number(gate.listenerConnections)}`);
               lines.push("", "Coverage:", ...block(gate.coverage));
