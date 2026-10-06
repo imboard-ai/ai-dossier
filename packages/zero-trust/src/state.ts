@@ -18,6 +18,8 @@ export enum ReasonCode {
   ResumeShipping = 'resume_shipping',
   ResumeRevising = 'resume_revising',
   PublicationObserved = 'publication_observed',
+  ContributorHandoff = 'contributor_handoff',
+  EngagementObserved = 'engagement_observed',
   ReviewAwaited = 'review_awaited',
   RevisionRequested = 'revision_requested',
   UpstreamAccepted = 'upstream_accepted',
@@ -32,6 +34,11 @@ export enum ReasonCode {
 }
 
 type Edges = Readonly<Partial<Record<ReasonCode, RunState>>>;
+/** An observed hand-off must match the phase that issued it. */
+const HANDOFF_ORIGIN: Readonly<Partial<Record<ReasonCode, string>>> = Object.freeze({
+  [ReasonCode.EngagementObserved]: 'gating',
+  [ReasonCode.PublicationObserved]: 'shipping',
+});
 const failures = {
   [ReasonCode.PolicyBlocked]: 'blocked',
   [ReasonCode.UnsupportedEnvironment]: 'unsupported',
@@ -52,6 +59,7 @@ export const TRANSITIONS = Object.freeze({
     [ReasonCode.PermissionRequired]: 'awaiting_maintainer',
     [ReasonCode.GatePassed]: 'planning',
     [ReasonCode.UserPaused]: 'paused_user',
+    [ReasonCode.ContributorHandoff]: 'awaiting_contributor',
   } as const),
   awaiting_maintainer: Object.freeze({
     ...failures,
@@ -87,6 +95,13 @@ export const TRANSITIONS = Object.freeze({
     ...failures,
     [ReasonCode.PublicationObserved]: 'submitted',
     [ReasonCode.UserPaused]: 'paused_user',
+    [ReasonCode.ContributorHandoff]: 'awaiting_contributor',
+  } as const),
+  // Durable hand-off (PRD §5.8): the contributor submits; no compute until resume reconciles.
+  awaiting_contributor: Object.freeze({
+    ...failures,
+    [ReasonCode.EngagementObserved]: 'awaiting_maintainer',
+    [ReasonCode.PublicationObserved]: 'submitted',
   } as const),
   submitted: Object.freeze({
     ...failures,
@@ -246,6 +261,12 @@ function applyTransition(run: RunRecord, reasonCode: ReasonCode, timestamp: stri
     run.state === 'paused_user' &&
     !Object.hasOwn(failures, reasonCode) &&
     to !== run.history.at(-1)?.from
+  )
+    throw new IllegalTransitionError(run.state, reasonCode);
+  if (
+    run.state === 'awaiting_contributor' &&
+    HANDOFF_ORIGIN[reasonCode] !== undefined &&
+    HANDOFF_ORIGIN[reasonCode] !== run.history.at(-1)?.from
   )
     throw new IllegalTransitionError(run.state, reasonCode);
   if (!isTimestamp(timestamp) || Date.parse(timestamp) < Date.parse(run.updatedAt))

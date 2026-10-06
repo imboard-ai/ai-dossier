@@ -577,6 +577,8 @@ const lifecycleRuns = [
   advance(gating, ReasonCode.GatePassed, ReasonCode.PlanApproved, ReasonCode.CandidateReady),
   advance(run, ReasonCode.UserPaused),
   run,
+  // No brokered write is admitted while the contributor holds the hand-off.
+  advance(run, ReasonCode.ContributorHandoff),
   advance(run, ReasonCode.PublicationObserved),
   advance(run, ReasonCode.PublicationObserved, ReasonCode.ReviewAwaited),
   advance(run, ReasonCode.PublicationObserved, ReasonCode.RevisionRequested),

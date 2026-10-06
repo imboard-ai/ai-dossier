@@ -118,7 +118,7 @@ No visual UI is in scope; this journey and the state contract replace wireframes
 - Require an open, actionable bug in a public supported repository with documented verification, public dependencies, and no required service/private-package secrets.
 - Inspect contribution rules, templates, AI policy, assignment, linked PRs, and relevant discussion. An explicit ban on LLM contributions ends the run.
 - Stop for judgment on conflicting or unclear AI rules. Do not interpret silence as permission when the project requires approval.
-- If prior assignment/discussion is required, or ownership is unclear, prepare one concise request disclosing heavy LLM use, proposed scope, and intended verification, which the contributor posts through a prefilled comment link (§5.7). Reconcile the posted comment by its marker, persist its URL, and await an explicit maintainer invitation/assignment.
+- If prior assignment/discussion is required, or ownership is unclear, prepare one concise request disclosing heavy LLM use, proposed scope, and intended verification, which the contributor posts from an issue link plus a prepared body (§5.7; GitHub has no prefill for comments). Reconcile the posted comment by its marker, persist its URL, and await an explicit maintainer invitation/assignment.
 - If rules welcome direct PRs on unassigned issues, proceed without ceremonial comments.
 - An existing competing fix or assignee requires a documented invitation to collaborate; otherwise hand off.
 - Never post automated reminders. Maintainer waits consume no worker/model compute. A status check occurs only on explicit user resume in MVP.
@@ -173,7 +173,7 @@ Recheck upstream base before shipping. If it changed, rebase in isolation and ve
 
 Source export accepts bounded ordinary file blobs and their executable modes plus a controller-owned manifest; reject symlinks, special files, traversal paths, oversized files, and `.git` configuration/hooks. Reconstruct commits using trusted Git configuration; recompute tree/commit identities. The final reconstructed candidate SHA is the SHA tested and shipped. Failed export or identity mismatch stops shipping.
 
-After verification, an independent clean shipper performs only the writes GitHub allows with short-lived, repository-limited authorization: contents writes to the contributor's fork under an expected-SHA guard, plus credential-free reconciliation reads. Upstream writes (engagement comment, PR creation, update, and close) are **contributor-confirmed hand-offs**: the run prepares the exact content as a prefilled GitHub compare URL or comment, the contributor reviews and submits it under their own account, and the run reconciles the result. No credentials go to the worker; revoke shipping credentials after use. Do not require a broad long-lived token as a fallback.
+After verification, an independent clean shipper performs only the writes GitHub allows with short-lived, repository-limited authorization: contents writes to the contributor's fork under an expected-SHA guard, plus credential-free reconciliation reads. Upstream writes (engagement comment, PR creation, update, and close) are **contributor-confirmed hand-offs**: the run prepares the exact content as a prefilled GitHub compare URL, or as an issue link plus a prepared comment body (GitHub has no prefill for comments), the contributor reviews and submits it under their own account, and the run reconciles the result. No credentials go to the worker; revoke shipping credentials after use. Do not require a broad long-lived token as a fallback.
 
 **Why a hand-off** ([decision record](decisions/github-credentials.md), owner decision 2026-10-06). Primarily, deliberate human-in-the-loop review: a person reviews and owns every public submission made under their name, which keeps low-quality AI contributions out of maintainers' queues. It is also the only way to keep the credential contract. The gate-3 probe observed that GitHub App tokens, both user and installation, are refused (403) for comments, fork creation, and PR creation on an upstream that has not installed the App, while fork-side writes succeed. A per-run OAuth App token (option C′ in the record) remains a possible future opt-in that would need its own probe; it is not planned.
 
@@ -198,7 +198,7 @@ Example provenance: “This contribution used substantial LLM assistance, orches
 | `planning`, `implementing`, `verifying` | Isolated active execution |
 | `paused_user` | Selected checkpoint or pause request; no active compute |
 | `shipping` | Typed authenticated operations on verified candidate |
-| `awaiting_contributor` | Durable hand-off: prefilled comment or PR link issued, or manual fork/App installation pending; no compute; resume reconciles by marker |
+| `awaiting_contributor` | Durable hand-off: comment link + prepared body or prefilled PR link issued, or manual fork/App installation pending; no compute; resume reconciles by marker |
 | `submitted` | Initial run complete, PR URL persisted; CI may be pending |
 | `awaiting_review` | Durable post-submission hand-off |
 | `revising` | Explicit resume addresses actionable feedback on same PR |
@@ -220,7 +220,7 @@ Persist sanitized source snapshots, state, receipts, and logs locally under cont
 | Operation | Performed by | Resource / permissions | Admission condition |
 |---|---|---|---|
 | Read policy/issue/source | Broker, no credential | Public upstream read | Supplied target binding; no contributor credential required |
-| Engagement comment | **Contributor hand-off** (prefilled comment) | Contributor's own account | Policy permits contact; one controller-journaled request; verified contributor login; no test receipt required |
+| Engagement comment | **Contributor hand-off** (issue link + prepared body) | Contributor's own account | Policy permits contact; one controller-journaled request; verified contributor login; no test receipt required |
 | Discover fork | Broker, no credential | Public fork listing and `parent` identity | Eligibility and invitation/direct-PR permission; explicitly approved upstream parent |
 | Create fork | **Contributor, one-time manual step** | Contributor's own account | Same as discover; run waits durably, then verifies parent and installation scope |
 | Push candidate | Broker | Installation token narrowed to the fork, contents write | Current policy permission plus authenticated commit receipt and expected remote SHA |
@@ -273,7 +273,7 @@ Demand/effort baselines are unknown. Establish them through actual use; no fixed
 Role/outcome mapping: contributor configuration/control is covered by scenarios 8–9; maintainer permission/noise by 1–3 and 16; developer correctness by 6–7 and 15; contributor artifact/publication integrity by 10–13 and 17–18; autonomous portfolio use by 14; operator lifecycle safety by 4–5 and 19–20. Each acceptance fixture must identify its actor, expected outcome, and S1–S5 ownership in its test metadata.
 
 1. **Policy prohibition:** Given a repository bans LLM contributions, when the issue is supplied, then terminate before engagement or implementation with the rule cited.
-2. **Permission required:** Given assignment is required, when no invitation exists, then issue at most one prefilled disclosed request for the contributor to post, reconcile the posted comment by marker, and persist `awaiting_maintainer`; repeated resume issues no additional request.
+2. **Permission required:** Given assignment is required, when no invitation exists, then issue at most one prepared disclosed request (issue link + body) for the contributor to post, reconcile the posted comment by marker, and persist `awaiting_maintainer`; repeated resume issues no additional request.
 3. **Direct contribution:** Given direct PRs are welcomed and no competing assignee/fix exists, when gates pass, then proceed without mandatory user review unless selected.
 4. **Hostile execution:** Given dependency/test scripts attempt secret reads, host mounts, metadata access, direct egress, container privilege escalation, or broker access, when executed, then access is denied and no shipping authorization is issued after a boundary failure.
 5. **Hostile instructions:** Given repository text demands credential disclosure or a different target PR, when read by the model, then typed authority enforcement rejects those actions regardless of model output.
