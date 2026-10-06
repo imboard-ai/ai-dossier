@@ -82,6 +82,7 @@ export function validateManifest(
   overrides: Partial<SourceLimits> = {}
 ): SourceManifest {
   const limits = sourceLimits(overrides);
+  if (!raw || typeof raw !== 'object') throw new CanonicalError('invalid_manifest');
   const { version, entries: input, totalBytes: claimedTotal, digest } = raw;
   if (version !== 1 || !Array.isArray(input) || input.length > limits.entries)
     throw new CanonicalError('invalid_manifest');
@@ -90,6 +91,7 @@ export function validateManifest(
   const modes = new Map<string, string>();
   let totalBytes = 0;
   for (const entry of input) {
+    if (!entry || typeof entry !== 'object') throw new CanonicalError('invalid_manifest');
     const { path, mode, bytes, sha256: hash } = entry;
     validateSourcePath(path);
     if (path.split('/').length > limits.depth) throw new CanonicalError('limit_exceeded');
@@ -136,9 +138,11 @@ export function createManifest(
   limits: Partial<SourceLimits> = {}
 ): SourceManifest {
   const cap = sourceLimits(limits);
+  if (!Array.isArray(entries)) throw new CanonicalError('invalid_manifest');
   if (entries.length > cap.entries) throw new CanonicalError('limit_exceeded');
   let totalBytes = 0;
   for (const entry of entries) {
+    if (!entry || typeof entry !== 'object') throw new CanonicalError('invalid_manifest');
     if (typeof entry.bytes !== 'string') throw new CanonicalError('invalid_manifest');
     if (entry.bytes.length > 4 * Math.ceil(cap.fileBytes / 3))
       throw new CanonicalError('limit_exceeded');
@@ -168,6 +172,9 @@ export function exportSource(root: string, overrides: Partial<SourceLimits> = {}
   let total = 0;
   const flags = fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK;
   const dirFlags = flags | fs.constants.O_DIRECTORY;
+  // Linux O_PATH pins an inode without opening a device/FIFO for I/O if a
+  // regular-file lstat is raced. Node does not expose this Linux-only constant.
+  const pathFlags = 0x200000 | fs.constants.O_NOFOLLOW;
   const held: number[] = [];
   try {
     let fd = fs.openSync('/', dirFlags);
@@ -179,47 +186,71 @@ export function exportSource(root: string, overrides: Partial<SourceLimits> = {}
     const walk = (dir: number, prefix: string, depth: number): void => {
       if (depth > limits.depth) throw new CanonicalError('limit_exceeded');
       const before = fs.fstatSync(dir);
-      const names = fs.readdirSync(`/proc/self/fd/${dir}`, { encoding: 'buffer' });
-      for (const nameBytes of names) {
-        const name = nameBytes.toString('utf8');
-        if (!Buffer.from(name).equals(nameBytes)) throw new CanonicalError('invalid_path');
-        const path = prefix ? `${prefix}/${name}` : name;
-        validateSourcePath(path);
-        if (entries.length >= limits.entries) throw new CanonicalError('limit_exceeded');
-        const anchored = `/proc/self/fd/${dir}/${name}`;
-        const stat = fs.lstatSync(anchored);
-        if (!stat.isDirectory() && !stat.isFile()) throw new CanonicalError('unsupported');
-        const child = fs.openSync(anchored, stat.isDirectory() ? dirFlags : flags);
-        try {
-          const opened = fs.fstatSync(child);
-          if (!unchanged(stat, opened)) throw new CanonicalError('source_changed');
-          if (stat.isDirectory()) {
-            entries.push({ path, mode: '040000', bytes: '', sha256: sha256('') });
-            walk(child, path, depth + 1);
-          } else {
-            if (stat.size > limits.fileBytes || total + stat.size > limits.totalBytes)
-              throw new CanonicalError('limit_exceeded');
-            // Never use readFile on a raced file: it can grow without bound.
-            const bytes = Buffer.alloc(stat.size);
-            let read = 0;
-            while (read < bytes.length) {
-              const count = fs.readSync(child, bytes, read, bytes.length - read, null);
-              if (!count) throw new CanonicalError('source_changed');
-              read += count;
+      // Stream bounded batches: readdirSync would allocate the entire hostile
+      // directory before the entry cap could reject it. Node supports Buffer
+      // dirent names but @types/node models only the string form.
+      const listing = fs.opendirSync(`/proc/self/fd/${dir}`, {
+        encoding: 'buffer' as BufferEncoding,
+        bufferSize: 32,
+      });
+      try {
+        for (let entry = listing.readSync(); entry; entry = listing.readSync()) {
+          const nameBytes = entry.name as unknown as Buffer;
+          const name = nameBytes.toString('utf8');
+          if (!Buffer.from(name).equals(nameBytes)) throw new CanonicalError('invalid_path');
+          const path = prefix ? `${prefix}/${name}` : name;
+          validateSourcePath(path);
+          if (entries.length >= limits.entries) throw new CanonicalError('limit_exceeded');
+          const anchored = `/proc/self/fd/${dir}/${name}`;
+          const stat = fs.lstatSync(anchored);
+          if (!stat.isDirectory() && !stat.isFile()) throw new CanonicalError('unsupported');
+          const child = fs.openSync(anchored, stat.isDirectory() ? dirFlags : pathFlags);
+          try {
+            const opened = fs.fstatSync(child);
+            if (!unchanged(stat, opened)) throw new CanonicalError('source_changed');
+            if (stat.isDirectory()) {
+              entries.push({ path, mode: '040000', bytes: '', sha256: sha256('') });
+              walk(child, path, depth + 1);
+            } else {
+              if (stat.size > limits.fileBytes || total + stat.size > limits.totalBytes)
+                throw new CanonicalError('limit_exceeded');
+              // Reopen ONLY the verified regular inode through its pinned fd.
+              // This magic link is controller-generated, never a worker path.
+              const bytes = Buffer.alloc(stat.size);
+              const reader = fs.openSync(
+                `/proc/self/fd/${child}`,
+                fs.constants.O_RDONLY | fs.constants.O_NONBLOCK
+              );
+              try {
+                if (!unchanged(opened, fs.fstatSync(reader)))
+                  throw new CanonicalError('source_changed');
+                let read = 0;
+                while (read < bytes.length) {
+                  const count = fs.readSync(reader, bytes, read, bytes.length - read, null);
+                  if (!count) throw new CanonicalError('source_changed');
+                  read += count;
+                }
+                if (!unchanged(opened, fs.fstatSync(reader)))
+                  throw new CanonicalError('source_changed');
+              } finally {
+                fs.closeSync(reader);
+              }
+              total += bytes.length;
+              entries.push({
+                path,
+                mode: stat.mode & 0o111 ? '100755' : '100644',
+                bytes: bytes.toString('base64'),
+                sha256: sha256(bytes),
+              });
             }
-            total += bytes.length;
-            entries.push({
-              path,
-              mode: stat.mode & 0o111 ? '100755' : '100644',
-              bytes: bytes.toString('base64'),
-              sha256: sha256(bytes),
-            });
+            if (!unchanged(opened, fs.fstatSync(child)) || !unchanged(stat, fs.lstatSync(anchored)))
+              throw new CanonicalError('source_changed');
+          } finally {
+            fs.closeSync(child);
           }
-          if (!unchanged(opened, fs.fstatSync(child)) || !unchanged(stat, fs.lstatSync(anchored)))
-            throw new CanonicalError('source_changed');
-        } finally {
-          fs.closeSync(child);
         }
+      } finally {
+        listing.closeSync();
       }
       if (!unchanged(before, fs.fstatSync(dir))) throw new CanonicalError('source_changed');
     };

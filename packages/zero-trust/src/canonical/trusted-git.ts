@@ -1,17 +1,17 @@
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CanonicalError } from './export';
 
 /** Internal plumbing only. Never points Git at an artifact's repository/config. */
 export class TrustedGit {
   readonly directory: string;
+  // biome-ignore lint/correctness/noUnusedPrivateClassMembers: Biome misses the read in the environment-copy spread in run().
   private readonly env: NodeJS.ProcessEnv;
   constructor() {
-    this.directory = fs.mkdtempSync(join(tmpdir(), 'zt-canonical-'));
+    // Do not let inherited TMPDIR relocate trusted config into worker storage.
+    this.directory = fs.mkdtempSync('/tmp/zt-canonical-');
     const home = join(this.directory, 'home');
-    fs.mkdirSync(home, { mode: 0o700 });
     this.env = {
       PATH: '/usr/bin:/bin',
       HOME: home,
@@ -27,6 +27,7 @@ export class TrustedGit {
       GIT_NO_REPLACE_OBJECTS: '1',
     };
     try {
+      fs.mkdirSync(home, { mode: 0o700 });
       this.run([
         'init',
         '--bare',
@@ -40,6 +41,18 @@ export class TrustedGit {
     }
   }
   run(args: readonly string[], input?: Buffer | string, identity: NodeJS.ProcessEnv = {}): Buffer {
+    const gitEnv = { ...this.env };
+    for (const key of [
+      'GIT_AUTHOR_NAME',
+      'GIT_AUTHOR_EMAIL',
+      'GIT_AUTHOR_DATE',
+      'GIT_COMMITTER_NAME',
+      'GIT_COMMITTER_EMAIL',
+      'GIT_COMMITTER_DATE',
+    ]) {
+      const value = identity[key];
+      if (value !== undefined) gitEnv[key] = value;
+    }
     const result = spawnSync(
       '/usr/bin/git',
       [
@@ -61,7 +74,7 @@ export class TrustedGit {
       ],
       {
         cwd: this.directory,
-        env: { ...this.env, ...identity },
+        env: gitEnv,
         input,
         maxBuffer: 128 * 1024 * 1024,
         timeout: 60000,

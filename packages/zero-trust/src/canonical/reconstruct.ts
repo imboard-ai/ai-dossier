@@ -79,6 +79,7 @@ function date(value: string): string {
   return `${epoch / 1000} +0000`;
 }
 function approval(raw: ContributorApproval): ContributorApproval {
+  if (!raw || typeof raw !== 'object') throw new CanonicalError('altered_identity');
   const { login, name, email, timestamp } = raw;
   date(timestamp);
   return Object.freeze({
@@ -89,6 +90,7 @@ function approval(raw: ContributorApproval): ContributorApproval {
   });
 }
 function inputs(raw: CommitInputs): CommitInputs {
+  if (!raw || typeof raw !== 'object') throw new CanonicalError('invalid_manifest');
   const { baseSha, author, committerTimestamp, message } = raw;
   date(committerTimestamp);
   if (
@@ -295,6 +297,7 @@ export function reconstructCandidate(
   limits: Partial<SourceLimits> = {}
 ): CanonicalCandidate {
   const input = inputs(persisted);
+  if (!trusted || typeof trusted !== 'object') throw new CanonicalError('invalid_manifest');
   const expectedAuthor = approval(trusted.author);
   if (input.baseSha !== oid(trusted.baseSha)) throw new CanonicalError('wrong_parent');
   if (JSON.stringify(input.author) !== JSON.stringify(expectedAuthor))

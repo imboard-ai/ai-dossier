@@ -171,7 +171,8 @@ engine integration or the complete S1 release gate.
 at any depth; it never silently omits a checkout's configuration or submodules.
 Export currently requires Linux with `/proc/self/fd` and no-follow directory opens;
 unsupported platforms fail closed. Ancestor directories and children are opened
-without following symlinks, reads are byte-bounded and identity/metadata changes
+without following symlinks, directory enumeration is streamed in bounded batches,
+reads are byte-bounded and identity/metadata changes
 around reads are rejected. The worker supervisor should freeze source before export.
 The snapshot contains copied, immutable base64 bytes, executable modes, directory
 entries and SHA-256 hashes. No shipping operation re-reads the mutable filesystem.
@@ -214,7 +215,8 @@ repository, validates the baseline with the same source/path/size rules, then
 constructs one tree/commit using `hash-object --no-filters`, `mktree`, `commit-tree`.
 It never opens a worker repository or runs checkout/add/diff/filter drivers.
 In-tree `.gitattributes` is preserved as data and cannot affect blob bytes.
-Git runs from `/usr/bin/git` with an allowlisted environment, private empty home,
+Git runs from `/usr/bin/git` with an allowlisted environment, private empty home
+under a fresh `/tmp` directory (inherited `TMPDIR` is ignored),
 no templates/system/global config, disabled hooks/credential helpers/attributes,
 no replacements and `protocol.allow=never`. Subprocesses have a 60-second timeout
 and 128 MiB output cap; supervise controller resources independently for large or

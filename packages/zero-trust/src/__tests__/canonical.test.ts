@@ -100,6 +100,19 @@ function baseline(
 }
 
 describe('canonical filesystem export', () => {
+  it('entry limit stops streaming enumeration without reading the full directory', () => {
+    const root = temp();
+    for (let i = 0; i < 100; i++) fs.writeFileSync(join(root, `file-${i}`), 'bytes');
+    const read = vi.spyOn(fs.Dir.prototype, 'readSync');
+    rejects(() => exportSource(root, { entries: 1 }), 'limit_exceeded');
+    expect(read.mock.calls.length).toBeLessThanOrEqual(2);
+  });
+  it('malformed persisted shapes yield typed, non-echoing rejections', () => {
+    rejects(() => validateManifest(null as never), 'invalid_manifest');
+    rejects(() => createManifest(null as never), 'invalid_manifest');
+    rejects(() => createManifest([null] as never), 'invalid_manifest');
+    rejects(() => validateManifest({ version: 1, entries: [null] } as never), 'invalid_manifest');
+  });
   it.each([
     ['ß.txt', 'SS.txt'],
     ['ς.txt', 'σ.txt'],
@@ -236,6 +249,29 @@ describe('canonical filesystem export', () => {
     });
     rejects(() => exportSource(root), 'source_changed');
   });
+  it('pins file type without opening a raced special inode for I/O', () => {
+    const root = temp();
+    fs.writeFileSync(join(root, 'file'), 'safe');
+    const originalStat = fs.fstatSync;
+    const originalOpen = fs.openSync;
+    const device = fs.lstatSync('/dev/null');
+    let pinned: number | undefined;
+    let reopened = false;
+    vi.spyOn(fs, 'openSync').mockImplementation((path, flags, mode) => {
+      const fd = originalOpen(path, flags, mode);
+      if (String(path).endsWith('/file')) {
+        expect(Number(flags) & 0x200000).not.toBe(0); // O_PATH, not device I/O.
+        pinned = fd;
+      }
+      if (pinned !== undefined && String(path) === `/proc/self/fd/${pinned}`) reopened = true;
+      return fd;
+    });
+    vi.spyOn(fs, 'fstatSync').mockImplementation(((fd: number) =>
+      fd === pinned ? device : originalStat(fd)) as typeof fs.fstatSync);
+    rejects(() => exportSource(root), 'source_changed');
+    expect(pinned).toBeDefined();
+    expect(reopened).toBe(false);
+  });
   it('directory replacement cannot redirect the descriptor-anchored walk', () => {
     const root = temp();
     const outside = temp();
@@ -243,17 +279,17 @@ describe('canonical filesystem export', () => {
     fs.mkdirSync(dir);
     fs.writeFileSync(join(dir, 'file'), 'safe');
     fs.writeFileSync(join(outside, 'secret'), 'outside');
-    const original = fs.readdirSync;
+    const original = fs.opendirSync;
     let swapped = false;
-    vi.spyOn(fs, 'readdirSync').mockImplementation(((path: fs.PathLike, options: unknown) => {
-      const result = original(path, options as { encoding: 'buffer' });
-      if (!swapped && result.some((entry: Buffer) => entry.equals(Buffer.from('file')))) {
+    vi.spyOn(fs, 'opendirSync').mockImplementation((path, options) => {
+      const result = original(path, options);
+      if (!swapped && fs.realpathSync(path).endsWith('/dir')) {
         swapped = true;
         fs.renameSync(dir, join(root, 'old'));
         fs.symlinkSync(outside, dir);
       }
       return result;
-    }) as typeof fs.readdirSync);
+    });
     rejects(() => exportSource(root), 'source_changed');
     expect(swapped).toBe(true);
   });
@@ -281,6 +317,51 @@ describe('canonical filesystem export', () => {
 });
 
 describe('canonical Git reconstruction', () => {
+  it('cleans its private directory after initialization failure', () => {
+    const original = fs.mkdtempSync;
+    let created = '';
+    vi.spyOn(fs, 'mkdtempSync').mockImplementation(((prefix: string) => {
+      created = original(prefix);
+      return created;
+    }) as typeof fs.mkdtempSync);
+    vi.spyOn(fs, 'mkdirSync').mockImplementation(() => {
+      throw new Error('synthetic storage failure');
+    });
+    expect(() => new TrustedGit()).toThrow('synthetic storage failure');
+    expect(created).toMatch(/^\/tmp\/zt-canonical-/u);
+    expect(fs.existsSync(created)).toBe(false);
+  });
+  it('validates nested baseline trees and rejects inconsistent bound tree/commit identities', () => {
+    const base = baseline();
+    const source = createManifest([
+      file('a', '', '040000'),
+      file('a/b', '', '040000'),
+      file('a/b/c'),
+    ]);
+    const first = createCandidate(source, approved(base.baseSha), base.pack);
+    const next = createCandidate(source, approved(first.record.candidateSha), first.pack);
+    expect(next.record.baseSha).toBe(first.record.candidateSha);
+    for (const field of ['treeSha', 'candidateSha'] as const) {
+      const inconsistent = { ...first.record, [field]: 'a'.repeat(40) };
+      // Simulate corrupted controller state: even a matching binding cannot mask
+      // recomputed tree/commit identity disagreement.
+      const authority = { ...first.authority, recordDigest: sha256(JSON.stringify(inconsistent)) };
+      rejects(
+        () => reconstructCandidate(source, inconsistent, authority, base.pack),
+        field === 'treeSha' ? 'tree_mismatch' : 'commit_mismatch'
+      );
+    }
+    rejects(() => createCandidate(source, null as never, base.pack), 'invalid_manifest');
+    rejects(
+      () =>
+        createCandidate(source, { ...approved(base.baseSha), author: null } as never, base.pack),
+      'altered_identity'
+    );
+    rejects(
+      () => reconstructCandidate(source, first.record, null as never, base.pack),
+      'invalid_manifest'
+    );
+  });
   it.each([
     '.git',
     '../escape',
@@ -519,6 +600,7 @@ describe('canonical Git reconstruction', () => {
       GIT_SSH_COMMAND: `touch ${sentinel}`,
       PATH: root,
       LD_PRELOAD: '/nonexistent/hostile.so',
+      TMPDIR: '/nonexistent-worker-controlled-temp',
     }))
       vi.stubEnv(key, value);
     const candidate = createCandidate(exportSource(sourceRoot), approved(base.baseSha), base.pack);
@@ -533,6 +615,17 @@ describe('canonical Git reconstruction', () => {
     try {
       expect(git.run(['config', '--get', 'core.hooksPath']).toString().trim()).toBe('/dev/null');
       expect(git.run(['config', '--get', 'protocol.allow']).toString().trim()).toBe('never');
+      expect(
+        git
+          .run(['config', '--get', 'core.hooksPath'], undefined, {
+            GIT_CONFIG_COUNT: '1',
+            GIT_CONFIG_KEY_0: 'core.hooksPath',
+            GIT_CONFIG_VALUE_0: hooks,
+            HOME: root,
+          })
+          .toString()
+          .trim()
+      ).toBe('/dev/null');
       rejects(() => git.run(['ls-remote', repo]), 'git_failed');
       git.run(['index-pack', '--strict', '--stdin'], candidate.pack);
       expect(git.run(['cat-file', 'blob', `${candidate.record.treeSha}:payload`]).toString()).toBe(
