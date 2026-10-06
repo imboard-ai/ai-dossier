@@ -17,7 +17,7 @@ import { ReceiptNonceStore } from '../receipt/nonces';
 import { renderReceipt } from '../receipt/render';
 import { canonicalJson, parseReceipt, RECEIPT_TTL_MS } from '../receipt/schema';
 import { authorizeShipping, type ReceiptContext, verifyReceipt } from '../receipt/verify';
-import { createRun } from '../state';
+import { createRun, ReasonCode, transitionRun } from '../state';
 
 const SHA = 'a'.repeat(40);
 const CANDIDATE = 'b'.repeat(40);
@@ -139,13 +139,21 @@ describe('controller receipt — scenarios 10/17, contributor integrity, S3/S4',
         },
       },
       {
-        run: createRun(
-          {
-            runId: 'run-1',
-            contributor: 'alice',
-            upstreamIssue: 'https://github.com/o/r/issues/8',
-          },
-          new Date(AT).toISOString()
+        run: [
+          ReasonCode.GatePassed,
+          ReasonCode.PlanApproved,
+          ReasonCode.CandidateReady,
+          ReasonCode.VerificationPassed,
+        ].reduce(
+          (run, reason) => transitionRun(run, reason, new Date(AT).toISOString()),
+          createRun(
+            {
+              runId: 'run-1',
+              contributor: 'alice',
+              upstreamIssue: 'https://github.com/o/r/issues/8',
+            },
+            new Date(AT).toISOString()
+          )
         ),
         contributionId: input.contributionId,
       },

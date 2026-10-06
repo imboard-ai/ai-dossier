@@ -5,6 +5,7 @@ import {
   permittedTransitions,
   ReasonCode,
   type RunRecord,
+  type RunState,
   restoreRun,
   transitionRun,
 } from './state';
@@ -134,25 +135,58 @@ export function parseEngagementMarker(text: string): string | null {
 
 type Event =
   | { v: 1; type: 'run'; run: RunRecord; contributionId: string }
+  | { v: 1; type: 'run_update'; run: RunRecord }
   | { v: 1; type: 'intended'; input: IntentInput }
   | { v: 1; type: 'attempted' | 'ambiguous' | 'absent'; key: string }
   | { v: 1; type: 'confirmed'; key: string; artifactRef: string; remoteSha?: string }
   | { v: 1; type: 'blocked'; run: RunRecord; reason: WriteBlockReason };
+
+/** Only the same controller run or an exact forward continuation may be observed. */
+function continuation(previous: RunRecord, value: unknown): RunRecord {
+  const run = restoreRun(value);
+  if (
+    run.runId !== previous.runId ||
+    run.upstreamIssue !== previous.upstreamIssue ||
+    run.contributor !== previous.contributor ||
+    run.createdAt !== previous.createdAt ||
+    run.history.length < previous.history.length ||
+    JSON.stringify(run.history.slice(0, previous.history.length)) !==
+      JSON.stringify(previous.history)
+  )
+    throw new IntentError();
+  return run;
+}
+
+const ADMISSION: Readonly<Record<OperationKind, readonly RunState[]>> = Object.freeze({
+  engagement_comment: ['gating', 'awaiting_maintainer'],
+  fork_ensure: ['shipping'],
+  push_branch: ['shipping'],
+  pr_create: ['shipping'],
+  pr_update: ['shipping', 'revising'],
+  // Explicit withdrawal is performed before the controller records declined.
+  pr_close: ['shipping', 'submitted', 'awaiting_review', 'revising', 'accepted'],
+});
 
 function reduce(state: IntentState | undefined, raw: unknown): IntentState {
   if (!isRecord(raw) || raw.v !== 1) throw new IntentError();
   if (raw.type === 'run') {
     if (state) throw new IntentError();
     const run = restoreRun(raw.run);
-    if (run.state !== 'blocked' && !permittedTransitions(run.state)[ReasonCode.PolicyBlocked])
-      throw new IntentError();
     return {
       run,
       contributionId: safeString(raw.contributionId),
       intents: new Map(),
     };
   }
-  if (!state || state.run.state === 'blocked') throw new IntentError();
+  if (!state) throw new IntentError();
+  if (raw.type === 'run_update') return { ...state, run: continuation(state.run, raw.run) };
+  // Historical attempts remain replayable, but closed states cannot add attempts.
+  if (
+    (raw.type === 'intended' || raw.type === 'attempted') &&
+    (state.run.state === 'paused_user' ||
+      !permittedTransitions(state.run.state)[ReasonCode.PolicyBlocked])
+  )
+    throw new IntentError();
   if (raw.type === 'blocked') {
     if (!WRITE_BLOCK_REASONS.includes(raw.reason as WriteBlockReason)) throw new IntentError();
     const run = restoreRun(raw.run);
@@ -250,18 +284,20 @@ export class IntentDriver {
       this.state = state;
     } else {
       this.state = replayIntents(events);
-      if (
-        this.state.run.runId !== run.runId ||
-        this.state.run.upstreamIssue !== run.upstreamIssue ||
-        this.state.run.contributor !== run.contributor ||
-        this.state.contributionId !== contributionId
-      )
-        throw new IntentError();
+      if (this.state.contributionId !== contributionId) throw new IntentError();
+      this.observeRun(run);
     }
     drivenJournals.add(journal);
   }
   snapshot(): IntentState {
     return { ...this.state, intents: new Map(this.state.intents) };
+  }
+  /** Synchronous revocation: cannot queue behind an asynchronous reconciliation/write. */
+  observeRun(value: RunRecord): void {
+    if (this.failed) throw new WriteBlockedError();
+    const run = continuation(this.state.run, value);
+    if (run.history.length !== this.state.run.history.length)
+      this.persist({ v: 1, type: 'run_update', run });
   }
   private persist(event: Event): void {
     const next = reduce(this.state, event);
@@ -275,7 +311,7 @@ export class IntentDriver {
   }
   private serial<T>(work: () => Promise<T>): Promise<T> {
     const pending = this.tail.then(() => {
-      if (this.failed || this.state.run.state === 'blocked') throw new WriteBlockedError();
+      if (this.failed) throw new WriteBlockedError();
       return work();
     });
     this.tail = pending.catch(() => undefined);
@@ -284,8 +320,10 @@ export class IntentDriver {
   private block(reason: WriteBlockReason = 'unknown'): never {
     // Latch before clock/transition/persistence: even a failed hand-off blocks admission.
     this.failed = true;
-    const run = transitionRun(this.state.run, ReasonCode.PolicyBlocked, this.now());
-    this.persist({ v: 1, type: 'blocked', run, reason });
+    if (permittedTransitions(this.state.run.state)[ReasonCode.PolicyBlocked]) {
+      const run = transitionRun(this.state.run, ReasonCode.PolicyBlocked, this.now());
+      this.persist({ v: 1, type: 'blocked', run, reason });
+    }
     throw new WriteBlockedError();
   }
   private confirm(intent: Intent, result: MutationResult): void {
@@ -333,12 +371,17 @@ export class IntentDriver {
   resume(): Promise<void> {
     return this.serial(() => this.reconcileAll());
   }
+  private admit(operationKind: OperationKind): void {
+    if (this.failed || !ADMISSION[operationKind].includes(this.state.run.state))
+      throw new WriteBlockedError();
+  }
   execute(input: IntentInput): Promise<string> {
     const valid = inputOf(input);
     const key = idempotencyKey(valid);
     return this.serial(async () => {
       if (valid.contributionId !== this.state.contributionId) throw new IntentError();
       await this.reconcileAll();
+      this.admit(valid.operationKind);
       let intent = this.state.intents.get(key);
       if (intent?.status === 'confirmed') return intent.artifactRef as string;
       if (!intent) {
@@ -348,6 +391,7 @@ export class IntentDriver {
       this.persist({ v: 1, type: 'attempted', key });
       intent = this.state.intents.get(key) as Intent;
       let result: MutationResult;
+      this.admit(valid.operationKind);
       try {
         result = await this.adapter.mutate(intent);
       } catch {

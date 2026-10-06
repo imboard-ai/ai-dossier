@@ -97,7 +97,23 @@ contribution ID, injected trusted `WriteAdapter`, and an ISO timestamp clock.
 `resume()` reconciles pending writes; `execute(input)` also applies that barrier
 before admitting any mutation. `snapshot()` returns the durable run and intents.
 Close the journal before recovery. Recover with the same run/contribution/target
-identity; the journal, not the supplied initial state, controls progress.
+identity and the controller's current lifecycle record. Its immutable identity and
+creation time must match, and its history must extend the journal's history exactly;
+rollback and divergent histories are rejected. Newer lifecycle snapshots are fsynced
+as `run_update` events. Call synchronous `observeRun(currentRun)` on every live
+controller transition, including cancellation and cleanup failure. This takes effect
+even while reconciliation is awaiting an adapter response. Already-issued mutations
+cannot be recalled; their outcomes are still journaled and reconciled.
+
+Admission is checked after reconciliation: engagement comments require `gating` or
+`awaiting_maintainer`; fork/push/PR creation require `shipping`; PR updates require
+`shipping` or `revising`. Explicit withdrawal (`pr_close`) is permitted in `shipping`,
+`submitted`, `awaiting_review`, `revising` or `accepted`, before recording `declined`.
+Terminal states, `blocked_cleanup` and `paused_user` deny every mutation with
+`WriteBlockedError`, including retries and calls for already-confirmed intents.
+`resume()` may still reconcile attempted/ambiguous intents in these states, persisting
+found/absent evidence without writing externally. Legacy journals remain replayable;
+historical attempts are evidence, never current admission authority.
 
 The adapter must authenticate artifact ownership/target, enforce current permission
 and receipt checks, and implement compare-and-swap branch writes. For push results,
@@ -108,8 +124,10 @@ must include `engagementMarker(contributionId)` in comments and reconcile the un
 matching marker via `parseEngagementMarker`, with contributor/target checks.
 
 Only one retry is available after proven absence, including across restarts.
-Unknown reconciliation persists a `PolicyBlocked` lifecycle transition and denies
-all further writes. `snapshot().blockedReason` preserves the bounded reason
+Unknown reconciliation denies all further writes and persists a `PolicyBlocked`
+transition from the current run when that edge is legal. Terminal/cleanup states
+remain unchanged rather than inventing an illegal transition.
+`snapshot().blockedReason` on a persisted block preserves the bounded reason
 (`unknown`, `reconciliation_error`, `invalid_evidence`, `unexpected_remote_sha`,
 or `retry_exhausted`) without storing provider exception text.
 Every intent and attempt is fsynced before the adapter runs;
