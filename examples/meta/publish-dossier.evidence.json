@@ -1,10 +1,10 @@
 {
   "evidence_schema_version": "1.0.0",
   "dossier": "imboard-ai/meta/publish-dossier",
-  "version": "1.1.4",
+  "version": "1.1.6",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "65a7bda1b3b67bd54e105f9c5e25c92a25c01bb13e8c58d2c939eb7b63885d6e"
+    "hash": "4f0a7985b23a992fe9a244da35feadde9bb7b65314401bbb730636e4e0c05b23"
   },
   "entries": [
     {
@@ -14,8 +14,7 @@
       "evidence": [
         {
           "provider": "claude-code",
-          "session": "73ca020f-8e89-40e4-bc85-d6e511f5fc45",
-          "host": "host-c"
+          "session": "73ca020f-8e89-40e4-bc85-d6e511f5fc45"
         }
       ]
     },
@@ -26,8 +25,7 @@
       "evidence": [
         {
           "provider": "claude-code",
-          "session": "73ca020f-8e89-40e4-bc85-d6e511f5fc45",
-          "host": "host-c"
+          "session": "73ca020f-8e89-40e4-bc85-d6e511f5fc45"
         }
       ]
     },
@@ -38,20 +36,18 @@
       "evidence": [
         {
           "provider": "claude-code",
-          "session": "4e15a017-3cce-45b9-a19a-558ade4e693a",
-          "host": "host-c"
+          "session": "4e15a017-3cce-45b9-a19a-558ade4e693a"
         }
       ]
     },
     {
       "anchor": "Step 5: Refresh every machine",
-      "rationale": "a retired host was decommissioned 2026-09-09; refresh-fleet.sh is the canonical refresh; cite ai-dossier#749",
+      "rationale": "A retired machine was dropped from the fleet on 2026-09-09; refresh-fleet.sh is the canonical refresh; cite ai-dossier#749",
       "created_at": "2026-09-16T22:43:53.911Z",
       "evidence": [
         {
           "provider": "claude-code",
-          "session": "claude-session-fc749",
-          "host": "host-c"
+          "session": "claude-session-fc749"
         }
       ]
     },
@@ -62,8 +58,18 @@
       "evidence": [
         {
           "provider": "claude-code",
-          "session": "4e15a017-3cce-45b9-a19a-558ade4e693a",
-          "host": "host-c"
+          "session": "4e15a017-3cce-45b9-a19a-558ade4e693a"
+        }
+      ]
+    },
+    {
+      "anchor": "### Step 5: Refresh every machine",
+      "rationale": "scripts/refresh-fleet.sh no longer hard-codes the operator's host list (ai-dossier#1049/#1051): the hosts come from REFRESH_FLEET_HOSTS / REFRESH_FLEET_LOCAL_HOST, and a bare run without them now exits non-zero instead of silently refreshing only the local machine. The step documents the env setup and the --local-only path so a refresh never quietly skips hosts.",
+      "created_at": "2026-10-06T06:16:37.692Z",
+      "evidence": [
+        {
+          "provider": "claude-code",
+          "session": "7a025ecf-d259-4510-ad79-3af9f3439315"
         }
       ]
     }
