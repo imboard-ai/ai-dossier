@@ -466,3 +466,85 @@ claim is limited to the exact candidate and is not proof of patch correctness.
 
 Fixtures with known bugs live in `fixtures/ecosystem/`. CI self-checks them
 (`scripts/zero-trust-fixtures-selfcheck.mjs`); that is the only host-side install/test run.
+
+## Fork-side GitHub credential broker
+
+`src/github/broker.ts`, `app-auth.ts` and `token-journal.ts` are the only code that
+holds GitHub credentials (the hand-off modules beside them are credential-free). They
+are controller-only: the package index does not export them, and
+`src/github/__tests__/isolation.test.ts` fails if any other module, including the index,
+the hand-off modules and the worker broker, can reach them through an import chain.
+Import them by path from trusted controller code.
+
+Under the hybrid hand-off ([decision record](../../docs/features/zero-trust-full-cycle/decisions/github-credentials.md))
+the broker performs fork pushes only. Upstream comments and PRs are contributor
+hand-offs. `ForkCredentialBroker` has a typed operation API and no generic token call:
+
+- `recover()` must run first. It revokes every journaled token without a recorded
+  revocation before any admission. Values held in process memory (`TokenVault`) are
+  revoked one by one. User-chain tokens whose values were lost are ended by deleting
+  the grant with a live user token. An installation token whose value was lost cannot be
+  revoked through any API, so the broker enters `blocked_cleanup` and reports its id and
+  native expiry for the operator. It never records that token as revoked. Recovery over a
+  journal whose run already ended returns `admitted: false`.
+- `registerUserToken(value, expiresAt)` holds the contributor's unscoped user token
+  (needed for `user_scoped` mints and the kill switch). `rotateUserToken` records a
+  refresh; the old token is marked `rotated` only once observed dead, and its scoped
+  children stay journaled as live.
+- `mintForkPush(intent, { repositoryId, via? }, scopeFrom?)` mints one token for one
+  journaled `push_branch` intent attempt and returns a `ForkPushLease`. The token is
+  narrowed to the verified fork's repository id with `contents:write`: an installation
+  token (the default `via`) or a scoped user token minted from the unscoped user token
+  (`scopeFrom`, default the newest held one). The journaled intent's target must name the
+  same fork (`fork:<repositoryId>:branch:<name>`). A different repository, an unjournaled or
+  non-push intent, a second mint for the same attempt, or scoping from a scoped token is
+  refused before any network call. A token GitHub does not confirm as repository-selected
+  with exactly that permission is revoked and refused.
+- `take(lease)` hands out the lease's `GitPushCredential` once, inside the window;
+  `revoke(lease)` ends it. `revoke` refuses the unscoped user token
+  (`user_token_run_scoped`): only `endRun`, cancellation or `killAll` revoke it. `withForkPush(intent, target, operation, cancel?)` does all
+  three and is the preferred entry point. It revokes on success, failure, throw and
+  cancellation (including a cancel that arrives during the mint). A timer also revokes
+  the token 15 minutes after the mint request, even mid-operation. GitHub's 1 h / 8 h
+  lifetimes are recorded but never relied on.
+- `GitPushCredential` is a git environment that redacts itself in JSON, `inspect` and
+  `String()`. The token goes in an `http.extraheader` supplied via `GIT_CONFIG_*`, with
+  the credential helper and global/system config off. The same overrides disable hooks,
+  fsmonitor, proxies, redirects and non-HTTPS protocols, and force TLS verification. Run
+  the push from a controller-owned clone the worker never had write access to.
+- A revocation counts only when a liveness read after the DELETE returns 401. Each
+  failed attempt is journaled with its stage and HTTP status, and the next attempt
+  waits (1 s, then 4 s). After three failures the broker closes admission and calls
+  `onCleanupBlocked`, so the controller moves the run to `blocked_cleanup`.
+  `CredentialCleanupError.report` lists what is still outstanding.
+- `endRun(reason?)` (run end or cancellation, journaled as `completed` or `cancelled`) revokes installation tokens and scoped children
+  individually, deletes the grant if a child will not die, and revokes the unscoped user
+  token last. Revoking the user token ends its refresh chain, so the journal records that
+  the next run needs a new contributor authorization. Revoking or rotating a parent
+  never counts as revoking a child.
+- `killAll()` closes admission, waits for in-flight mints, and deletes the contributor's
+  grant with an unexpired, unrevoked user-chain token *before* revoking anything else.
+  It then revokes installation tokens. A 404 from the grant endpoint means "not
+  deleted". If no held token can delete the grant (none held, or every attempt
+  refused), `grant.deleted` is false and the report asks for a contributor
+  re-authorization or a manual revoke. Every tracked scoped child, then the user token,
+  is revoked one by one, and `complete` is false: a token of the grant the broker does
+  not hold may still be live.
+- `resolveByOperator(tokenId)` journals that the owner confirmed by hand that a token is
+  dead. `settleExpired()` settles unresolved tokens whose *journaled* native `expiresAt`
+  has passed; a token with no recorded expiry is never settled by time. Both return
+  what is still unresolved, so the controller can complete cleanup.
+- `onJournalFailed` reports a journal write failure (disk, permissions) separately from
+  GitHub cleanup failures; `status()` then shows `journal_failed`.
+- `status()` is safe to log: ids, kinds, states, times and failure counts only.
+  `close()` stops an instance's timers and writes before a successor in the same process
+  takes over the journal and vault.
+
+The token journal (`token-journal.ts`) uses a `Journal` in its own controller
+directory. Each event is replay-validated and scanned with `assertNoSecrets`, and token
+values are never written. Tests replay the gate-3 probe's recorded status codes through
+an in-memory fake (`__tests__/github-fake.ts`), so CI makes no GitHub calls.
+
+An installation token whose value was lost in a full process crash cannot be revoked
+through any GitHub API. The run stays in `blocked_cleanup` until `resolveByOperator`
+or, when the mint response was journaled, `settleExpired` after its native expiry.
