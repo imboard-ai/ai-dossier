@@ -1,6 +1,6 @@
 # Operator How-To: The Autonomous Issue Pipeline
 
-How issues move from "queued" to "merged" on hcc2 without a human in the loop for the
+How issues move from "queued" to "merged" on the runner host without a human in the loop for the
 common case — the scheduler, the tick cron, the Telegram channel, and the two points
 where it deliberately stops and asks a human instead of guessing.
 
@@ -21,7 +21,7 @@ where it deliberately stops and asks a human instead of guessing.
   for the full mechanism (dispatch, verification, stall ladder, batch recovery).
 - **A project** is one `~/.dossier/sched/<project>/` directory: its own `config.json`
   (slots, stall timeout, dispatch command/model per tier), `state.json` (live queue and
-  slots), and `events.jsonl` (append-only journal). Two projects run on hcc2 today —
+  slots), and `events.jsonl` (append-only journal). Two projects run on the runner host today —
   see below.
 - **The tick cron** (`~/.dossier/reset-fleet/tick.sh`, every 2 minutes) is the only thing
   that has to be running for the pipeline to make progress. It ticks every project's
@@ -44,11 +44,11 @@ where it deliberately stops and asks a human instead of guessing.
 Both configs share the same tier ladder: `mechanical` → `haiku`, `mid` → `sonnet`,
 `strong` → `opus`. The engine escalates a unit one tier on a stall and dispatch can
 override the command/model/prompt per tier independently (a mixed agent-CLI ladder —
-see `dispatch.tiers` in the sched README), though on hcc2 today both projects use the
+see `dispatch.tiers` in the sched README), though on the runner host today both projects use the
 `claude` CLI at every tier. The dispatch prompt is the operator's own contract with the
 agent: it names the workflow to fetch (`imboard-ai/git/full-cycle-issue`), the ship mode,
 and repo-specific reminders (e.g. the ai-dossier repo's per-package version-bump rule for
-CI). Config lives at `~/.dossier/sched/<project>/config.json` on hcc2; edit it there and
+CI). Config lives at `~/.dossier/sched/<project>/config.json` on the runner host; edit it there and
 the next tick picks it up — there is no reload command.
 
 ## The tick loop
@@ -124,7 +124,7 @@ Nothing sched-specific has to happen. The only durable state is:
   running slots by pid, including a hybrid pid-identity check so a reused pid post-reboot
   is never mistaken for the agent that used to hold it).
 - The crontab entry for `tick.sh` — installed once, persists across reboots as long as
-  the system's cron daemon starts on boot (it does, by default, on hcc2).
+  the system's cron daemon starts on boot (it does, by default, on the runner host).
 
 So the pipeline self-resumes on the next tick after boot. If it doesn't — check
 `crontab -l` for the `tick.sh` line first (it self-removes once every tracked issue is

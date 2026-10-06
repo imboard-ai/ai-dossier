@@ -1,7 +1,7 @@
 # sched fleet-parity validation — RFC-0001 Step 1 exit gate
 
 **Status: COMPLETE — all workloads terminal. Final report.**
-**Run:** `r-471-046c` · issue #471 · executing host: `hcc2` · 2026-08-29 22:22Z → 2026-08-30 15:35Z (~17.2 h wall-clock, of which ~5 h lost to external quota walls)
+**Run:** `r-471-046c` · issue #471 · executing host: the runner host · 2026-08-29 22:22Z → 2026-08-30 15:35Z (~17.2 h wall-clock, of which ~5 h lost to external quota walls)
 
 ## Recommendation
 
@@ -21,7 +21,7 @@ This report is the committable artifact (issue #471 scope). Divergences found al
 
 | Item | Value |
 |---|---|
-| Execution host | `hcc2` (16 vCPU, 30 GB RAM) — the only host reachable from this run |
+| Execution host | the runner host (16 vCPU, 30 GB RAM) — the only host reachable from this run |
 | CLI | `@ai-dossier/cli` 0.19.0 (npm; upgraded from 0.14.0 in pre-flight — sched requires ≥ 0.19.0; ≥ 0.13.0 required for token telemetry) |
 | Scheduler | `ai-dossier sched` (packages/sched, #460/#464/#468), engine config: `max_slots=3`, `stall_timeout_ms=5400000` (90 min — see §5 divergence #495), reconcile tick 60 s, PR poll 150 s, dispatch `claude -p --output-format json --model {model}` |
 | Dispatch tiers | W1/W2 (claude): `mid` = sonnet, report = haiku, ladder → opus. From 04:36Z (W3 + re-drives): opencode — llmgateway-routed models first, then **openrouter** per owner instruction from 05:07Z — `mid` = `~z-ai/glm-latest`, `strong` = `~moonshotai/kimi-latest`, report = mechanical (glm) — mirroring the fleet baselines' glm/kimi model families (claude's weekly limit and then llmgateway's Dev Plan credits ran out mid-validation; see D8) |
@@ -60,23 +60,23 @@ Per-issue wall-clock comes from runstate trails (`ai-dossier runstate stats --is
 
 - Sched engine journal `~/.dossier/sched/imboard-ai-imboard-monorepo/events.jsonl` (every decision), `state.json`, per-agent output `runs/issue-<n>.log` (claude `-p` JSON: usage, cost, duration, turns).
 - Runstate trails on GitHub issues (both arms).
-- `~/.dossier/runs.jsonl` (hcc2) — per-machine dossier telemetry.
-- opencode session DB (`~/.local/share/opencode/opencode.db`) — the Fleet A arm's per-session tokens/cost (glm/kimi/gpt ran via opencode on hcc2; `runs.jsonl` nested entries carry no token data by design — tokens are only logged for `ai-dossier run`-spawned agent runs).
+- `~/.dossier/runs.jsonl` (the runner host) — per-machine dossier telemetry.
+- opencode session DB (`~/.local/share/opencode/opencode.db`) — the Fleet A arm's per-session tokens/cost (glm/kimi/gpt ran via opencode on the runner host; `runs.jsonl` nested entries carry no token data by design — tokens are only logged for `ai-dossier run`-spawned agent runs).
 
-**AC3 accounting (runs.jsonl aggregation, per host)** — the every-host read was performed by the wls supervisor session (hcc2 has no outbound credentials; the data was pulled TO this run rather than credentials given to it) and posted as [this issue comment](https://github.com/imboard-ai/ai-dossier/issues/471#issuecomment-5470422534); window = 2026-08-29T21:00Z → 2026-08-30T15:30Z:
+**AC3 accounting (runs.jsonl aggregation, per host)** — the every-host read was performed by the dev machine supervisor session (the runner host has no outbound credentials; the data was pulled TO this run rather than credentials given to it) and posted as [this issue comment](https://github.com/imboard-ai/ai-dossier/issues/471#issuecomment-5470422534); window = 2026-08-29T21:00Z → 2026-08-30T15:30Z:
 
 | host | total entries | in window | with telemetry (duration_ms) | imboard-monorepo cwd in window | CLI at read time |
 |---|---|---|---|---|---|
-| wls | 1 247 | 11 | 2 | **0** | 0.19.0 |
-| hcc | 4 226 | 2 | 2 | **2** | 0.14.0 |
-| hcc2 | 868 | 209 | 209 | 191 | 0.19.0 |
+| dev machine | 1 247 | 11 | 2 | **0** | 0.19.0 |
+| second host | 4 226 | 2 | 2 | **2** | 0.14.0 |
+| the runner host | 868 | 209 | 209 | 191 | 0.19.0 |
 
-- **wls: zero imboard-cwd runs in the window** — no cohort activity occurred there; nothing undercounted.
-- **hcc: 2 imboard-cwd runs in the window** — the only off-host activity. The only non-validation imboard runstate activity inside the window is fleet member #3856's tail (report done 22:44:27Z Aug 29, run `r-3856-6d2a`, PR #3918 — the session already in flight when this validation started), whose dossier fetches these entries plausibly are; the wls supervisor characterizes them as an interactive session, not fleet units. They are not part of either comparison cohort (Fleet A's 12 FLEET-PLANs and all its unit trails are hcc2-local; every sched unit ran on hcc2), and at 2-vs-191 they are immaterial either way.
-- **hcc2: 209 in-window entries, 100% carrying duration telemetry, 191 in imboard-monorepo** — consistent with both comparison arms executing here. CLI 0.19.0 ≥ 0.13.0 for the measured window ✅ (the fleet-baseline window opened before hcc2's CLI was upgraded — see §6).
+- **dev machine: zero imboard-cwd runs in the window** — no cohort activity occurred there; nothing undercounted.
+- **second host: 2 imboard-cwd runs in the window** — the only off-host activity. The only non-validation imboard runstate activity inside the window is fleet member #3856's tail (report done 22:44:27Z Aug 29, run `r-3856-6d2a`, PR #3918 — the session already in flight when this validation started), whose dossier fetches these entries plausibly are; the dev machine supervisor characterizes them as an interactive session, not fleet units. They are not part of either comparison cohort (Fleet A's 12 FLEET-PLANs and all its unit trails are the runner host-local; every sched unit ran on the runner host), and at 2-vs-191 they are immaterial either way.
+- **the runner host: 209 in-window entries, 100% carrying duration telemetry, 191 in imboard-monorepo** — consistent with both comparison arms executing here. CLI 0.19.0 ≥ 0.13.0 for the measured window ✅ (the fleet-baseline window opened before the runner host's CLI was upgraded — see §6).
 - `input_tokens`/`output_tokens` are null across **all** hosts' runs.jsonl for this window (opencode-spawned runs don't populate them) — the report's per-unit token data from the agent CLIs' own records (claude result JSON + opencode session streams) is therefore the *only* token source, not a fallback.
 
-Fleet B (the claude-model cohort, Aug 25–26) executed on a different host entirely — its tokens are unreachable from hcc2 (§6).
+Fleet B (the claude-model cohort, Aug 25–26) executed on a different host entirely — its tokens are unreachable from the runner host (§6).
 
 ## 3. Results
 
@@ -175,7 +175,7 @@ The park→refill chain held throughout: #3824's park (06:38) refilled #3890's r
 
 ## 4. Baseline comparison
 
-### 4.1 The fleet cohorts (hcc2, same repo, detached full-cycle)
+### 4.1 The fleet cohorts (the runner host, same repo, detached full-cycle)
 
 **Fleet A** — `FLEET-PLAN-20260828-054148` + same-window members (Aug 28–29; glm-5.3 / kimi-k3-fast / gpt-5.6 via opencode). Completed members: #3848, #3851, #3852, #3860, #3864 (+ #3857 gate-blocked as `no-actionable-work`, #3862 never dispatched, #3859/#3861 from adjacent fleets):
 
@@ -188,11 +188,11 @@ The park→refill chain held throughout: #3824's park (06:38) refilled #3890's r
 | #3864 | 4.1 h | gate 1.1 h + 0.8 h, implement 1.3 h |
 | **median** | **4.4 h** (of the 5 shown members) | 7/10 same-window issues show >45 m gaps; **39.1 h** total gap time in the window |
 
-**Fleet B** — `FLEET-PLAN-20260826-091737` (Aug 25–26; claude sonnet-5/opus-5, 10 completed): per-issue spans 1.9–28.8 h (median 3.3 h), makespan 47.9 h; #3752 alone shows a 16.3 h gate gap. **Fleet B executed on a different host** — its token/session data is not on hcc2 (see §6).
+**Fleet B** — `FLEET-PLAN-20260826-091737` (Aug 25–26; claude sonnet-5/opus-5, 10 completed): per-issue spans 1.9–28.8 h (median 3.3 h), makespan 47.9 h; #3752 alone shows a 16.3 h gate gap. **Fleet B executed on a different host** — its token/session data is not on the runner host (see §6).
 
 ### 4.2 Un-tailed merges — the baseline's own record
 
-The imboard worktree pool on hcc2 currently holds **9 assigned worktrees whose issues are CLOSED** (#3714, #3715, #3729, #3759, #3848, #3856, #3859, #3863, #3871 — verified closed) — merged fleet members whose teardown never ran. That is the fleet's un-tailed-merge record on this host (a stock accumulated across recent fleet runs, not a single workload's flow). The sched arm's corresponding record: W1 processed every merge's tail in-tick (§3.1).
+The imboard worktree pool on the runner host currently holds **9 assigned worktrees whose issues are CLOSED** (#3714, #3715, #3729, #3759, #3848, #3856, #3859, #3863, #3871 — verified closed) — merged fleet members whose teardown never ran. That is the fleet's un-tailed-merge record on this host (a stock accumulated across recent fleet runs, not a single workload's flow). The sched arm's corresponding record: W1 processed every merge's tail in-tick (§3.1).
 
 ### 4.3 Head-to-head (sched arm, all workloads final, vs the fleets)
 
@@ -212,7 +212,7 @@ Model heterogeneity caveat (§6): the fleet cohorts ran glm/kimi/gpt via opencod
 
 - [x] **AC1** — ≥3 real multi-issue workloads (≥4 each) driven end-to-end by `sched`, all-full-cycle detached: W1 (4 issues, 4/4 merged), W2 (4 issues: 2 merged via re-drives after quota walls, 1 merged, 1 external watcher-block), W3 (4 issues: 3 merged, 1 correct human hand-off). Every unit was dispatched, supervised, and driven to a terminal state by the scheduler.
 - [x] **AC2** — metrics recorded per workload: occupancy (§3.1, §3.2, §3.3 — >90% target met on both clean windows), un-tailed merges 0 (with teardown/report defect precision), stall recoveries (3 triggered by genuine stalls/exits, all recovered to merges; the quota-wall burns are D8, separated out), wall-clock vs fleet baselines (§4.3).
-- [x] **AC3** — token/duration data aggregated from `~/.dossier/runs.jsonl` on every execution host: the every-host read was performed by the wls supervisor session (hcc2 lacks outbound credentials) and posted on this issue — the table is incorporated in §2.5, citing [the comment](https://github.com/imboard-ai/ai-dossier/issues/471#issuecomment-5470422534). Reading: wls had zero cohort-relevant runs; hcc's 2 in-window imboard entries are the #3856 fleet tail (immaterial at 2-vs-191, outside both comparison cohorts); hcc2 (both arms' host) carried 209 in-window entries at 100% telemetry on CLI 0.19.0 ≥ 0.13.0. Token values are null in runs.jsonl on all hosts for this window (opencode-spawned runs don't log them) — the agent CLIs' own usage records are the only token source and were used for both arms.
+- [x] **AC3** — token/duration data aggregated from `~/.dossier/runs.jsonl` on every execution host: the every-host read was performed by the dev machine supervisor session (the runner host lacks outbound credentials) and posted on this issue — the table is incorporated in §2.5, citing [the comment](https://github.com/imboard-ai/ai-dossier/issues/471#issuecomment-5470422534). Reading: dev machine had zero cohort-relevant runs; second host's 2 in-window imboard entries are the #3856 fleet tail (immaterial at 2-vs-191, outside both comparison cohorts); the runner host (both arms' host) carried 209 in-window entries at 100% telemetry on CLI 0.19.0 ≥ 0.13.0. Token values are null in runs.jsonl on all hosts for this window (opencode-spawned runs don't log them) — the agent CLIs' own usage records are the only token source and were used for both arms.
 - [x] **AC4** — every divergence filed and linked: D1–D10 → #495, #496, #497, #500, #501, #502, #505, #506, #507 (9 issues; one operational note, D4, carries no issue by design — the state machine reconciled correctly, so it is not a state-machine divergence).
 - [x] **AC5** — this report, with the §Recommendation go/no-go.
 
@@ -233,8 +233,8 @@ Model heterogeneity caveat (§6): the fleet cohorts ran glm/kimi/gpt via opencod
 
 ## 6. Limitations
 
-- **Multi-host runs.jsonl aggregation**: this run executes on `hcc2` and has no outbound SSH credentials to `wls`/`hcc` (verified: no keys, publickey denied, no VPN) — the cross-host read was instead performed by the wls supervisor session, which pulled all three hosts' runs.jsonl and posted the aggregation on this issue (incorporated in §2.5, AC3 met). The fleet baselines selected for comparison were verified (via FLEET-PLAN logs + runs.jsonl `cwd` entries) to have executed on `hcc2` as well, so no arm is undercounted. Fleet B (the claude-model cohort) executed on a different host entirely — its tokens are unreachable from hcc2.
-- **runs.jsonl does not carry fleet-agent token usage** (fleet subagents are opencode background agents; runs.jsonl logs their nested dossier fetches only — `input_tokens`/`output_tokens` are null on **all three hosts** for the measured window, per the cross-host aggregation in §2.5). Token data therefore comes from the agent CLIs' own records: claude result-JSON (sched arm, W1/W2) and opencode session streams (fleet A + sched W3). The fleet-baseline window (from Aug 28) also opened before hcc2's CLI upgrade — hcc2's earliest telemetry entry is 2026-08-29T09:29Z.
+- **Multi-host runs.jsonl aggregation**: this run executes on the runner host and has no outbound SSH credentials to the dev machine and the second host (verified: no keys, publickey denied, no VPN) — the cross-host read was instead performed by the dev machine supervisor session, which pulled all three hosts' runs.jsonl and posted the aggregation on this issue (incorporated in §2.5, AC3 met). The fleet baselines selected for comparison were verified (via FLEET-PLAN logs + runs.jsonl `cwd` entries) to have executed on the runner host as well, so no arm is undercounted. Fleet B (the claude-model cohort) executed on a different host entirely — its tokens are unreachable from the runner host.
+- **runs.jsonl does not carry fleet-agent token usage** (fleet subagents are opencode background agents; runs.jsonl logs their nested dossier fetches only — `input_tokens`/`output_tokens` are null on **all three hosts** for the measured window, per the cross-host aggregation in §2.5). Token data therefore comes from the agent CLIs' own records: claude result-JSON (sched arm, W1/W2) and opencode session streams (fleet A + sched W3). The fleet-baseline window (from Aug 28) also opened before the runner host's CLI upgrade — the runner host's earliest telemetry entry is 2026-08-29T09:29Z.
 - **Model heterogeneity**: W1/W2 ran claude tiers (sonnet/opus/haiku); W3 + re-drives ran glm-latest/kimi-latest via opencode/openrouter (quota walls forced the mid-validation switch, §D8); Fleet A ran glm/kimi/gpt, Fleet B ran claude on another host. Occupancy and un-tailed merges are model-independent; latency and cost comparisons carry the caveat (the W3/re-drive rows are the model-matched ones).
 - **W3's composite occupancy** is not meaningful across operator state-resets (D7's workaround); clean-window occupancy is reported for W1/W2, refill-latency evidence for W3 (§3.3).
 - **Issue-size mix** differs from the fleet cohorts (walker-found UI bugs and small backend fixes vs the fleets' broader mix); per-issue latency comparisons are indicative, not controlled.
@@ -243,7 +243,7 @@ Model heterogeneity caveat (§6): the fleet cohorts ran glm/kimi/gpt via opencod
 ## 7. Appendix — evidence
 
 - Sched journal (every decision, verbatim): `docs/reports/evidence/sched-events-w1.jsonl` (W1 snapshot, 63 events) and `docs/reports/evidence/sched-events-final.jsonl` (the complete journal, 403 events) — the machine-readable record behind every §3 claim; two corrupt-state artifacts (`state.json.corrupt-duplicate-3889` evidencing #502, `state.json.corrupt-ladder-burn` from the #506 cascade window) are committed alongside.
-- Per-agent output: `docs/reports/evidence/agent-logs-summary.md` — every claude result (usage/cost/turns/duration) and opencode API error, condensed per unit; the full raw streams remain on hcc2 at `~/.dossier/sched/imboard-ai-imboard-monorepo/runs/issue-<n>.log`.
+- Per-agent output: `docs/reports/evidence/agent-logs-summary.md` — every claude result (usage/cost/turns/duration) and opencode API error, condensed per unit; the full raw streams remain on the runner host at `~/.dossier/sched/imboard-ai-imboard-monorepo/runs/issue-<n>.log`.
 - Fleet baselines: `~/.dossier/logs/fleet-cycle/imboard-ai-imboard-monorepo/FLEET-PLAN-*.md.gz` (12 plans), runstate trails via `ai-dossier runstate stats --issues … --repo imboard-ai/imboard-monorepo --json`, opencode session-DB token attribution (Fleet A ≈ $52.72 for the 5 completed core members).
 - Operational trail: this issue's runstate milestones (gate → setup → plan → implement) and the imboard issues' own trails (#3810, #3862, #3886, #3891, #3433, #3408, #3824, #3889, #3890, #3500 merged with full runstate histories; #3414 decision-pending hand-off; #3756's PR #3927 left for human disposition).
 - Filed issues: #495, #496, #497, #500, #501, #502, #505, #506, #507.

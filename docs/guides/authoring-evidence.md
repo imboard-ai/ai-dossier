@@ -63,7 +63,7 @@ An evidence sidecar is a JSON document keyed by the dossier's checksum:
           "provider": "claude-code",
           "session": "5a718af0-4e3c-4d6b-a7e1-e73bd3358ab4",
           "event": "toolu_01VrzBkULS3kxqPYzvbcke65",
-          "host": "wls",
+          "host": "dev-machine",
           "extra": { "ctx_session": "…", "ctx_event": "…" }
         }
       ]

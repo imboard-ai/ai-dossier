@@ -1,18 +1,18 @@
 import { getCollection } from 'astro:content';
+import { isInternalDoc } from './docs-links.mjs';
 import { titleOf } from './docs-nav';
 import { docDescription } from './seo.mjs';
 
 // Groups whose pages are the "core" docs surfaced in llms.txt and concatenated in llms-full.txt.
 // Everything else is listed under Optional in llms.txt; internal notes are left out entirely.
 const CORE_GROUPS = ['getting-started', 'explanation', 'reference'];
-const SKIP = /^(reports|agent-traps|contributing\/mcp|explanation\/infrastructure-lessons)(\/|$)/;
 
 const rank = (id: string) =>
   id === 'index' ? -1 : CORE_GROUPS.indexOf(id.split('/')[0]) + 1 || CORE_GROUPS.length + 1;
 
 export async function llmsDocs() {
   const entries = (await getCollection('docs'))
-    .filter((e) => !SKIP.test(e.id))
+    .filter((e) => !isInternalDoc(e.id))
     .sort((a, b) => rank(a.id) - rank(b.id) || a.id.localeCompare(b.id));
   const rows = entries.map((e) => {
     const title = titleOf(e.id, e.body);
