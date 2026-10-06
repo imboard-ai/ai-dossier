@@ -469,10 +469,12 @@ Fixtures with known bugs live in `fixtures/ecosystem/`. CI self-checks them
 
 ## Fork-side GitHub credential broker
 
-`src/github/` is the only code that holds GitHub credentials. It is controller-only:
-the package index does not export it, and `src/github/__tests__/isolation.test.ts`
-fails if any module outside `src/github/` (including the worker broker) can reach it
-through an import chain. Import it by path from trusted controller code.
+`src/github/broker.ts`, `app-auth.ts` and `token-journal.ts` are the only code that
+holds GitHub credentials (the hand-off modules beside them are credential-free). They
+are controller-only: the package index does not export them, and
+`src/github/__tests__/isolation.test.ts` fails if any other module, including the index,
+the hand-off modules and the worker broker, can reach them through an import chain.
+Import them by path from trusted controller code.
 
 Under the hybrid hand-off ([decision record](../../docs/features/zero-trust-full-cycle/decisions/github-credentials.md))
 the broker performs fork pushes only. Upstream comments and PRs are contributor

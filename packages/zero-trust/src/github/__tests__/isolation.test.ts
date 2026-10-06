@@ -1,12 +1,18 @@
-/** AC8: the credential broker is controller-only. No module outside src/github/,
- * including the package index and the worker broker under src/vm/, may reach it
- * through any chain of static or dynamic imports. */
+/** AC8: the credential broker is controller-only. No module outside the
+ * credential-holding set, including the package index, the credential-free
+ * hand-off modules beside it in src/github/ and the worker broker under src/vm/,
+ * may reach it through any chain of static or dynamic imports. */
 import fs from 'node:fs';
 import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const SRC = path.resolve(__dirname, '../..');
 const GITHUB = path.join(SRC, 'github');
+/** The only modules that hold or handle GitHub credentials. */
+const CREDENTIAL = ['broker.ts', 'app-auth.ts', 'token-journal.ts'].map((name) =>
+  path.join(GITHUB, name)
+);
+const isCredential = (file: string) => CREDENTIAL.includes(file);
 
 function sources(dir: string): string[] {
   return fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
@@ -49,22 +55,18 @@ function reaches(entry: string): string[] {
 }
 
 describe('credential broker isolation', () => {
-  const outside = sources(SRC).filter((file) => !file.startsWith(`${GITHUB}${path.sep}`));
+  const outside = sources(SRC).filter((file) => !isCredential(file));
 
-  it('scans the package index and every non-broker module', () => {
+  it('scans the package index and every non-credential module', () => {
+    for (const file of CREDENTIAL) expect(fs.existsSync(file)).toBe(true);
     expect(outside).toContain(path.join(SRC, 'index.ts'));
     expect(outside.length).toBeGreaterThan(10);
   });
 
   it.each(
-    sources(SRC)
-      .filter((file) => !file.startsWith(`${GITHUB}${path.sep}`))
-      .map((file) => [path.relative(SRC, file)])
-  )('%s cannot reach src/github/', (relative) => {
-    const reached = reaches(path.join(SRC, relative)).filter((file) =>
-      file.startsWith(`${GITHUB}${path.sep}`)
-    );
-    expect(reached).toEqual([]);
+    outside.map((file) => [path.relative(SRC, file)])
+  )('%s cannot reach the credential broker', (relative) => {
+    expect(reaches(path.join(SRC, relative)).filter(isCredential)).toEqual([]);
   });
 
   it('detects a violation (self-check of the scanner)', () => {
