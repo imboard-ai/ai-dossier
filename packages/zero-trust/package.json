@@ -16,6 +16,10 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage"
   },
+  "dependencies": {
+    "@ai-dossier/core": "^1.14.4",
+    "ajv": "^8.18.0"
+  },
   "devDependencies": {
     "@types/node": "^24.10.0",
     "@vitest/coverage-v8": "^4.0.9",

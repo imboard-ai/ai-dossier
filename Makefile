@@ -69,7 +69,7 @@ build-sched: build-core build-pool
 	@echo "✓ packages/sched built"
 
 ## build-zero-trust: Build private provider-independent zero-trust foundation
-build-zero-trust:
+build-zero-trust: build-core
 	@echo "Building packages/zero-trust..."
 	cd packages/zero-trust && npm run build
 	@echo "✓ packages/zero-trust built"
