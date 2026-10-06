@@ -115,7 +115,7 @@ export function handoffMarker(input: IntentInput): string {
 }
 
 const MARKER =
-  /<!-- ai-dossier:ztfc contribution=([A-Za-z0-9_-]{1,128}) intent=([a-f0-9]{32}) op=(engagement_comment|pr_create) -->/gu;
+  /<!-- ai-dossier:ztfc contribution=([A-Za-z0-9_-]{1,128}) intent=([a-f0-9]{32}) op=(engagement_comment|pr_create|pr_update|pr_close) -->/gu;
 
 /** Every marker in a body; a reconciler accepts only exactly one, equal to its own. */
 export function findHandoffMarkers(text: string): string[] {

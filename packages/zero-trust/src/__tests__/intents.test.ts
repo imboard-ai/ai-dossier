@@ -48,7 +48,7 @@ const BROKERED = OPERATION_KINDS.filter((kind) => !CONTRIBUTOR_CONFIRMED_OPERATI
 const input: IntentInput = {
   contributionId: 'c-1',
   target: 'o/r/pulls',
-  operationKind: 'pr_update',
+  operationKind: 'fork_ensure',
   candidateSha: sha,
 };
 const dirs: string[] = [];
@@ -166,7 +166,7 @@ describe('durable provider-independent write intents', () => {
       ...input,
       get operationKind() {
         kindReads++;
-        return kindReads === 1 ? ('pr_update' as const) : ('push_branch' as const);
+        return kindReads === 1 ? ('fork_ensure' as const) : ('push_branch' as const);
       },
     };
     let refReads = 0;
@@ -302,7 +302,7 @@ describe('durable provider-independent write intents', () => {
     expect(replayIntents(j.read())).toEqual(d.snapshot());
   });
   it.each([
-    'pr_update',
+    'fork_ensure',
     'push_branch',
   ] as const)('lost %s response resumes without duplicate artifacts (11/16/18)', async (operationKind) => {
     const dir = directory();
@@ -351,7 +351,12 @@ describe('durable provider-independent write intents', () => {
   it.each(
     CONTRIBUTOR_CONFIRMED_OPERATIONS
   )('refuses brokered %s fail-closed before journaling or the adapter (hybrid hand-off)', async (operationKind) => {
-    expect(CONTRIBUTOR_CONFIRMED_OPERATIONS).toEqual(['engagement_comment', 'pr_create']);
+    expect(CONTRIBUTOR_CONFIRMED_OPERATIONS).toEqual([
+      'engagement_comment',
+      'pr_create',
+      'pr_update',
+      'pr_close',
+    ]);
     for (const current of [gating, run]) {
       const fake = new FakeAdapter();
       const j = journal();
@@ -564,7 +569,7 @@ describe('durable provider-independent write intents', () => {
     const d = driver(j, fake);
     for (const patch of [
       { operationKind: 'delete' },
-      { candidateSha: null },
+      { operationKind: 'push_branch', candidateSha: null },
       { candidateSha: 'short' },
       { target: '' },
       { contributionId: 'other' },

@@ -273,6 +273,8 @@ function reduce(state: HandoffState | undefined, raw: unknown): HandoffState {
     const key = idempotencyKey(input);
     const binding = bindingFor(state.run, input, raw.binding);
     if (
+      // PR edits, close and reopen are `PrTracker` hand-offs, never this driver's.
+      (operationKind !== 'pr_create' && operationKind !== 'engagement_comment') ||
       input.contributionId !== state.contributionId ||
       handoffs.has(key) ||
       pendingOf(state) ||

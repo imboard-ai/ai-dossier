@@ -54,7 +54,7 @@ export type AmbiguityReason =
 type Ambiguous = { readonly kind: 'ambiguous'; readonly reason: AmbiguityReason };
 
 /** Lists every page or reports unknown; a truncated listing is never treated as complete. */
-async function listAll(
+export async function listAll(
   read: GitHubRead,
   path: string,
   maxPages: number
@@ -109,12 +109,26 @@ export type PrObservation =
   | Ambiguous
   | Unknown;
 
-/** One match persists; zero keeps waiting; several, or one without the marker, hands off. */
-export async function reconcilePr(
+/** One validated PR from the head+base listing. */
+export interface ListedPull {
+  readonly number: number;
+  readonly url: string;
+  readonly state: 'open' | 'closed';
+  readonly merged: boolean;
+  readonly headSha: string;
+  readonly body: string | null;
+  /** Lowercased author login, or null when GitHub did not say. */
+  readonly author: string | null;
+  /** The head repository no longer resolves (fork deleted or renamed). */
+  readonly headRepoGone: boolean;
+}
+
+/** Every PR on exactly this head and base, in any state, or null when the listing is
+ * unreadable, truncated, malformed, or answers outside the requested head/base. */
+export async function listPulls(
   read: GitHubRead,
-  binding: PrBinding,
-  expected: PrExpectation
-): Promise<PrObservation> {
+  binding: PrBinding
+): Promise<ListedPull[] | null> {
   const b = prBinding(binding);
   const repo = `${enc(b.upstream.owner)}/${enc(b.upstream.repo)}`;
   const items = await listAll(
@@ -122,9 +136,9 @@ export async function reconcilePr(
     `/repos/${repo}/pulls?state=all&head=${enc(`${b.headOwner}:${b.branch}`)}&base=${enc(b.base)}`,
     MAX_PR_PAGES
   );
-  if (!items) return { kind: 'unknown' };
+  if (!items) return null;
   const prefix = `https://github.com/${b.upstream.owner}/${b.upstream.repo}/pull/`.toLowerCase();
-  const pulls = [];
+  const pulls: ListedPull[] = [];
   for (const item of items) {
     const pr = obj(item);
     const head = obj(pr?.head);
@@ -141,7 +155,7 @@ export async function reconcilePr(
       (pr.state !== 'open' && pr.state !== 'closed') ||
       (pr.body !== null && typeof pr.body !== 'string')
     )
-      return { kind: 'unknown' };
+      return null;
     // GitHub answered outside the requested head/base: do not trust the listing.
     if (
       typeof head.label !== 'string' ||
@@ -149,30 +163,57 @@ export async function reconcilePr(
       head.ref !== b.branch ||
       base.ref !== b.base
     )
-      return { kind: 'unknown' };
-    pulls.push({ pr, headSha: head.sha });
+      return null;
+    pulls.push({
+      number: pr.number as number,
+      url: pr.html_url,
+      state: pr.state,
+      merged: typeof pr.merged_at === 'string',
+      headSha: head.sha,
+      body: pr.body as string | null,
+      author: login(pr.user),
+      headRepoGone: head.repo === null,
+    });
   }
+  return pulls;
+}
+
+/** One match persists; zero keeps waiting; several, or one without the marker, hands off. */
+export async function reconcilePr(
+  read: GitHubRead,
+  binding: PrBinding,
+  expected: PrExpectation
+): Promise<PrObservation> {
+  const b = prBinding(binding);
+  const pulls = await listPulls(read, b);
+  if (!pulls) return { kind: 'unknown' };
   if (pulls.length === 0)
     return expected.issuedAt
-      ? findOrphan(read, repo, b.base, expected.marker, expected.issuedAt)
+      ? findOrphan(
+          read,
+          `${enc(b.upstream.owner)}/${enc(b.upstream.repo)}`,
+          b.base,
+          expected.marker,
+          expected.issuedAt
+        )
       : { kind: 'absent' };
   if (pulls.length > 1) return { kind: 'ambiguous', reason: 'multiple_matches' };
-  const [{ pr, headSha }] = pulls;
+  const [pr] = pulls as [ListedPull];
   // A deleted fork leaves `head.repo` null: the head can no longer be verified.
-  if (obj(pr.head)?.repo === null) return { kind: 'ambiguous', reason: 'fork_unverifiable' };
+  if (pr.headRepoGone) return { kind: 'ambiguous', reason: 'fork_unverifiable' };
   if (!hasOnlyMarker(pr.body, expected.marker))
     return { kind: 'ambiguous', reason: 'marker_missing' };
-  if (login(pr.user) !== expected.contributor.toLowerCase())
+  if (pr.author !== expected.contributor.toLowerCase())
     return { kind: 'ambiguous', reason: 'foreign_author' };
-  const url = pr.html_url as string;
-  if (headSha !== expected.candidateSha) return { kind: 'head_mismatch', url, headSha };
+  if (pr.headSha !== expected.candidateSha)
+    return { kind: 'head_mismatch', url: pr.url, headSha: pr.headSha };
   return {
     kind: 'found',
-    url,
-    number: pr.number as number,
-    headSha,
-    state: pr.state as 'open' | 'closed',
-    merged: typeof pr.merged_at === 'string',
+    url: pr.url,
+    number: pr.number,
+    headSha: pr.headSha,
+    state: pr.state,
+    merged: pr.merged,
   };
 }
 
