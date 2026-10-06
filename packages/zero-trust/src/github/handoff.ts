@@ -2,7 +2,7 @@
  * head come only from the controller binding; every prefilled field is untrusted text
  * that is URL-encoded and bounded and cannot move the target. */
 import { createHash } from 'node:crypto';
-import { type IntentInput, idempotencyKey } from '../intents';
+import { CONTRIBUTOR_CONFIRMED_OPERATIONS, type IntentInput, idempotencyKey } from '../intents';
 import type { CommandEvidence } from '../receipt/schema';
 import { assertNoSecrets } from '../redaction';
 import { assertContentPolicy, HandoffError, untrustedText } from './text';
@@ -14,7 +14,8 @@ export const MAX_PREFILL_URL_LENGTH = 8000;
 export const MAX_PR_TITLE_LENGTH = 256;
 /** GitHub's maximum issue/PR/comment body length. */
 export const MAX_BODY_LENGTH = 65536;
-export const HANDOFF_OPERATIONS = Object.freeze(['engagement_comment', 'pr_create'] as const);
+/** The operations `IntentDriver.execute` refuses: one list, so the two cannot drift. */
+export const HANDOFF_OPERATIONS = CONTRIBUTOR_CONFIRMED_OPERATIONS;
 export type HandoffOperation = (typeof HANDOFF_OPERATIONS)[number];
 
 export interface RepoBinding {
@@ -40,6 +41,10 @@ export function isGitHubLogin(value: unknown): value is string {
   return typeof value === 'string' && OWNER.test(value);
 }
 
+export function isRepoName(value: unknown): value is string {
+  return typeof value === 'string' && REPO.test(value) && value !== '.' && value !== '..';
+}
+
 /** A strict subset of git ref names, so a ref can never carry URL syntax. */
 export function isSafeRef(value: unknown): value is string {
   return (
@@ -51,15 +56,7 @@ export function isSafeRef(value: unknown): value is string {
 
 function repoBinding(value: unknown): RepoBinding {
   const v = value as RepoBinding;
-  if (
-    typeof v !== 'object' ||
-    v === null ||
-    !isGitHubLogin(v.owner) ||
-    typeof v.repo !== 'string' ||
-    !REPO.test(v.repo) ||
-    v.repo === '.' ||
-    v.repo === '..'
-  )
+  if (typeof v !== 'object' || v === null || !isGitHubLogin(v.owner) || !isRepoName(v.repo))
     throw new HandoffError('invalid_binding');
   return Object.freeze({ owner: v.owner, repo: v.repo });
 }

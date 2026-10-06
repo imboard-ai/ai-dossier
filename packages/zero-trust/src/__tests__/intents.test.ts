@@ -307,12 +307,11 @@ describe('durable provider-independent write intents', () => {
     const fake = new FakeAdapter();
     fake.mode = 'lost';
     const j = journal(dir);
-    const current = run;
-    const d = driver(j, fake, current);
+    const d = driver(j, fake, run);
     const op = { ...input, operationKind };
     await expect(d.execute(op)).rejects.toBeInstanceOf(MutationUncertainError);
     j.close();
-    const restored = driver(journal(dir), fake, current);
+    const restored = driver(journal(dir), fake, run);
     await restored.resume();
     expect(await restored.execute(op)).toBe('artifact-1');
     expect(fake.writes).toBe(1);
@@ -361,7 +360,9 @@ describe('durable provider-independent write intents', () => {
         operationKind,
         candidateSha: operationKind === 'engagement_comment' ? null : sha,
       };
-      expect(() => d.execute(op)).toThrow(IntentError);
+      expect(() => d.execute(op)).toThrow(
+        expect.objectContaining({ name: 'IntentError', code: 'contributor_confirmed' })
+      );
       expect(fs.readFileSync(j.filePath, 'utf8')).toBe(before);
       expect(fake.writes + fake.reads).toBe(0);
       // The refusal does not latch the driver: brokered kinds still work.

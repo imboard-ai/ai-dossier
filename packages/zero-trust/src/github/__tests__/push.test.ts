@@ -23,6 +23,7 @@ import {
 import { Journal } from '../../journal';
 import { issueReceipt, type ReceiptInput, type SignedReceipt } from '../../receipt/issue';
 import { ReceiptNonceStore } from '../../receipt/nonces';
+import { ReceiptError } from '../../receipt/schema';
 import type { ReceiptContext } from '../../receipt/verify';
 import { createRun, ReasonCode, transitionRun } from '../../state';
 import { AppCredentials } from '../app-auth';
@@ -124,16 +125,21 @@ const C2 = candidateWith('rebased revision\n');
 const SHA1 = C1.record.candidateSha;
 const SHA2 = C2.record.candidateSha;
 
+const FORK_GIT_ENV = {
+  PATH: '/usr/bin:/bin',
+  GIT_CONFIG_NOSYSTEM: '1',
+  GIT_CONFIG_GLOBAL: '/dev/null',
+};
 /** The contributor fork: a local bare repository. */
 class Fork {
   readonly dir = temp('zt-fork-');
   constructor() {
     this.git(['init', '--bare', '--quiet']);
   }
-  git(args: string[], input?: Buffer): string {
+  git(args: string[], input?: Buffer | string, extraEnv: Record<string, string> = {}): string {
     return execFileSync('/usr/bin/git', ['--git-dir', this.dir, ...args], {
       input,
-      env: { PATH: '/usr/bin:/bin', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' },
+      env: { ...FORK_GIT_ENV, ...extraEnv },
     })
       .toString()
       .trim();
@@ -149,24 +155,12 @@ class Fork {
   outOfBand(branch = BRANCH): string {
     this.git(['index-pack', '--stdin'], BASE.pack);
     const tree = this.git(['rev-parse', `${BASE.baseSha}^{tree}`]);
-    const sha = execFileSync(
-      '/usr/bin/git',
-      ['--git-dir', this.dir, 'commit-tree', tree, '-p', BASE.baseSha],
-      {
-        input: 'out of band\n',
-        env: {
-          PATH: '/usr/bin:/bin',
-          GIT_CONFIG_NOSYSTEM: '1',
-          GIT_CONFIG_GLOBAL: '/dev/null',
-          GIT_AUTHOR_NAME: 'Other',
-          GIT_AUTHOR_EMAIL: 'other@example.org',
-          GIT_COMMITTER_NAME: 'Other',
-          GIT_COMMITTER_EMAIL: 'other@example.org',
-        },
-      }
-    )
-      .toString()
-      .trim();
+    const sha = this.git(['commit-tree', tree, '-p', BASE.baseSha], 'out of band\n', {
+      GIT_AUTHOR_NAME: 'Other',
+      GIT_AUTHOR_EMAIL: 'other@example.org',
+      GIT_COMMITTER_NAME: 'Other',
+      GIT_COMMITTER_EMAIL: 'other@example.org',
+    });
     this.git(['update-ref', `refs/heads/${branch}`, sha]);
     return sha;
   }
@@ -296,13 +290,25 @@ async function authorization(g: Grant): Promise<ShippingAuthorization> {
   return { receipt, context, candidate: g.candidate };
 }
 
+/** Pushes to the local bare repository instead of github.com; nothing else differs. */
+class LocalForkPusher extends ForkPusher {
+  constructor(
+    options: ConstructorParameters<typeof ForkPusher>[0],
+    private readonly bare: string
+  ) {
+    super(options);
+  }
+  protected override remote(): { url: string; config: readonly string[] } {
+    return { url: `file://${this.bare}`, config: ['protocol.file.allow=always'] };
+  }
+}
+
 /** One controller process: intent journal, broker, nonce store, push ledger, pusher. */
 class Rig {
   readonly fork: Fork;
   readonly fake = new GitHubFake(Date.now);
   readonly dirs: { intents: string; tokens: string; nonces: string; pushes: string };
   readonly grants: Grant[] = [];
-  readonly sleeps: number[] = [];
   driver!: IntentDriver;
   broker!: ForkCredentialBroker;
   pusher!: ForkPusher;
@@ -332,26 +338,25 @@ class Rig {
     });
     expect((await this.broker.recover()).admitted).toBe(true);
     this.ledger = journal(this.dirs.pushes);
-    this.pusher = new ForkPusher({
-      broker: {
-        withForkPush: (...args) =>
-          this.wrap(this.broker.withForkPush.bind(this.broker) as never)(...args),
+    this.pusher = new LocalForkPusher(
+      {
+        broker: {
+          withForkPush: (...args) =>
+            this.wrap(this.broker.withForkPush.bind(this.broker) as never)(...args),
+        },
+        read: this.fork.read,
+        fork: FORK,
+        ledger: this.ledger,
+        trustedControllerKey: publicKey,
+        nonces: new ReceiptNonceStore(this.dirs.nonces),
+        authorize: async () => {
+          const grant = this.grants.shift();
+          if (!grant) throw new Error('no authorization prepared');
+          return authorization(grant);
+        },
       },
-      read: this.fork.read,
-      fork: FORK,
-      ledger: this.ledger,
-      trustedControllerKey: publicKey,
-      nonces: new ReceiptNonceStore(this.dirs.nonces),
-      authorize: async () => {
-        const grant = this.grants.shift();
-        if (!grant) throw new Error('no authorization prepared');
-        return authorization(grant);
-      },
-      sleep: async (ms) => {
-        this.sleeps.push(ms);
-      },
-      localRemote: this.fork.dir,
-    });
+      this.fork.dir
+    );
     this.driver = new IntentDriver(
       journal(this.dirs.intents),
       this.pusher,
@@ -384,7 +389,7 @@ describe('verified CAS push to the fork (#1066)', () => {
       if (p.includes('/git/ref/') && r.fork.refReads() === 1) ledgerAtPreflight = r.events();
       return undefined;
     });
-    const exec = vi.spyOn(TrustedGit.prototype, 'exec');
+    const exec = vi.spyOn(TrustedGit.prototype, 'execAsync');
     expect(r.pusher.expectedRemoteSha(pushOf(SHA1))).toBeNull();
     const ref = await r.driver.execute(pushOf(SHA1));
     expect(ref).toBe(`${TARGET}@${SHA1}`);
@@ -433,7 +438,9 @@ describe('verified CAS push to the fork (#1066)', () => {
     const r = await rig();
     const other = r.fork.outOfBand();
     r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
-    await expect(r.driver.execute(pushOf(SHA1))).rejects.toThrow(WriteBlockedError);
+    const error = await r.driver.execute(pushOf(SHA1)).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(WriteBlockedError);
+    expect((error as Error).cause).toMatchObject({ detail: `expected=absent,observed=${other}` });
     expect(r.driver.snapshot().blockedReason).toBe('remote_diverged');
     expect(r.fork.sha()).toBe(other);
     expect(r.mints()).toBe(0);
@@ -517,7 +524,8 @@ describe('verified CAS push to the fork (#1066)', () => {
     r.wrap = (inner) => inner;
     await r.driver.resume();
     r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
-    await expect(r.driver.execute(pushOf(SHA1))).rejects.toThrow(WriteBlockedError);
+    const error = await r.driver.execute(pushOf(SHA1)).catch((e: unknown) => e);
+    expect((error as Error).cause).toMatchObject({ detail: 'replayed_nonce' });
     expect(r.driver.snapshot().blockedReason).toBe('authorization_refused');
     expect(r.fork.sha()).toBeNull();
     expect(r.mints()).toBe(0);
@@ -542,7 +550,7 @@ describe('verified CAS push to the fork (#1066)', () => {
     await r.driver.execute(pushOf(SHA1));
     // The rebased revision expects exactly the previously verified SHA.
     expect(r.pusher.expectedRemoteSha(pushOf(SHA2))).toBe(SHA1);
-    const exec = vi.spyOn(TrustedGit.prototype, 'exec');
+    const exec = vi.spyOn(TrustedGit.prototype, 'execAsync');
     r.grants.push({ candidate: C2, expected: SHA1, nonce: 'nonce-2' });
     expect(await r.driver.execute(pushOf(SHA2))).toBe(`${TARGET}@${SHA2}`);
     expect(r.fork.sha()).toBe(SHA2);
@@ -564,15 +572,36 @@ describe('verified CAS push to the fork (#1066)', () => {
     expect(r.mints()).toBe(1);
   });
 
-  it.each<[string, (g: Grant) => Grant]>([
-    ['wrong parent', (g) => ({ ...g, receipt: { parentSha: 'e'.repeat(40) } })],
-    ['wrong contributor', (g) => ({ ...g, receipt: { contributor: 'mallory' } })],
-    ['changed candidate SHA', (g) => ({ ...g, candidate: C2 })],
-    ['candidate on another parent', (g) => ({ ...g, context: { parentSha: 'e'.repeat(40) } })],
-    ['wrong fork', (g) => ({ ...g, receipt: { forkRepositoryId: FORK_ID + 1 } })],
-    ['wrong upstream', (g) => ({ ...g, receipt: { upstreamRepositoryId: UPSTREAM_ID + 1 } })],
+  it.each<[string, string, (g: Grant) => Grant]>([
+    [
+      'wrong parent',
+      'wrong_baseSha',
+      (g) => ({ ...g, receipt: { baseSha: 'e'.repeat(40), parentSha: 'e'.repeat(40) } }),
+    ],
+    [
+      'wrong contributor',
+      'wrong_contributor',
+      (g) => ({ ...g, receipt: { contributor: 'mallory' } }),
+    ],
+    ['changed candidate SHA', 'invalid_candidate', (g) => ({ ...g, candidate: C2 })],
+    [
+      'candidate on another parent',
+      'invalid_candidate',
+      (g) => ({ ...g, context: { parentSha: 'e'.repeat(40) } }),
+    ],
+    [
+      'wrong fork',
+      'wrong_forkRepositoryId',
+      (g) => ({ ...g, receipt: { forkRepositoryId: FORK_ID + 1 } }),
+    ],
+    [
+      'wrong upstream',
+      'wrong_upstreamRepositoryId',
+      (g) => ({ ...g, receipt: { upstreamRepositoryId: UPSTREAM_ID + 1 } }),
+    ],
     [
       'unverified candidate (failed check)',
+      'unverified',
       (g) => ({
         ...g,
         receipt: {
@@ -590,11 +619,17 @@ describe('verified CAS push to the fork (#1066)', () => {
         },
       }),
     ],
-    ['policy denies shipping', (g) => ({ ...g, context: { policyPermitsShipping: false } })],
-  ])('refuses %s before minting a token (scenarios 10/17, AC1/AC7)', async (_name, mutate) => {
+    [
+      'policy denies shipping',
+      'policy_denied',
+      (g) => ({ ...g, context: { policyPermitsShipping: false } }),
+    ],
+  ])('refuses %s before minting a token (scenarios 10/17, AC1/AC7)', async (_name, code, mutate) => {
     const r = await rig();
     r.grants.push(mutate({ candidate: C1, expected: null, nonce: 'nonce-1' }));
-    await expect(r.driver.execute(pushOf(SHA1))).rejects.toThrow(WriteBlockedError);
+    const error = await r.driver.execute(pushOf(SHA1)).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(WriteBlockedError);
+    expect((error as Error).cause).toMatchObject({ reason: 'authorization_refused', detail: code });
     expect(r.driver.snapshot().blockedReason).toBe('authorization_refused');
     expect(r.mints()).toBe(0);
     expect(r.fork.sha()).toBeNull();
@@ -616,26 +651,41 @@ describe('verified CAS push to the fork (#1066)', () => {
     ]);
   });
 
-  it('rides out a trailing read-back, then fails closed if it never shows the candidate', async () => {
+  it('reads back from the git server, so a trailing API read cannot fail a landed push', async () => {
     const r = await rig();
     r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
-    let lag = 1;
+    // The API keeps answering "absent" after the preflight; ls-remote sees the push.
     r.fork.overrides.push((p) =>
-      p.includes('/git/ref/') && r.fork.refReads() > 1 && lag-- > 0
-        ? { status: 404, body: null }
-        : undefined
+      p.includes('/git/ref/') && r.fork.refReads() > 1 ? { status: 404, body: null } : undefined
     );
     expect(await r.driver.execute(pushOf(SHA1))).toBe(`${TARGET}@${SHA1}`);
-    expect(r.sleeps).toEqual([1000]);
+    expect(r.fork.refReads()).toBe(1);
+  });
 
-    const stuck = await rig();
-    stuck.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
-    stuck.fork.overrides.push((p) =>
-      p.includes('/git/ref/') ? { status: 404, body: null } : undefined
-    );
-    await expect(stuck.driver.execute(pushOf(SHA1))).rejects.toThrow(MutationUncertainError);
-    expect(stuck.sleeps).toEqual([1000, 3000]);
-    expect(stuck.events()).toEqual(['push_intended']);
+  it('an aborted lease kills the push and leaves the attempt to reconciliation', async () => {
+    const r = await rig();
+    r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
+    r.wrap = (inner) => async (intent, target, operation, cancel) =>
+      inner(intent, target, (credential) => operation(credential, AbortSignal.abort()), cancel);
+    const error = await r.driver.execute(pushOf(SHA1)).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(MutationUncertainError);
+    expect((error as Error).cause).toMatchObject({ code: 'push_uncertain', detail: 'killed' });
+    expect(r.fork.sha()).toBeNull();
+    expect(r.events()).toEqual(['push_intended']);
+    // The remote still holds the expected value: the one retry is admitted.
+    await r.driver.resume();
+    expect(r.driver.snapshot().intents.get(idempotencyKey(pushOf(SHA1)))?.retryReady).toBe(true);
+  });
+
+  it('a nonce-store failure is not a refusal: the attempt stays ambiguous', async () => {
+    const r = await rig();
+    r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
+    vi.spyOn(ReceiptNonceStore.prototype, 'consume').mockImplementation(() => {
+      throw new ReceiptError('store_locked');
+    });
+    await expect(r.driver.execute(pushOf(SHA1))).rejects.toThrow(MutationUncertainError);
+    expect(r.driver.snapshot().blockedReason).toBeUndefined();
+    expect(r.mints()).toBe(0);
   });
 
   it('never pushes to a repository whose id is not the bound fork', async () => {
@@ -651,7 +701,7 @@ describe('verified CAS push to the fork (#1066)', () => {
 
   it('provides the hand-off read-back: verified SHA, null when absent, refused otherwise', async () => {
     const r = await rig();
-    const admission: HandoffAdmission['remoteBranchSha'] = () => r.pusher.remoteBranchSha(TARGET);
+    const admission: HandoffAdmission['remoteBranchSha'] = r.pusher.handoffReadBack(TARGET);
     expect(await admission()).toBeNull();
     r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
     await r.driver.execute(pushOf(SHA1));
@@ -663,26 +713,48 @@ describe('verified CAS push to the fork (#1066)', () => {
     );
   });
 
-  it('only handles push_branch and rejects a corrupt ledger', async () => {
+  it('only handles push_branch and rejects a corrupt or foreign ledger', async () => {
     const r = await rig();
+    const intended = {
+      v: 1,
+      type: 'push_intended',
+      key: 'k',
+      repositoryId: FORK_ID,
+      attempt: 1,
+      branch: BRANCH,
+      candidateSha: SHA1,
+      expectedRemoteSha: null,
+    };
     expect(() =>
       r.pusher.expectedRemoteSha({ ...pushOf(SHA1), operationKind: 'pr_update' })
     ).toThrow(ForkPushError);
     expect(() =>
-      replayPushes([
-        {
-          v: 1,
-          type: 'push_intended',
-          key: 'k',
-          attempt: 1,
-          branch: BRANCH,
-          candidateSha: SHA1,
-          expectedRemoteSha: null,
-        },
-        { v: 1, type: 'push_verified', key: 'k', branch: BRANCH, remoteSha: SHA2 },
-      ])
+      replayPushes(
+        [
+          intended,
+          {
+            v: 1,
+            type: 'push_verified',
+            key: 'k',
+            repositoryId: FORK_ID,
+            branch: BRANCH,
+            remoteSha: SHA2,
+          },
+        ],
+        FORK_ID
+      )
+    ).toThrow('invalid_ledger (event 1)');
+    expect(() =>
+      replayPushes([{ v: 1, type: 'push_forced', key: 'k', repositoryId: FORK_ID }], FORK_ID)
     ).toThrow(ForkPushError);
-    expect(() => replayPushes([{ v: 1, type: 'push_forced', key: 'k' }])).toThrow(ForkPushError);
+    // A ledger written for another fork never drives this one's lease or read-back.
+    expect(replayPushes([intended], FORK_ID).intended.size).toBe(1);
+    expect(() => replayPushes([intended], FORK_ID + 1)).toThrow(ForkPushError);
+    // A retry must repeat its first attempt's branch, candidate and expected SHA.
+    expect(() =>
+      replayPushes([intended, { ...intended, attempt: 2, expectedRemoteSha: SHA2 }], FORK_ID)
+    ).toThrow(ForkPushError);
+    expect(() => replayPushes([intended, intended], FORK_ID)).toThrow(ForkPushError);
   });
 });
 
@@ -735,5 +807,37 @@ describe('credential-free fork ref reads', () => {
         throw new Error('down');
       }, at)
     ).rejects.toThrow('ref_unknown');
+  });
+});
+
+describe('TrustedGit extra environment and config', () => {
+  it('accepts a broker credential env but refuses anything that could undo the hardening', () => {
+    const git = new TrustedGit();
+    try {
+      const credential = {
+        GIT_TERMINAL_PROMPT: '0',
+        GIT_CONFIG_NOSYSTEM: '1',
+        GIT_CONFIG_GLOBAL: '/dev/null',
+        GIT_TRACE_REDACT: '1',
+        GIT_CONFIG_COUNT: '1',
+        GIT_CONFIG_KEY_0: 'user.name',
+        GIT_CONFIG_VALUE_0: 'fixture',
+      };
+      expect(git.exec(['config', 'user.name'], { env: credential }).stdout.toString()).toBe(
+        'fixture\n'
+      );
+      for (const env of [
+        { GIT_DIR: '/tmp' },
+        { GIT_SSH_COMMAND: 'sh' },
+        { GIT_CONFIG_PARAMETERS: "'core.hooksPath'='.'" },
+        { GIT_CONFIG_GLOBAL: '/tmp/gitconfig' },
+        { PATH: '/tmp' },
+      ])
+        expect(() => git.exec(['version'], { env })).toThrow(TypeError);
+      for (const entry of ['protocol.allow=always', 'core.hooksPath=.', 'Credential.Helper=x'])
+        expect(() => git.exec(['version'], { config: [entry] })).toThrow(TypeError);
+    } finally {
+      git.close();
+    }
   });
 });

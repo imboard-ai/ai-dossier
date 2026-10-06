@@ -6,15 +6,14 @@
  * One attempt: authorize (verify the receipt, burn its single-use nonce) → persist branch,
  * candidate and expected remote SHA → preflight the remote ref → push exactly the candidate
  * with `--force-with-lease=refs/heads/<branch>:<expected>` under a broker lease → read the
- * ref back. Only a read-back equal to the candidate confirms the push. */
-import fs from 'node:fs';
-import path from 'node:path';
+ * ref back from the git server. Only a read-back equal to the candidate confirms the push. */
 import type { CanonicalCandidate } from '../canonical/reconstruct';
-import { TrustedGit } from '../canonical/trusted-git';
+import { type GitResult, TrustedGit } from '../canonical/trusted-git';
 import {
   type Intent,
   type IntentInput,
   idempotencyKey,
+  MAX_WRITE_ATTEMPTS,
   type MutationResult,
   type ReconcileResult,
   type WriteAdapter,
@@ -22,30 +21,47 @@ import {
 } from '../intents';
 import type { SignedReceipt } from '../receipt/issue';
 import type { ReceiptNonceStore } from '../receipt/nonces';
+import { ReceiptError } from '../receipt/schema';
 import { authorizeShipping, type ReceiptContext } from '../receipt/verify';
 import { isRecoveryEvent } from '../recovery';
 import { assertNoSecrets } from '../redaction';
+import { isRecord } from '../state';
 import type { ForkCredentialBroker } from './broker';
 import {
   type ForkBranch,
   ForkRefError,
   type ForkRepository,
+  isCommitSha,
   parseForkTarget,
   readForkBranch,
 } from './fork-ref';
+import type { HandoffAdmission } from './handoff-driver';
 import type { GitHubRead } from './reconcile';
+import type { TokenStore } from './token-journal';
 
-/** Re-reads while the remote still shows the expected SHA after git reported success:
- * GitHub's API can trail a push briefly. Exhausting them leaves the push ambiguous. */
-export const READ_BACK_DELAYS_MS: readonly number[] = Object.freeze([1000, 3000]);
 const PUSH_TIMEOUT_MS = 120_000;
-const SHA = /^[a-f0-9]{40}$/u;
+/** Nonce-store failures say nothing about the receipt: the attempt stays ambiguous, and
+ * reconciliation (remote still at the expected SHA) admits the one retry. */
+const STORE_FAILURES = Object.freeze([
+  'store_locked',
+  'persistence_uncertain',
+  'corrupt_store',
+  'missing_store',
+  'unsafe_store',
+]);
 
 export class ForkPushError extends Error {
   constructor(
-    readonly code: 'not_a_push' | 'invalid_ledger' | 'unverified_remote' | 'push_uncertain'
+    readonly code:
+      | 'not_a_push'
+      | 'invalid_candidate'
+      | 'invalid_ledger'
+      | 'unverified_remote'
+      | 'push_uncertain',
+    /** Secret-free: a git outcome (`rejected`, `killed`, …) or a ledger position. */
+    readonly detail?: string
   ) {
-    super(`Fork push refused: ${code}`);
+    super(`Fork push refused: ${code}${detail ? ` (${detail})` : ''}`);
     this.name = 'ForkPushError';
   }
 }
@@ -59,11 +75,8 @@ export interface ShippingAuthorization {
   readonly candidate: CanonicalCandidate;
 }
 
-/** A durable store of its own; satisfied by `Journal` in a controller directory. */
-export interface PushLedgerStore {
-  read(): unknown[];
-  append(event: unknown): void;
-}
+/** Its own durable store (a `Journal` in a controller directory), owned by one controller. */
+export type PushLedgerStore = TokenStore;
 
 export interface ForkPusherOptions {
   readonly broker: Pick<ForkCredentialBroker, 'withForkPush'>;
@@ -76,9 +89,6 @@ export interface ForkPusherOptions {
   /** Supplies the receipt, context and candidate for the attempt being made. */
   readonly authorize: (intent: Intent) => Promise<ShippingAuthorization>;
   readonly now?: () => number;
-  readonly sleep?: (ms: number) => Promise<void>;
-  /** Tests only: an absolute path to a local bare repository that stands in for the fork. */
-  readonly localRemote?: string;
 }
 
 interface Intended {
@@ -94,104 +104,126 @@ export interface PushLedger {
   readonly verified: ReadonlyMap<string, string>;
 }
 type PushEvent =
-  | ({ v: 1; type: 'push_intended'; key: string } & Intended)
-  | { v: 1; type: 'push_verified'; key: string; branch: string; remoteSha: string };
+  | ({ v: 1; type: 'push_intended'; key: string; repositoryId: number } & Intended)
+  | {
+      v: 1;
+      type: 'push_verified';
+      key: string;
+      repositoryId: number;
+      branch: string;
+      remoteSha: string;
+    };
 
-function invalid(): never {
-  throw new ForkPushError('invalid_ledger');
+function intendedValid(e: Record<string, unknown>, prior: Intended | undefined): boolean {
+  if (
+    !Number.isSafeInteger(e.attempt) ||
+    (e.attempt as number) < 1 ||
+    (e.attempt as number) > MAX_WRITE_ATTEMPTS ||
+    typeof e.branch !== 'string' ||
+    !isCommitSha(e.candidateSha) ||
+    !(e.expectedRemoteSha === null || isCommitSha(e.expectedRemoteSha))
+  )
+    return false;
+  // A retry repeats its first attempt's values exactly.
+  return (
+    !prior ||
+    (prior.attempt < (e.attempt as number) &&
+      prior.branch === e.branch &&
+      prior.candidateSha === e.candidateSha &&
+      prior.expectedRemoteSha === e.expectedRemoteSha)
+  );
 }
 
-export function replayPushes(events: readonly unknown[]): PushLedger {
+/** Replays one fork's ledger; an event for any other repository id is corruption. */
+export function replayPushes(events: readonly unknown[], repositoryId: number): PushLedger {
   const intended = new Map<string, Intended>();
   const verified = new Map<string, string>();
-  for (const raw of events) {
-    if (isRecoveryEvent(raw)) continue;
-    const e = raw as PushEvent;
-    if (typeof e !== 'object' || e === null || e.v !== 1 || typeof e.key !== 'string') invalid();
-    const prior = intended.get(e.key);
-    if (e.type === 'push_intended') {
+  events.forEach((e, index) => {
+    if (isRecoveryEvent(e)) return;
+    const invalid = () => {
+      throw new ForkPushError('invalid_ledger', `event ${index}`);
+    };
+    if (!isRecord(e) || e.v !== 1 || typeof e.key !== 'string' || e.repositoryId !== repositoryId)
+      invalid();
+    const event = e as Record<string, unknown> & { key: string };
+    const prior = intended.get(event.key);
+    if (event.type === 'push_intended') {
+      if (!intendedValid(event, prior)) invalid();
+      const { attempt, branch, candidateSha, expectedRemoteSha } = event as unknown as Intended;
+      intended.set(event.key, Object.freeze({ attempt, branch, candidateSha, expectedRemoteSha }));
+    } else if (event.type === 'push_verified') {
       if (
-        !Number.isSafeInteger(e.attempt) ||
-        e.attempt < 1 ||
-        e.attempt > 2 ||
-        (prior ? prior.attempt >= e.attempt : false) ||
-        typeof e.branch !== 'string' ||
-        typeof e.candidateSha !== 'string' ||
-        !SHA.test(e.candidateSha) ||
-        !(e.expectedRemoteSha === null || SHA.test(e.expectedRemoteSha ?? '')) ||
-        (prior &&
-          (prior.branch !== e.branch ||
-            prior.candidateSha !== e.candidateSha ||
-            prior.expectedRemoteSha !== e.expectedRemoteSha))
+        typeof event.branch !== 'string' ||
+        !isCommitSha(event.remoteSha) ||
+        (prior && (prior.branch !== event.branch || prior.candidateSha !== event.remoteSha))
       )
         invalid();
-      const { attempt, branch, candidateSha, expectedRemoteSha } = e;
-      intended.set(e.key, Object.freeze({ attempt, branch, candidateSha, expectedRemoteSha }));
-    } else if (e.type === 'push_verified') {
-      if (
-        typeof e.branch !== 'string' ||
-        typeof e.remoteSha !== 'string' ||
-        !SHA.test(e.remoteSha) ||
-        (prior && (prior.branch !== e.branch || prior.candidateSha !== e.remoteSha))
-      )
-        invalid();
-      verified.set(e.branch, e.remoteSha);
+      verified.set(event.branch as string, event.remoteSha as string);
     } else invalid();
-  }
+  });
   return { intended, verified };
+}
+
+/** Outcome of the push plus the server's own answer for the ref (`undefined`: unknown). */
+interface PushOutcome {
+  readonly git: 'pushed' | 'rejected' | 'failed' | 'killed';
+  readonly remote: string | null | undefined;
 }
 
 export class ForkPusher implements WriteAdapter {
   private readonly now: () => number;
-  private readonly sleep: (ms: number) => Promise<void>;
   constructor(private readonly options: ForkPusherOptions) {
-    if (options.localRemote !== undefined && !path.isAbsolute(options.localRemote))
-      throw new ForkPushError('not_a_push');
     this.now = options.now ?? Date.now;
-    this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
-    this.ledger();
+    // Fail closed at startup on a corrupt or foreign ledger.
+    this.snapshot();
   }
 
-  ledger(): PushLedger {
-    return replayPushes(this.options.ledger.read());
+  snapshot(): PushLedger {
+    return replayPushes(this.options.ledger.read(), this.options.fork.repositoryId);
   }
 
   private record(event: PushEvent): void {
     assertNoSecrets(JSON.stringify(event));
-    replayPushes([...this.options.ledger.read(), event]);
+    replayPushes([...this.options.ledger.read(), event], this.options.fork.repositoryId);
     this.options.ledger.append(event);
   }
 
-  private target(intent: Intent | IntentInput): ForkBranch {
-    if (intent.operationKind !== 'push_branch' || intent.candidateSha === null)
+  private target(intent: IntentInput): { at: ForkBranch; sha: string } {
+    if (intent.operationKind !== 'push_branch' || !isCommitSha(intent.candidateSha))
       throw new ForkPushError('not_a_push');
-    return parseForkTarget(intent.target, this.options.fork);
+    return { at: parseForkTarget(intent.target, this.options.fork), sha: intent.candidateSha };
   }
 
   /** Absent, or the SHA the last verified push left on this branch. A retry keeps the
    * value persisted by its first attempt. The controller puts this in the receipt grant. */
   expectedRemoteSha(intent: IntentInput): string | null {
-    const at = this.target(intent);
-    const ledger = this.ledger();
+    const { at } = this.target(intent);
+    const ledger = this.snapshot();
     const persisted = ledger.intended.get(idempotencyKey(intent));
     if (persisted) return persisted.expectedRemoteSha;
     return ledger.verified.get(at.branch) ?? null;
   }
 
-  /** `HandoffAdmission.remoteBranchSha` (#1067): the fork branch read back from the remote,
-   * null when absent. A present SHA that no verified push left there is refused. */
+  /** The fork branch read back from the remote, null when absent. A present SHA that no
+   * verified push left there is refused. */
   async remoteBranchSha(target: string): Promise<string | null> {
     const at = parseForkTarget(target, this.options.fork);
     const remote = await readForkBranch(this.options.read, at);
     if (remote === null) return null;
-    if (this.ledger().verified.get(at.branch) !== remote)
+    if (this.snapshot().verified.get(at.branch) !== remote)
       throw new ForkPushError('unverified_remote');
     return remote;
   }
 
+  /** `HandoffAdmission.remoteBranchSha` (#1067) for the PR hand-off of `target`. */
+  handoffReadBack(target: string): HandoffAdmission['remoteBranchSha'] {
+    parseForkTarget(target, this.options.fork);
+    return () => this.remoteBranchSha(target);
+  }
+
   /** Lost push response (scenario 18): the remote ref decides. */
   async reconcile(intent: Intent): Promise<ReconcileResult> {
-    const at = this.target(intent);
+    const { at, sha } = this.target(intent);
     const expected = this.expectedRemoteSha(intent);
     let remote: string | null;
     try {
@@ -200,54 +232,58 @@ export class ForkPusher implements WriteAdapter {
       if (error instanceof ForkRefError) return { kind: 'unknown' };
       throw error;
     }
-    if (remote === intent.candidateSha) return { kind: 'found', ...this.verified(intent, at) };
+    if (remote === sha) return { kind: 'found', ...this.verified(intent, at, sha) };
     // Nothing of ours landed: the driver admits exactly one retry.
     if (remote === expected) return { kind: 'absent' };
-    throw new WriteRefusedError('remote_diverged');
+    throw diverged(expected, remote);
   }
 
   async mutate(intent: Intent): Promise<MutationResult> {
-    const at = this.target(intent);
-    const sha = intent.candidateSha as string;
+    const { at, sha } = this.target(intent);
     const expected = this.expectedRemoteSha(intent);
-    const candidate = await this.admit(intent, expected);
+    const candidate = await this.admit(intent, sha, expected);
     // Write-ahead: a crash from here on is reconciled against these values.
     this.record({
       v: 1,
       type: 'push_intended',
       key: intent.key,
+      repositoryId: at.fork.repositoryId,
       attempt: intent.attempts,
       branch: at.branch,
       candidateSha: sha,
       expectedRemoteSha: expected,
     });
     const before = await readForkBranch(this.options.read, at);
-    if (before === sha) return this.verified(intent, at);
-    if (before !== expected) throw new WriteRefusedError('remote_diverged');
-    const status = await this.options.broker.withForkPush(
+    if (before === sha) return this.verified(intent, at, sha);
+    if (before !== expected) throw diverged(expected, before);
+    const outcome = await this.options.broker.withForkPush(
       intent,
       { repositoryId: at.fork.repositoryId },
-      async (credential, signal) => {
-        if (signal.aborted) throw new ForkPushError('push_uncertain');
-        return this.casPush(candidate, at, expected, credential.env());
-      }
+      (credential, signal) => this.casPush(candidate, at, expected, credential.env(), signal)
     );
-    return this.readBack(intent, at, expected, status === 0);
+    if (outcome.remote === sha) return this.verified(intent, at, sha);
+    if (outcome.remote !== undefined && outcome.remote !== expected)
+      throw diverged(expected, outcome.remote);
+    // Unknown, or still at the expected value (nothing landed): reconciliation decides.
+    throw new ForkPushError('push_uncertain', outcome.git);
   }
 
   /** Scenarios 10 and 17: every refusal happens here, before a token is minted. */
-  private async admit(intent: Intent, expected: string | null): Promise<CanonicalCandidate> {
+  private async admit(
+    intent: Intent,
+    sha: string,
+    expected: string | null
+  ): Promise<CanonicalCandidate> {
+    const { receipt, context, candidate } = await this.options.authorize(intent);
     try {
-      const { receipt, context, candidate } = await this.options.authorize(intent);
-      const record = candidate?.record;
       // Only the reconstructed, receipt-bound candidate on the verified parent ships.
       if (
-        record?.candidateSha !== intent.candidateSha ||
-        context.candidateSha !== intent.candidateSha ||
-        record.baseSha !== context.parentSha ||
+        candidate.record.candidateSha !== sha ||
+        context.candidateSha !== sha ||
+        candidate.record.baseSha !== context.parentSha ||
         context.forkRepositoryId !== this.options.fork.repositoryId
       )
-        throw new ForkPushError('not_a_push');
+        throw new ForkPushError('invalid_candidate');
       await authorizeShipping(
         receipt,
         this.options.trustedControllerKey,
@@ -258,31 +294,34 @@ export class ForkPusher implements WriteAdapter {
         this.now
       );
       return candidate;
-    } catch {
-      throw new WriteRefusedError('authorization_refused');
+    } catch (error) {
+      if (error instanceof ReceiptError && !STORE_FAILURES.includes(error.code))
+        throw new WriteRefusedError('authorization_refused', error.code);
+      if (error instanceof ForkPushError)
+        throw new WriteRefusedError('authorization_refused', error.code);
+      throw error;
     }
   }
 
-  /** Exit status of one push of exactly the candidate. No remotes, no wildcards, no
-   * plain force: the lease names the only remote value the update may replace. */
-  private casPush(
+  /** One push of exactly the candidate, then the git server's answer for the ref. No
+   * remotes, no wildcards, no plain force: the lease names the only value it may replace. */
+  private async casPush(
     candidate: CanonicalCandidate,
     at: ForkBranch,
     expected: string | null,
-    credentialEnv: Readonly<Record<string, string>>
-  ): number | null {
+    credentialEnv: Readonly<Record<string, string>>,
+    signal: AbortSignal
+  ): Promise<PushOutcome> {
     const sha = candidate.record.candidateSha;
+    const ref = `refs/heads/${at.branch}`;
     const git = new TrustedGit();
     try {
       git.run(['index-pack', '--stdin', '--strict'], candidate.pack);
       if (git.run(['cat-file', '-t', sha]).toString().trim() !== 'commit')
-        throw new ForkPushError('not_a_push');
-      const local = this.options.localRemote;
-      const url = local
-        ? `file://${fs.realpathSync(local)}`
-        : `https://github.com/${at.fork.owner}/${at.fork.name}.git`;
-      const ref = `refs/heads/${at.branch}`;
-      return git.exec(
+        throw new ForkPushError('invalid_candidate');
+      const { url, config } = this.remote(at);
+      const options = { env: credentialEnv, config, signal, timeoutMs: PUSH_TIMEOUT_MS };
+      const push = await git.execAsync(
         [
           'push',
           '--porcelain',
@@ -292,46 +331,60 @@ export class ForkPusher implements WriteAdapter {
           url,
           `${sha}:${ref}`,
         ],
-        {
-          env: credentialEnv,
-          config: local ? ['protocol.file.allow=always'] : [],
-          timeoutMs: PUSH_TIMEOUT_MS,
-        }
-      ).status;
+        options
+      );
+      // The git server, not the API, answers the read-back: no cache can trail the push.
+      const listed = signal.aborted
+        ? undefined
+        : await git.execAsync(['ls-remote', url, ref], options);
+      return { git: pushOutcome(push, ref), remote: listed && lsRemote(listed, ref) };
     } finally {
       git.close();
     }
   }
 
-  /** Confirms only a remote equal to the candidate; anything else fails closed. */
-  private async readBack(
-    intent: Intent,
-    at: ForkBranch,
-    expected: string | null,
-    reportedPushed: boolean
-  ): Promise<MutationResult> {
-    const delays = reportedPushed ? READ_BACK_DELAYS_MS : [];
-    for (let attempt = 0; ; attempt++) {
-      const remote = await readForkBranch(this.options.read, at);
-      if (remote === intent.candidateSha) return this.verified(intent, at);
-      if (remote !== expected) throw new WriteRefusedError('remote_diverged');
-      const delay = delays[attempt];
-      // Still at the expected value: nothing landed, or the read trails. Reconcile decides.
-      if (delay === undefined) throw new ForkPushError('push_uncertain');
-      await this.sleep(delay);
-    }
+  /** The fork's push URL; tests substitute a local bare repository. */
+  protected remote(at: ForkBranch): { url: string; config: readonly string[] } {
+    return { url: `https://github.com/${at.fork.owner}/${at.fork.name}.git`, config: [] };
   }
 
-  private verified(intent: Intent, at: ForkBranch): MutationResult {
-    const sha = intent.candidateSha as string;
-    if (this.ledger().verified.get(at.branch) !== sha)
+  private verified(intent: Intent, at: ForkBranch, sha: string): MutationResult {
+    if (this.snapshot().verified.get(at.branch) !== sha)
       this.record({
         v: 1,
         type: 'push_verified',
         key: intent.key,
+        repositoryId: at.fork.repositoryId,
         branch: at.branch,
         remoteSha: sha,
       });
     return { artifactRef: `${intent.target}@${sha}`, remoteSha: sha };
   }
+}
+
+function diverged(expected: string | null, observed: string | null): WriteRefusedError {
+  return new WriteRefusedError(
+    'remote_diverged',
+    `expected=${expected ?? 'absent'},observed=${observed ?? 'absent'}`
+  );
+}
+
+/** `--porcelain` flags: `!` rejected (stale lease, protected branch), `=` up to date. */
+function pushOutcome(push: GitResult, ref: string): PushOutcome['git'] {
+  if (push.status === null) return 'killed';
+  const line = push.stdout
+    .toString()
+    .split('\n')
+    .find((l) => l.split('\t')[1]?.endsWith(`:${ref}`));
+  if (line?.startsWith('!')) return 'rejected';
+  return push.status === 0 ? 'pushed' : 'failed';
+}
+
+function lsRemote(listed: GitResult, ref: string): string | null | undefined {
+  if (listed.status !== 0) return undefined;
+  const lines = listed.stdout.toString().split('\n').filter(Boolean);
+  const match = lines.map((l) => l.split('\t')).filter(([, name]) => name === ref);
+  if (!match.length) return null;
+  const sha = match.length === 1 ? match[0]?.[0] : undefined;
+  return isCommitSha(sha) ? sha : undefined;
 }
