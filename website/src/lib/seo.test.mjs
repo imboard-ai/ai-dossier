@@ -134,3 +134,32 @@ test('JSON-LD references the organization and carries the og image', () => {
   assert.equal('datePublished' in a, false);
   assert.equal('dateModified' in a, false);
 });
+
+test('inner-word emphasis markers and globs are content, not markup', () => {
+  const t = (body) => firstParagraph(`# T\n\n${body}`);
+  assert.equal(
+    t('Edit __init__.py and compute 2**3**4 before the release goes out today.'),
+    'Edit __init__.py and compute 2**3**4 before the release goes out today.'
+  );
+  assert.equal(
+    t('Match src/*.md, lib/*.ts files when you configure the docs build step.'),
+    'Match src/*.md, lib/*.ts files when you configure the docs build step.'
+  );
+  assert.equal(
+    t('Paired __strong__ and **bold** and *em*. still unwrap in the summary text here.'),
+    'Paired strong and bold and em. still unwrap in the summary text here.'
+  );
+});
+
+test('code spans pair their backtick runs and stray placeholders are dropped', () => {
+  assert.equal(
+    firstParagraph('# T\n\nUse ``a ` b`` literally, and `x_y_z` too, for the full details here.'),
+    'Use a ` b literally, and x_y_z too, for the full details here.'
+  );
+  assert.equal(
+    firstParagraph(
+      '# T\n\nA stray \uE0009\uE000 marker should not print undefined anywhere in text.'
+    ),
+    'A stray marker should not print undefined anywhere in text.'
+  );
+});

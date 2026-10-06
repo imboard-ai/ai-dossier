@@ -4,11 +4,19 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { test } from 'node:test';
+import { pathToFileURL } from 'node:url';
 import { gitLastmod, shallowBoundaries } from './lastmod.mjs';
 
 // Git versions differ in how %cI renders UTC (`Z` vs `+00:00`); compare instants.
 const instant = (iso) => (iso ? new Date(iso).toISOString().replace('.000', '') : iso);
-const run = (cwd, ...args) => execFileSync('git', args, { cwd, stdio: 'ignore' });
+// Every git call runs against a scrubbed environment so an inherited GIT_DIR (e.g. when run from
+// a git hook) or a global signing/hooks config cannot touch the outer repo or break the fixture.
+function cleanEnv(extra = {}) {
+  const env = { ...process.env, ...extra };
+  for (const k of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR']) delete env[k];
+  return { ...env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+}
+const run = (cwd, ...args) => execFileSync('git', args, { cwd, stdio: 'ignore', env: cleanEnv() });
 
 function commit(cwd, file, date) {
   writeFileSync(path.join(cwd, file), `${file} ${date}\n`);
@@ -16,15 +24,14 @@ function commit(cwd, file, date) {
   execFileSync('git', ['commit', '-m', `touch ${file}`], {
     cwd,
     stdio: 'ignore',
-    env: {
-      ...process.env,
+    env: cleanEnv({
       GIT_AUTHOR_NAME: 't',
       GIT_AUTHOR_EMAIL: 't@t',
       GIT_COMMITTER_NAME: 't',
       GIT_COMMITTER_EMAIL: 't@t',
       GIT_AUTHOR_DATE: date,
       GIT_COMMITTER_DATE: date,
-    },
+    }),
   });
 }
 
@@ -38,7 +45,7 @@ function fixture() {
   commit(full, 'mid.md', '2026-02-01T00:00:00Z');
   commit(full, 'new.md', '2026-03-01T00:00:00Z');
   const shallow = path.join(root, 'shallow');
-  run(root, 'clone', '-q', '--depth', '2', `file://${full}`, shallow);
+  run(root, 'clone', '-q', '--depth', '2', pathToFileURL(full).href, shallow);
   return { root, full, shallow };
 }
 
