@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Journal } from '../journal';
+import { recordLockReclaim, StoreLockedError, withStoreLock } from '../lock';
+import { isTailRecovery } from '../recovery';
 import { canonicalJson, ReceiptError, snapshotJson } from './schema';
 
 export interface NonceConsumption {
@@ -11,7 +13,7 @@ export interface NonceConsumption {
 }
 /** LOCAL trusted filesystem only. All users of this directory take the same
  * exclusive lock, open the journal only under it, reread, append and fsync.
- * A crashed lock is never stolen: the supervisor must reconcile its owner first.
+ * Dead owners are reclaimed only with process identity proof and durable audit.
  * This must not share a directory with IntentDriver's separate journal. */
 export class ReceiptNonceStore {
   private readonly directory: string;
@@ -48,6 +50,7 @@ export class ReceiptNonceStore {
         const nonces = new Set<string>();
         const attempts = new Map<string, number>();
         for (const event of events.slice(1)) {
+          if (isTailRecovery(event)) continue;
           validateRow(event);
           const prior = event as NonceConsumption;
           if (nonces.has(prior.nonce)) throw new ReceiptError('corrupt_store');
@@ -69,28 +72,23 @@ export class ReceiptNonceStore {
   private locked<T>(work: () => T): T {
     if (this.poisoned) throw new ReceiptError('persistence_uncertain');
     const lock = path.join(this.directory, 'receipt.lock');
-    let fd: number;
     try {
-      fd = fs.openSync(lock, 'wx', 0o600);
-    } catch {
-      throw new ReceiptError('store_locked');
-    }
-    let completed = false;
-    try {
-      fs.writeFileSync(fd, `${process.pid}\n`);
-      fs.fsyncSync(fd);
-      const result = work();
-      completed = true;
-      return result;
+      return withStoreLock(
+        lock,
+        0,
+        (owner) => {
+          recordLockReclaim(path.join(this.directory, 'lock-recovery'), lock, owner, []);
+        },
+        work,
+        (error) => !(error instanceof ReceiptError)
+      );
     } catch (error) {
       // Retain the lock on every uncertain error. Validation/replay failures are
       // known not to have written, and may release it safely.
-      if (error instanceof ReceiptError) completed = true;
-      else this.poisoned = true;
+      if (error instanceof StoreLockedError || error instanceof SyntaxError)
+        throw new ReceiptError('store_locked');
+      if (!(error instanceof ReceiptError)) this.poisoned = true;
       throw error;
-    } finally {
-      fs.closeSync(fd);
-      if (completed) fs.unlinkSync(lock);
     }
   }
 }

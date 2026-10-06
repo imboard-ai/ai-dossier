@@ -12,6 +12,7 @@ import {
   type EstimateRequest,
   type Money,
 } from './budget-types';
+import { lockRecoveries, recordLockReclaim, StoreLockedError, withStoreLock } from './lock';
 
 function integer(n: number, label: string, positive = false): void {
   if (!Number.isSafeInteger(n) || n < (positive ? 1 : 0)) {
@@ -354,6 +355,18 @@ export class BudgetLedger {
     if (purpose !== 'work' && purpose !== 'teardown')
       throw new BudgetError('invalid_budget', 'Invalid reservation purpose');
     return this.mutate((state) => {
+      if (purpose === 'work' && fs.existsSync(`${this.file}.recovery-journal`)) {
+        const pending = new Set(
+          lockRecoveries(`${this.file}.recovery-journal`).flatMap(
+            (event) => event.pendingReservations
+          )
+        );
+        if (state.reservations.some((row) => row.status === 'reserved' && pending.has(row.id)))
+          throw new BudgetError(
+            'persistence_uncertain',
+            'Reconcile recovered reservations before new work'
+          );
+      }
       const s = state.sessions.find((entry) => entry.id === sessionId);
       if (!s) throw new BudgetError('unknown_session', 'Unknown budget session');
       estimate(e, s.ceiling.currency);
@@ -464,28 +477,24 @@ export class BudgetLedger {
         'Fence and reconcile ledger before reopening after write uncertainty'
       );
     const lock = `${this.file}.lock`;
-    const start = Date.now();
-    let fd: number;
-    for (;;) {
-      try {
-        fd = fs.openSync(lock, 'wx', 0o600);
-        break;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-        if (Date.now() - start >= this.lockTimeoutMs)
-          throw new BudgetError(
-            'lock_timeout',
-            'Ledger lock held; reconcile owner before retrying'
-          );
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
-      }
-    }
     try {
-      fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, id: randomUUID() }));
-      return fn();
-    } finally {
-      fs.closeSync(fd);
-      fs.unlinkSync(lock);
+      return withStoreLock(
+        lock,
+        this.lockTimeoutMs,
+        (owner) => {
+          const pending = fs.existsSync(this.file)
+            ? this.snapshot()
+                .reservations.filter((row) => row.status === 'reserved')
+                .map((row) => row.id)
+            : [];
+          recordLockReclaim(`${this.file}.recovery-journal`, lock, owner, pending);
+        },
+        fn
+      );
+    } catch (error) {
+      if (error instanceof StoreLockedError || error instanceof SyntaxError)
+        throw new BudgetError('lock_timeout', 'Ledger lock held; reconcile owner before retrying');
+      throw error;
     }
   }
 }

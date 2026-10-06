@@ -150,8 +150,12 @@ or `retry_exhausted`) without storing provider exception text.
 Every intent and attempt is fsynced before the adapter runs;
 confirmation is fsynced before success returns. File and ancestor directory entries
 are fsynced on open. Write uncertainty poisons the live driver; recover from disk
-and reconcile before trying again. Invalid or torn JSONL fails closed and requires
-operator recovery; it is never skipped or automatically truncated. The trusted
+and reconcile before trying again. Only an unparseable final line without its
+trailing newline is quarantined, byte-for-byte, in a private sibling file. Open
+records `journal_tail_recovered`; a fsynced write-ahead marker makes recovery itself
+crash-resumable and idempotent. Complete malformed lines, corrupt middle lines,
+invalid complete-prefix UTF-8 and valid JSON without its newline fail closed.
+Recovery metadata is strictly validated on replay and grants no authorization. The trusted
 storage/supervisor boundary is required: this mechanism cannot defend against an
 actor who can rewrite the controller's journal or run a second controller process.
 
@@ -192,9 +196,14 @@ numeric `budgetTotals` rejects unrepresentable sums rather than capping them.
 Mutations re-read and validate every row under an exclusive file lock and persist
 via unique temp file + fsync + same-directory rename + directory fsync. Unknown
 reservations survive a process crash. Missing/corrupt history is never reset.
-If a writer dies **inside** the short mutation, an orphaned `.lock` intentionally
-blocks admission (`lock_timeout`): stop/fence all writers, reconcile the committed
-ledger and possible external effects, then remove that lock before retrying.
+Locks record PID, boot-ID/process-start-ticks token, creation time and unique ID.
+An orphan is reclaimed only on proof of PID absence or a different start token;
+live owners are never age-reclaimed. Unknown/legacy owners and unavailable process
+evidence still block admission (`lock_timeout`). Reclamation is fsynced into
+`<ledger>.recovery-journal/events.jsonl` before removing the dead owner's lock.
+Pending reservation IDs at recovery fence new **work** across reopen until each
+is explicitly settled or released. `settle(id, null)` does not clear the fence;
+teardown remains available within its existing accounting limits.
 Never infer safe lock removal from age or a PID alone. Leftover temp files are
 not committed state. Filesystem errors propagate; after write uncertainty reload
 and reconcile before retrying an action. A write/fsync failure poisons the live
@@ -205,7 +214,13 @@ directory exclusively controlled by the controller; no network filesystem or
 worker write access. The ledger neither invokes nor enforces provider token/time
 limits: execution adapters must honor the admitted maximums, and pricing is an
 estimate rather than a provider billing guarantee. It is not yet an execution
-engine integration or the complete S1 release gate.
+engine integration or the complete S1 release gate. Store locks require Linux
+`/proc` and `/usr/bin/flock` from util-linux. A permanent private `.lock.guard`
+inode holds the kernel lock for the whole transaction, including reclaim; never
+unlink/replace guard files. The inherited open description keeps the lock held
+after flock exits, and kernel process death releases it. Unsupported platforms,
+missing flock or unreadable process identity fail closed. This is local controller
+storage, not a distributed lease.
 
 ## Canonical source and candidate identity
 
@@ -320,11 +335,15 @@ newly signed receipts/nonces. A new attempt number comes only from IntentDriver'
 durable retry after reconciliation proved absence; it still requires a fresh grant.
 
 Provision the nonce directory first; call `initialize()` only on first creation.
-Never initialize/reset it on resume. Missing/corrupt/torn history fails closed.
-Exclusive lock files serialize independent processes; a crashed lock is never
-automatically stolen. On uncertain persistence the instance is fenced and its lock
-retained. A supervisor must establish that the old owner is stopped and reconcile
-the journal and external mutation before removing a stale lock. A consumed nonce
+Never initialize/reset it on resume. Missing/corrupt complete history fails closed;
+the final torn-line recovery above preserves all completed consumptions.
+The same Linux ownership proof and permanent kernel guard serialize independent
+processes. Dead-owner reclaim is fsynced to `lock-recovery/events.jsonl` in the nonce
+directory before its lock is removed. On uncertain persistence the instance is
+fenced and its owner lock retained; a still-live owner cannot be reclaimed, even
+by another instance in that process. Reopening after proven owner death replays
+the consumed nonce/attempt set before any authorization. The controller must still
+reconcile the journal and external mutation through `IntentDriver`. A consumed nonce
 stays consumed after a crash or lost response. Reauthorization requires reconciliation,
 fresh policy checks and a new controller-issued grant for the same verified candidate;
 the store provides no automatic retry or external write. Assumptions: one trusted

@@ -1,4 +1,5 @@
 import type { Journal } from './journal';
+import { isRecoveryEvent } from './recovery';
 import { assertNoSecrets } from './redaction';
 import {
   isRecord,
@@ -273,7 +274,9 @@ function reduce(state: IntentState | undefined, raw: unknown): IntentState {
 }
 export function replayIntents(events: readonly unknown[]): IntentState {
   let state: IntentState | undefined;
-  for (const event of events) state = reduce(state, event);
+  for (const event of events) {
+    if (!isRecoveryEvent(event)) state = reduce(state, event);
+  }
   if (!state) throw new IntentError();
   return state;
 }

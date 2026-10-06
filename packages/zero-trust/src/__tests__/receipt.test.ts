@@ -546,18 +546,24 @@ describe('controller nonce durability — concurrent processes and crash boundar
     fs.symlinkSync(path.join(directory, 'nonces'), alias);
     expect(() => new ReceiptNonceStore(alias)).toThrow('unsafe_store');
   });
-  it('missing, corrupt or torn history never resets the consumed set', () => {
+  it('missing history fails closed and torn history recovers with an audit event', () => {
     const file = path.join(directory, 'nonces/events.jsonl');
     fs.unlinkSync(file);
     expect(() => store.consume(row)).toThrow('missing_store');
     fs.writeFileSync(file, '{"v":1,"type":"receipt-nonces"}\n{"nonce":');
-    expect(() => store.consume(row)).toThrow();
+    store.consume(row);
+    expect(() => store.consume(row)).toThrow('replayed_nonce');
   });
   it('fsync failure returns no authorization and fences even a reopened controller', () => {
     const original = fs.fsyncSync;
-    let calls = 0;
+    const write = fs.writeSync;
+    let appended = false;
+    vi.spyOn(fs, 'writeSync').mockImplementation(((...args: Parameters<typeof fs.writeSync>) => {
+      appended = true;
+      return Reflect.apply(write, fs, args);
+    }) as typeof fs.writeSync);
     vi.spyOn(fs, 'fsyncSync').mockImplementation((fd) => {
-      if (++calls === 2) throw new Error('disk failure');
+      if (appended) throw new Error('disk failure');
       original(fd);
     });
     expect(() => store.consume(row)).toThrow();

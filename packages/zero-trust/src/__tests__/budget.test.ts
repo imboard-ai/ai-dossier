@@ -385,7 +385,7 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
   function compiledModule(): string {
     // Compile the current source, never a possibly stale pool dist/. No build prerequisite.
     const sourceDir = path.resolve(__dirname, '..');
-    for (const name of ['budget', 'budget-types']) {
+    for (const name of ['budget', 'budget-types', 'lock', 'journal', 'recovery']) {
       const source = fs.readFileSync(path.join(sourceDir, `${name}.ts`), 'utf8');
       fs.writeFileSync(
         path.join(dir, `${name}.js`),
@@ -449,10 +449,19 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
     'after-rename',
   ] as const)('fails closed on fsync failure %s and recovers only committed state', (when) => {
     const original = fs.fsyncSync;
-    let calls = 0;
+    const rename = fs.renameSync;
+    let renamed = false;
+    vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      rename(from, to);
+      renamed = true;
+    });
     vi.spyOn(fs, 'fsyncSync').mockImplementation((fd) => {
-      calls += 1;
-      if (calls === (when === 'before-rename' ? 1 : 2)) throw new Error('injected disk failure');
+      const named = fs.readlinkSync(`/proc/self/fd/${fd}`);
+      if (
+        (when === 'before-rename' && named.startsWith(`${file}.tmp-`)) ||
+        (when === 'after-rename' && renamed)
+      )
+        throw new Error('injected disk failure');
       original(fd);
     });
     expect(() => ledger.reserve('initial', estimate(90))).toThrow('injected disk failure');
@@ -511,7 +520,7 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
   it.each([
     'before',
     'after',
-  ] as const)('recovers a real writer killed %s atomic rename without stealing its lock', async (when) => {
+  ] as const)('recovers a real writer killed %s atomic rename with audited dead-owner reclaim', async (when) => {
     const module = compiledModule();
     const script = `const fs=require('node:fs');const {BudgetLedger}=require(${JSON.stringify(module)});const rename=fs.renameSync;fs.renameSync=(...args)=>{if(${JSON.stringify(when)}==='after')rename(...args);process.send('at-rename');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,60000);};new BudgetLedger(${JSON.stringify(file)},'contribution-1').reserve('initial',${JSON.stringify(estimate(90))});`;
     const child = spawn(process.execPath, ['-e', script], {
@@ -530,10 +539,16 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
     }
     const resumed = new BudgetLedger(file, 'contribution-1', 20);
     expect(resumed.snapshot().reservations).toHaveLength(when === 'before' ? 0 : 1);
-    code(() => resumed.reserve('initial', estimate(1)), 'lock_timeout');
-    expect(fs.existsSync(`${file}.lock`)).toBe(true);
-    // Fixture supervisor has joined the killed writer; reconciliation is now explicit.
-    fs.unlinkSync(`${file}.lock`);
+    if (when === 'after') {
+      code(() => resumed.reserve('initial', estimate(1)), 'persistence_uncertain');
+      resumed.settle(resumed.snapshot().reservations[0].id, {
+        money: { currency: 'USD', minor: 90 },
+        tokens: 10,
+        timeMs: 100,
+        source: 'reconciled invoice',
+      });
+    }
+    expect(fs.existsSync(`${file}.lock`)).toBe(when === 'before');
     if (when === 'after') code(() => resumed.reserve('initial', estimate(1)), 'ceiling_exceeded');
     else resumed.reserve('initial', estimate(90));
   });

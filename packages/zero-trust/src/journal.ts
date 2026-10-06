@@ -1,6 +1,9 @@
 /** Durable controller-owned JSONL. Corruption and uncertain writes fail closed. */
+
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import * as path from 'node:path';
+import { isTailRecovery, type TailRecovery } from './recovery';
 
 const openPaths = new Set<string>();
 
@@ -58,12 +61,88 @@ export class Journal {
       }
       this.fd = fd;
       this.size = stat.size;
+      this.recoverTail();
       this.read();
       openPaths.add(this.filePath);
     } catch {
       if (fd !== undefined) fs.closeSync(fd);
       throw new JournalError();
     }
+  }
+
+  private bytes(): Buffer {
+    this.check();
+    const bytes = Buffer.alloc(this.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = fs.readSync(this.fd, bytes, offset, bytes.length - offset, offset);
+      if (!count) throw new JournalError();
+      offset += count;
+    }
+    return bytes;
+  }
+
+  /** The fsynced sidecar is a write-ahead recovery intent, not a new admission.
+   * Quarantine -> marker -> truncate -> recovery event -> remove marker. A crash
+   * at ANY boundary replays this exact event instead of losing/duplicating it. */
+  // biome-ignore lint/correctness/noUnusedPrivateClassMembers: Called during constructor recovery before read/admission.
+  private recoverTail(): void {
+    const markerPath = `${this.filePath}.recovery`;
+    let marker: TailRecovery | undefined;
+    try {
+      const value: unknown = JSON.parse(readPrivate(markerPath).toString('utf8'));
+      if (!isTailRecovery(value)) throw new JournalError();
+      marker = value;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    const bytes = this.bytes();
+    if (!marker) {
+      if (!bytes.length || bytes.at(-1) === 10) return;
+      const offset = bytes.lastIndexOf(10) + 1;
+      const prefix = bytes.subarray(0, offset);
+      parseComplete(prefix); // Validate ALL prior lines before creating evidence.
+      const tail = bytes.subarray(offset);
+      let parsed = false;
+      try {
+        JSON.parse(tail.toString('utf8'));
+        parsed = true;
+      } catch {
+        // Only an unparseable, unterminated final line qualifies.
+      }
+      if (parsed) throw new JournalError();
+      const sha256 = hash(tail);
+      marker = {
+        v: 1,
+        type: 'journal_tail_recovered',
+        offset,
+        bytes: tail.length,
+        sha256,
+        prefixSha256: hash(prefix),
+        quarantine: `events.jsonl.quarantine-${offset}-${sha256}`,
+      };
+      persistPrivate(path.join(path.dirname(this.filePath), marker.quarantine), tail);
+      persistPrivate(markerPath, Buffer.from(`${JSON.stringify(marker)}\n`));
+    }
+    const prefix = bytes.subarray(0, marker.offset);
+    if (prefix.length !== marker.offset || hash(prefix) !== marker.prefixSha256)
+      throw new JournalError();
+    parseComplete(prefix);
+    const tail = readPrivate(path.join(path.dirname(this.filePath), marker.quarantine));
+    if (tail.length !== marker.bytes || hash(tail) !== marker.sha256) throw new JournalError();
+    const event = Buffer.from(`${JSON.stringify(marker)}\n`);
+    const remainder = bytes.subarray(marker.offset);
+    // Only original tail, clean prefix, or our own interrupted recovery append.
+    if (!remainder.equals(tail) && !event.subarray(0, remainder.length).equals(remainder))
+      throw new JournalError();
+    if (!remainder.equals(event)) {
+      fs.ftruncateSync(this.fd, marker.offset);
+      fs.fsyncSync(this.fd);
+      this.size = marker.offset;
+      this.append(marker);
+    }
+    fs.unlinkSync(markerPath);
+    syncDir(path.dirname(this.filePath));
   }
 
   private check(): void {
@@ -84,23 +163,7 @@ export class Journal {
 
   read(): unknown[] {
     try {
-      this.check();
-      const bytes = Buffer.alloc(this.size);
-      let offset = 0;
-      while (offset < bytes.length) {
-        const count = fs.readSync(this.fd, bytes, offset, bytes.length - offset, offset);
-        if (!count) throw new JournalError();
-        offset += count;
-      }
-      const text = bytes.toString('utf8');
-      if (!Buffer.from(text).equals(bytes)) throw new JournalError();
-      if (text && !text.endsWith('\n')) throw new JournalError();
-      return text
-        ? text
-            .slice(0, -1)
-            .split('\n')
-            .map((line) => JSON.parse(line))
-        : [];
+      return parseComplete(this.bytes());
     } catch {
       this.poisoned = true;
       throw new JournalError();
@@ -135,4 +198,57 @@ export class Journal {
       openPaths.delete(this.filePath);
     }
   }
+}
+
+function hash(bytes: Buffer): string {
+  return createHash('sha256').update(bytes).digest('hex');
+}
+function parseComplete(bytes: Buffer): unknown[] {
+  const text = bytes.toString('utf8');
+  if (!Buffer.from(text).equals(bytes) || (text && !text.endsWith('\n'))) throw new JournalError();
+  return text
+    ? text
+        .slice(0, -1)
+        .split('\n')
+        .map((line) => JSON.parse(line))
+    : [];
+}
+function syncDir(directory: string): void {
+  const fd = fs.openSync(directory, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
+  try {
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+function readPrivate(file: string): Buffer {
+  const fd = fs.openSync(
+    file,
+    fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK
+  );
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0) throw new JournalError();
+    return fs.readFileSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+function persistPrivate(file: string, bytes: Buffer): void {
+  const tmp = `${file}.tmp-${randomUUID()}`;
+  const fd = fs.openSync(tmp, 'wx', 0o600);
+  try {
+    fs.writeFileSync(fd, bytes);
+    fs.fsyncSync(fd);
+    try {
+      fs.linkSync(tmp, file);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || !readPrivate(file).equals(bytes))
+        throw error;
+    }
+  } finally {
+    fs.closeSync(fd);
+    fs.unlinkSync(tmp);
+  }
+  syncDir(path.dirname(file));
 }
