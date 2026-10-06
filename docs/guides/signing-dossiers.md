@@ -225,7 +225,7 @@ permissions:
 
 env:
   AWS_REGION: us-east-1
-  ROLE_ARN: arn:aws:iam::123456789012:role/github-dossier-oidc
+  ROLE_ARN: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/github-dossier-oidc
   KMS_KEY_ALIAS: alias/dossier-official-prod
 
 jobs:
