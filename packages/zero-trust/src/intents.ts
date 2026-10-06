@@ -295,7 +295,7 @@ export class IntentDriver {
     private readonly now: () => string
   ) {
     if (drivenJournals.has(journal)) throw new IntentError();
-    const events = journal.read();
+    const events = journal.read().filter((event) => !isRecoveryEvent(event));
     const run = restoreRun(initial.run);
     const contributionId = safeString(initial.contributionId);
     if (!events.length) {

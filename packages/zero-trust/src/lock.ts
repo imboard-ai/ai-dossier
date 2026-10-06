@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { syncDirectory } from './durable-fs';
 import { Journal } from './journal';
 import {
   isLockOwner,
@@ -51,17 +52,12 @@ function privateFile(fd: number): void {
   const stat = fs.fstatSync(fd);
   if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0) throw new StoreLockedError();
 }
-export function syncDirectory(directory: string): void {
-  const fd = fs.openSync(directory, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
-  try {
-    fs.fsyncSync(fd);
-  } finally {
-    fs.closeSync(fd);
-  }
-}
 
 /** Called only with the store's permanent guard held. */
-export function lockRecoveries(directory: string): LockRecovery[] {
+export function lockRecoveries(directory: string, create = false): LockRecovery[] {
+  const exists = fs.existsSync(directory);
+  if ((!exists && !create) || (exists && !fs.existsSync(path.join(directory, 'events.jsonl'))))
+    throw new StoreLockedError();
   const journal = new Journal(directory);
   try {
     const result: LockRecovery[] = [];
@@ -69,6 +65,7 @@ export function lockRecoveries(directory: string): LockRecovery[] {
       if (isLockRecovery(event)) result.push(event);
       else if (!isTailRecovery(event)) throw new StoreLockedError();
     }
+    if (!create && result.length === 0) throw new StoreLockedError();
     return result;
   } finally {
     journal.close();
@@ -80,7 +77,7 @@ export function recordLockReclaim(
   owner: LockOwner,
   pendingReservations: string[]
 ): void {
-  const prior = lockRecoveries(directory).find((event) => event.owner.id === owner.id);
+  const prior = lockRecoveries(directory, true).find((event) => event.owner.id === owner.id);
   if (prior) {
     if (prior.lock !== path.basename(lock) || JSON.stringify(prior.owner) !== JSON.stringify(owner))
       throw new StoreLockedError();
@@ -88,14 +85,16 @@ export function recordLockReclaim(
   }
   const journal = new Journal(directory);
   try {
-    journal.append({
+    const event: LockRecovery = {
       v: 1,
       type: 'lock_reclaimed',
       lock: path.basename(lock),
       owner,
       at: new Date().toISOString(),
       pendingReservations,
-    });
+    };
+    if (!isLockRecovery(event)) throw new StoreLockedError();
+    journal.append(event);
   } finally {
     journal.close();
   }
@@ -166,10 +165,10 @@ export function withStoreLock<T>(
     try {
       fs.writeFileSync(fd, `${JSON.stringify(owner)}\n`);
       fs.fsyncSync(fd);
-      fs.linkSync(tmp, file);
+      fs.renameSync(tmp, file);
       published = true;
     } finally {
-      fs.unlinkSync(tmp);
+      fs.rmSync(tmp, { force: true });
     }
     syncDirectory(path.dirname(file));
     try {

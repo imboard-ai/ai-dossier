@@ -201,13 +201,19 @@ An orphan is reclaimed only on proof of PID absence or a different start token;
 live owners are never age-reclaimed. Unknown/legacy owners and unavailable process
 evidence still block admission (`lock_timeout`). Reclamation is fsynced into
 `<ledger>.recovery-journal/events.jsonl` before removing the dead owner's lock.
-Pending reservation IDs at recovery fence new **work** across reopen until each
-is explicitly settled or released. `settle(id, null)` does not clear the fence;
+Opening an existing ledger captures all pending reservation IDs as a resume barrier,
+even if the old controller released its mutation lock before crashing. Dead-lock
+recovery adds all pending IDs to that barrier and its durable audit. New **work**
+is fenced until every old hold is explicitly settled or released. Missing or empty
+established recovery journals fail closed; losing the sidecar never frees holds.
+`settle(id, null)` does not clear the fence;
 teardown remains available within its existing accounting limits.
 Never infer safe lock removal from age or a PID alone. Leftover temp files are
 not committed state. Filesystem errors propagate; after write uncertainty reload
 and reconcile before retrying an action. A write/fsync failure poisons the live
 instance (`persistence_uncertain`); the complete state may already have committed.
+Its owner lock is retained on uncertain persistence, so another instance cannot
+steal it while that process is live. After owner death, reconcile before admission.
 Directory aliases resolve to one canonical lock path; ledger symlinks are refused.
 Use a pre-provisioned durable local
 directory exclusively controlled by the controller; no network filesystem or

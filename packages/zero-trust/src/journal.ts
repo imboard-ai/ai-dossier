@@ -3,6 +3,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import * as path from 'node:path';
+import { syncDirectory } from './durable-fs';
 import { isTailRecovery, type TailRecovery } from './recovery';
 
 const openPaths = new Set<string>();
@@ -142,7 +143,7 @@ export class Journal {
       this.append(marker);
     }
     fs.unlinkSync(markerPath);
-    syncDir(path.dirname(this.filePath));
+    syncDirectory(path.dirname(this.filePath));
   }
 
   private check(): void {
@@ -213,14 +214,6 @@ function parseComplete(bytes: Buffer): unknown[] {
         .map((line) => JSON.parse(line))
     : [];
 }
-function syncDir(directory: string): void {
-  const fd = fs.openSync(directory, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
-  try {
-    fs.fsyncSync(fd);
-  } finally {
-    fs.closeSync(fd);
-  }
-}
 function readPrivate(file: string): Buffer {
   const fd = fs.openSync(
     file,
@@ -235,20 +228,30 @@ function readPrivate(file: string): Buffer {
   }
 }
 function persistPrivate(file: string, bytes: Buffer): void {
+  // One controller owns the journal directory (store users hold their kernel
+  // guard). Reuse only exact existing evidence; publish with ONE link atomically.
+  try {
+    if (!readPrivate(file).equals(bytes)) throw new JournalError();
+    const existing = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    try {
+      fs.fsyncSync(existing);
+    } finally {
+      fs.closeSync(existing);
+    }
+    syncDirectory(path.dirname(file));
+    return;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
   const tmp = `${file}.tmp-${randomUUID()}`;
   const fd = fs.openSync(tmp, 'wx', 0o600);
   try {
     fs.writeFileSync(fd, bytes);
     fs.fsyncSync(fd);
-    try {
-      fs.linkSync(tmp, file);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || !readPrivate(file).equals(bytes))
-        throw error;
-    }
+    fs.renameSync(tmp, file);
   } finally {
     fs.closeSync(fd);
-    fs.unlinkSync(tmp);
+    fs.rmSync(tmp, { force: true });
   }
-  syncDir(path.dirname(file));
+  syncDirectory(path.dirname(file));
 }

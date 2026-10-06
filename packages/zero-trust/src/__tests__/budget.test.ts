@@ -2,7 +2,6 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import * as ts from 'typescript';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BudgetLedger, budgetTotals, estimateBudget, requireBudgetRates } from '../budget';
 import {
@@ -11,6 +10,7 @@ import {
   type BudgetRate,
   type BudgetSession,
 } from '../budget-types';
+import { compiledFixture } from './compiled-fixture';
 
 const price = (resource = 'model', unit: BudgetRate['unit'] = 'token', cost = 1): BudgetRate => ({
   resource,
@@ -109,7 +109,7 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
     ledger.settle(r.id, null);
     const resumed = new BudgetLedger(file, 'contribution-1');
     expect(resumed.snapshot().reservations[0].status).toBe('reserved');
-    code(() => resumed.reserve('initial', estimate(21)), 'ceiling_exceeded');
+    code(() => resumed.reserve('initial', estimate(21)), 'persistence_uncertain');
     code(() => resumed.release(r.id, ''), 'invalid_budget');
     resumed.release(r.id, 'provider confirmed never started');
     resumed.reserve('initial', estimate(90));
@@ -383,22 +383,7 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
   });
 
   function compiledModule(): string {
-    // Compile the current source, never a possibly stale pool dist/. No build prerequisite.
-    const sourceDir = path.resolve(__dirname, '..');
-    for (const name of ['budget', 'budget-types', 'lock', 'journal', 'recovery']) {
-      const source = fs.readFileSync(path.join(sourceDir, `${name}.ts`), 'utf8');
-      fs.writeFileSync(
-        path.join(dir, `${name}.js`),
-        ts.transpileModule(source, {
-          compilerOptions: {
-            module: ts.ModuleKind.CommonJS,
-            target: ts.ScriptTarget.ES2022,
-            esModuleInterop: true,
-          },
-        }).outputText
-      );
-    }
-    return path.join(dir, 'budget.js');
+    return compiledFixture(dir, 'budget');
   }
 
   async function runRacers(script: string): Promise<(number | null)[]> {
@@ -418,7 +403,7 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
 
   it('races real processes sharing one persisted file', async () => {
     const module = compiledModule();
-    const script = `const {BudgetLedger}=require(${JSON.stringify(module)}); try {new BudgetLedger(${JSON.stringify(file)},'contribution-1').reserve('initial',${JSON.stringify(estimate(60))});process.exitCode=0;}catch(e){process.exitCode=e.code==='ceiling_exceeded'?2:3;}`;
+    const script = `const {BudgetLedger}=require(${JSON.stringify(module)}); try {new BudgetLedger(${JSON.stringify(file)},'contribution-1').reserve('initial',${JSON.stringify(estimate(60))});process.exitCode=0;}catch(e){process.exitCode=['ceiling_exceeded','persistence_uncertain'].includes(e.code)?2:3;}`;
     const exits = await runRacers(script);
     expect(exits.filter((c) => c === 0)).toHaveLength(1);
     expect(exits.filter((c) => c === 2)).toHaveLength(7);
@@ -453,7 +438,7 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
     let renamed = false;
     vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
       rename(from, to);
-      renamed = true;
+      if (to === file) renamed = true;
     });
     vi.spyOn(fs, 'fsyncSync').mockImplementation((fd) => {
       const named = fs.readlinkSync(`/proc/self/fd/${fd}`);
@@ -469,11 +454,11 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
     code(() => ledger.reserve('initial', estimate(1)), 'persistence_uncertain');
     const recovered = new BudgetLedger(file, 'contribution-1');
     expect(recovered.snapshot().reservations).toHaveLength(when === 'before-rename' ? 0 : 1);
-    expect(fs.existsSync(`${file}.lock`)).toBe(false);
+    expect(fs.existsSync(`${file}.lock`)).toBe(true);
     expect(fs.readdirSync(dir).filter((name) => name.includes('.tmp-'))).toHaveLength(0);
-    if (when === 'after-rename')
-      code(() => recovered.reserve('initial', estimate(1)), 'ceiling_exceeded');
-    else recovered.reserve('initial', estimate(90));
+    code(() => recovered.reserve('initial', estimate(1)), 'lock_timeout');
+    // Fault injection did not kill this live process. A new controller must not
+    // steal its retained uncertain lock; real SIGKILL recovery is tested below.
   });
 
   it('normalizes directory aliases into one lock and refuses symlink ledger files', () => {
@@ -506,7 +491,7 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
     await exited;
     const resumed = new BudgetLedger(file, 'contribution-1');
     expect(resumed.snapshot().reservations[0].id).toBe(id);
-    code(() => resumed.reserve('initial', estimate(1)), 'ceiling_exceeded');
+    code(() => resumed.reserve('initial', estimate(1)), 'persistence_uncertain');
     expect(fs.existsSync(`${file}.lock`)).toBe(false);
     resumed.settle(id, {
       money: { currency: 'USD', minor: 90 },
@@ -522,7 +507,7 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
     'after',
   ] as const)('recovers a real writer killed %s atomic rename with audited dead-owner reclaim', async (when) => {
     const module = compiledModule();
-    const script = `const fs=require('node:fs');const {BudgetLedger}=require(${JSON.stringify(module)});const rename=fs.renameSync;fs.renameSync=(...args)=>{if(${JSON.stringify(when)}==='after')rename(...args);process.send('at-rename');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,60000);};new BudgetLedger(${JSON.stringify(file)},'contribution-1').reserve('initial',${JSON.stringify(estimate(90))});`;
+    const script = `const fs=require('node:fs');const {BudgetLedger}=require(${JSON.stringify(module)});const rename=fs.renameSync;fs.renameSync=(...args)=>{if(args[1]!==${JSON.stringify(file)})return rename(...args);if(${JSON.stringify(when)}==='after')rename(...args);process.send('at-rename');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,60000);};new BudgetLedger(${JSON.stringify(file)},'contribution-1').reserve('initial',${JSON.stringify(estimate(90))});`;
     const child = spawn(process.execPath, ['-e', script], {
       stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
     });

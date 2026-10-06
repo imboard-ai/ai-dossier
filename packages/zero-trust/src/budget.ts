@@ -282,6 +282,7 @@ export function budgetTotals(state: BudgetState, sessionId: string): BudgetTotal
 export class BudgetLedger {
   readonly file: string;
   private writeUncertain = false;
+  private readonly resumePending = new Set<string>();
   constructor(
     file: string,
     readonly contributionId: string,
@@ -292,6 +293,14 @@ export class BudgetLedger {
     // Normalize directory aliases so two callers cannot lock the same ledger
     // through different symlinked directory names. The supervisor provisions it.
     this.file = path.join(fs.realpathSync(path.dirname(path.resolve(file))), path.basename(file));
+    // Opening an existing ledger is a resume boundary, independent of whether
+    // the dead controller held its short mutation lock when it crashed. Capture
+    // ALL old unknown outcomes; a null observation never reconciles them.
+    if (fs.existsSync(this.file)) {
+      for (const row of this.snapshot().reservations) {
+        if (row.status === 'reserved') this.resumePending.add(row.id);
+      }
+    }
   }
 
   /** Explicit first creation only: cannot overwrite an existing contribution. */
@@ -355,18 +364,21 @@ export class BudgetLedger {
     if (purpose !== 'work' && purpose !== 'teardown')
       throw new BudgetError('invalid_budget', 'Invalid reservation purpose');
     return this.mutate((state) => {
-      if (purpose === 'work' && fs.existsSync(`${this.file}.recovery-journal`)) {
-        const pending = new Set(
-          lockRecoveries(`${this.file}.recovery-journal`).flatMap(
-            (event) => event.pendingReservations
-          )
-        );
-        if (state.reservations.some((row) => row.status === 'reserved' && pending.has(row.id)))
-          throw new BudgetError(
-            'persistence_uncertain',
-            'Reconcile recovered reservations before new work'
-          );
+      const pending = new Set(this.resumePending);
+      if (fs.existsSync(`${this.file}.recovery-journal`)) {
+        for (const id of lockRecoveries(`${this.file}.recovery-journal`).flatMap(
+          (event) => event.pendingReservations
+        ))
+          pending.add(id);
       }
+      if (
+        purpose === 'work' &&
+        state.reservations.some((row) => row.status === 'reserved' && pending.has(row.id))
+      )
+        throw new BudgetError(
+          'persistence_uncertain',
+          'Reconcile recovered reservations before new work'
+        );
       const s = state.sessions.find((entry) => entry.id === sessionId);
       if (!s) throw new BudgetError('unknown_session', 'Unknown budget session');
       estimate(e, s.ceiling.currency);
@@ -487,9 +499,11 @@ export class BudgetLedger {
                 .reservations.filter((row) => row.status === 'reserved')
                 .map((row) => row.id)
             : [];
+          for (const id of pending) this.resumePending.add(id);
           recordLockReclaim(`${this.file}.recovery-journal`, lock, owner, pending);
         },
-        fn
+        fn,
+        () => this.writeUncertain
       );
     } catch (error) {
       if (error instanceof StoreLockedError || error instanceof SyntaxError)

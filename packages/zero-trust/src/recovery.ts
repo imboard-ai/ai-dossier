@@ -1,4 +1,5 @@
 /** Recovery observations carry no authorization and must still validate on replay. */
+import { isTimestamp } from './state';
 export interface LockOwner {
   pid: number;
   startToken: string;
@@ -28,13 +29,6 @@ function record(value: unknown): value is Record<string, unknown> {
 function keys(value: Record<string, unknown>, expected: string): boolean {
   return Object.keys(value).sort().join(',') === expected;
 }
-function timestamp(value: unknown): boolean {
-  return (
-    typeof value === 'string' &&
-    Number.isFinite(Date.parse(value)) &&
-    new Date(value).toISOString() === value
-  );
-}
 function uuid(value: unknown): boolean {
   return typeof value === 'string' && /^[a-f0-9-]{36}$/.test(value);
 }
@@ -46,7 +40,7 @@ export function isLockOwner(value: unknown): value is LockOwner {
     (value.pid as number) > 0 &&
     typeof value.startToken === 'string' &&
     /^[a-f0-9-]{36}:\d+$/.test(value.startToken) &&
-    timestamp(value.createdAt) &&
+    isTimestamp(value.createdAt) &&
     uuid(value.id)
   );
 }
@@ -74,9 +68,14 @@ export function isLockRecovery(value: unknown): value is LockRecovery {
     value.v === 1 &&
     value.type === 'lock_reclaimed' &&
     typeof value.lock === 'string' &&
-    /^[A-Za-z0-9._-]{1,255}$/.test(value.lock) &&
+    value.lock.length > 0 &&
+    Buffer.byteLength(value.lock) <= 255 &&
+    value.lock !== '.' &&
+    value.lock !== '..' &&
+    !value.lock.includes('/') &&
+    !value.lock.includes('\u0000') &&
     isLockOwner(value.owner) &&
-    timestamp(value.at) &&
+    isTimestamp(value.at) &&
     Array.isArray(value.pendingReservations) &&
     value.pendingReservations.every(uuid) &&
     new Set(value.pendingReservations).size === value.pendingReservations.length

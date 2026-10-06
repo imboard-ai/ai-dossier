@@ -913,6 +913,25 @@ describe('current controller lifecycle admission', () => {
 });
 
 describe('fail-closed journal durability', () => {
+  it('recovers a torn first run append and initializes once beside recovery evidence', async () => {
+    const dir = directory();
+    fs.writeFileSync(path.join(dir, 'events.jsonl'), '{"v":1,"type":"run","run":', { mode: 0o600 });
+    let j = journal(dir);
+    const fake = new FakeAdapter();
+    let d = driver(j, fake);
+    await d.resume();
+    expect(await d.execute(input)).toBe('artifact-1');
+    j.close();
+    j = journal(dir);
+    d = driver(j, fake);
+    await d.resume();
+    expect(await d.execute(input)).toBe('artifact-1');
+    expect(fake.writes).toBe(1);
+    expect(j.read().filter((event) => (event as { type: string }).type === 'run')).toHaveLength(1);
+    expect(
+      j.read().filter((event) => (event as { type: string }).type === 'journal_tail_recovered')
+    ).toHaveLength(1);
+  });
   it('torn confirmation resumes all outstanding intents before admitting new writes', async () => {
     const dir = directory();
     const j = journal(dir);
