@@ -1,5 +1,6 @@
-/** Fork-side GitHub credential broker (#1064). The only component that holds
- * GitHub credentials. Controller-only: never import it from worker-facing code.
+/** Fork-side GitHub credential broker (#1064). It holds every token it mints and the
+ * contributor's user token; `contributor.ts` (#1065) holds only the refresh token and hands
+ * each access token here. Controller-only: never import it from worker-facing code.
  *
  * Under the hybrid hand-off the broker performs fork pushes only; upstream
  * writes are contributor hand-offs. Every token is narrowed to the verified
@@ -11,10 +12,12 @@ import type { Intent, IntentState } from '../intents';
 import { assertNoSecrets } from '../redaction';
 import {
   type AppCredentials,
+  bearer,
   deleteGrant,
   deleteToken,
   GitHubAuthError,
   type GitHubHttp,
+  type GitHubResponse,
   type IssuedToken,
   type IssueResult,
   mintInstallationToken,
@@ -71,6 +74,7 @@ export const BROKER_REFUSALS = Object.freeze([
   'window_expired',
   'token_reused',
   'user_token_run_scoped',
+  'read_not_allowed',
 ] as const);
 export type BrokerRefusal = (typeof BROKER_REFUSALS)[number];
 
@@ -137,6 +141,10 @@ export interface BrokerOptions {
    * is the store's own (disk, permissions), never a GitHub failure. */
   readonly onJournalFailed?: (error: unknown) => void;
 }
+
+/** The contributor's own identity and App installations (#1065), GET only. */
+const CONTRIBUTOR_READ =
+  /^\/user(?:\/installations(?:\/[0-9]{1,20}\/repositories)?)?(?:\?per_page=[0-9]{1,3}(?:&page=[0-9]{1,4})?)?$/u;
 
 /** Shipping targets name the fork by id: `fork:<repositoryId>:branch:<name>`. */
 const FORK_TARGET = /^fork:([0-9]{1,20}):branch:./u;
@@ -384,6 +392,20 @@ export class ForkCredentialBroker {
     }
     // Not observed dead: it stays journaled live and is revoked at run end.
     return this.holdUserToken(value, expiresAt);
+  }
+
+  /** Contributor authorization reads (#1065) with the held unscoped user token; the value
+   * never leaves the broker. Refused without a live one, so the caller re-authorizes. */
+  async readAsContributor(path: string): Promise<GitHubResponse> {
+    this.assertOpen();
+    if (!CONTRIBUTOR_READ.test(path)) throw new CredentialBrokerError('read_not_allowed');
+    const token = this.liveUserToken();
+    if (!token) throw new CredentialBrokerError('no_user_token');
+    return this.options.http({
+      method: 'GET',
+      path,
+      authorization: bearer(this.vault.get(token.id) as string),
+    });
   }
 
   /** The newest held unscoped user token. */
