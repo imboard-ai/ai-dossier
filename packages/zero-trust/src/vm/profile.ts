@@ -28,7 +28,7 @@ export const PROFILE_PINS = Object.freeze({
 /** Bumped whenever cloud-init, the guest agent or the hardening changes. */
 export const BAKE_RECIPE_VERSION = 1;
 
-export interface ProfileManifest {
+export interface VmProfileManifest {
   readonly schema: 'zt-vm-profile-v1';
   /** Digest over pins + recipe version + guest agent source. */
   readonly profileDigest: string;
@@ -72,8 +72,8 @@ export function profileDigest(agentSource: string): string {
 const HEX64 = /^[a-f0-9]{64}$/;
 const DOCKER_ID = /^sha256:[a-f0-9]{64}$/;
 
-export function parseManifest(value: unknown, expectedDigest: string): ProfileManifest {
-  const m = value as ProfileManifest;
+export function parseManifest(value: unknown, expectedDigest: string): VmProfileManifest {
+  const m = value as VmProfileManifest;
   if (
     typeof value !== 'object' ||
     value === null ||

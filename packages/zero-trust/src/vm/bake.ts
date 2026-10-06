@@ -10,10 +10,10 @@ import { type HostTools, preflightHost } from './host';
 import { AGENT_SOURCE_PATH, type HostOps, systemOps } from './local-qemu';
 import {
   PROFILE_PINS,
-  type ProfileManifest,
   parseManifest,
   profileDigest,
   sha256File,
+  type VmProfileManifest,
 } from './profile';
 import { buildBakeArgs } from './qemu-args';
 
@@ -89,7 +89,7 @@ export function parseBakeConsole(consoleText: string): { node: string; python: s
   return { node: value.node, python: value.python };
 }
 
-export async function bakeProfile(options: BakeOptions): Promise<ProfileManifest> {
+export async function bakeProfile(options: BakeOptions): Promise<VmProfileManifest> {
   const log = options.log ?? (() => undefined);
   const ops = options.ops ?? systemOps;
   const tools = options.tools ?? preflightHost(options.accelerator ?? 'auto');

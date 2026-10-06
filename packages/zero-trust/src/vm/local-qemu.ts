@@ -27,7 +27,7 @@ import {
 } from './adapter';
 import { BrokerClient } from './broker';
 import { type HostTools, preflightHost } from './host';
-import { type ProfileManifest, parseManifest, profileDigest, sha256File } from './profile';
+import { parseManifest, profileDigest, sha256File, type VmProfileManifest } from './profile';
 import { BOOT_TIMEOUT_MS, buildRunArgs, MAX_SOCKET_PATH_BYTES, TIMEOUT_SCALE } from './qemu-args';
 
 export const AGENT_SOURCE_PATH = path.join(__dirname, '..', '..', 'vm-guest', 'agent.py');
@@ -174,7 +174,7 @@ function privateDir(dir: string): string {
 
 export class LocalQemuAdapter implements VmAdapter {
   readonly tools: HostTools;
-  readonly manifest: ProfileManifest;
+  readonly manifest: VmProfileManifest;
   private readonly ops: HostOps;
   private readonly clients = new Map<string, BrokerClient>();
   private imageVerified: boolean;

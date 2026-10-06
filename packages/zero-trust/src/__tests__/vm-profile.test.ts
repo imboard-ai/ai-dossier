@@ -18,10 +18,10 @@ import {
 } from '../vm/cloud-init';
 import {
   PROFILE_PINS,
-  type ProfileManifest,
   parseManifest,
   profileDigest,
   sha256File,
+  type VmProfileManifest,
 } from '../vm/profile';
 
 const AGENT = 'print("zt agent")\n';
@@ -29,7 +29,7 @@ const DIGEST = profileDigest(AGENT);
 const IMAGE_ID = `sha256:${'1'.repeat(64)}`;
 
 function manifest(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-  const valid: ProfileManifest = {
+  const valid: VmProfileManifest = {
     schema: 'zt-vm-profile-v1',
     profileDigest: DIGEST,
     baseImageSha256: PROFILE_PINS.baseImage.sha256,
