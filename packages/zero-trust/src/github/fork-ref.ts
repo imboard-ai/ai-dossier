@@ -2,6 +2,7 @@
  * reconciliation reads"; decision record row 4b). The fork is named by repository id: a
  * read is answered only after GitHub confirms that owner/name still resolves to that id. */
 import { isRecord } from '../state';
+import type { ForkRepository } from './fork';
 import { isGitHubLogin, isRepoName, isSafeRef } from './handoff';
 import type { GitHubRead } from './reconcile';
 
@@ -16,14 +17,10 @@ export class ForkRefError extends Error {
   }
 }
 
-/** The verified fork (#1065), the only push target. */
-export interface ForkRepository {
-  readonly repositoryId: number;
-  readonly owner: string;
-  readonly name: string;
-}
+/** The verified fork (#1065's `ForkRepository`/`ForkReady`), the only push target. */
+export type ForkRef = Pick<ForkRepository, 'repositoryId' | 'owner' | 'repo'>;
 export interface ForkBranch {
-  readonly fork: ForkRepository;
+  readonly fork: ForkRef;
   readonly branch: string;
 }
 
@@ -34,26 +31,26 @@ export function isCommitSha(value: unknown): value is string {
   return typeof value === 'string' && /^[a-f0-9]{40}$/u.test(value);
 }
 
-function forkRepository(fork: ForkRepository): ForkRepository {
+function forkRepository(fork: ForkRef): ForkRef {
   if (
     !fork ||
     !Number.isSafeInteger(fork.repositoryId) ||
     fork.repositoryId <= 0 ||
     !isGitHubLogin(fork.owner) ||
-    !isRepoName(fork.name)
+    !isRepoName(fork.repo)
   )
     throw new ForkRefError('invalid_target');
-  return Object.freeze({ repositoryId: fork.repositoryId, owner: fork.owner, name: fork.name });
+  return Object.freeze({ repositoryId: fork.repositoryId, owner: fork.owner, repo: fork.repo });
 }
 
 /** The journaled `push_branch` target for a branch of the verified fork. */
-export function forkTarget(fork: ForkRepository, branch: string): string {
+export function forkTarget(fork: ForkRef, branch: string): string {
   if (!isSafeRef(branch)) throw new ForkRefError('invalid_target');
   return `fork:${forkRepository(fork).repositoryId}:branch:${branch}`;
 }
 
 /** Parses a journaled target; it must name exactly the bound fork. */
-export function parseForkTarget(target: string, fork: ForkRepository): ForkBranch {
+export function parseForkTarget(target: string, fork: ForkRef): ForkBranch {
   const bound = forkRepository(fork);
   const match = typeof target === 'string' ? TARGET.exec(target) : null;
   if (!match || Number(match[1]) !== bound.repositoryId || !isSafeRef(match[2]))
@@ -74,7 +71,7 @@ async function get(read: GitHubRead, path: string) {
 export async function readForkBranch(read: GitHubRead, at: ForkBranch): Promise<string | null> {
   const fork = forkRepository(at.fork);
   if (!isSafeRef(at.branch)) throw new ForkRefError('invalid_target');
-  const repo = `/repos/${encodeURIComponent(fork.owner)}/${encodeURIComponent(fork.name)}`;
+  const repo = `/repos/${encodeURIComponent(fork.owner)}/${encodeURIComponent(fork.repo)}`;
   const identity = await get(read, repo);
   if (identity.status !== 200 || !isRecord(identity.body) || identity.body.id !== fork.repositoryId)
     throw new ForkRefError('fork_unverified', identity.status);

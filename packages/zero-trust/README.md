@@ -406,7 +406,8 @@ and the actual `@ai-dossier/core` `Signer` interface. Only Ed25519 is admitted. 
 controller owns the private key and signer; neither belongs in worker/model tools.
 The signature covers canonical sorted-key JSON bytes, including all identity,
 profile/policy, command, network and operation bindings. `receiptDigest` hashes those
-same bytes with SHA-256. Schema version is `ztfc-receipt-v1`.
+same bytes with SHA-256. Schema version is `ztfc-receipt-v2` (v2 added the required
+`profile.accelerator`, `kvm` or `tcg`).
 
 `verifyReceipt(envelope, trustedControllerKey, context, now)` verifies integrity,
 controller key material, exact authenticated identity/SHA bindings, and the trusted
@@ -468,7 +469,8 @@ claim is limited to the exact candidate and is not proof of patch correctness.
 - `selectProfile(detection)` picks a runtime from the versioned `profiles.json` that
   satisfies every project declaration and never substitutes a version.
   `recordProfileSelection` / `loadProfileRecord` store the choice once per run and
-  re-verify it before execution. `profileReceiptBinding` gives the receipt's profile fields.
+  re-verify it before execution. `profileReceiptBinding(record, accelerator)` gives the receipt's
+  profile fields, with the accelerator taken from the VM handle.
 - `buildCommandPlan(manager, proxy, options?)` returns provisioning (`package_proxy`) and
   verification (`none`) commands as argv data. `options` sets test targets (e.g. the
   regression test), timeouts, the profile's interpreter and an environment directory
@@ -485,11 +487,53 @@ claim is limited to the exact candidate and is not proof of patch correctness.
 Fixtures with known bugs live in `fixtures/ecosystem/`. CI self-checks them
 (`scripts/zero-trust-fixtures-selfcheck.mjs`); that is the only host-side install/test run.
 
+## Local VM execution profile (gate 1)
+
+`src/vm/` runs untrusted code in a disposable local QEMU VM; Linux x86_64 hosts only. Design,
+QEMU flags, network design, measured overhead and residual risks:
+[execution-profile decision record](../../docs/features/zero-trust-full-cycle/decisions/execution-profile.md).
+
+- `preflightHost(request)` refuses closed (`unsupported_environment` + detail) on an
+  unsupported OS or architecture, missing QEMU tools, or a forced `kvm` without `/dev/kvm`.
+  There is no host-container fallback.
+- `LocalQemuAdapter` implements the provider-neutral `VmAdapter` (create, exec, putFile,
+  getFile, destroy, listByRun) plus the `killAll` incident kill switch. QEMU runs rootless with
+  `restrict=on` user-mode networking, no forwards and no shared folders; the broker
+  (`BrokerClient`, `vm-guest/agent.py`) is the only data path.
+- `teardownVm` caps deletion at three attempts, then moves the run to `blocked_cleanup` and
+  hands it to `observeRun`; `assertPublicationPermitted(run, operationKind)` applies the intent
+  admission table, which admits no GitHub write in `blocked_cleanup`.
+- `bakeProfile` / `ensureBaseImage` build the hash-pinned image (`PROFILE_PINS`,
+  `BAKE_RECIPE_VERSION`, `BAKED_DISK_GIB`); `parseManifest` and `assertStandaloneQcow2` check it.
+  `DEFAULT_LIMITS` holds the PRD §5.1 defaults.
+- Errors: `UnsupportedEnvironmentError` (`.detail` is an `UnsupportedDetail`), `VmCleanupError`,
+  `BrokerError`, `BoundaryBreachError`, `PublicationDeniedError`. VM lifecycle events go to a
+  journal dedicated to them, not the run's intent journal.
+- `admitModelAction` (`src/authority.ts`) admits only a closed set of model actions bound to
+  controller targets.
+- `evaluateBoundary` / `assertBoundaryHeld` (`src/vm/evidence.ts`) judge hostile-fixture runs
+  from host-side measurements; fixture reports are untrusted.
+
+From `packages/zero-trust`:
+
+```bash
+npm run build
+node scripts/zt-vm.mjs bake  --profile-dir <dir> --cache-dir <dir> [--accel auto|kvm|tcg]
+node scripts/zt-vm.mjs smoke --profile-dir <dir> --state-dir <dir> [--accel ...] [--timings-out f]
+node scripts/zt-vm.mjs kill-all --state-dir <dir> --reason <text>   # exit 2: a VM was left behind
+ZT_VM_E2E=1 ZT_PROFILE_DIR=<abs dir> npx vitest run src/__tests__/vm-gate.e2e.test.ts
+```
+
+The kill switch stays engaged until an operator deletes `<state-dir>/KILL_SWITCH`.
+
+The hostile fixtures live in `fixtures/hostile/`; `.github/workflows/zero-trust-vm.yml` runs
+the gate under KVM, plus a TCG smoke test, on every PR touching this package.
+
 ## Fork-side GitHub credential broker
 
-`src/github/broker.ts`, `app-auth.ts`, `token-journal.ts` and `push.ts` (which hands the
-broker's push credential to git) are the only code that holds or handles GitHub
-credentials (the hand-off modules beside them are credential-free). They
+`src/github/broker.ts`, `app-auth.ts`, `token-journal.ts`, `contributor.ts` and `push.ts`
+(which hands the broker's push credential to git) are the only code that holds or handles
+GitHub credentials (the hand-off and fork modules beside them are credential-free). They
 are controller-only: the package index does not export them, and
 `src/github/__tests__/isolation.test.ts` fails if any other module, including the index,
 the hand-off modules and the worker broker, can reach them through an import chain.
@@ -507,7 +551,10 @@ hand-offs. `ForkCredentialBroker` has a typed operation API and no generic token
   native expiry for the operator. It never records that token as revoked. Recovery over a
   journal whose run already ended returns `admitted: false`.
 - `registerUserToken(value, expiresAt)` holds the contributor's unscoped user token
-  (needed for `user_scoped` mints and the kill switch). `rotateUserToken` records a
+  (needed for `user_scoped` mints and the kill switch). `readAsContributor(path)` makes a
+  GET with it, restricted to `/user`, `/user/installations` and
+  `/user/installations/{id}/repositories` (optional `per_page`/`page`); any other path is
+  refused `read_not_allowed`, and the value never leaves the broker. `rotateUserToken` records a
   refresh; the old token is marked `rotated` only once observed dead, and its scoped
   children stay journaled as live.
 - `mintForkPush(intent, { repositoryId, via? }, scopeFrom?)` mints one token for one
@@ -574,19 +621,21 @@ or, when the mint response was journaled, `settleExpired` after its native expir
 `WriteAdapter` for `push_branch` (PRD §5.7, §5.9 "Push candidate"; decision record rows
 4/4b; scenarios 10, 17, 18). Each attempt, in order:
 
-1. `authorize(intent)` supplies the receipt, fresh controller context and the
+1. Preflight reads the ref through `readForkBranch`. The candidate already there
+   confirms without a token or receipt; anything other than the expected value blocks
+   with `remote_diverged` and pushes nothing. An answer naming another repository id
+   blocks with `fork_unverified`; an unreadable answer withdraws the attempt
+   (`MutationDeferredError`).
+2. `authorize(intent)` supplies the receipt, fresh controller context and the
    reconstructed candidate. The candidate must be the intent's SHA on the context's
    parent, and `authorizeShipping` verifies the receipt and burns its single-use nonce.
    A refusal (wrong parent, contributor, fork or SHA, replay, unverified candidate,
-   policy) blocks with `authorization_refused` before any token is minted. A nonce-store
-   failure leaves the attempt ambiguous instead. A retry needs a fresh receipt.
-2. `push_intended` (branch, candidate, expected remote SHA) is appended to the push
+   policy) blocks with `authorization_refused` before any token is minted. A failed
+   `authorize` callback or a nonce-store refusal raised before the store appends
+   withdraws the attempt; a failed append leaves it ambiguous. A retry needs a fresh
+   receipt.
+3. `push_intended` (branch, candidate, expected remote SHA) is appended to the push
    ledger, its own `Journal`, scoped to the fork's repository id.
-3. Preflight reads the ref through `readForkBranch`. The candidate already there
-   confirms without a token; anything other than the expected value blocks with
-   `remote_diverged` and pushes nothing. An answer naming another repository id blocks
-   with `fork_unverified`; an unreadable answer leaves the attempt ambiguous, and
-   reconciliation defers (`ReconcileDeferredError`) until the ref is readable.
 4. Inside `broker.withForkPush`, git pushes exactly the candidate from a fresh
    `TrustedGit` repository holding only the candidate pack:
    `--force-with-lease=refs/heads/<branch>:<expected>` (empty: the branch must not
@@ -608,5 +657,71 @@ credentials, null when absent, refused when no verified push left it there.
 
 `src/github/fork-ref.ts` (exported, credential-free) names push targets by fork
 repository id, `fork:<repositoryId>:branch:<name>` (`forkTarget`/`parseForkTarget`).
-`readForkBranch` answers a SHA, or null on 404, only after `GET /repos/{owner}/{name}`
+`readForkBranch` answers a SHA, or null on 404, only after `GET /repos/{owner}/{repo}`
 confirms the id; anything else throws `ForkRefError` with the HTTP status.
+
+## Contributor authorization and fork prerequisites
+
+Before anything is pushed, the run establishes who the contributor is and that their fork
+is ready (#1065). Creating the fork and installing the App are one-time manual steps: the
+fork API refuses the App's user token (403, because the App is not installed on the
+upstream; decision record row 3b), so the run waits for them durably.
+
+- `checkForkReadiness` (`src/github/fork.ts`, credential-free, exported) checks every
+  prerequisite once per explicit call and never schedules anything. Discovery reads the
+  contributor's same-name repository, then the upstream's fork listing (newest first, at
+  most ten pages) filtered by owner, with no credential, and binds by repository id:
+  `fork:true`, `parent.id` equal to the upstream id recorded at gating, and owner equal to
+  the run's contributor. A name match alone never counts. A fork of another fork in the
+  upstream network (`fork_wrong_parent`), a repository owned by another account
+  (`fork_wrong_owner`), or a different repository than the one bound earlier
+  (`fork_replaced`) blocks the run. These are the outcome's `reason`; the run itself records
+  `policy_blocked`. Absence is reported only when the reads prove it: a failed read, or a
+  capped listing that cannot rule out a bound or renamed fork, answers `unknown`.
+- A missing fork moves the run from `gating` or `shipping` to `awaiting_contributor`
+  (`fork_missing`); a missing or suspended App installation does the same
+  (`installation_missing`). The outcome's one-line `nextPermittedAction` carries the exact
+  link: the GitHub fork page, the App's install page with "Only select repositories", or
+  the installation's settings page to unsuspend it. A re-check that finds the same wait
+  records nothing; one that finds the next prerequisite missing records the new reason.
+  When everything passes, the run resumes the phase that entered the wait
+  (`resume_gating` / `resume_shipping`). `prerequisiteAction(run, upstream, appSlug)`
+  re-derives the status line from a persisted run. The state machine keeps this wait apart
+  from a link hand-off: a resume cannot leave a pending link, and an observed submission
+  cannot leave a prerequisite wait. `fork_missing`, `installation_missing` and
+  `installation_too_broad` are the only new run reason codes, and they leave only gating,
+  shipping and the wait.
+- The installation on the fork must have `repository_selection=selected`, select exactly
+  the fork, and grant no permission beyond the App's declared set. `all`, an extra
+  repository or an extra permission blocks with `installation_too_broad` and a link to the
+  installation's settings. Any installation of the App on the upstream blocks the same way.
+  Selection and permissions are read with the App JWT (`GET /repos/{owner}/{repo}/installation`);
+  the selected repository set needs the contributor's user token. Until the contributor has
+  authorized, the outcome is `authorization_required` and carries the `ForkReady` binding the
+  broker is built with.
+- `ContributorAuthorization` (`src/github/contributor.ts`) runs the GitHub App user
+  authorization web flow. `begin(redirectUri)` accepts only a canonical loopback redirect,
+  `http://127.0.0.1:<port>/<path>` or `http://[::1]:<port>/<path>` (an explicit port, no
+  query or fragment), and creates a CSPRNG `state` and a PKCE S256 verifier in memory.
+  `complete(callback, run)` spends the pending attempt first, compares `state` in constant
+  time, exchanges the code, and reads `GET /user` with the new token before anything else.
+  Only the run's contributor's token is handed to the broker. Another account's login or
+  account id (scenario 17) blocks the run (`contributor_mismatch`, recorded as
+  `policy_blocked`) and its token is revoked at once; a login that cannot be read revokes
+  the token unused. `bindLogin(run, userId)` repeats the check on resume through the broker
+  and, on a mismatch, ends the broker's run before blocking. `listenLoopback({ isExpected:
+  auth.matchesPending })` listens on 127.0.0.1, answers 400 to anything but a well-formed
+  callback carrying the pending `state` under its own Host header, then answers a fixed page
+  that echoes nothing and sends no referrer.
+- `refresh()` is single-flight and serialized with `complete` and `bindLogin`: the broker
+  takes the new access token before the stored refresh token is replaced, so the pair is
+  never half-updated, and a token the broker refuses is revoked. `bad_refresh_token`
+  answers `reauthorize` and drops the chain; nothing retries. Once the broker has revoked
+  the user token (run end, cancellation, kill switch), its refresh token is dead too:
+  `refresh()` answers `reauthorize` and `status()` reports `reauthorization_required`, both
+  without presenting it. A new process holds no refresh token and must authorize again.
+  An App that does not issue expiring user tokens, or whose credentials or redirect GitHub
+  refuses, is reported as `app_misconfigured`; a non-expiring token is revoked, never kept.
+- The authorization code, `state`, access and refresh tokens never appear in an outcome,
+  status, error message or the token journal; the object redacts itself in JSON and
+  `inspect`. Every refusal carries a fixed next step.

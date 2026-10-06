@@ -31,8 +31,8 @@ import { isRecord } from '../state';
 import type { ForkCredentialBroker } from './broker';
 import {
   type ForkBranch,
+  type ForkRef,
   ForkRefError,
-  type ForkRepository,
   isCommitSha,
   parseForkTarget,
   readForkBranch,
@@ -85,7 +85,7 @@ export interface ForkPusherOptions {
   readonly broker: Pick<ForkCredentialBroker, 'withForkPush'>;
   /** Credential-free reader (`anonymousReader`). */
   readonly read: GitHubRead;
-  readonly fork: ForkRepository;
+  readonly fork: ForkRef;
   readonly ledger: PushLedgerStore;
   readonly trustedControllerKey: string;
   readonly nonces: ReceiptNonceStore;
@@ -286,7 +286,7 @@ export class ForkPusher implements WriteAdapter {
       return await readForkBranch(this.options.read, at);
     } catch (error) {
       if (error instanceof ForkRefError && error.code === 'fork_unverified' && error.status === 200)
-        throw new WriteRefusedError('fork_unverified', `${at.fork.owner}/${at.fork.name}`);
+        throw new WriteRefusedError('fork_unverified', `${at.fork.owner}/${at.fork.repo}`);
       throw error;
     }
   }
@@ -381,7 +381,7 @@ export class ForkPusher implements WriteAdapter {
    * to exactly that repository, so if the name were renamed or transferred to another
    * repository in between, GitHub refuses the push (403) and the read-back stays put. */
   protected remote(at: ForkBranch): { url: string; config: readonly string[] } {
-    return { url: `https://github.com/${at.fork.owner}/${at.fork.name}.git`, config: [] };
+    return { url: `https://github.com/${at.fork.owner}/${at.fork.repo}.git`, config: [] };
   }
 
   private verified(intent: Intent, at: ForkBranch, sha: string): MutationResult {

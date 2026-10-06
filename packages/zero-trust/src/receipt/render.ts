@@ -27,7 +27,7 @@ export function renderReceipt(input: unknown): string {
   const r = parseReceipt(input);
   const lines = [
     '<details><summary>Verification receipt</summary>',
-    `<p>Profile: ${escapeHtml(r.profile.name)}; runtime: ${escapeHtml(r.profile.runtime)}; image: ${escapeHtml(r.profile.imageDigest)}</p>`,
+    `<p>Profile: ${escapeHtml(r.profile.name)}; runtime: ${escapeHtml(r.profile.runtime)}; image: ${escapeHtml(r.profile.imageDigest)}; accelerator: ${escapeHtml(r.profile.accelerator)}</p>`,
     `<p>Candidate: ${r.candidateSha}; base/parent: ${r.baseSha}</p>`,
     `<p>Profile digest: ${r.profileDigest}; policy digest: ${r.policyDigest}</p>`,
     '<ul>',

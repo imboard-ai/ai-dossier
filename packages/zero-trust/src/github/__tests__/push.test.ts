@@ -36,7 +36,7 @@ import { ForkPushError, ForkPusher, replayPushes, type ShippingAuthorization } f
 import type { GitHubRead, GitHubResponse } from '../reconcile';
 import { CLIENT_ID, FORK_ID, GitHubFake, INSTALLATION_ID, OWNER, UPSTREAM_ID } from './github-fake';
 
-const FORK = Object.freeze({ repositoryId: FORK_ID, owner: OWNER, name: 'fixture' });
+const FORK = Object.freeze({ repositoryId: FORK_ID, owner: OWNER, repo: 'fixture' });
 const BRANCH = 'fix-1066';
 const TARGET = `fork:${FORK_ID}:branch:${BRANCH}`;
 const DIGEST = 'c'.repeat(64);
@@ -246,7 +246,12 @@ function receiptInput(g: Grant): ReceiptInput {
     candidateSha: g.candidate.record.candidateSha,
     profileDigest: DIGEST,
     policyDigest: DIGEST,
-    profile: { name: 'node-22', runtime: '22.0.0', imageDigest: `sha256:${DIGEST}` },
+    profile: {
+      name: 'node-22',
+      runtime: '22.0.0',
+      imageDigest: `sha256:${DIGEST}`,
+      accelerator: 'kvm',
+    },
     commands: [
       {
         id: 'regression',

@@ -68,7 +68,12 @@ beforeEach(async () => {
     candidateSha: CANDIDATE,
     profileDigest: DIGEST,
     policyDigest: DIGEST,
-    profile: { name: 'node-22', runtime: '22.0.0', imageDigest: `sha256:${DIGEST}` },
+    profile: {
+      name: 'node-22',
+      runtime: '22.0.0',
+      imageDigest: `sha256:${DIGEST}`,
+      accelerator: 'kvm',
+    },
     commands: [
       {
         id: 'regression',
@@ -303,6 +308,9 @@ describe('controller receipt — scenarios 10/17, contributor integrity, S3/S4',
     const r = await issue();
     await expect(
       verify(r, { ...context, profile: { ...context.profile, runtime: '20' } })
+    ).rejects.toThrow('wrong_profile');
+    await expect(
+      verify(r, { ...context, profile: { ...context.profile, accelerator: 'tcg' } })
     ).rejects.toThrow('wrong_profile');
     await expect(
       verify(r, { ...context, networkPolicy: { ...context.networkPolicy, verification: 'online' } })

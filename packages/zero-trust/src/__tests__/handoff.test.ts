@@ -100,7 +100,12 @@ function receipt(commands: CommandEvidence[] = [command()], candidateSha = CANDI
     candidateSha,
     profileDigest: DIGEST,
     policyDigest: DIGEST,
-    profile: { name: 'node-22', runtime: '22.0.0', imageDigest: `sha256:${DIGEST}` },
+    profile: {
+      name: 'node-22',
+      runtime: '22.0.0',
+      imageDigest: `sha256:${DIGEST}`,
+      accelerator: 'kvm',
+    },
     commands,
     networkPolicy: {
       acquisition: 'source-broker',
@@ -729,7 +734,7 @@ describe('awaiting_contributor hand-off driver', () => {
 
   /** The production adapter (#1066): `ForkPusher.handoffReadBack` over a fork ref fake. */
   function pusherReadBack(remote: string | null, verified: string | null) {
-    const fork = { repositoryId: 4242, owner: 'alice', name: 'proj' };
+    const fork = { repositoryId: 4242, owner: 'alice', repo: 'proj' };
     const target = forkTarget(fork, binding.branch);
     const ledger = verified
       ? [
