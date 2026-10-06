@@ -39,7 +39,7 @@ name: Surface Vercel Build Failures
 # Setup:
 #   1. Store the token:  aws ssm put-parameter --name /dossier/vercel_token \
 #         --type SecureString --value "<token>"
-#   2. Grant the OIDC role ssm:GetParameter on arn:aws:ssm:us-east-1:942039714848:
+#   2. Grant the OIDC role ssm:GetParameter on arn:aws:ssm:us-east-1:<account-id>:
 #      parameter/dossier/vercel_token, plus kms:Decrypt on the key encrypting it.
 #
 # Until both are done the job logs a warning and exits, so this is safe to merge early.

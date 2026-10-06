@@ -146,7 +146,7 @@ Dossiers are executable workflows that require cryptographic signatures to estab
     "public_key": "imboard-ai-2024-kms",
     "signature": "MEUCIQDx...",
     "signed_by": "Imboard AI Security Team <security@imboard.ai>",
-    "key_id": "arn:aws:kms:us-east-1:942039714848:key/xxx"
+    "key_id": "arn:aws:kms:us-east-1:123456789012:key/xxx"
   }
 }
 ```

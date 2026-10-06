@@ -137,8 +137,8 @@ aws sts get-caller-identity
 # Expected output shows your AWS user/role:
 # {
 #     "UserId": "AIDA...",
-#     "Account": "942039714848",
-#     "Arn": "arn:aws:iam::942039714848:user/yourname"
+#     "Account": "123456789012",
+#     "Arn": "arn:aws:iam::123456789012:user/yourname"
 # }
 ```
 
@@ -225,7 +225,7 @@ permissions:
 
 env:
   AWS_REGION: us-east-1
-  ROLE_ARN: arn:aws:iam::942039714848:role/github-dossier-oidc
+  ROLE_ARN: arn:aws:iam::123456789012:role/github-dossier-oidc
   KMS_KEY_ALIAS: alias/dossier-official-prod
 
 jobs:
@@ -299,7 +299,7 @@ GitHub Actions uses OpenID Connect (OIDC) to get temporary AWS credentials:
     {
       "Effect": "Allow",
       "Principal": {
-        "Federated": "arn:aws:iam::942039714848:oidc-provider/token.actions.githubusercontent.com"
+        "Federated": "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
       },
       "Action": "sts:AssumeRoleWithWebIdentity",
       "Condition": {

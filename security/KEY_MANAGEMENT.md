@@ -72,7 +72,7 @@ aws kms create-alias \
       "Sid": "AllowGitHubActionsSign",
       "Effect": "Allow",
       "Principal": {
-        "Federated": "arn:aws:iam::942039714848:oidc-provider/token.actions.githubusercontent.com"
+        "Federated": "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
       },
       "Action": [
         "kms:Sign",
@@ -572,7 +572,7 @@ is what the trust check matches**, and the ARN is what to add:
 
 ```bash
 ai-dossier keys add \
-  "arn:aws:kms:us-east-1:942039714848:key/1234abcd-12ab-34cd-56ef-1234567890ab" \
+  "arn:aws:kms:us-east-1:123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab" \
   "imboard-ai-2024-kms"
 ```
 
