@@ -542,6 +542,122 @@ const deniedRuns = lifecycleRuns.filter((r) =>
 );
 
 describe('current controller lifecycle admission', () => {
+  it('recovery from the durable exhaustion prefix fences same and different keys even when the block clock failed', async () => {
+    const dir = directory();
+    const j = journal(dir);
+    const fake = new FakeAdapter();
+    fake.mode = 'fail';
+    const d = new IntentDriver(j, fake, { run, contributionId: 'c-1' }, () => {
+      throw new Error('clock unavailable');
+    });
+    await expect(d.execute(input)).rejects.toThrow(MutationUncertainError);
+    await expect(d.execute(input)).rejects.toThrow(MutationUncertainError);
+    await expect(d.resume()).rejects.toThrow('clock unavailable');
+    expect((j.read().at(-1) as { type: string }).type).toBe('exhausted');
+    expect(d.snapshot().run.state).toBe('shipping');
+    j.close();
+    const recovered = journal(dir);
+    const restored = driver(recovered, fake);
+    const reads = fake.reads;
+    await restored.resume();
+    for (const target of [input.target, 'other'])
+      await expect(restored.execute({ ...input, target })).rejects.toThrow(WriteBlockedError);
+    expect(fake.writes).toBe(2);
+    expect(fake.reads).toBe(reads);
+    expect(restored.snapshot().blockedReason).toBe('retry_exhausted');
+    expect(() =>
+      replayIntents([
+        ...recovered.read(),
+        { v: 1, type: 'intended', input: { ...input, target: 'other' } },
+      ])
+    ).toThrow(IntentError);
+  });
+  it('pending resume rejects when observation fsync fails during a retry-ready reconciliation', async () => {
+    const j = journal();
+    const fake = new FakeAdapter();
+    fake.mode = 'fail';
+    const d = driver(j, fake);
+    await expect(d.execute(input)).rejects.toThrow(MutationUncertainError);
+    await d.resume();
+    let finish!: (result: ReconcileResult) => void;
+    let started!: () => void;
+    const reading = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    vi.spyOn(fake, 'reconcile').mockImplementation(() => {
+      started();
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    });
+    const pending = d.resume();
+    await reading;
+    vi.spyOn(fs, 'fsyncSync').mockImplementationOnce(() => {
+      throw new Error('disk');
+    });
+    expect(() => d.observeRun(advance(run, ReasonCode.UserCancelled))).toThrow(JournalError);
+    finish({ kind: 'absent' });
+    await expect(pending).rejects.toThrow(WriteBlockedError);
+    await expect(d.execute({ ...input, target: 'other' })).rejects.toThrow(WriteBlockedError);
+    expect(fake.writes).toBe(1);
+  });
+  it('reconciles legacy paused-run journal effects under a current cancellation without new writes', async () => {
+    const paused = advance(run, ReasonCode.UserPaused);
+    const cancelled = advance(paused, ReasonCode.UserCancelled);
+    const j = journal();
+    for (const event of [
+      { v: 1, type: 'run', run: paused, contributionId: 'c-1' },
+      { v: 1, type: 'intended', input },
+      { v: 1, type: 'attempted', key: idempotencyKey(input) },
+      { v: 1, type: 'ambiguous', key: idempotencyKey(input) },
+    ])
+      j.append(event);
+    const fake = new FakeAdapter();
+    fake.observation = { kind: 'found', artifactRef: 'legacy-effect' };
+    const d = driver(j, fake, cancelled);
+    await d.resume();
+    await expect(d.execute(input)).rejects.toThrow(WriteBlockedError);
+    expect(fake.writes).toBe(0);
+    expect(fake.reads).toBe(1);
+    expect(d.snapshot().intents.get(idempotencyKey(input))?.artifactRef).toBe('legacy-effect');
+    expect(replayIntents(j.read())).toEqual(d.snapshot());
+  });
+  it.each([
+    'success',
+    'lost',
+  ] as const)('preserves an already-issued %s mutation outcome after cancellation', async (mode) => {
+    const j = journal();
+    const fake = new FakeAdapter();
+    let finish!: () => void;
+    let started!: () => void;
+    const issued = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    vi.spyOn(fake, 'mutate').mockImplementation(async () => {
+      fake.writes++;
+      started();
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      if (mode === 'lost') throw new Error('lost response');
+      return { artifactRef: 'issued-effect' };
+    });
+    const d = driver(j, fake);
+    const pending = d.execute(input);
+    await issued;
+    const current = advance(run, ReasonCode.UserCancelled);
+    d.observeRun(current);
+    finish();
+    if (mode === 'lost') await expect(pending).rejects.toThrow(MutationUncertainError);
+    else await expect(pending).resolves.toBe('issued-effect');
+    expect(d.snapshot().run).toEqual(current);
+    expect(d.snapshot().intents.get(idempotencyKey(input))?.status).toBe(
+      mode === 'lost' ? 'ambiguous' : 'confirmed'
+    );
+    await expect(d.execute({ ...input, target: 'other' })).rejects.toThrow(WriteBlockedError);
+    expect(fake.writes).toBe(1);
+    expect(replayIntents(j.read())).toEqual(d.snapshot());
+  });
   it.each([
     ReasonCode.UserCancelled,
     ReasonCode.CleanupFailed,

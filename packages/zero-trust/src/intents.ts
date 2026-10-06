@@ -185,8 +185,7 @@ function reduce(state: IntentState | undefined, raw: unknown): IntentState {
   // Historical attempts remain replayable, but closed states cannot add attempts.
   if (
     (raw.type === 'intended' || raw.type === 'attempted') &&
-    (state.run.state === 'paused_user' ||
-      !permittedTransitions(state.run.state)[ReasonCode.PolicyBlocked])
+    (state.blockedReason || !permittedTransitions(state.run.state)[ReasonCode.PolicyBlocked])
   )
     throw new IntentError();
   if (raw.type === 'blocked') {
@@ -264,7 +263,13 @@ function reduce(state: IntentState | undefined, raw: unknown): IntentState {
     }
     intents.set(intent.key, Object.freeze(next));
   }
-  return { ...state, intents };
+  return {
+    ...state,
+    intents,
+    // The fsynced exhaustion event itself fences ALL writes, including recovery
+    // between this evidence append and the optional lifecycle block append.
+    ...(raw.type === 'exhausted' ? { blockedReason: 'retry_exhausted' as const } : {}),
+  };
 }
 export function replayIntents(events: readonly unknown[]): IntentState {
   let state: IntentState | undefined;
@@ -367,6 +372,7 @@ export class IntentDriver {
       } catch {
         this.block('reconciliation_error');
       }
+      if (this.failed) throw new WriteBlockedError();
       if (!result || result.kind === 'unknown') this.block();
       if (result.kind === 'found') {
         try {
@@ -388,7 +394,11 @@ export class IntentDriver {
     return this.serial(() => this.reconcileAll());
   }
   private admit(operationKind: OperationKind): void {
-    if (this.failed || !ADMISSION[operationKind].includes(this.state.run.state))
+    if (
+      this.failed ||
+      this.state.blockedReason ||
+      !ADMISSION[operationKind].includes(this.state.run.state)
+    )
       throw new WriteBlockedError();
   }
   execute(input: IntentInput): Promise<string> {
