@@ -2,9 +2,10 @@ import { budgetTotals } from '../budget';
 import type { BudgetState } from '../budget-types';
 import { prerequisiteAction } from '../github/fork';
 import { type HandoffState, handoffStatus } from '../github/handoff-driver';
-import { type RunRecord, type RunState, restoreRun } from '../state';
+import { assertSecretFree } from '../redaction';
+import { type RunRecord, type RunState, restoreRun, sameRunRecord } from '../state';
 import { InvalidStatusError, renderJson, type StatusRecord } from '../status';
-import { assertSecretFree } from './config';
+import { contributionIdOf } from './ids';
 
 const ACTIVE: readonly RunState[] = [
   'gating',
@@ -75,14 +76,15 @@ export function assembleStatus(parts: StatusParts): StatusRecord {
   }
   if (ACTIVE.includes(state)) activeTimeMs += now - start;
   const session = parts.budget.sessions.find((s) => s.id === parts.sessionId);
-  if (!session || parts.budget.contributionId !== run.runId.replace(/-run-[1-9][0-9]*$/u, ''))
+  if (!session || parts.budget.contributionId !== contributionIdOf(run.runId))
     throw new InvalidStatusError();
   const totals = budgetTotals(parts.budget, parts.sessionId);
   const spend = totals.spent + totals.reserved;
   if (!Number.isSafeInteger(spend)) throw new InvalidStatusError();
   if (
     parts.handoff &&
-    (parts.handoff.run.runId !== run.runId || parts.handoff.run.state !== run.state)
+    (!sameRunRecord(restoreRun(parts.handoff.run), run) ||
+      parts.handoff.contributionId !== contributionIdOf(run.runId))
   )
     throw new InvalidStatusError();
   if (parts.tracker && parts.tracker.state !== run.state) throw new InvalidStatusError();
@@ -110,7 +112,7 @@ export function assembleStatus(parts: StatusParts): StatusRecord {
     },
     reasonCode: run.history.at(-1)?.reasonCode ?? run.reasonCode,
     nextPermittedAction:
-      handoff?.nextPermittedAction ??
+      (handoff ? `${handoff.nextPermittedAction} Link: ${handoff.link}` : undefined) ??
       parts.tracker?.nextPermittedAction ??
       prerequisite?.nextPermittedAction ??
       DEFAULT_STATE_ACTIONS[run.state],

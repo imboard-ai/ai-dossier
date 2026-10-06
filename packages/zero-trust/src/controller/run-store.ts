@@ -1,11 +1,17 @@
-import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { privateDir, readPrivate, replacePrivate, syncDirectory } from '../durable-fs';
+import {
+  assertDirectoryAncestors,
+  privateDir,
+  readPrivate,
+  replacePrivate,
+  syncDirectory,
+} from '../durable-fs';
 import { Journal } from '../journal';
-import { StoreLockedError } from '../lock';
+import { lockDescriptor, StoreLockedError } from '../lock';
 import { isTailRecovery } from '../recovery';
+import { assertSecretFree } from '../redaction';
 import {
   createRun,
   isRecord,
@@ -14,7 +20,8 @@ import {
   restoreRun,
   sameRunRecord,
 } from '../state';
-import { assertSecretFree, type RunConfig, runConfigInput, validateRunConfig } from './config';
+import { type RunConfig, RunConfigError, runConfigInput, validateRunConfig } from './config';
+import { contributionIdOf } from './ids';
 
 export const RUN_STORE_DIRECTORIES = Object.freeze([
   'intents',
@@ -49,14 +56,71 @@ function fail(code: RunStoreErrorCode): never {
 function hash(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
-function noSymlinkAncestors(directory: string): void {
-  for (let current = path.resolve(directory); ; current = path.dirname(current)) {
-    if (fs.existsSync(current)) {
-      const stat = fs.lstatSync(current);
-      if (!stat.isDirectory() || stat.isSymbolicLink()) fail('invalid_store');
+
+/** Pin every ancestor before descending: later writes cannot follow a replacement. */
+function pinDirectory(directory: string): number {
+  let fd = fs.openSync('/', fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
+  try {
+    for (const component of path.resolve(directory).split('/').filter(Boolean)) {
+      const next = fs.openSync(
+        `/proc/self/fd/${fd}/${component}`,
+        fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW
+      );
+      fs.closeSync(fd);
+      fd = next;
     }
-    if (current === path.dirname(current)) break;
+    const stat = fs.fstatSync(fd);
+    if (stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o700) fail('invalid_store');
+    return fd;
+  } catch {
+    fs.closeSync(fd);
+    fail('invalid_store');
   }
+}
+
+function replayControl(journal: Journal): {
+  run: RunRecord;
+  confirmed?: RunRecord;
+  upstreamId?: number;
+} {
+  let run: RunRecord | undefined;
+  let confirmed: RunRecord | undefined;
+  let upstreamId: number | undefined;
+  for (const event of journal.read()) {
+    assertSecretFree(event);
+    if (isTailRecovery(event)) continue;
+    if (!isRecord(event) || event.v !== 1) fail('invalid_store');
+    if (event.type === 'run') {
+      const next = restoreRun(event.run);
+      if (
+        run
+          ? !confirmed || !sameRunRecord(run, confirmed) || !isRunContinuation(run, next)
+          : next.history.length !== 0
+      )
+        fail('run_diverged');
+      run = next;
+    } else if (
+      event.type === 'snapshot' &&
+      run &&
+      event.sha256 === hash(Buffer.from(JSON.stringify(run)))
+    ) {
+      confirmed = run;
+    } else if (
+      event.type === 'upstream' &&
+      upstreamId === undefined &&
+      Number.isSafeInteger(event.repositoryId) &&
+      Number(event.repositoryId) > 0
+    ) {
+      upstreamId = event.repositoryId as number;
+    } else fail('invalid_store');
+  }
+  if (!run) fail('invalid_store');
+  return { run, confirmed, upstreamId };
+}
+function confirmSnapshot(journal: Journal, directory: string, run: RunRecord): void {
+  const bytes = Buffer.from(JSON.stringify(run));
+  replacePrivate(path.join(directory, 'run.json'), bytes);
+  journal.append({ v: 1, type: 'snapshot', sha256: hash(bytes) });
 }
 /** Permanent flock inode; Linux kernel releases it on controller death, never age. */
 function acquire(directory: string): number {
@@ -80,11 +144,7 @@ function acquire(directory: string): number {
       (stat.mode & 0o777) !== 0o600
     )
       throw new StoreLockedError();
-    const result = spawnSync('/usr/bin/flock', ['-x', '-n', '3'], {
-      stdio: ['ignore', 'ignore', 'ignore', fd],
-      timeout: 5000,
-    });
-    if (result.error || result.status !== 0) throw new StoreLockedError();
+    lockDescriptor(fd, 0);
     const named = fs.lstatSync(file);
     if (named.dev !== stat.dev || named.ino !== stat.ino) throw new StoreLockedError();
     fs.fsyncSync(fd);
@@ -105,6 +165,7 @@ export class RunStore {
     readonly directory: string,
     readonly contributionId: string,
     private readonly guard: number,
+    private readonly directoryFd: number,
     private readonly journal: Journal,
     private readonly storedConfig: RunConfig,
     private current: RunRecord
@@ -137,17 +198,21 @@ export class RunStore {
   static create(root: string, input: RunConfig, now: Date | string): RunStore {
     const config = validateRunConfig(runConfigInput(input));
     if (config.resumeRunId !== undefined) fail('invalid_run_id');
-    noSymlinkAncestors(root);
-    privateDir(root);
+    const runTimestamp = now instanceof Date ? now.toISOString() : now;
     const contributionId = `ztc-${randomBytes(8).toString('hex')}`;
-    const directory = path.join(root, contributionId);
-    // Exclusive creation prevents accidental reuse, even in a random-ID collision.
-    fs.mkdirSync(directory, { mode: 0o700 });
-    privateDir(directory);
-    syncDirectory(root);
-    const guard = acquire(directory);
+    const directory = path.resolve(root, contributionId);
+    let guard: number | undefined;
+    let directoryFd: number | undefined;
     let journal: Journal | undefined;
     try {
+      assertDirectoryAncestors(root);
+      privateDir(root);
+      fs.mkdirSync(directory, { mode: 0o700 });
+      privateDir(directory);
+      syncDirectory(root);
+      directoryFd = pinDirectory(directory);
+      const pinned = `/proc/self/fd/${directoryFd}`;
+      guard = acquire(pinned);
       for (const name of RUN_STORE_DIRECTORIES) privateDir(path.join(directory, name));
       const run = createRun(
         {
@@ -155,46 +220,55 @@ export class RunStore {
           upstreamIssue: config.issueUrl,
           contributor: config.contributor,
         },
-        now instanceof Date ? now.toISOString() : now
+        runTimestamp
       );
       const bytes = Buffer.from(JSON.stringify(runConfigInput(config)));
-      replacePrivate(path.join(directory, 'config.json'), bytes);
-      replacePrivate(path.join(directory, 'config.sha256'), Buffer.from(hash(bytes)));
+      replacePrivate(path.join(pinned, 'config.json'), bytes);
+      replacePrivate(path.join(pinned, 'config.sha256'), Buffer.from(hash(bytes)));
       journal = new Journal(path.join(directory, 'control'));
       journal.append({ v: 1, type: 'run', run });
-      replacePrivate(path.join(directory, 'run.json'), Buffer.from(JSON.stringify(run)));
-      syncDirectory(directory);
-      return new RunStore(directory, contributionId, guard, journal, config, run);
+      confirmSnapshot(journal, pinned, run);
+      syncDirectory(pinned);
+      return new RunStore(directory, contributionId, guard, directoryFd, journal, config, run);
     } catch (error) {
       journal?.close();
-      fs.closeSync(guard);
-      throw error;
+      if (guard !== undefined) fs.closeSync(guard);
+      if (directoryFd !== undefined) fs.closeSync(directoryFd);
+      if (
+        error instanceof RunStoreError ||
+        error instanceof StoreLockedError ||
+        error instanceof RunConfigError
+      )
+        throw error;
+      fail('invalid_store');
     }
   }
   static open(root: string, runId: string): RunStore {
-    if (!/^ztc-[a-f0-9]{16}-run-1$/u.test(runId)) fail('invalid_run_id');
-    const contributionId = runId.slice(0, -6);
+    const contributionId = contributionIdOf(runId);
+    if (!contributionId) fail('invalid_run_id');
     const directory = path.resolve(root, contributionId);
-    noSymlinkAncestors(directory);
-    // Opening never creates a missing store or missing evidence.
-    for (const dir of [
-      directory,
-      ...RUN_STORE_DIRECTORIES.map((name) => path.join(directory, name)),
-    ]) {
-      const stat = fs.lstatSync(dir);
-      if (!stat.isDirectory() || stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o700)
-        fail('invalid_store');
-    }
-    const guard = acquire(directory);
+    let directoryFd: number | undefined;
+    let guard: number | undefined;
     let journal: Journal | undefined;
     try {
-      const bytes = readPrivate(path.join(directory, 'config.json'));
-      if (hash(bytes) !== readPrivate(path.join(directory, 'config.sha256')).toString('utf8'))
+      assertDirectoryAncestors(directory);
+      // Opening never creates a missing store or missing evidence.
+      for (const dir of [
+        directory,
+        ...RUN_STORE_DIRECTORIES.map((name) => path.join(directory, name)),
+      ]) {
+        const stat = fs.lstatSync(dir);
+        if (!stat.isDirectory() || stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o700)
+          fail('invalid_store');
+      }
+      directoryFd = pinDirectory(directory);
+      const pinned = `/proc/self/fd/${directoryFd}`;
+      guard = acquire(pinned);
+      const bytes = readPrivate(path.join(pinned, 'config.json'));
+      if (hash(bytes) !== readPrivate(path.join(pinned, 'config.sha256')).toString('utf8'))
         fail('invalid_store');
       const config = validateRunConfig(JSON.parse(bytes.toString('utf8')));
-      const raw: unknown = JSON.parse(
-        readPrivate(path.join(directory, 'run.json')).toString('utf8')
-      );
+      const raw: unknown = JSON.parse(readPrivate(path.join(pinned, 'run.json')).toString('utf8'));
       assertSecretFree(raw);
       const run = restoreRun(raw);
       if (
@@ -205,34 +279,38 @@ export class RunStore {
         fail('invalid_store');
       readPrivate(path.join(directory, 'control', 'events.jsonl'));
       journal = new Journal(path.join(directory, 'control'));
-      let previous: RunRecord | undefined;
-      let upstreamId: number | undefined;
-      for (const event of journal.read()) {
-        assertSecretFree(event);
-        if (isTailRecovery(event)) continue;
-        if (!isRecord(event) || event.v !== 1) fail('invalid_store');
-        if (event.type === 'run') {
-          const next = restoreRun(event.run);
-          if (previous ? !isRunContinuation(previous, next) : next.history.length !== 0)
-            fail('run_diverged');
-          previous = next;
-        } else if (
-          event.type === 'upstream' &&
-          upstreamId === undefined &&
-          Number.isSafeInteger(event.repositoryId) &&
-          Number(event.repositoryId) > 0
-        ) {
-          upstreamId = event.repositoryId as number;
-        } else fail('invalid_store');
+      const evidence = replayControl(journal);
+      if (!sameRunRecord(evidence.run, run)) {
+        if (
+          !evidence.confirmed ||
+          sameRunRecord(evidence.run, evidence.confirmed) ||
+          !sameRunRecord(evidence.confirmed, run)
+        )
+          fail('run_diverged');
       }
-      if (!previous || !sameRunRecord(previous, run)) fail('run_diverged');
-      const store = new RunStore(directory, contributionId, guard, journal, config, run);
-      store.upstreamId = upstreamId;
+      if (!evidence.confirmed || !sameRunRecord(evidence.run, evidence.confirmed))
+        confirmSnapshot(journal, pinned, evidence.run);
+      const store = new RunStore(
+        directory,
+        contributionId,
+        guard,
+        directoryFd,
+        journal,
+        config,
+        evidence.run
+      );
+      store.upstreamId = evidence.upstreamId;
       return store;
     } catch (error) {
       journal?.close();
-      fs.closeSync(guard);
-      if (error instanceof RunStoreError) throw error;
+      if (guard !== undefined) fs.closeSync(guard);
+      if (directoryFd !== undefined) fs.closeSync(directoryFd);
+      if (
+        error instanceof RunStoreError ||
+        error instanceof StoreLockedError ||
+        error instanceof RunConfigError
+      )
+        throw error;
       fail('invalid_store');
     }
   }
@@ -249,7 +327,7 @@ export class RunStore {
     if (sameRunRecord(this.current, run)) return;
     this.write(() => {
       this.journal.append({ v: 1, type: 'run', run });
-      replacePrivate(path.join(this.directory, 'run.json'), Buffer.from(JSON.stringify(run)));
+      confirmSnapshot(this.journal, `/proc/self/fd/${this.directoryFd}`, run);
     });
     this.current = run;
   }
@@ -294,6 +372,9 @@ export class RunStore {
     // Uncertain persistence retains the kernel fence until process termination.
     this.closed = true;
     this.journal.close();
-    if (!this.poisoned) fs.closeSync(this.guard);
+    if (!this.poisoned) {
+      fs.closeSync(this.guard);
+      fs.closeSync(this.directoryFd);
+    }
   }
 }

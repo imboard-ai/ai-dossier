@@ -1,11 +1,14 @@
 import { createPrivateKey } from 'node:crypto';
 import fs from 'node:fs';
+import path from 'node:path';
 import { requireBudgetRates } from '../budget';
 import { BudgetError, type BudgetRate } from '../budget-types';
-import { readPrivate } from '../durable-fs';
-import { assertNoSecrets } from '../redaction';
+import { isAppSlug } from '../github/fork';
+import { isGitHubLogin, upstreamIssueBinding } from '../github/handoff';
+import { assertSecretFree } from '../redaction';
 import { isRecord } from '../state';
 import { DEFAULT_LIMITS, type VmLimits } from '../vm/adapter';
+import { contributionIdOf } from './ids';
 
 export type ConfigErrorCode =
   | 'invalid_config'
@@ -79,22 +82,6 @@ export interface RunConfig {
 function fail(code: ConfigErrorCode): never {
   throw new RunConfigError(code);
 }
-/** Scan actual strings before JSON escaping or dropping unknown fields. */
-export function assertSecretFree(value: unknown): void {
-  if (typeof value === 'string') assertNoSecrets(value);
-  else if (value instanceof Map) {
-    for (const [key, field] of value) {
-      assertSecretFree(key);
-      assertSecretFree(field);
-    }
-  } else if (Array.isArray(value)) value.forEach(assertSecretFree);
-  else if (isRecord(value)) {
-    for (const [key, field] of Object.entries(value)) {
-      assertNoSecrets(key);
-      assertSecretFree(field);
-    }
-  }
-}
 function object(raw: unknown, keys: string[], code: ConfigErrorCode): Record<string, unknown> {
   if (!isRecord(raw)) fail(code);
   if (Object.keys(raw).some((key) => !keys.includes(key))) fail('unknown_key');
@@ -121,7 +108,10 @@ function phase(raw: unknown): ModelPhase {
   try {
     const url = new URL(endpoint);
     if (
-      !['https:', 'http:'].includes(url.protocol) ||
+      !(
+        url.protocol === 'https:' ||
+        (url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))
+      ) ||
       url.username ||
       url.password ||
       url.search ||
@@ -139,20 +129,27 @@ function phase(raw: unknown): ModelPhase {
   };
 }
 function signer(file: string): void {
+  let fd: number | undefined;
   try {
-    const stat = fs.lstatSync(file);
+    fd = fs.openSync(
+      file,
+      fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK
+    );
+    const stat = fs.fstatSync(fd);
     if (
       !stat.isFile() ||
-      stat.isSymbolicLink() ||
       stat.uid !== process.getuid?.() ||
       (stat.mode & 0o777) !== 0o600 ||
       stat.nlink !== 1
     )
       fail('invalid_signer_key');
-    const key = createPrivateKey(readPrivate(file));
+    if (stat.size > 16384) fail('invalid_signer_key');
+    const key = createPrivateKey(fs.readFileSync(fd));
     if (key.asymmetricKeyType !== 'ed25519') fail('invalid_signer_key');
   } catch {
     fail('invalid_signer_key');
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
   }
 }
 
@@ -187,26 +184,25 @@ export function validateRunConfig(raw: unknown): RunConfig {
     'invalid_config'
   );
   const issueUrl = text(r.issueUrl, 'invalid_issue_url');
-  const match =
-    /^https:\/\/github\.com\/([A-Za-z0-9][A-Za-z0-9-]{0,38})\/([A-Za-z0-9_.-]+)\/issues\/([1-9][0-9]*)$/u.exec(
-      issueUrl
-    );
-  if (
-    !match ||
-    match[1]?.includes('--') ||
-    ['.', '..'].includes(match[2] ?? '') ||
-    !Number.isSafeInteger(Number(match[3]))
-  )
+  let binding: ReturnType<typeof upstreamIssueBinding>;
+  try {
+    binding = upstreamIssueBinding(issueUrl);
+  } catch {
     fail('invalid_issue_url');
+  }
+  if (binding.upstream.owner.length > 39) fail('invalid_issue_url');
   const contributor = text(r.contributor, 'invalid_contributor');
-  if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u.test(contributor) || contributor.includes('--'))
-    fail('invalid_contributor');
+  if (contributor.length > 39 || !isGitHubLogin(contributor)) fail('invalid_contributor');
   const e = object(
     r.executionProfile,
     ['provider', 'profileDir', 'stateDir', 'accelerator', 'proxyEndpointsFile'],
     'unsupported_environment'
   );
-  if (e.provider !== 'local-qemu' || !['auto', 'kvm', 'tcg'].includes(String(e.accelerator)))
+  if (
+    e.provider !== 'local-qemu' ||
+    typeof e.accelerator !== 'string' ||
+    !['auto', 'kvm', 'tcg'].includes(e.accelerator)
+  )
     fail('unsupported_environment');
   const m = object(r.modelProfile, ['phases', 'rates'], 'invalid_model_profile');
   const phases = object(m.phases, ['planning', 'implementing', 'repair'], 'invalid_model_profile');
@@ -231,6 +227,7 @@ export function validateRunConfig(raw: unknown): RunConfig {
   const rates = m.rates as BudgetRate[];
   try {
     if (!Array.isArray(rates)) fail('missing_rate');
+    if (Object.keys(rates).some((key) => !/^(0|[1-9][0-9]*)$/u.test(key))) fail('unknown_key');
     for (const rate of rates) {
       object(
         rate,
@@ -251,15 +248,17 @@ export function validateRunConfig(raw: unknown): RunConfig {
         : 'invalid_budget'
     );
   }
-  const checkpoints = r.checkpoints ?? [];
+  const checkpoints = r.checkpoints === undefined ? [] : r.checkpoints;
   if (
     !Array.isArray(checkpoints) ||
+    Object.keys(checkpoints).length !== checkpoints.length ||
+    Object.keys(checkpoints).some((key) => !/^(0|[1-9][0-9]*)$/u.test(key)) ||
     checkpoints.some((c) => !['plan', 'patch', 'verification'].includes(c)) ||
     new Set(checkpoints).size !== checkpoints.length
   )
     fail('invalid_checkpoints');
   const caps = { ...DEFAULT_LIMITS, activeMinutes: 120 };
-  const l = object(r.limits ?? {}, Object.keys(caps), 'invalid_limits');
+  const l = object(r.limits === undefined ? {} : r.limits, Object.keys(caps), 'invalid_limits');
   const limits = { ...caps };
   for (const key of Object.keys(caps) as (keyof typeof caps)[]) {
     if (l[key] !== undefined) limits[key] = positive(l[key], 'invalid_limits');
@@ -272,7 +271,7 @@ export function validateRunConfig(raw: unknown): RunConfig {
     'invalid_github_app'
   );
   const slug = text(g.slug, 'invalid_github_app');
-  if (!/^[a-z0-9][a-z0-9-]*$/u.test(slug)) fail('invalid_github_app');
+  if (!isAppSlug(slug)) fail('invalid_github_app');
   const githubApp = {
     appId: positive(g.appId, 'invalid_github_app'),
     clientId: text(g.clientId, 'invalid_github_app'),
@@ -280,24 +279,26 @@ export function validateRunConfig(raw: unknown): RunConfig {
     privateKeyEnv: env(g.privateKeyEnv),
     clientSecretEnv: env(g.clientSecretEnv),
   };
-  const retentionDays = positive(r.retentionDays ?? 30, 'invalid_retention');
+  const retentionDays = positive(
+    r.retentionDays === undefined ? 30 : r.retentionDays,
+    'invalid_retention'
+  );
   if (retentionDays > 3650) fail('invalid_retention');
   const resumeRunId =
     r.resumeRunId === undefined ? undefined : text(r.resumeRunId, 'invalid_resume_run_id');
-  if (resumeRunId !== undefined && !/^ztc-[a-f0-9]{16}-run-[1-9][0-9]*$/u.test(resumeRunId))
-    fail('invalid_resume_run_id');
-  const signerKeyFile = text(r.signerKeyFile, 'invalid_signer_key');
+  if (resumeRunId !== undefined && !contributionIdOf(resumeRunId)) fail('invalid_resume_run_id');
+  const signerKeyFile = path.resolve(text(r.signerKeyFile, 'invalid_signer_key'));
   signer(signerKeyFile);
   return {
     issueUrl,
-    upstream: { owner: match[1] as string, repo: match[2] as string, issue: Number(match[3]) },
+    upstream: { ...binding.upstream, issue: binding.issue },
     contributor,
     executionProfile: {
       provider: 'local-qemu',
-      profileDir: text(e.profileDir, 'unsupported_environment'),
-      stateDir: text(e.stateDir, 'unsupported_environment'),
+      profileDir: path.resolve(text(e.profileDir, 'unsupported_environment')),
+      stateDir: path.resolve(text(e.stateDir, 'unsupported_environment')),
       accelerator: e.accelerator as 'auto' | 'kvm' | 'tcg',
-      proxyEndpointsFile: text(e.proxyEndpointsFile, 'unsupported_environment'),
+      proxyEndpointsFile: path.resolve(text(e.proxyEndpointsFile, 'unsupported_environment')),
     },
     modelProfile: { phases: { planning, implementing, ...(repair ? { repair } : {}) }, rates },
     budget,

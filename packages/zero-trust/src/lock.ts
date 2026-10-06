@@ -26,6 +26,15 @@ export class StorePersistenceError extends Error {
   }
 }
 
+/** Acquire on the inherited open description; caller owns inode checks and lifetime. */
+export function lockDescriptor(fd: number, timeoutMs: number): void {
+  const result = spawnSync('/usr/bin/flock', ['-x', '-w', String(timeoutMs / 1000), '3'], {
+    stdio: ['ignore', 'ignore', 'ignore', fd],
+    timeout: timeoutMs + 1000,
+  });
+  if (result.error || result.status !== 0) throw new StoreLockedError();
+}
+
 /** Linux-local identity includes the boot ID: start ticks alone repeat after reboot. */
 export function processStartToken(pid: number): string | null {
   if (process.platform !== 'linux') throw new StoreLockedError();
@@ -155,11 +164,7 @@ export function withStoreLock<T>(
   let owner: LockOwner | undefined;
   try {
     privateFile(guard);
-    const result = spawnSync('/usr/bin/flock', ['-x', '-w', String(timeoutMs / 1000), '3'], {
-      stdio: ['ignore', 'ignore', 'ignore', guard],
-      timeout: timeoutMs + 1000,
-    });
-    if (result.error || result.status !== 0) throw new StoreLockedError();
+    lockDescriptor(guard, timeoutMs);
     const opened = fs.fstatSync(guard);
     const named = fs.lstatSync(`${file}.guard`);
     if (opened.ino !== named.ino || opened.dev !== named.dev) throw new StoreLockedError();

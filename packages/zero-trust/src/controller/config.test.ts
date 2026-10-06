@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { assertSecretFree, SecretRedactionError } from '../redaction';
 import { type ConfigErrorCode, RunConfigError, validateRunConfig } from './config';
 
 const dirs: string[] = [];
@@ -90,6 +91,19 @@ describe('validateRunConfig', () => {
     expect(value.contributor).toBe('contributor');
   });
   const cases: [string, unknown, ConfigErrorCode][] = [
+    ['checkpoints', null, 'invalid_checkpoints'],
+    ['checkpoints', new Array(1), 'invalid_checkpoints'],
+    ['limits', null, 'invalid_limits'],
+    ['retentionDays', null, 'invalid_retention'],
+    ['executionProfile.accelerator', ['tcg'], 'unsupported_environment'],
+    ['executionProfile.accelerator', new String('auto'), 'unsupported_environment'],
+    ['issueUrl', 'https://github.com/owner-/repo/issues/1', 'invalid_issue_url'],
+    ['issueUrl', `https://github.com/owner/${'r'.repeat(101)}/issues/1`, 'invalid_issue_url'],
+    ['contributor', 'contributor-', 'invalid_contributor'],
+    ['githubApp.slug', 'app-', 'invalid_github_app'],
+    ['githubApp.slug', 'a'.repeat(101), 'invalid_github_app'],
+    ['resumeRunId', 'ztc-0123456789abcdef-run-2', 'invalid_resume_run_id'],
+    ['modelProfile.phases.planning.endpoint', 'http://model.example/v1', 'invalid_model_profile'],
     ['issueUrl', 'https://github.com/owner/repo/pull/1', 'invalid_issue_url'],
     ['issueUrl', 'https://example.com/owner/repo/issues/1', 'invalid_issue_url'],
     ['issueUrl', 'https://github.com/owner/repo/issues/1?a=b', 'invalid_issue_url'],
@@ -162,7 +176,42 @@ describe('validateRunConfig', () => {
       validateRunConfig(input);
     } catch (error) {
       expect(String(error)).not.toContain('ghp_');
+      if (typeof value === 'string' && value.length > 3) {
+        expect(String(error)).not.toContain(value);
+        expect(JSON.stringify(error)).not.toContain(value);
+      }
     }
+  });
+  it('normalizes relative paths once and permits only explicit local HTTP endpoints', () => {
+    const { raw } = configFixture();
+    raw.modelProfile.phases.planning.endpoint = 'http://localhost:8080/v1';
+    const config = validateRunConfig(raw);
+    expect(path.isAbsolute(config.executionProfile.profileDir)).toBe(true);
+    expect(config.executionProfile.stateDir).toBe(path.resolve(raw.executionProfile.stateDir));
+  });
+  it('scans array metadata and cloneable container payloads, including cycles', () => {
+    const { raw } = configFixture();
+    Object.assign(raw.modelProfile.rates, { extra: 'ghp_secret' });
+    expect(() => validateRunConfig(raw)).toThrow(new RunConfigError('secret_detected'));
+    Object.assign(raw.modelProfile.rates, { extra: 'plain' });
+    expect(() => validateRunConfig(raw)).toThrow(new RunConfigError('unknown_key'));
+    for (const value of [
+      new Set(['ghp_secret']),
+      new String('ghp_secret'),
+      new Error('ghp_secret'),
+      new Map([['ghp_secret', 'plain']]),
+      new Map([['plain', 'ghp_secret']]),
+    ])
+      expect(() => assertSecretFree(value)).toThrow(SecretRedactionError);
+    const cycle: Record<string, unknown> = {
+      plain: new Date(),
+      set: new Set(['plain']),
+      boxed: new String('plain'),
+      error: new Error('plain'),
+    };
+    cycle.self = cycle;
+    expect(() => assertSecretFree(cycle)).not.toThrow();
+    expect(() => assertSecretFree(new Uint8Array([1]))).toThrow(SecretRedactionError);
   });
   it('accepts lowered limits, checkpoints, optional repair omission and resume ID', () => {
     const { raw } = configFixture();

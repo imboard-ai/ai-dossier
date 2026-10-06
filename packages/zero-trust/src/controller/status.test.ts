@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { BudgetState } from '../budget-types';
 import type { HandoffRecord } from '../github/handoff-driver';
+import { SecretRedactionError } from '../redaction';
 import { createRun, ReasonCode, transitionRun } from '../state';
 import { renderHuman, renderJson } from '../status';
 import { assembleStatus } from './status';
@@ -111,6 +112,7 @@ describe('assembleStatus', () => {
       input: { operationKind: 'engagement_comment' },
       binding: { upstream: { owner: 'owner', repo: 'repo' }, issue: 1 },
       linkKind: 'body_file',
+      link: 'https://github.com/owner/repo/issues/1',
       bodyFile: 'body.txt',
     } as HandoffRecord;
     const p = {
@@ -120,6 +122,8 @@ describe('assembleStatus', () => {
       tracker: { state: run.state, nextPermittedAction: 'tracker-action' },
     };
     expect(assembleStatus(p).nextPermittedAction).toContain('review the prepared request');
+    expect(renderHuman(assembleStatus(p))).toContain(record.link);
+    expect(renderJson(assembleStatus(p))).toContain(record.link);
     expect(assembleStatus({ ...p, handoff: undefined }).nextPermittedAction).toBe('tracker-action');
     const waiting = transitionRun(initial(), ReasonCode.ForkMissing, at(1));
     const prerequisite = {
@@ -132,6 +136,35 @@ describe('assembleStatus', () => {
     expect(assembleStatus({ ...parts(), run: waiting }).nextPermittedAction).toContain(
       'contributor hand-off'
     );
+  });
+
+  it('refuses a stale handoff even when the current run returns to the same state', () => {
+    const old = transitionRun(initial(), ReasonCode.ContributorHandoff, at(1));
+    let current = transitionRun(old, ReasonCode.EngagementObserved, at(2));
+    current = transitionRun(current, ReasonCode.MaintainerInvited, at(3));
+    current = transitionRun(current, ReasonCode.ForkMissing, at(4));
+    const handoff = { run: old, contributionId: id, handoffs: new Map<string, HandoffRecord>() };
+    expect(() => assembleStatus({ ...parts(), run: current, handoff })).toThrow();
+    expect(() =>
+      assembleStatus({ ...parts(), run: current, handoff: { ...handoff, run: current } })
+    ).not.toThrow();
+    expect(() =>
+      assembleStatus({
+        ...parts(),
+        run: current,
+        handoff: { ...handoff, run: current, contributionId: 'other' },
+      })
+    ).toThrow();
+  });
+  it('rejects planted free-text tokens specifically, with benign renderer controls', () => {
+    expect(() => assembleStatus({ ...parts(), phase: 'plain-phase' })).not.toThrow();
+    expect(() => assembleStatus({ ...parts(), phase: 'ghp_secret' })).toThrow(SecretRedactionError);
+    expect(() =>
+      assembleStatus({
+        ...parts(),
+        tracker: { state: 'gating', nextPermittedAction: 'ghp_secret' },
+      })
+    ).toThrow(SecretRedactionError);
   });
   it('fails closed on bad clocks, budget identity, mismatched state and planted secrets', () => {
     expect(() => assembleStatus({ ...parts(), now: 'invalid' })).toThrow();

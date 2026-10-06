@@ -4,8 +4,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { compiledFixture } from '../__tests__/compiled-fixture';
 import { replacePrivate } from '../durable-fs';
+import { Journal } from '../journal';
 import { StoreLockedError } from '../lock';
+import { SecretRedactionError } from '../redaction';
 import { ReasonCode, transitionRun } from '../state';
 import { validateRunConfig } from './config';
 import { RUN_STORE_DIRECTORIES, RunStore, RunStoreError } from './run-store';
@@ -119,8 +122,9 @@ describe('RunStore', () => {
   it('holds lifetime exclusion within this process and independent processes', () => {
     const { root, store } = rig();
     expect(() => RunStore.open(root, store.runId)).toThrow(StoreLockedError);
-    const script = `const {RunStore}=require('./dist/controller/run-store');try{RunStore.open(process.argv[1],process.argv[2]);process.exit(2)}catch(e){if(e.name!=='StoreLockedError')throw e}`;
-    const result = spawnSync(process.execPath, ['-e', script, root, store.runId], {
+    const module = compiledFixture(path.dirname(root), 'controller/run-store');
+    const script = `const {RunStore}=require(process.argv[3]);try{RunStore.open(process.argv[1],process.argv[2]);process.exit(2)}catch(e){if(e.name!=='StoreLockedError')throw e}`;
+    const result = spawnSync(process.execPath, ['-e', script, root, store.runId, module], {
       cwd: path.resolve(__dirname, '../..'),
       encoding: 'utf8',
     });
@@ -134,9 +138,10 @@ describe('RunStore', () => {
       process.execPath,
       [
         '-e',
-        `const {RunStore}=require('./dist/controller/run-store');const s=RunStore.open(process.argv[1],process.argv[2]);process.stdout.write('ready');setInterval(()=>{},1000)`,
+        `const {RunStore}=require(process.argv[3]);const s=RunStore.open(process.argv[1],process.argv[2]);process.stdout.write('ready');setInterval(()=>{},1000)`,
         root,
         id,
+        compiledFixture(path.dirname(root), 'controller/run-store'),
       ],
       { cwd: path.resolve(__dirname, '../..'), stdio: ['ignore', 'pipe', 'pipe'] }
     );
@@ -224,7 +229,9 @@ describe('RunStore', () => {
   it('rejects path traversal, secret persistence, invalid store paths and closed handles', () => {
     const { root, config, store } = rig();
     expect(() => RunStore.open(root, '../escape')).toThrow(new RunStoreError('invalid_run_id'));
-    expect(() => store.persistRun({ ...store.run, contributor: 'ghp_secret' })).toThrow();
+    expect(() =>
+      store.persistRun({ ...store.run, extra: 'ghp_secret' } as typeof store.run)
+    ).toThrow(SecretRedactionError);
     expect(() => store.assertResumeMatches({ ...config, contributor: 'ghp_secret' })).toThrow();
     expect(() => RunStore.create(root, { ...config, resumeRunId: store.runId }, START)).toThrow(
       RunStoreError
@@ -239,5 +246,109 @@ describe('RunStore', () => {
     }
     store.close();
     expect(() => store.run).toThrow(new RunStoreError('store_closed'));
+  });
+
+  it('rolls a pending journaled snapshot forward but rejects rollback of a confirmed one', () => {
+    const { root, store } = rig();
+    const initial = store.run;
+    const next = transitionRun(initial, ReasonCode.GatePassed, LATER);
+    const id = store.runId;
+    store.close();
+    const journal = new Journal(path.join(store.directory, 'control'));
+    journal.append({ v: 1, type: 'run', run: next });
+    journal.close();
+    const recovered = open(root, id);
+    expect(recovered.run).toEqual(next);
+    expect(JSON.parse(fs.readFileSync(path.join(store.directory, 'run.json'), 'utf8'))).toEqual(
+      next
+    );
+    recovered.close();
+    replacePrivate(path.join(store.directory, 'run.json'), Buffer.from(JSON.stringify(initial)));
+    expect(() => RunStore.open(root, id)).toThrow(new RunStoreError('run_diverged'));
+  });
+
+  it('accepts benign extra run data but refuses a token without altering durable bytes', () => {
+    const { root, store } = rig();
+    const id = store.runId;
+    const next = transitionRun(store.run, ReasonCode.GatePassed, LATER);
+    const before = fs.readFileSync(path.join(store.directory, 'control/events.jsonl'));
+    expect(() => store.persistRun({ ...next, extra: 'ghp_secret' } as typeof next)).toThrow(
+      SecretRedactionError
+    );
+    expect(fs.readFileSync(path.join(store.directory, 'control/events.jsonl'))).toEqual(before);
+    store.persistRun({ ...next, extra: 'plain' } as typeof next);
+    store.close();
+    replacePrivate(
+      path.join(store.directory, 'run.json'),
+      Buffer.from(JSON.stringify({ ...next, extra: 'plain' }))
+    );
+    const restored = open(root, id);
+    expect(restored.run).toEqual(next);
+  });
+
+  it('maps missing paths to fixed errors that never echo a planted token', () => {
+    const { root, store } = rig();
+    try {
+      RunStore.open(path.join(root, 'ghp_secret'), store.runId);
+    } catch (error) {
+      expect(error).toEqual(new RunStoreError('invalid_store'));
+      expect(String(error)).not.toContain('ghp_secret');
+    }
+  });
+
+  it('pins snapshot publication across an ancestor replacement without redirected writes', () => {
+    const { root, store } = rig();
+    const moved = `${root}-moved`;
+    const redirected = `${root}-redirected`;
+    fs.mkdirSync(redirected);
+    const destination = path.join(redirected, store.contributionId);
+    fs.mkdirSync(destination);
+    fs.writeFileSync(path.join(destination, 'run.json'), 'sentinel');
+    const append = Journal.prototype.append;
+    vi.spyOn(Journal.prototype, 'append').mockImplementation(function (this: Journal, event) {
+      append.call(this, event);
+      if ((event as { type?: string }).type === 'run') {
+        fs.renameSync(root, moved);
+        fs.symlinkSync(redirected, root);
+      }
+    });
+    try {
+      // Journal identity checks may fence after safe pinned publication; no redirection.
+      expect(() =>
+        store.persistRun(transitionRun(store.run, ReasonCode.GatePassed, LATER))
+      ).toThrow(new RunStoreError('persistence_uncertain'));
+      expect(fs.readFileSync(path.join(destination, 'run.json'), 'utf8')).toBe('sentinel');
+      expect(
+        JSON.parse(fs.readFileSync(path.join(moved, store.contributionId, 'run.json'), 'utf8'))
+          .state
+      ).toBe('planning');
+    } finally {
+      vi.restoreAllMocks();
+      fs.unlinkSync(root);
+      fs.renameSync(moved, root);
+      fs.rmSync(redirected, { recursive: true });
+    }
+  });
+
+  it.each([
+    'journal-fsync',
+    'snapshot-rename',
+    'snapshot-fsync',
+    'upstream-fsync',
+  ])('poisons and retains the fence after %s until child process death', (fault) => {
+    const { root, store } = rig();
+    const id = store.runId;
+    store.close();
+    const module = compiledFixture(path.dirname(root), 'controller/run-store');
+    const script = `const fs=require('node:fs'); const {RunStore}=require(process.argv[3]);const s=RunStore.open(process.argv[1],process.argv[2]);const fault=process.argv[4];const originalSync=fs.fsyncSync,originalRename=fs.renameSync;let syncs=0;fs.fsyncSync=function(fd){syncs++;if((fault==='journal-fsync'||fault==='upstream-fsync')&&syncs===1)throw Error('injected');if(fault==='snapshot-fsync'&&syncs===3)throw Error('injected');return originalSync(fd)};fs.renameSync=function(a,b){if(fault==='snapshot-rename'&&b.endsWith('/run.json'))throw Error('injected');return originalRename(a,b)};try{if(fault==='upstream-fsync')s.recordUpstreamRepositoryId(123);else{const {transitionRun,ReasonCode}=require(require('node:path').join(require('node:path').dirname(process.argv[3]),'../state'));s.persistRun(transitionRun(s.run,ReasonCode.GatePassed,'${LATER}'))}throw Error('mutation passed')}catch(e){if(e.code!=='persistence_uncertain')throw e}fs.fsyncSync=originalSync;fs.renameSync=originalRename;try{s.run;throw Error('read passed')}catch(e){if(e.code!=='persistence_uncertain')throw e}s.close();try{RunStore.open(process.argv[1],process.argv[2]);throw Error('lock released')}catch(e){if(e.name!=='StoreLockedError')throw e}process.stdout.write('fenced');`;
+    const result = spawnSync(process.execPath, ['-e', script, root, id, module, fault], {
+      encoding: 'utf8',
+      timeout: 30000,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe('fenced');
+    const recovered = open(root, id);
+    expect(recovered.run.state).toBe(fault === 'upstream-fsync' ? 'gating' : 'planning');
+    if (fault === 'upstream-fsync') expect(recovered.upstreamRepositoryId).toBe(123);
   });
 });
