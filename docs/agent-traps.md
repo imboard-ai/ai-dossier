@@ -75,6 +75,11 @@ search for first.
 
 ## Budget admission traps
 
+| Symptom (grep this) | What went wrong | Fix | PR |
+|---|---|---|---|
+| RunStore crash after journal append refuses every resume / snapshot rollback | Exact equality alone cannot distinguish interrupted publication from a reverted committed snapshot. | Journal an explicit snapshot confirmation after atomic publication; recover only the exact pending continuation under the lifetime guard, and refuse rollback of confirmed evidence. Test append/rename/fsync interruption and process-death recovery. | #1090 |
+| Valid controller config selects the wrong accelerator / stale handoff gives the old action | Coercing an array to a string validates one value but returns another; comparing handoff ID/state misses a later return to the same wait state. | Validate primitive accelerator literals and exact replayed handoff history/contribution; use source-compiled process fixtures rather than warm dist. | #1090 |
+
 Ledger admission and reservation rules in the zero-trust budget code.
 
 | Symptom (grep this) | What went wrong | Fix | PR |

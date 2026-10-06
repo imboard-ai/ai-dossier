@@ -3,7 +3,7 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import * as path from 'node:path';
-import { publishPrivate, readPrivate, syncDirectory } from './durable-fs';
+import { assertDirectoryAncestors, publishPrivate, readPrivate, syncDirectory } from './durable-fs';
 import { isTailRecovery, type TailRecovery } from './recovery';
 
 const openPaths = new Set<string>();
@@ -29,13 +29,7 @@ export class Journal {
     try {
       const dir = path.dirname(this.filePath);
       // Check every existing ancestor before recursive creation (no symlink traversal).
-      for (let current = dir; ; current = path.dirname(current)) {
-        if (fs.existsSync(current)) {
-          const stat = fs.lstatSync(current);
-          if (!stat.isDirectory() || stat.isSymbolicLink()) throw new JournalError();
-        }
-        if (current === path.dirname(current)) break;
-      }
+      assertDirectoryAncestors(dir);
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
       fs.chmodSync(dir, 0o700);
       fd = fs.openSync(

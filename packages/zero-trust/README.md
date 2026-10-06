@@ -46,7 +46,9 @@ was lost; the lifecycle API performs no GitHub writes or resource teardown.
 
 `StatusRecord` has all PRD status facts. `activeTimeMs` excludes waits. Money
 estimates contain nonnegative finite `amount` and a matching three-letter
-`currency`; these are estimates, not invoices. `candidateSha` is omitted if absent.
+`currency`; these are estimates, not invoices. Controller-assembled amounts are
+integer minor units (USD `45` means $0.45). Renderers preserve caller-supplied
+numbers without conversion. `candidateSha` is omitted if absent.
 `renderJson` and `renderHuman` render identical whitelisted facts; human values
 use JSON quoting to neutralize line injection. Both use the exported, immutable
 `SECRET_PATTERNS` policy shared with intent and receipt validation. Case-insensitive
@@ -80,8 +82,8 @@ const status = {
   upstreamIssue: restored.upstreamIssue,
   contributor: restored.contributor,
   activeTimeMs: 60000,
-  estimatedSpend: { amount: 0.25, currency: 'USD' },
-  budgetRemaining: { amount: 4.75, currency: 'USD' },
+  estimatedSpend: { amount: 25, currency: 'USD' },
+  budgetRemaining: { amount: 475, currency: 'USD' },
   reasonCode: ReasonCode.GatePassed,
   nextPermittedAction: 'approve_plan',
 };
@@ -90,9 +92,131 @@ console.log(renderJson(status));
 ```
 
 The values above are illustrative controller-supplied facts; the status renderer
-does not calculate spend, elapsed time or shipping authorization.
+does not calculate spend, elapsed time or shipping authorization. `assembleStatus`
+derives active time and monetary facts from controller history and the budget ledger.
 
-## Development
+## Controller configuration, storage and status (#1090)
+
+`validateRunConfig(raw)` accepts only the issue #1090 configuration fields and
+returns a detached `RunConfig` with parsed `upstream: { owner, repo, issue }`.
+The exact GitHub issue URL and contributor login are validated; unknown keys at
+every configuration object level fail closed. Environment fields name variables
+(`apiKeyEnv`, `privateKeyEnv`, `clientSecretEnv`), never their values. Every string,
+including unknown keys, is scanned before serialization. `RunConfigError.code`
+is a fixed, non-echoing reason such as `secret_detected`, `missing_rate`,
+`invalid_limits` or `unsupported_environment`.
+
+The input shape is:
+
+| Field | Shape / units |
+|---|---|
+| `issueUrl`, `contributor` | Exact issue URL; GitHub login, at most 39 characters |
+| `executionProfile` | `{ provider: 'local-qemu', profileDir, stateDir, accelerator, proxyEndpointsFile }` |
+| `modelProfile` | `{ phases: { planning, implementing, repair? }, rates }`; each phase is exported `ModelPhase` |
+| `budget` | `{ currency, ceilingMinor, cleanupAllowanceMinor, tokenLimit, activeMinutes }`; money in minor units, tokens in counts |
+| `checkpoints` | Optional subset of `plan`, `patch`, `verification` |
+| `limits` | Optional lowered `vcpus`, `memoryMiB`, `diskGiB`, `commandTimeoutMs`, `activeMinutes` |
+| `signerKeyFile` | Ed25519 receipt-key path |
+| `githubApp` | `{ appId, clientId, slug, privateKeyEnv, clientSecretEnv }`; positive numeric App ID, client ID and valid App slug; credentials are variable names |
+| `retentionDays`, `resumeRunId` | Optional retention and supported `ztc-<16 hex>-run-1` resume ID |
+
+Rates use exported `BudgetRate`: `resource`, `currency`, `unit`, `price`, `units`,
+`source`, `fx: { currency, numerator, denominator, timestamp }`. `price` is
+source-currency minor units per batch of `units`; FX is a positive rational
+conversion to the budget currency. Missing prices are refused even for free models.
+`runConfigInput(config)` removes derived `upstream` before revalidation or
+persistence: `validateRunConfig(runConfigInput(config))`. The returned object
+itself is not raw input. Exported `assertSecretFree(value)` recursively scans
+strings and keys (including array metadata and Map/Set payloads), unlike
+`assertNoSecrets(string)`. Unsupported opaque objects are refused; cycles
+terminate. Configuration arrays may not have extra non-index properties.
+
+The supported execution provider is `local-qemu` with explicit `profileDir`,
+`stateDir`, `accelerator` and `proxyEndpointsFile`. Each planning/implementing
+(and optional repair) model has adapter, model, endpoint and API-key variable
+name; endpoints cannot contain user credentials, queries or fragments. HTTPS is
+required except explicit localhost/loopback HTTP model endpoints. Paths are
+resolved to absolute paths once at validation, avoiding cwd-dependent resume. Rates
+are keyed by the phase's model name and must include even zero-price models,
+with FX targeting the budget currency. Budget ceilings, cleanup allowance,
+tokens and active minutes are positive safe integers. Cleanup allowance cannot
+exceed the ceiling. Resource limits default to `DEFAULT_LIMITS` plus 120 active
+minutes; overrides may only lower caps, including the 20-minute command cap.
+The active budget cannot exceed the active limit. A smaller VM disk is still
+subject to the adapter's baked-image minimum when execution starts.
+Checkpoints default to `[]`; retention defaults to 30 days (1–3650).
+`signerKeyFile` must be a single-link, current-user-owned, mode-0600 Ed25519
+private key, verified and read on one no-follow descriptor. Only its path is
+persisted; it must remain available on resume, and it is not fingerprinted.
+No environment credential is read. `resumeRunId` marks a resume request and is
+refused by `create`; use `open` instead. This foundation supports run 1 only;
+revisions allocate numbered budget sessions.
+
+`RunStore.create(root, config, now)` allocates a random `ztc-<16 hex>` contribution
+and `<contributionId>-run-1`; `now` is a Date or canonical ISO timestamp.
+`RunStore.open(root, runId)` restores it without initializing missing evidence.
+Both return a lifetime-exclusive controller handle. `run`, `config`,
+`contributionId`, `runId`, `directory`, `upstreamRepositoryId`,
+`storeDirectory(name)` and `budgetSessionId(n)` expose safe metadata. Budget
+session IDs are `<runId>-s<n>` (positive safe integer). Each store has 0700
+directories and 0600 files, immutable `config.json` plus `config.sha256`, and
+`run.json`. Dedicated directories are `intents`, `handoff`, `track`, `tokens`,
+`push-ledger`, `nonces`, `budget`, `vm`, `profile`, `artifacts`, `bodies`,
+and `control`. Individual primitives still initialize their own evidence only
+on first creation; opening a RunStore does not initialize or reset them.
+
+`persistRun(run)` admits only replay-valid exact continuations, journals them in
+`control/events.jsonl`, then atomically rewrites the snapshot. Opening compares
+the snapshot against this durable witness, rejecting rollback, divergence and
+corruption. A snapshot confirmation event follows each durable snapshot write.
+An interrupted, unconfirmed publication rolls forward only from the exact
+previous confirmed checkpoint (or the exact pending snapshot); a rollback of
+an already confirmed snapshot is refused. Unknown/divergent evidence yields
+`run_diverged` or `invalid_store` without changing the lifecycle. A failed write
+poisons the handle with `persistence_uncertain` and retains its kernel fence
+until the process terminates. `close()` is otherwise idempotent and releases
+the handle. A process crash releases the kernel lock; merely losing a JavaScript
+reference in a live process does not. Linux-local storage and util-linux
+`/usr/bin/flock` are required. Never unlink/replace `.controller.guard`, and
+keep stores outside worker write access. This is not a distributed lease.
+Snapshot reads/writes are anchored to a pinned directory descriptor; replacing
+an ancestor cannot redirect publication. Lock contention/unavailable kernel
+locking raises `StoreLockedError`. Other store refusals have non-echoing
+`RunStoreError.code`: `invalid_store`, `invalid_run_id`, `run_diverged`,
+`resume_identity_mismatch`, `persistence_uncertain`, `store_closed`. Stored
+configuration failures preserve their typed `RunConfigError`, including an
+unavailable signer key. Failed first creation preserves incomplete private
+evidence rather than deleting it. `RUN_STORE_DIRECTORIES` exports the allowlist.
+
+Record the authenticated upstream repository ID once with
+`recordUpstreamRepositoryId(id)`. `assertResumeMatches(config)` compares
+contributor, exact issue URL, execution provider and, once bound, the supplied
+`upstreamRepositoryId`. A changed or omitted bound ID yields
+`RunStoreError('resume_identity_mismatch')`. Changed identity or target requires
+a new contribution. Stored config is immutable; `assertResumeMatches` only
+checks identity and does not apply changed model/budget settings or reset history.
+Retention policy is configuration only here; this API performs no expiry deletion.
+
+`assembleStatus({ run, now, budget, sessionId, phase?, candidateSha?, handoff?,
+tracker?, prerequisite? })` returns all `StatusRecord` facts and performs no
+polling or network writes. Active time sums only gating, planning, implementing,
+verifying, shipping and revising intervals, including the current active interval;
+waits, pauses, submitted/outcome/terminal intervals are excluded. Estimated spend
+is the selected budget session's conservative spent plus reserved **minor units**;
+remaining is the ceiling less that total, floored at zero. It reports the latest
+transition reason and prioritizes pending `handoffStatus`, credential-free
+tracker status, `prerequisiteAction` (upstream binding and App slug), then
+`DEFAULT_STATE_ACTIONS`. Driver facts must describe the current run/state.
+Pending handoffs must have the exact current replay-valid history and contribution
+binding, and their action includes the submission URL. `phase` defaults to state.
+Exported `StatusParts` describes the input. Invalid/backwards `now`, absent
+session, wrong contribution, overflow and stale driver facts are refused with
+`InvalidStatusError`; clocks are never clamped. Use `renderJson` or `renderHuman`
+for the same validated facts. Configuration,
+RunStore and status helpers are exported from the package index; credential
+modules remain isolated, including type-only imports.
+
+## Development commands
 
 ```sh
 npm run build --workspace=@ai-dossier/zero-trust

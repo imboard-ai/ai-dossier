@@ -53,3 +53,40 @@ export function assertNoSecrets(value: string): void {
   )
     throw new SecretRedactionError();
 }
+
+/** Scan detached controller data, including container payloads and array metadata.
+ * Cycles terminate; unsupported object payloads are refused rather than skipped. */
+export function assertSecretFree(value: unknown): void {
+  const seen = new Set<object>();
+  const scan = (item: unknown): void => {
+    if (typeof item === 'string') {
+      assertNoSecrets(item);
+      return;
+    }
+    if (typeof item !== 'object' || item === null || seen.has(item)) return;
+    seen.add(item);
+    if (item instanceof Map)
+      for (const [key, field] of item) {
+        scan(key);
+        scan(field);
+      }
+    else if (item instanceof Set) for (const field of item) scan(field);
+    else if (item instanceof String) assertNoSecrets(item.valueOf());
+    else if (item instanceof Error) {
+      assertNoSecrets(item.message);
+      if (item.stack) assertNoSecrets(item.stack);
+      scan(item.cause);
+    } else if (
+      !(item instanceof Date) &&
+      !Array.isArray(item) &&
+      Object.getPrototypeOf(item) !== Object.prototype &&
+      Object.getPrototypeOf(item) !== null
+    )
+      throw new SecretRedactionError();
+    for (const [key, field] of Object.entries(item)) {
+      assertNoSecrets(key);
+      scan(field);
+    }
+  };
+  scan(value);
+}

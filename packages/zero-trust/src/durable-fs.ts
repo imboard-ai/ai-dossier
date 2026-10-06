@@ -3,6 +3,18 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+/** Non-mutating preflight; callers still pin descriptors across later operations. */
+export function assertDirectoryAncestors(directory: string): void {
+  for (let current = path.resolve(directory); ; current = path.dirname(current)) {
+    if (fs.existsSync(current)) {
+      const stat = fs.lstatSync(current);
+      if (!stat.isDirectory() || stat.isSymbolicLink())
+        throw new Error('Controller storage unavailable');
+    }
+    if (current === path.dirname(current)) break;
+  }
+}
+
 /** LOCAL Linux controller storage. Persist directory entries before admission. */
 export function syncDirectory(directory: string): void {
   const fd = fs.openSync(directory, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
