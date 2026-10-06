@@ -48,7 +48,7 @@ afterEach(() => {
 function row(over: Partial<UsageRow>): UsageRow {
   return {
     ts: '2026-09-29T10:00:00.000Z',
-    host: 'hcc',
+    host: 'host-a',
     provider: 'anthropic',
     model: 'claude-x',
     input: 10,
@@ -78,37 +78,41 @@ describe('rowKey / persistLocal', () => {
   it('keys on the message, not on attribution', () => {
     expect(rowKey(row({}))).toBe(rowKey(row({ issue: 5, unit: 'issue:5' })));
     expect(rowKey(row({}))).not.toBe(rowKey(row({ output: 6 })));
-    expect(rowKey(row({}))).not.toBe(rowKey(row({ host: 'wls' })));
+    expect(rowKey(row({}))).not.toBe(rowKey(row({ host: 'host-c' })));
   });
 
   it('is idempotent and refreshes attribution in place', () => {
     const dir = tmpDir();
     const rows = [row({}), row({ ts: '2026-09-29T10:01:00.000Z' })];
-    expect(persistLocal(dir, 'hcc', rows, [])).toMatchObject({ added: 2, updated: 0, total: 2 });
-    expect(persistLocal(dir, 'hcc', rows, [])).toMatchObject({
+    expect(persistLocal(dir, 'host-a', rows, [])).toMatchObject({ added: 2, updated: 0, total: 2 });
+    expect(persistLocal(dir, 'host-a', rows, [])).toMatchObject({
       added: 0,
       updated: 0,
       unchanged: 2,
       total: 2,
     });
     const refined = [row({ issue: 7, unit: 'issue:7' })];
-    expect(persistLocal(dir, 'hcc', refined, [])).toMatchObject({ added: 0, updated: 1, total: 2 });
-    const stored = [...readHostFile(hostFile(dir, 'hcc')).rows.values()];
+    expect(persistLocal(dir, 'host-a', refined, [])).toMatchObject({
+      added: 0,
+      updated: 1,
+      total: 2,
+    });
+    const stored = [...readHostFile(hostFile(dir, 'host-a')).rows.values()];
     expect(stored.find((r) => r.ts === rows[0].ts)?.issue).toBe(7);
   });
 
   it("never writes another host's rows into this host's file", () => {
     const dir = tmpDir();
-    persistLocal(dir, 'hcc', [row({}), row({ host: 'wls' })], []);
-    expect(listHosts(dir)).toEqual(['hcc']);
-    expect(readHostFile(hostFile(dir, 'hcc')).rows.size).toBe(1);
+    persistLocal(dir, 'host-a', [row({}), row({ host: 'host-c' })], []);
+    expect(listHosts(dir)).toEqual(['host-a']);
+    expect(readHostFile(hostFile(dir, 'host-a')).rows.size).toBe(1);
   });
 });
 
 describe('bundle export / import', () => {
   const limit: LimitEvent = {
     ts: '2026-09-29T10:05:00.000Z',
-    host: 'wls',
+    host: 'host-c',
     source: 'sched',
     provider: null,
     session_id: null,
@@ -118,28 +122,28 @@ describe('bundle export / import', () => {
   };
 
   it('merges idempotently, one file per source host, ignoring its own host', () => {
-    const wls = tmpDir();
+    const hostC = tmpDir();
     persistLocal(
-      wls,
-      'wls',
-      [row({ host: 'wls' }), row({ host: 'wls', ts: '2026-09-29T10:02:00.000Z' })],
+      hostC,
+      'host-c',
+      [row({ host: 'host-c' }), row({ host: 'host-c', ts: '2026-09-29T10:02:00.000Z' })],
       [limit]
     );
-    const bundle = buildBundle(wls, 'wls', null, 0);
+    const bundle = buildBundle(hostC, 'host-c', null, 0);
 
-    const hcc = tmpDir();
-    persistLocal(hcc, 'hcc', [row({})], []);
-    const first = importBundle(hcc, bundle.text, 'hcc');
-    expect(first).toMatchObject({ added: 3, updated: 0, unchanged: 0, hosts: ['wls'] });
-    const again = importBundle(hcc, bundle.text, 'hcc');
+    const hostA = tmpDir();
+    persistLocal(hostA, 'host-a', [row({})], []);
+    const first = importBundle(hostA, bundle.text, 'host-a');
+    expect(first).toMatchObject({ added: 3, updated: 0, unchanged: 0, hosts: ['host-c'] });
+    const again = importBundle(hostA, bundle.text, 'host-a');
     expect(again).toMatchObject({ added: 0, updated: 0, unchanged: 3 });
-    expect(listHosts(hcc)).toEqual(['hcc', 'wls']);
-    expect(readHostFile(hostFile(hcc, 'wls')).rows.size).toBe(2);
-    expect(readHostFile(hostFile(hcc, 'wls')).limits.size).toBe(1);
+    expect(listHosts(hostA)).toEqual(['host-a', 'host-c']);
+    expect(readHostFile(hostFile(hostA, 'host-c')).rows.size).toBe(2);
+    expect(readHostFile(hostFile(hostA, 'host-c')).limits.size).toBe(1);
 
-    // A bundle echoing hcc's own rows back is ignored: local files come only from local collection.
-    const echo = buildBundle(hcc, 'hcc', null, 0);
-    expect(importBundle(hcc, echo.text, 'hcc')).toMatchObject({ added: 0, ignored_local: 1 });
+    // A bundle echoing hostA's own rows back is ignored: local files come only from local collection.
+    const echo = buildBundle(hostA, 'host-a', null, 0);
+    expect(importBundle(hostA, echo.text, 'host-a')).toMatchObject({ added: 0, ignored_local: 1 });
   });
 
   it('skips malformed / hostile records and rejects a newer bundle version', () => {
@@ -148,58 +152,62 @@ describe('bundle export / import', () => {
       JSON.stringify({ k: 'header', version: 1, host: 'x', exported_at: 'now' }),
       'garbage',
       JSON.stringify({ k: 'row', key: 'k', row: row({ host: '../../etc' }) }),
-      JSON.stringify({ k: 'row', key: 'k', row: { ...row({ host: 'wls' }), input: 'NaN' } }),
-      JSON.stringify({ k: 'row', key: 'k', row: row({ host: 'wls' }) }),
+      JSON.stringify({ k: 'row', key: 'k', row: { ...row({ host: 'host-c' }), input: 'NaN' } }),
+      JSON.stringify({ k: 'row', key: 'k', row: row({ host: 'host-c' }) }),
     ].join('\n');
-    const r = importBundle(dir, text, 'hcc');
-    expect(r).toMatchObject({ added: 1, skipped: 3, hosts: ['wls'] });
+    const r = importBundle(dir, text, 'host-a');
+    expect(r).toMatchObject({ added: 1, skipped: 3, hosts: ['host-c'] });
     expect(fs.existsSync(path.join(dir, 'hosts', '..', '..', 'etc'))).toBe(false);
     expect(() =>
       importBundle(
         dir,
         JSON.stringify({ k: 'header', version: 99, host: 'x', exported_at: '' }),
-        'hcc'
+        'host-a'
       )
     ).toThrow(/newer/);
   });
 
   it('one null / scalar line neither throws nor poisons the file', () => {
     const dir = tmpDir();
-    const good = JSON.stringify({ k: 'row', key: 'k', row: row({ host: 'wls' }) });
-    const r = importBundle(dir, `null\n42\n"x"\n${good}\n`, 'hcc');
+    const good = JSON.stringify({ k: 'row', key: 'k', row: row({ host: 'host-c' }) });
+    const r = importBundle(dir, `null\n42\n"x"\n${good}\n`, 'host-a');
     expect(r).toMatchObject({ added: 1, skipped: 3 });
-    fs.appendFileSync(hostFile(dir, 'wls'), 'null\n');
-    expect(readHostFile(hostFile(dir, 'wls')).rows.size).toBe(1);
+    fs.appendFileSync(hostFile(dir, 'host-c'), 'null\n');
+    expect(readHostFile(hostFile(dir, 'host-c')).rows.size).toBe(1);
   });
 
   it('a stale relay never overwrites the owner-fresher record', () => {
     const owner = tmpDir();
     const relay = tmpDir();
-    persistLocal(owner, 'wls', [row({ host: 'wls' })], []);
-    const stale = buildBundle(owner, 'wls', null, 0).text;
-    importBundle(relay, stale, 'hcc');
-    // wls refines its attribution later...
-    persistLocal(owner, 'wls', [row({ host: 'wls', issue: 9, unit: 'issue:9' })], []);
-    const fresh = buildBundle(owner, 'wls', null, 0).text;
+    persistLocal(owner, 'host-c', [row({ host: 'host-c' })], []);
+    const stale = buildBundle(owner, 'host-c', null, 0).text;
+    importBundle(relay, stale, 'host-a');
+    // hostC refines its attribution later...
+    persistLocal(owner, 'host-c', [row({ host: 'host-c', issue: 9, unit: 'issue:9' })], []);
+    const fresh = buildBundle(owner, 'host-c', null, 0).text;
     const consumer = tmpDir();
-    importBundle(consumer, fresh, 'hcc2');
+    importBundle(consumer, fresh, 'host-b');
     // ...then the consumer also receives the STALE copy via a relay: it must not win.
-    expect(importBundle(consumer, stale, 'hcc2')).toMatchObject({ updated: 0 });
-    expect([...readHostFile(hostFile(consumer, 'wls')).rows.values()][0].issue).toBe(9);
+    expect(importBundle(consumer, stale, 'host-b')).toMatchObject({ updated: 0 });
+    expect([...readHostFile(hostFile(consumer, 'host-c')).rows.values()][0].issue).toBe(9);
     // And the fresher copy does replace an older one.
-    expect(importBundle(relay, fresh, 'hcc')).toMatchObject({ updated: 1 });
+    expect(importBundle(relay, fresh, 'host-a')).toMatchObject({ updated: 1 });
   });
 
   it('--since limits the exported rows', () => {
     const dir = tmpDir();
-    persistLocal(dir, 'hcc', [row({}), row({ ts: '2026-09-29T11:00:00.000Z' })], []);
-    expect(buildBundle(dir, 'hcc', ['hcc'], Date.parse('2026-09-29T10:30:00Z')).rows).toBe(1);
+    persistLocal(dir, 'host-a', [row({}), row({ ts: '2026-09-29T11:00:00.000Z' })], []);
+    expect(buildBundle(dir, 'host-a', ['host-a'], Date.parse('2026-09-29T10:30:00Z')).rows).toBe(1);
   });
 });
 
 describe('syncWithRemotes (fake ssh between simulated hosts)', () => {
-  it('one run from wls leaves every host with every host, and re-running changes nothing', () => {
-    const dirs: Record<string, string> = { wls: tmpDir(), hcc: tmpDir(), hcc2: tmpDir() };
+  it('one run from host-c leaves every host with every host, and re-running changes nothing', () => {
+    const dirs: Record<string, string> = {
+      'host-c': tmpDir(),
+      'host-a': tmpDir(),
+      'host-b': tmpDir(),
+    };
     for (const h of Object.keys(dirs)) {
       persistLocal(dirs[h], h, [row({ host: h, session_id: `sess-${h}` })], []);
     }
@@ -213,11 +221,12 @@ describe('syncWithRemotes (fake ssh between simulated hosts)', () => {
       }
       return { status: 1, stdout: '', stderr: 'unexpected' };
     };
-    const opts = { hosts: ['hcc', 'hcc2'], sinceMs: 0 };
-    const deps = { dir: dirs.wls, host: 'wls', nowMs: NOW, ssh };
+    const opts = { hosts: ['host-a', 'host-b'], sinceMs: 0 };
+    const deps = { dir: dirs['host-c'], host: 'host-c', nowMs: NOW, ssh };
     const first = syncWithRemotes(opts, deps);
     expect(first.every((r) => r.ok)).toBe(true);
-    for (const h of Object.keys(dirs)) expect(listHosts(dirs[h])).toEqual(['hcc', 'hcc2', 'wls']);
+    for (const h of Object.keys(dirs))
+      expect(listHosts(dirs[h])).toEqual(['host-a', 'host-b', 'host-c']);
     const second = syncWithRemotes(opts, deps);
     for (const r of second) {
       expect(r.pulled).toMatchObject({ added: 0, updated: 0 });
@@ -233,7 +242,11 @@ describe('syncWithRemotes (fake ssh between simulated hosts)', () => {
   });
 
   const fleet = () => {
-    const dirs: Record<string, string> = { wls: tmpDir(), hcc: tmpDir(), hcc2: tmpDir() };
+    const dirs: Record<string, string> = {
+      'host-c': tmpDir(),
+      'host-a': tmpDir(),
+      'host-b': tmpDir(),
+    };
     for (const h of Object.keys(dirs)) {
       persistLocal(dirs[h], h, [row({ host: h, session_id: `sess-${h}` })], []);
     }
@@ -253,34 +266,36 @@ describe('syncWithRemotes (fake ssh between simulated hosts)', () => {
 
   it('a host that was down in run 1 still reaches every host in run 2 (push reaches back to the pull window)', () => {
     const { dirs, down, ssh } = fleet();
-    down.add('hcc2');
-    const deps = { dir: dirs.wls, host: 'wls', nowMs: NOW, ssh };
-    syncWithRemotes({ hosts: ['hcc', 'hcc2'] }, deps); // cursors: hcc advances, hcc2 fails
+    down.add('host-b');
+    const deps = { dir: dirs['host-c'], host: 'host-c', nowMs: NOW, ssh };
+    syncWithRemotes({ hosts: ['host-a', 'host-b'] }, deps); // cursors: hostA advances, hostB fails
     down.clear();
-    // later run: hcc's cursor is recent, but hcc2's rows (older than it) must still get to hcc
-    syncWithRemotes({ hosts: ['hcc', 'hcc2'] }, { ...deps, nowMs: NOW + 3 * 86_400_000 });
+    // later run: hostA's cursor is recent, but host-b's rows (older than it) must still get to hostA
+    syncWithRemotes({ hosts: ['host-a', 'host-b'] }, { ...deps, nowMs: NOW + 3 * 86_400_000 });
     for (const h of Object.keys(dirs)) expect(countRows(dirs[h])).toBe(3);
   });
 
   it('--no-pull does not advance the pull cursor', () => {
     const { dirs, ssh } = fleet();
-    const deps = { dir: dirs.wls, host: 'wls', nowMs: NOW, ssh };
-    syncWithRemotes({ hosts: ['hcc'], pull: false }, deps);
-    expect(countRows(dirs.wls)).toBe(1); // nothing pulled
-    syncWithRemotes({ hosts: ['hcc'] }, { ...deps, nowMs: NOW + 86_400_000 });
-    expect(listHosts(dirs.wls)).toEqual(['hcc', 'wls']);
-    const state = JSON.parse(fs.readFileSync(path.join(dirs.wls, 'sync-state.json'), 'utf-8'));
-    expect(state.remotes.hcc.pull).toBeTruthy();
+    const deps = { dir: dirs['host-c'], host: 'host-c', nowMs: NOW, ssh };
+    syncWithRemotes({ hosts: ['host-a'], pull: false }, deps);
+    expect(countRows(dirs['host-c'])).toBe(1); // nothing pulled
+    syncWithRemotes({ hosts: ['host-a'] }, { ...deps, nowMs: NOW + 86_400_000 });
+    expect(listHosts(dirs['host-c'])).toEqual(['host-a', 'host-c']);
+    const state = JSON.parse(
+      fs.readFileSync(path.join(dirs['host-c'], 'sync-state.json'), 'utf-8')
+    );
+    expect(state.remotes['host-a'].pull).toBeTruthy();
   });
 
   it('reports an unreachable host without throwing and does not advance its cursor', () => {
     const dir = tmpDir();
     const ssh: SshRunner = () => ({ status: 255, stdout: '', stderr: 'ssh: connect timed out' });
-    const [r] = syncWithRemotes({ hosts: ['hcc2'] }, { dir, host: 'wls', nowMs: NOW, ssh });
+    const [r] = syncWithRemotes({ hosts: ['host-b'] }, { dir, host: 'host-c', nowMs: NOW, ssh });
     expect(r.ok).toBe(false);
     expect(r.error).toContain('timed out');
-    expect(fs.readFileSync(path.join(dir, 'sync-state.json'), 'utf-8')).not.toContain('"hcc2"');
-    expect(syncWithRemotes({ hosts: ['bad host;rm'] }, { dir, host: 'wls', ssh })[0].error).toBe(
+    expect(fs.readFileSync(path.join(dir, 'sync-state.json'), 'utf-8')).not.toContain('"host-b"');
+    expect(syncWithRemotes({ hosts: ['bad host;rm'] }, { dir, host: 'host-c', ssh })[0].error).toBe(
       'invalid host name'
     );
   });
@@ -322,7 +337,7 @@ describe('refreshLocal + merged report', () => {
           schedRoot: path.join(home, 'sched'),
           runsLog: path.join(home, 'runs.jsonl'),
         },
-        host: 'hcc',
+        host: 'host-a',
         nowMs: NOW,
       },
     };
@@ -341,27 +356,27 @@ describe('refreshLocal + merged report', () => {
     refreshLocal({ ...paths, dir });
     persistLocal(
       dir,
-      'wls',
-      [row({ host: 'wls', session_id: 'sess-wls-1', ts: '2026-09-29T11:00:00.000Z' })],
+      'host-c',
+      [row({ host: 'host-c', session_id: 'sess-host-c-1', ts: '2026-09-29T11:00:00.000Z' })],
       []
     );
     const deps = { ...paths, storeDir: dir };
     const opts = { last: '5h', until: '2026-09-29T12:00:00Z' };
 
     const localOnly = buildWindowReport(opts, deps);
-    expect(localOnly.by_host.map((h) => h.key)).toEqual(['hcc']);
+    expect(localOnly.by_host.map((h) => h.key)).toEqual(['host-a']);
     expect(localOnly.totals.messages).toBe(2);
 
     const all = buildWindowReport({ ...opts, hosts: 'all' }, deps);
-    expect(all.hosts).toEqual(['hcc', 'wls']);
+    expect(all.hosts).toEqual(['host-a', 'host-c']);
     expect(Object.fromEntries(all.by_host.map((h) => [h.key, h.messages]))).toEqual({
-      hcc: 2,
-      wls: 1,
+      'host-a': 2,
+      'host-c': 1,
     });
     expect(all.totals.messages).toBe(3);
     expect(renderWindowReport(all)).toContain('By host:');
 
-    const onlyWls = buildWindowReport({ ...opts, hosts: 'wls' }, deps);
+    const onlyWls = buildWindowReport({ ...opts, hosts: 'host-c' }, deps);
     expect(onlyWls.totals.messages).toBe(1);
 
     // The transcript rotates away; the persisted rows still report.
@@ -371,9 +386,9 @@ describe('refreshLocal + merged report', () => {
 
   it('mergedView prefers the fresh collection per key', () => {
     const dir = tmpDir();
-    persistLocal(dir, 'hcc', [row({})], []);
+    persistLocal(dir, 'host-a', [row({})], []);
     const fresh = { rows: [row({ issue: 3, unit: 'issue:3' })], limits: [] };
-    const view = mergedView(dir, 'hcc', fresh, null, 0, NOW);
+    const view = mergedView(dir, 'host-a', fresh, null, 0, NOW);
     expect(view.rows).toHaveLength(1);
     expect(view.rows[0].issue).toBe(3);
   });
@@ -387,13 +402,13 @@ describe('usage sync command wiring (fake ssh)', () => {
     process.env.CLAUDE_CONFIG_DIR = path.join(home, '.claude');
     process.env.OPENCODE_DB = path.join(home, 'none.db');
     process.env.DOSSIER_USAGE_DIR = path.join(home, 'usage');
-    process.env.DOSSIER_USAGE_HOST = 'wls';
+    process.env.DOSSIER_USAGE_HOST = 'host-c';
     const remoteDir = tmpDir();
-    persistLocal(remoteDir, 'hcc', [row({ host: 'hcc', session_id: 'sess-hcc' })], []);
+    persistLocal(remoteDir, 'host-a', [row({ host: 'host-a', session_id: 'sess-host-a' })], []);
     const calls: string[] = [];
     usageCommandDeps.ssh = (host, script) => {
       calls.push(`${host}: ${script}`);
-      return { status: 0, stdout: buildBundle(remoteDir, 'hcc', null, 0).text, stderr: '' };
+      return { status: 0, stdout: buildBundle(remoteDir, 'host-a', null, 0).text, stderr: '' };
     };
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
     try {
@@ -405,16 +420,18 @@ describe('usage sync command wiring (fake ssh)', () => {
         'usage',
         'sync',
         '--hosts',
-        'hcc',
+        'host-a',
         '--no-push',
         '--since',
         '2026-09-01',
       ]);
       expect(calls).toHaveLength(1); // --no-push: pull only
-      expect(calls[0]).toContain('hcc: ');
+      expect(calls[0]).toContain('host-a: ');
       expect(calls[0]).toContain("usage export --all --since '2026-09-01T00:00:00.000Z'");
-      expect(listHosts(path.join(home, 'usage'))).toEqual(['hcc', 'wls']);
-      expect(log.mock.calls.flat().join('\n')).toContain('hcc: pulled +1'.replace('+1', '1 new'));
+      expect(listHosts(path.join(home, 'usage'))).toEqual(['host-a', 'host-c']);
+      expect(log.mock.calls.flat().join('\n')).toContain(
+        'host-a: pulled +1'.replace('+1', '1 new')
+      );
     } finally {
       usageCommandDeps.ssh = undefined;
       log.mockRestore();

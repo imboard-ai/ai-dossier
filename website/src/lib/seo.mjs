@@ -26,18 +26,20 @@ function plain(text) {
   // GITHUB_ISSUES_PROPOSAL.md survives the emphasis pass.
   const code = [];
   const out = text
-    .replace(/`+([^`]+)`+/g, (_, c) => `\uE000${code.push(c) - 1}\uE000`)
+    .replace(/(`+)([^`]|[^`][\s\S]*?[^`])\1(?!`)/g, (_, __, c) => `\uE000${code.push(c) - 1}\uE000`)
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
     .replace(/\[([^\]]+)\]\[[^\]]*\]/g, '$1')
     .replace(/<((?:https?:\/\/|mailto:)[^>\s]+)>/g, '$1')
     .replace(/<[^>]+>/g, '')
     // Paired emphasis only: a lone `_` or `*` inside a word is content, not markup.
-    .replace(/(\*\*|__)(?=\S)(.+?)(?<=\S)\1/g, '$2')
-    .replace(/(?<![\w*])\*(?=\S)([^*]+?)(?<=\S)\*(?![\w*])/g, '$1')
+    .replace(/(?<![\w_])__(?=\S)(.+?)(?<=\S)__(?![\w_]|\.\w)/g, '$1')
+    .replace(/(?<![\w*])\*\*(?=\S)(.+?)(?<=\S)\*\*(?![\w*])/g, '$1')
+    // A `*` right after a path character is a glob (`src/*.md`), not emphasis.
+    .replace(/(?<![\w*/.])\*(?=\S)([^*]+?)(?<=\S)\*(?![\w*])/g, '$1')
     .replace(/(?<![\w_])_(?=\S)([^_]+?)(?<=\S)_(?![\w_])/g, '$1')
     .replace(/~~(?=\S)(.+?)(?<=\S)~~/g, '$1')
-    .replace(/\uE000(\d+)\uE000/g, (_, i) => code[Number(i)])
+    .replace(/\uE000(\d+)\uE000/g, (_, i) => code[Number(i)] ?? '')
     .replace(/\s+/g, ' ')
     .trim();
   return out;

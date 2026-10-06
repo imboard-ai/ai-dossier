@@ -176,7 +176,7 @@ Optional fields:
   "description": "Short description",
   "category": "development",
   "tags": ["react", "library"],
-  "author": "yuvaldim"
+  "author": "acme-user"
 }
 ---
 ```

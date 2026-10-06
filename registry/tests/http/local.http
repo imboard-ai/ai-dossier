@@ -79,7 +79,7 @@ POST {{baseUrl}}/api/v1/dossiers
 Content-Type: application/json
 
 {
-  "namespace": "yuvaldim/test",
+  "namespace": "acme-user/test",
   "content": "---\nname: my-dossier\ntitle: My Dossier\nversion: 1.0.0\n---\n\n# Hello",
   "changelog": "Initial publish"
 }
@@ -103,7 +103,7 @@ Content-Type: application/json
 # Authorization: Bearer <JWT>
 #
 # {
-#   "namespace": "yuvaldim/test",
+#   "namespace": "acme-user/test",
 #   "content": "# No frontmatter here"
 # }
 
@@ -128,7 +128,7 @@ Content-Type: application/json
 # Authorization: Bearer <JWT>
 #
 # {
-#   "namespace": "yuvaldim/test",
+#   "namespace": "acme-user/test",
 #   "content": "---\nname: my-dossier\ntitle: My Dossier\nversion: 1.0.0\n---\n\n# Hello\n\nThis is a test dossier.",
 #   "changelog": "Initial publish"
 # }
@@ -143,10 +143,10 @@ Content-Type: application/json
 # Authorization: Bearer <JWT>
 #
 # {
-#   "namespace": "yuvaldim/test",
+#   "namespace": "acme-user/test",
 #   "content": "---\nname: my-dossier\ntitle: My Dossier\nversion: 1.0.0\nchecksum:\n  algorithm: sha256\n  hash: 0000000000000000000000000000000000000000000000000000000000000000\n---\n\n# Hello\n\nThis is a test dossier.",
 #   "changelog": "Initial publish",
-#   "evidence": "{\"evidence_schema_version\":\"1.0.0\",\"dossier\":\"yuvaldim/test/my-dossier\",\"version\":\"1.0.0\",\"checksum\":{\"algorithm\":\"sha256\",\"hash\":\"0000000000000000000000000000000000000000000000000000000000000000\"},\"entries\":[]}"
+#   "evidence": "{\"evidence_schema_version\":\"1.0.0\",\"dossier\":\"acme-user/test/my-dossier\",\"version\":\"1.0.0\",\"checksum\":{\"algorithm\":\"sha256\",\"hash\":\"0000000000000000000000000000000000000000000000000000000000000000\"},\"entries\":[]}"
 # }
 
 ###
@@ -180,18 +180,18 @@ Authorization: Bearer invalid.token.here
 
 ### Delete Dossier - Valid (should return 200)
 # Replace <JWT> with actual token from OAuth flow
-# DELETE {{baseUrl}}/api/v1/dossiers/yuvaldim/test/my-dossier
+# DELETE {{baseUrl}}/api/v1/dossiers/acme-user/test/my-dossier
 # Authorization: Bearer <JWT>
 
 ###
 
 ### Delete Dossier - Specific Version (should return 200)
 # Replace <JWT> with actual token from OAuth flow
-# DELETE {{baseUrl}}/api/v1/dossiers/yuvaldim/test/my-dossier?version=1.0.0
+# DELETE {{baseUrl}}/api/v1/dossiers/acme-user/test/my-dossier?version=1.0.0
 # Authorization: Bearer <JWT>
 
 ###
 
 ### Delete Dossier - Wrong Version (should return 404 VERSION_NOT_FOUND)
-# DELETE {{baseUrl}}/api/v1/dossiers/yuvaldim/test/my-dossier?version=99.0.0
+# DELETE {{baseUrl}}/api/v1/dossiers/acme-user/test/my-dossier?version=99.0.0
 # Authorization: Bearer <JWT>

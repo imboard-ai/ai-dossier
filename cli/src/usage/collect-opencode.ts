@@ -4,7 +4,7 @@
  * `modelID`/`providerID`/`tokens`/`cost`).
  *
  * Read-only by construction: the database is opened with `readOnly: true`.
- * The store can be very large (14 GB observed on hcc) and `message` has no
+ * The store can be very large (14 GB observed in practice) and `message` has no
  * time index, so the query never scans `message` by time — it selects the
  * (small) `session` table by `time_updated`, then reads each session's
  * messages through the `(session_id, time_created, id)` index.

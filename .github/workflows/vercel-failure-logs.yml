@@ -37,10 +37,9 @@ name: Surface Vercel Build Failures
 # comment — it never checks out or executes repository content.
 #
 # Setup:
-#   1. Store the token:  chamber write dossier vercel_token "<token>"
-#      (equivalently: aws ssm put-parameter --name /dossier/vercel_token \
-#         --type SecureString --value "<token>")
-#   2. Grant the OIDC role ssm:GetParameter on arn:aws:ssm:us-east-1:942039714848:
+#   1. Store the token:  aws ssm put-parameter --name /dossier/vercel_token \
+#         --type SecureString --value "<token>"
+#   2. Grant the OIDC role ssm:GetParameter on arn:aws:ssm:us-east-1:<account-id>:
 #      parameter/dossier/vercel_token, plus kms:Decrypt on the key encrypting it.
 #
 # Until both are done the job logs a warning and exits, so this is safe to merge early.
@@ -56,7 +55,7 @@ permissions:
 
 env:
   AWS_REGION: us-east-1
-  ROLE_ARN: arn:aws:iam::942039714848:role/github-dossier-vercel-logs
+  ROLE_ARN: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/github-dossier-vercel-logs
   SSM_PARAM: /dossier/vercel_token
   VERCEL_TEAM_SLUG: imboard
 
