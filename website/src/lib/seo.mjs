@@ -26,7 +26,7 @@ function plain(text) {
   // GITHUB_ISSUES_PROPOSAL.md survives the emphasis pass.
   const code = [];
   const out = text
-    .replace(/`+([^`]+)`+/g, (_, c) => `\u0000${code.push(c) - 1}\u0000`)
+    .replace(/`+([^`]+)`+/g, (_, c) => `\uE000${code.push(c) - 1}\uE000`)
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
     .replace(/\[([^\]]+)\]\[[^\]]*\]/g, '$1')
@@ -37,7 +37,7 @@ function plain(text) {
     .replace(/(?<![\w*])\*(?=\S)([^*]+?)(?<=\S)\*(?![\w*])/g, '$1')
     .replace(/(?<![\w_])_(?=\S)([^_]+?)(?<=\S)_(?![\w_])/g, '$1')
     .replace(/~~(?=\S)(.+?)(?<=\S)~~/g, '$1')
-    .replace(/\u0000(\d+)\u0000/g, (_, i) => code[Number(i)])
+    .replace(/\uE000(\d+)\uE000/g, (_, i) => code[Number(i)])
     .replace(/\s+/g, ' ')
     .trim();
   return out;

@@ -6,6 +6,8 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { gitLastmod, shallowBoundaries } from './lastmod.mjs';
 
+// Git versions differ in how %cI renders UTC (`Z` vs `+00:00`); compare instants.
+const instant = (iso) => (iso ? new Date(iso).toISOString().replace('.000', '') : iso);
 const run = (cwd, ...args) => execFileSync('git', args, { cwd, stdio: 'ignore' });
 
 function commit(cwd, file, date) {
@@ -44,8 +46,8 @@ test('full clone keeps every real date and has no boundaries', () => {
   const { root, full } = fixture();
   try {
     assert.equal(shallowBoundaries(full).size, 0);
-    assert.equal(gitLastmod('old.md', full), '2026-01-01T00:00:00+00:00');
-    assert.equal(gitLastmod('new.md', full), '2026-03-01T00:00:00+00:00');
+    assert.equal(instant(gitLastmod('old.md', full)), '2026-01-01T00:00:00Z');
+    assert.equal(instant(gitLastmod('new.md', full)), '2026-03-01T00:00:00Z');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -59,7 +61,7 @@ test('shallow clone: files last changed at the boundary have no lastmod', () => 
     assert.equal(gitLastmod('old.md', shallow), undefined);
     assert.equal(gitLastmod('mid.md', shallow), undefined);
     // new.md changed inside the window and keeps its true date.
-    assert.equal(gitLastmod('new.md', shallow), '2026-03-01T00:00:00+00:00');
+    assert.equal(instant(gitLastmod('new.md', shallow)), '2026-03-01T00:00:00Z');
     assert.equal(gitLastmod('missing.md', shallow), undefined);
   } finally {
     rmSync(root, { recursive: true, force: true });
