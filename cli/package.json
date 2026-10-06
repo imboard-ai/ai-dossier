@@ -1,6 +1,6 @@
 {
   "name": "@ai-dossier/cli",
-  "version": "0.89.9",
+  "version": "0.89.10",
   "description": "CLI for signed, versioned agent skills and model-driven orchestration: create, verify, sign, publish, and install skills for Claude Code, Codex, OpenCode, and LLM tools.",
   "main": "dist/cli.js",
   "bin": {
