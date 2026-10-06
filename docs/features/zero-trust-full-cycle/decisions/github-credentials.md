@@ -5,7 +5,7 @@
 - **Probe:** [`packages/zero-trust/probes/github-credentials/`](../../../../packages/zero-trust/probes/github-credentials/)
 - **Raw evidence (redacted):** [`docs/reports/evidence/ztfc-github-credentials-probe.jsonl`](../../../reports/evidence/ztfc-github-credentials-probe.jsonl)
 - **Run date:** 2026-10-06
-- **Status:** **UNSUPPORTED.** The upstream writes cannot be done with short-lived least-privilege GitHub App credentials, so PRD §5.9 applies and startup is blocked. See [Verdict](#verdict).
+- **Status:** **UNSUPPORTED for fully autonomous upstream writes. DECIDED: hybrid hand-off (A),** owner decision of 2026-10-06. Feasibility gate 3 passes under the revised contract: fork-side writes are brokered, and upstream writes are hand-offs the contributor confirms. See [Verdict](#verdict) and [Decision](#decision).
 
 > [!WARNING]
 > **Broker design impact: scoped tokens outlive their parent.** A token minted with
@@ -112,19 +112,25 @@ Scenario 11 note: the 422 safety net only holds while a PR is **open**. After a 
 
 Rows 1, 3a, 4 and 4b are **SUPPORTED**. Fork pushes work with a fork-only installation token or a scoped ghu. The broker must revoke after use, because both tokens are natively 1–8 h, longer than the PRD's 15-minute window. GitHub refuses reuse after revocation.
 
-**PRD §5.9 consequence, applied:** "If the provider cannot satisfy this contract, startup is unsupported." The shipper cannot do the upstream-facing writes in the authority matrix with any short-lived, repository-limited GitHub App credential, so zero-trust startup is **blocked**. The probe did **not** fall back to, or try, a PAT or OAuth-App token. Feasibility gate 3 (PRD §9) is not passed. The remaining #1011 acceptance criteria (the broker) stay open, waiting for a product decision.
+**PRD §5.9 consequence, applied:** "If the provider cannot satisfy this contract, startup is unsupported." The shipper cannot do the upstream-facing writes in the authority matrix with any short-lived, repository-limited GitHub App credential, so under the original contract zero-trust startup is **blocked**. The probe did **not** fall back to, or try, a PAT or OAuth-App token.
 
-### Decision needed (escalated to the owner)
+**Gate 3 (PRD §9): passed under the revised contract** in the [Decision](#decision) below. The broker does the fork-side writes (push, CAS, reconciliation) with short-lived, repository-limited, revoked credentials. The upstream comment and PR are hand-offs the contributor confirms. The #1011 broker acceptance criteria are rescoped to the fork-side broker.
 
-**The decision:** how the zero-trust shipper performs the upstream writes (engagement comment and upstream PR create/update/close), given that GitHub App tokens cannot write to an upstream that has not installed the App.
+### Decision
+
+**Decided by the owner on 2026-10-06: A, hybrid hand-off.**
+
+**Rationale.** Before anything is submitted upstream, the contributor reviews it and makes one click on a prefilled PR or comment. That click is a deliberate human-in-the-loop review: a person reviews and owns every public submission made under their name, which keeps low-quality AI contributions ("AI slop") out of maintainers' queues. It is also the only path that keeps the short-lived, repository-limited credential contract, because GitHub refuses App writes to upstreams that have not installed the App (rows 2 and 5).
+
+**What changes.** The broker does every write it can do with short-lived credentials: fork push, branch CAS, and reconciliation reads. The upstream PR becomes a contributor click on a prefilled compare URL (`/compare/{base}...{owner}:{branch}?expand=1&title=…&body=…`), and the engagement comment becomes a prefilled comment. The run then reconciles the PR by `head` + `base` + hidden marker (scenario 11). Upstream close or withdrawal is likewise a hand-off to the contributor. The PRD amendment and the S4 issues are tracked separately.
+
+Options considered:
 
 | Option | Pros | Cons |
 |---|---|---|
-| **A. Hybrid hand-off (recommended).** The broker does every write it *can* do with short-lived credentials: fork push, branch CAS, reconciliation reads. The upstream PR and the comment become a contributor click on a prefilled compare URL (`/compare/{base}...{owner}:{branch}?expand=1&title=…&body=…`) or a prefilled comment. The run then reconciles the PR by `head`+`base`+marker. | Keeps the credential contract intact (nothing long-lived, nothing broad). Uses only what was observed to work. The human click is also a natural publication checkpoint (PRD §5.1). | Upstream publication is not fully autonomous, which changes the PRD's autonomy statement. The contributor must be present at the publication checkpoint. |
+| **A. Hybrid hand-off (DECIDED)** | Keeps the credential contract intact (nothing long-lived, nothing broad). Uses only what was observed to work. Every public submission is reviewed and owned by a person. | Upstream publication is not fully autonomous, which amends the PRD's autonomy statement. The contributor must be present at the publication checkpoint. |
 | B. Require the upstream to install the App | Fully automatic, and it works with the observed token types | Real OSS upstreams will not install a third-party App for drive-by contributors. This defeats the product's purpose. |
-| C′. OAuth App user token with `public_repo`, authorized once per run and revoked with `DELETE /applications/{client_id}/token` when the run ends (**not probed**) | Expected to be able to write to any public upstream as the contributor. Revocation is documented, and the token's life is bounded by the run. | The scope is every public repository the user can reach, not repository-limited. The lifetime is the run, not 15 minutes per operation. Every run needs a fresh contributor consent. There is no per-operation narrowing, because OAuth Apps have no scoped-token endpoint. It meets the PRD only if the owner relaxes "repository-limited, ≤15 min per operation" to "run-bounded and revoked". Not tested here: no OAuth App token was minted. |
-| C. OAuth App with `public_repo` scope, long-lived | Can write to arbitrary public repositories as the user | Non-expiring and not repository-limited, which is the broad long-lived token PRD §5.7 and §5.9 forbid. There are no refresh tokens, so per-operation tokens would need a user consent each time. Ruled out by the PRD. |
+| C′. OAuth App user token with `public_repo`, authorized once per run and revoked with `DELETE /applications/{client_id}/token` when the run ends. **Possible future opt-in mode; not probed, and it would need its own probe.** | Expected to be able to write to any public upstream as the contributor. Revocation is documented, and the token's life is bounded by the run. | The scope is every public repository the user can reach, not repository-limited. The lifetime is the run, not 15 minutes per operation. Every run needs a fresh contributor consent. There is no per-operation narrowing, because OAuth Apps have no scoped-token endpoint. It would need the contract relaxed to "run-bounded and revoked". |
+| C. OAuth App with `public_repo` scope, long-lived | Can write to arbitrary public repositories as the user | Non-expiring and not repository-limited, which is the broad long-lived token PRD §5.7 and §5.9 forbid. Ruled out. |
 | D. Classic or fine-grained PAT | — | Classic PATs are broad and long-lived, which the PRD forbids. Fine-grained PATs cannot write to public repositories where the user is not a member. Ruled out. |
 | E. Declare GitHub unsupported for MVP | Honest, with no contract change | Ends the product for its only target platform. |
-
-**Why escalate:** options A, C′ and E change the PRD's product contract (autonomy, or scope), and B, C and D are ruled out by the PRD or by the market. Choosing between them is a product decision, not an implementation default.
