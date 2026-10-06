@@ -240,22 +240,40 @@ export interface BudgetTotals {
   timeMs: number;
 }
 
-/** Observed overruns are recorded, not silently capped. Under-estimates never free funds. */
-export function budgetTotals(state: BudgetState, sessionId: string): BudgetTotals {
+function reservationTotals(
+  state: BudgetState,
+  sessionId: string,
+  purpose?: BudgetReservation['purpose']
+) {
   const rows = state.reservations.filter(
-    (r) => r.sessionId === sessionId && r.status !== 'released'
+    (r) =>
+      r.sessionId === sessionId &&
+      r.status !== 'released' &&
+      (purpose === undefined || r.purpose === purpose)
   );
+  const total = (values: number[]): bigint => values.reduce((n, v) => n + BigInt(v), 0n);
   const amount = (r: BudgetReservation, dimension: 'tokens' | 'timeMs'): number =>
     Math.max(r.estimate[dimension], r.observed?.[dimension] ?? 0);
   return {
-    spent: sum(
+    spent: total(
       rows
         .filter((r) => r.status === 'settled')
         .map((r) => Math.max(r.estimate.money.minor, r.observed?.money.minor ?? 0))
     ),
-    reserved: sum(rows.filter((r) => r.status === 'reserved').map((r) => r.estimate.money.minor)),
-    tokens: sum(rows.map((r) => amount(r, 'tokens'))),
-    timeMs: sum(rows.map((r) => amount(r, 'timeMs'))),
+    reserved: total(rows.filter((r) => r.status === 'reserved').map((r) => r.estimate.money.minor)),
+    tokens: total(rows.map((r) => amount(r, 'tokens'))),
+    timeMs: total(rows.map((r) => amount(r, 'timeMs'))),
+  };
+}
+
+/** Observed overruns are recorded, not silently capped. Under-estimates never free funds. */
+export function budgetTotals(state: BudgetState, sessionId: string): BudgetTotals {
+  const t = reservationTotals(state, sessionId);
+  return {
+    spent: safe(t.spent),
+    reserved: safe(t.reserved),
+    tokens: safe(t.tokens),
+    timeMs: safe(t.timeMs),
   };
 }
 
@@ -339,13 +357,25 @@ export class BudgetLedger {
       const s = state.sessions.find((entry) => entry.id === sessionId);
       if (!s) throw new BudgetError('unknown_session', 'Unknown budget session');
       estimate(e, s.ceiling.currency);
-      const t = budgetTotals(state, sessionId);
-      const ceiling = s.ceiling.minor - (purpose === 'work' ? s.cleanupAllowance : 0);
-      if (BigInt(t.spent) + BigInt(t.reserved) + BigInt(e.money.minor) > BigInt(ceiling))
+      const t = reservationTotals(state, sessionId);
+      const workCeiling = BigInt(s.ceiling.minor) - BigInt(s.cleanupAllowance);
+      let committed = t.spent + t.reserved;
+      let ceiling = workCeiling;
+      if (purpose === 'teardown') {
+        const work = reservationTotals(state, sessionId, 'work');
+        const workCommitted = work.spent + work.reserved;
+        // Charge work overruns to work only. Cleanup can borrow unreserved work
+        // funds, but its protected allowance survives even an overrun of the ceiling.
+        committed -= workCommitted;
+        ceiling =
+          BigInt(s.cleanupAllowance) +
+          (workCommitted < workCeiling ? workCeiling - workCommitted : 0n);
+      }
+      if (committed + BigInt(e.money.minor) > ceiling)
         throw new BudgetError('ceiling_exceeded', 'Insufficient unreserved budget');
       if (
-        BigInt(t.tokens) + BigInt(e.tokens) > BigInt(s.tokenLimit) ||
-        BigInt(t.timeMs) + BigInt(e.timeMs) > BigInt(s.timeLimitMs)
+        t.tokens + BigInt(e.tokens) > BigInt(s.tokenLimit) ||
+        t.timeMs + BigInt(e.timeMs) > BigInt(s.timeLimitMs)
       )
         throw new BudgetError('limit_exceeded', 'Token or time limit exceeded');
       const r: BudgetReservation = {

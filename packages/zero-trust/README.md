@@ -166,7 +166,13 @@ occurred. Repeated reconciliation fails closed; retain and use the reservation I
 `snapshot()` exposes the contribution's entire history; `budgetTotals(state, id)`
 returns spent/reserved/usage per session. Do not add different currencies together.
 Only controller-authorized `teardown` reservations can access the cleanup allowance;
-they still respect the full ceiling and resource limits.
+their commitments plus the new estimate may not exceed
+`cleanupAllowance + max(0, ceiling − cleanupAllowance − work commitments)`.
+Commitments include pending estimates and settled `max(estimate, observed)` charges,
+excluding released reservations. Work overruns may put aggregate spending above the
+session ceiling, but cannot consume the remaining cleanup allowance. Teardown still
+respects cumulative token/time limits. Admission uses exact bigint totals; public
+numeric `budgetTotals` rejects unrepresentable sums rather than capping them.
 
 Mutations re-read and validate every row under an exclusive file lock and persist
 via unique temp file + fsync + same-directory rename + directory fsync. Unknown
