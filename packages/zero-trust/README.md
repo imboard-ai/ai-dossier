@@ -181,8 +181,11 @@ Hard links are accepted as regular file bytes, never preserved as links.
 
 Default limits: 10 MiB/file, 100 MiB total, 10,000 entries, 64 path components.
 Paths must be valid UTF-8; absolute/traversal paths, controls, Windows separators,
-drive delimiters, `.git`, and Unicode/case-fold aliases are rejected. Collision
-comparison conservatively uses NFKC plus expanding upper/lower case folds; names
+drive delimiters, `.git`, and Unicode/case-fold aliases are rejected. `.git`
+component rejection includes NTFS trailing ASCII spaces/dots and case-insensitive
+`git~<single digit>` short names, plus HFS-ignorable spellings, at every depth.
+Collision comparison strips Git's HFS ignorables (U+200C–U+200F, U+202A–U+202E,
+U+206A–U+206F, U+FEFF), then conservatively uses NFKC plus expanding upper/lower case folds; names
 are never silently normalized. Empty directories remain in the manifest binding
 but do not appear in the Git tree, as in ordinary Git commits. `validateManifest`
 revalidates persisted records and returns deep-frozen primitive snapshots.
@@ -214,6 +217,11 @@ closure (maximum 128 MiB input). A raw pack has no config/refs/hooks/alternates.
 The primitive imports it with strict object validation into a fresh private bare
 repository, validates the baseline with the same source/path/size rules, then
 constructs one tree/commit using `hash-object --no-filters`, `mktree`, `commit-tree`.
+Creation and reconstruction then run `fsck --strict --full --no-dangling` over
+the candidate objects before returning authority or pack output. This independent
+gate rejects unsafe objects even if source-path validation regresses, including
+Git's security-sensitive `.gitmodules`/`.gitattributes` content checks. Any fsck
+failure maps to the non-echoing `CanonicalError('invalid_path')` reason.
 It never opens a worker repository or runs checkout/add/diff/filter drivers.
 In-tree `.gitattributes` is preserved as data and cannot affect blob bytes.
 Git runs from `/usr/bin/git` with an allowlisted environment, private empty home

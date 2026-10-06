@@ -387,9 +387,16 @@ describe('canonical Git reconstruction', () => {
     const original = TrustedGit.prototype.run;
     let injected = false;
     let fsckCalled = false;
+    let fsckArgs: readonly string[] | undefined;
+    let fsckFailure: unknown;
     let packCalled = false;
     let directory = '';
-    vi.spyOn(TrustedGit.prototype, 'run').mockImplementation(function (args, input, identity) {
+    vi.spyOn(TrustedGit.prototype, 'run').mockImplementation(function (
+      this: TrustedGit,
+      args,
+      input,
+      identity
+    ) {
       directory = this.directory;
       if (args[0] === 'mktree' && Buffer.isBuffer(input)) {
         const treeInput = input.toString();
@@ -400,13 +407,23 @@ describe('canonical Git reconstruction', () => {
       }
       if (args[0] === 'fsck') {
         fsckCalled = true;
-        expect(args).toContain('--strict');
-        expect(args).toContain('--full');
+        fsckArgs = [...args];
       }
       if (args[0] === 'pack-objects') packCalled = true;
-      return original.call(this, args, input, identity);
+      try {
+        return original.call(this, args, input, identity);
+      } catch (error) {
+        if (args[0] === 'fsck') fsckFailure = error;
+        throw error;
+      }
     });
     rejects(() => createCandidate(source, approved(base.baseSha), base.pack), 'invalid_path');
+    // Assert outside createCandidate's catch boundary: a failed assertion in
+    // the spy must never masquerade as the expected real Git rejection.
+    expect(fsckArgs).toContain('--strict');
+    expect(fsckArgs).toContain('--full');
+    expect(fsckFailure).toBeInstanceOf(CanonicalError);
+    expect((fsckFailure as CanonicalError).reason).toBe('git_failed');
     expect(injected).toBe(true);
     expect(fsckCalled).toBe(true);
     expect(packCalled).toBe(false);
