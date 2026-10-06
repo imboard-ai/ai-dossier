@@ -42,7 +42,8 @@ export const BIN_DIR = path.join(CLI_ROOT, 'bin');
 export const OFFICIAL_KMS_KEYS = [
   'alias/dossier-official-prod',
   'alias/dossier-official',
-  'arn:aws:kms:us-east-1:942039714848:key/d9ccd3fc-b190-49fd-83f7-e94df6620c1d',
+  // Matched by substring, so this also catches the key's full ARN in any account.
+  'key/d9ccd3fc-b190-49fd-83f7-e94df6620c1d',
 ];
 
 // Re-export validation constants from core (single source of truth)

@@ -9,7 +9,7 @@ Nothing is running; nothing will start on its own.
 | Halted at | 2026-09-03 10:42Z — owner out of subscription tokens; the work is not urgent (*Verify:* `ls -l ~/.dossier/reset-fleet/engine-*.log` — both stamped 10:42. `tick.log` is **not** the witness: it stops at 2026-09-02 20:00 for an unrelated reason, the exec-bit incident below) |
 | Hand-off issue | [#598](https://github.com/imboard-ai/ai-dossier/issues/598) (this document is its durable form) |
 | Facts below verified | 2026-09-06, against `ai-dossier sched status`, `gh`, `git log`, `ps`, `crontab -l`, `~/.dossier/reset-fleet/` |
-| Host | hcc2 |
+| Host | the runner host |
 
 This is the document to read first when picking the programme back up. It exists because the
 checkpoint previously lived only in a GitHub issue body, where nothing in this repo reads it —
@@ -48,7 +48,7 @@ All merged and published to npm.
 phase-aware stall ladder, PR watch, tails, fencing on redispatch (#504), label pre-screen (#507),
 batch units with seal / anchor / eviction / dissolve, `abandon`, `stats`. Parity against
 fleet-cycle: **Conditional GO** ([`sched-parity.md`](./sched-parity.md), occupancy 99–100%). It
-runs unattended on hcc2 from a 2-minute cron tick (`~/.dossier/reset-fleet/tick.sh`) reporting to
+runs unattended on the runner host from a 2-minute cron tick (`~/.dossier/reset-fleet/tick.sh`) reporting to
 Telegram, self-upgrading the CLI and its nested sched package from npm.
 
 **Dossiers** — `issue-cycle-classifier`, `batch-issues-preparation`, `slot-cycle` published;
@@ -236,7 +236,7 @@ return evictedMemberIds(batch).size > threshold;   // evictedMemberIds = new Set
 
 It is the only dissolve trigger, `evictions.length` appears nowhere in `packages/sched/src/`, and
 the journal's `evictions=` field is that same de-duplicated count (`evictedCount:
-evictedMemberIds(batch).size`). hcc2's deployed `@ai-dossier/sched` was 0.21.0, published
+evictedMemberIds(batch).size`). The runner host's deployed `@ai-dossier/sched` was 0.21.0, published
 2026-09-02T21:32:25Z — before the 05:58 dissolve — and its `dist/recovery.js` carries the
 de-duplicating form.
 
@@ -340,7 +340,7 @@ ai-dossier#18 (all verified `OPEN` 2026-09-06). imboard-monorepo#3416 and #340 h
 
 *Verify:* `gh issue view <n> --repo imboard-ai/imboard-monorepo --json state`
 
-## 5. Halt state on hcc2
+## 5. Halt state on the runner host
 
 Verified 2026-09-06. What #598 recorded at the halt is marked where it has moved since.
 

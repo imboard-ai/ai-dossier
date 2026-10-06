@@ -114,7 +114,7 @@ const publishDossierEndpoint = {
         type: 'string',
         required: true,
         description: 'Target namespace (e.g., "imboard-ai/development")',
-        example: 'yuvaldim/tools',
+        example: 'acme-user/tools',
       },
       content: {
         type: 'string',
@@ -135,7 +135,7 @@ const publishDossierEndpoint = {
         description:
           'JSON-encoded evidence record (.evidence.json) for this dossier body checksum; its dossier/version/checksum must match the published content. Max 256KB. Omitting it removes any existing sidecar from a prior version.',
         example:
-          '{"evidence_schema_version":"1.0.0","dossier":"yuvaldim/tools/my-dossier","version":"1.0.0","checksum":{"algorithm":"sha256","hash":"<64 hex chars>"},"entries":[]}',
+          '{"evidence_schema_version":"1.0.0","dossier":"acme-user/tools/my-dossier","version":"1.0.0","checksum":{"algorithm":"sha256","hash":"<64 hex chars>"},"entries":[]}',
       },
     },
   },
@@ -237,7 +237,7 @@ const namespaceDocs = {
     'Personal namespace: You can publish to {your-username}/*',
     'Organization namespace: You can publish to {org}/* if you are a member',
   ],
-  example: 'User "yuvaldim" in org "imboard-ai" can publish to: yuvaldim/*, imboard-ai/*',
+  example: 'User "acme-user" in org "imboard-ai" can publish to: acme-user/*, imboard-ai/*',
 };
 
 export default async function handler(req: VercelRequest, res: VercelResponse) {

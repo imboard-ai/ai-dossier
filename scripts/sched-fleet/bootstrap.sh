@@ -61,7 +61,7 @@ if ! npm i -g @ai-dossier/cli@latest; then
   TG "❌ reset-fleet: CLI upgrade failed; bootstrap remains scheduled for retry"
   exit 1
 fi
-cd "$HOME/projects/ai-dossier/main" || { TG "❌ reset-fleet: repo missing on hcc2"; exit 1; }
+cd "$HOME/projects/ai-dossier/main" || { TG "❌ reset-fleet: repo missing on the fleet host"; exit 1; }
 
 SD="$HOME/.dossier/sched/imboard-ai-ai-dossier"
 if ! mkdir -p "$SD"; then
@@ -241,4 +241,4 @@ if ! remove_cron_line "$BOOTSTRAP_CRON_MARKER"; then
 fi
 
 BOOTSTRAP_COMPLETE=1
-TG "🚀 Claude annual reset — enqueued #496→#500→#505→#507 into dossier-sched on hcc2 (serial dep chain, sonnet mid-tier, opus only on stall escalation, attached ship). Engine ticks every 2 min via cron; zero LLM supervision. Epic: https://github.com/imboard-ai/ai-dossier/issues/474"
+TG "🚀 Claude annual reset — enqueued #496→#500→#505→#507 into dossier-sched on the fleet host (serial dep chain, sonnet mid-tier, opus only on stall escalation, attached ship). Engine ticks every 2 min via cron; zero LLM supervision. Epic: https://github.com/imboard-ai/ai-dossier/issues/474"

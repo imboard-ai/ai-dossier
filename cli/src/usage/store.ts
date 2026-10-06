@@ -26,7 +26,7 @@ export function usageStoreDir(env: NodeJS.ProcessEnv = process.env): string {
   return env.DOSSIER_USAGE_DIR || path.join(os.homedir(), '.dossier', 'usage');
 }
 
-/** This host's id in rows — `DOSSIER_USAGE_HOST` overrides `os.hostname()` (e.g. to force `wls`). */
+/** This host's id in rows — `DOSSIER_USAGE_HOST` overrides `os.hostname()` (e.g. to force a stable name). */
 export function localHostId(env: NodeJS.ProcessEnv = process.env): string {
   return env.DOSSIER_USAGE_HOST || os.hostname();
 }

@@ -19,6 +19,7 @@ import {
   WriteBlockedError,
 } from '../intents';
 import { Journal, JournalError } from '../journal';
+import { SecretRedactionError } from '../redaction';
 import { createRun, ReasonCode, RUN_STATES, type RunRecord, transitionRun } from '../state';
 
 const timestamp = '2026-10-05T00:00:00.000Z';
@@ -91,6 +92,62 @@ afterEach(() => {
 });
 
 describe('durable provider-independent write intents', () => {
+  it.each([
+    'ghu_syntheticUserToken',
+    '_sk-proj-syntheticKey_',
+    'credential_sk-12345678',
+    String.raw`\nsk-proj-syntheticKey`,
+    String.raw`Authorization:\ttoken\tx`,
+    String.raw`Authorization:\x09token\x20x`,
+    String.raw`Authorization:\u0009token\u0020x`,
+    String.raw`Authorization:\040token\040x`,
+    String.raw`Authorization:\011token\012x`,
+    String.raw`Authorization:\x9token\u20x`,
+    JSON.stringify({ command: String.raw`curl -H $'Authorization:\ttoken\tx'` }),
+    String.raw`Authorization:\ token\ syntheticOpaqueToken`,
+    String.raw`Authorization:\0040token\0040syntheticOpaqueToken`,
+    String.raw`Authorization:\040token\0400syntheticOpaqueToken`,
+    JSON.stringify({ header: String.raw`Authorization:\011token\0111syntheticOpaqueToken` }),
+    JSON.stringify({ command: 'Authoriza\\\ntion: token syntheticOpaqueToken' }),
+  ])('rejects credentials before persistence or provider mutation %#', (secret) => {
+    const fake = new FakeAdapter();
+    const j = journal();
+    const d = driver(j, fake);
+    const before = fs.readFileSync(j.filePath, 'utf8');
+    expect(() => d.execute({ ...input, target: secret })).toThrow(SecretRedactionError);
+    expect(() => d.execute({ ...input, target: secret })).not.toThrow(secret);
+    expect(fs.readFileSync(j.filePath, 'utf8')).toBe(before);
+    expect(fake.writes).toBe(0);
+  });
+  it.each([
+    'ghu_syntheticUserToken',
+    '_sk-proj-syntheticKey_',
+    'credential_sk-12345678',
+    String.raw`\nsk-proj-syntheticKey`,
+    String.raw`Authorization:\ttoken\tx`,
+    String.raw`Authorization:\x09token\x20x`,
+    String.raw`Authorization:\u0009token\u0020x`,
+    String.raw`Authorization:\040token\040x`,
+    String.raw`Authorization:\011token\012x`,
+    String.raw`Authorization:\x9token\u20x`,
+    JSON.stringify({ command: String.raw`curl -H $'Authorization:\ttoken\tx'` }),
+    String.raw`Authorization:\ token\ syntheticOpaqueToken`,
+    String.raw`Authorization:\0040token\0040syntheticOpaqueToken`,
+    String.raw`Authorization:\040token\0400syntheticOpaqueToken`,
+    JSON.stringify({ header: String.raw`Authorization:\011token\0111syntheticOpaqueToken` }),
+    JSON.stringify({ command: 'Authoriza\\\ntion: token syntheticOpaqueToken' }),
+  ])('never persists credentials from mutation or reconciliation evidence %#', async (secret) => {
+    const fake = new FakeAdapter();
+    const j = journal();
+    const d = driver(j, fake);
+    const mutate = vi.spyOn(fake, 'mutate').mockResolvedValue({ artifactRef: secret });
+    await expect(d.execute(input)).rejects.toThrow(MutationUncertainError);
+    fake.observation = { kind: 'found', artifactRef: secret };
+    await expect(d.resume()).rejects.toThrow(WriteBlockedError);
+    expect(fs.readFileSync(j.filePath, 'utf8')).not.toContain(secret);
+    expect(d.snapshot().intents.get(idempotencyKey(input))?.artifactRef).toBeNull();
+    expect(mutate).toHaveBeenCalledTimes(1);
+  });
   it('rejects credentials and snapshots getter-backed input/results once', async () => {
     const fake = new FakeAdapter();
     const j = journal();
@@ -316,6 +373,9 @@ describe('durable provider-independent write intents', () => {
     expect(await d.execute(input)).toBe('artifact-2');
     expect(fake.reads).toBe(1);
     expect(fake.writes).toBe(2);
+    expect(await d.execute({ ...input, target: 'fork:22:branch:task-validation' })).toBe(
+      'artifact-3'
+    );
   });
   it.each([
     'unknown',

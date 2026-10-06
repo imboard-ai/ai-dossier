@@ -120,7 +120,7 @@ These phrases are the source of truth; every reframed doc should draw from them 
 
 **DO NOT change (normative):** field names, enums, MUST/SHOULD rules, `---dossier` delimiter spec, document-structure requirements. **Do not rename "dossier" → "skill" in normative text** — "dossier" is the defined format term. No schema change needed; `relationships` already expresses the trigger-skill link.
 
-**Deprecated — do not reframe:** `docs/explanation/agents.md` (just verify its redirect targets carry the new framing; also leaks personal path `/home/yuvaldim/...` and has stale "MCP planned" content).
+**Deprecated — do not reframe:** `docs/explanation/agents.md` (just verify its redirect targets carry the new framing; also leaks personal path `~/...` and has stale "MCP planned" content).
 
 ---
 

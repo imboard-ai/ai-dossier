@@ -1,7 +1,7 @@
 {
   "name": "@ai-dossier/cli",
-  "version": "0.89.6",
-  "description": "CLI for portable AI-agent skills: create, verify, sign, publish, and install workflows for Claude Code, Codex, OpenCode, and LLM tools.",
+  "version": "0.89.9",
+  "description": "CLI for signed, versioned agent skills and model-driven orchestration: create, verify, sign, publish, and install skills for Claude Code, Codex, OpenCode, and LLM tools.",
   "main": "dist/cli.js",
   "bin": {
     "ai-dossier": "./bin/ai-dossier"
@@ -25,7 +25,17 @@
     "signed-skills",
     "skill-registry",
     "ai-agent-cli",
-    "workflow-verification"
+    "workflow-verification",
+    "model-driven-orchestration",
+    "agent-orchestration",
+    "ai-agents",
+    "llm",
+    "skill-md",
+    "claude-code",
+    "claude-skills",
+    "supply-chain-security",
+    "signed",
+    "versioning"
   ],
   "author": "Imboard AI",
   "license": "AGPL-3.0-only",

@@ -70,7 +70,7 @@ describe('evidence command', () => {
                 provider: 'claude-code' as const,
                 session: 'sess-1',
                 event: 'evt-1',
-                host: 'wls',
+                host: 'host-a',
                 extra: { ctx: 'abc' },
               },
             ],
@@ -95,7 +95,7 @@ describe('evidence command', () => {
       );
       expect(console.log).toHaveBeenCalledWith('• Section A');
       expect(console.log).toHaveBeenCalledWith('  Because X');
-      expect(console.log).toHaveBeenCalledWith('  refs: claude-code:sess-1#evt-1 @wls ctx=abc');
+      expect(console.log).toHaveBeenCalledWith('  refs: claude-code:sess-1#evt-1 @host-a ctx=abc');
     });
 
     it('should print the raw record with --json', async () => {

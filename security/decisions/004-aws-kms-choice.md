@@ -298,7 +298,7 @@ resource "aws_kms_alias" "dossier_signing" {
     {
       "Effect": "Allow",
       "Principal": {
-        "Federated": "arn:aws:iam::942039714848:oidc-provider/token.actions.githubusercontent.com"
+        "Federated": "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
       },
       "Action": "sts:AssumeRoleWithWebIdentity",
       "Condition": {
@@ -324,7 +324,7 @@ resource "aws_kms_alias" "dossier_signing" {
       "Sid": "Enable IAM User Permissions",
       "Effect": "Allow",
       "Principal": {
-        "AWS": "arn:aws:iam::942039714848:root"
+        "AWS": "arn:aws:iam::123456789012:root"
       },
       "Action": "kms:*",
       "Resource": "*"
@@ -333,7 +333,7 @@ resource "aws_kms_alias" "dossier_signing" {
       "Sid": "Allow GitHub Actions to Sign",
       "Effect": "Allow",
       "Principal": {
-        "AWS": "arn:aws:iam::942039714848:role/github-dossier-oidc"
+        "AWS": "arn:aws:iam::123456789012:role/github-dossier-oidc"
       },
       "Action": [
         "kms:Sign",
