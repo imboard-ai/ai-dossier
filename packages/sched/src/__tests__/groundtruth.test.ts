@@ -23,6 +23,7 @@ import {
   parsePrViewJson,
   parseSetupInfo,
   REVIEW_PARTIAL_REASON,
+  resolveSetupWorktree,
   WRONG_PROCEDURE_MARKER,
   wrongProcedureDirective,
   wrongProcedureShippedPr,
@@ -1580,5 +1581,34 @@ describe('issueCloseTruth: a missing issue is not an outage (#768)', () => {
       createdAt: null,
       closedAt: null,
     });
+  });
+});
+
+describe('resolveSetupWorktree (#1085 portable worktree=)', () => {
+  const info = (worktree: string) => ({ worktree, poolClaimed: false, branch: 'feature/1' });
+  const exec = (file: string, args: string[]): string | null => {
+    if (file === 'git' && args[0] === 'rev-parse') return '/data/acme/main/.git\n';
+    if (file === 'git' && args[0] === 'worktree') {
+      return 'worktree /data/acme/main\nworktree /pool/wt-9\n';
+    }
+    return null;
+  };
+
+  it('resolves <repo>/../worktrees/<x> against the local main checkout', () => {
+    expect(resolveSetupWorktree(exec, '/data/acme/main', info('<repo>/../worktrees/f-1'))).toEqual(
+      info('/data/acme/worktrees/f-1')
+    );
+  });
+
+  it('resolves <local>/<name> through the local worktree list', () => {
+    expect(resolveSetupWorktree(exec, '/data/acme/main', info('<local>/wt-9')).worktree).toBe(
+      '/pool/wt-9'
+    );
+  });
+
+  it('leaves a legacy absolute value, or an unresolvable token, unchanged', () => {
+    expect(resolveSetupWorktree(exec, '/r', info('/abs/wt'))).toEqual(info('/abs/wt'));
+    expect(resolveSetupWorktree(exec, '/r', info('<local>/gone')).worktree).toBe('<local>/gone');
+    expect(resolveSetupWorktree(() => null, '/r', info('<repo>/x')).worktree).toBe('<repo>/x');
   });
 });

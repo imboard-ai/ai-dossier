@@ -212,6 +212,7 @@ export {
   parseSetupInfo,
   prOfMilestone,
   REVIEW_PARTIAL_REASON,
+  resolveSetupWorktree,
   type SetupInfo,
   wrongProcedureShippedPr,
 } from './groundtruth';

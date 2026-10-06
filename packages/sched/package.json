@@ -1,6 +1,6 @@
 {
   "name": "@ai-dossier/sched",
-  "version": "0.68.4",
+  "version": "0.68.5",
   "description": "The deterministic shell for hybrid model-driven orchestration of signed, versioned agent skills; never invokes an LLM.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -53,7 +53,7 @@
     "registry": "https://registry.npmjs.org"
   },
   "dependencies": {
-    "@ai-dossier/core": "^1.13.0",
+    "@ai-dossier/core": "^1.15.0",
     "@ai-dossier/worktree-pool": "^0.7.0"
   },
   "devDependencies": {

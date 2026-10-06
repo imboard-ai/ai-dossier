@@ -11,7 +11,13 @@
  * and any consumer — supply fake ground truth and no subprocess runs.
  */
 
-import { isTrustedAuthorAssociation } from '@ai-dossier/core';
+import * as path from 'node:path';
+import {
+  isPortablePath,
+  isTrustedAuthorAssociation,
+  LOCAL_PATH_TOKEN,
+  resolvePortablePath,
+} from '@ai-dossier/core';
 import { unwrapList } from './json';
 import {
   classifyWorkflowText,
@@ -66,7 +72,10 @@ export interface PrTruth {
 
 /** Teardown inputs recovered from a run's `setup` milestone (#468 AC2). */
 export interface SetupInfo {
-  /** Absolute worktree path (`worktree=` key of the setup milestone). */
+  /**
+   * Worktree path (`worktree=` key of the setup milestone): portable (`<repo>/…`,
+   * `<local>/…`, #1085) as parsed, absolute once {@link resolveSetupWorktree} resolved it.
+   */
   worktree: string;
   /** Whether the worktree was claimed from the pool (`pool_claimed=true`). */
   poolClaimed: boolean;
@@ -593,7 +602,8 @@ export function createExecGroundTruth(
     setupInfo(issue: number): SetupInfo | null | undefined {
       const out = exec('gh', ['issue', 'view', String(issue), '--json', 'comments'], opts.repoDir);
       if (out === null) return undefined; // poll failed — unreachable
-      return parseSetupInfo(out);
+      const info = parseSetupInfo(out);
+      return info === null ? null : resolveSetupWorktree(exec, opts.repoDir, info);
     },
     issueLabels(issue: number): string[] | undefined {
       const out = exec('gh', ['issue', 'view', String(issue), '--json', 'labels'], opts.repoDir);
@@ -1178,6 +1188,38 @@ export function parseSetupInfo(commentsJson: string | null): SetupInfo | null {
     };
   }
   return null;
+}
+
+/**
+ * Resolve a setup milestone's portable `worktree=` (#1085) against THIS machine:
+ * `<repo>/…` against the main checkout of `repoDir` (`dirname` of the git common dir),
+ * `<local>/<name>` against the local worktree list. A legacy absolute value, or one that
+ * does not resolve, is returned unchanged — teardown and the takeover rescue validate
+ * the path themselves and refuse anything that is not a registered, contained worktree.
+ */
+export function resolveSetupWorktree(
+  exec: ExecFn,
+  repoDir: string | undefined,
+  info: SetupInfo
+): SetupInfo {
+  if (!isPortablePath(info.worktree)) return info;
+  const common = exec('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], repoDir);
+  const anchor =
+    common !== null && path.isAbsolute(common.trim())
+      ? path.basename(common.trim()) === '.git'
+        ? path.dirname(common.trim())
+        : common.trim()
+      : null;
+  let worktrees: string[] = [];
+  if (info.worktree.startsWith(`${LOCAL_PATH_TOKEN}/`)) {
+    const list = exec('git', ['worktree', 'list', '--porcelain'], repoDir);
+    worktrees = (list ?? '')
+      .split('\n')
+      .filter((line) => line.startsWith('worktree '))
+      .map((line) => line.slice('worktree '.length));
+  }
+  const resolved = resolvePortablePath(info.worktree, { anchor, worktrees });
+  return resolved === null ? info : { ...info, worktree: resolved };
 }
 
 /**

@@ -1,6 +1,6 @@
 {
   "name": "@ai-dossier/cli",
-  "version": "0.89.11",
+  "version": "0.89.12",
   "description": "CLI for signed, versioned agent skills and model-driven orchestration: create, verify, sign, publish, and install skills for Claude Code, Codex, OpenCode, and LLM tools.",
   "main": "dist/cli.js",
   "bin": {
@@ -56,8 +56,8 @@
     "registry": "https://registry.npmjs.org"
   },
   "dependencies": {
-    "@ai-dossier/core": "^1.14.0",
-    "@ai-dossier/sched": "^0.68.0",
+    "@ai-dossier/core": "^1.15.0",
+    "@ai-dossier/sched": "^0.68.5",
     "@ai-dossier/worktree-pool": "^0.7.0",
     "commander": "^12.1.0",
     "yaml": "^2.8.3"

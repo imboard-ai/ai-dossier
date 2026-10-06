@@ -9,6 +9,7 @@
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { redactHomePaths } from '@ai-dossier/core';
 import type { AlertNotifier } from '@ai-dossier/sched';
 
 export const ALERT_ISSUE_ENV = 'DOSSIER_SCHED_ALERT_ISSUE';
@@ -97,8 +98,9 @@ export function createAlertNotifier(
       return;
     }
     const at = now();
+    // The tracking issue may be public: no home-directory path reaches it (#1085).
     const body = (count: number, first: string) =>
-      `**sched alert (${alert.kind})** — ${alert.message}${
+      `**sched alert (${alert.kind})** — ${redactHomePaths(alert.message)}${
         count > 1 ? `\n\n_Repeated ${count} times since ${first}; latest ${at.toISOString()}._` : ''
       }`;
     try {

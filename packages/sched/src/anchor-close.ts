@@ -22,6 +22,7 @@
  * talks to GitHub or git is injected, so tests never shell out.
  */
 
+import { redactHomePaths } from '@ai-dossier/core';
 import { SAFE_REF_RE } from './attribution';
 import { type ClosingPr, type IssueCloseTruth, timestampMs } from './groundtruth';
 import { BATCH_ANCHOR_LABEL, DECISION_PENDING_LABEL, hasLabel } from './labels';
@@ -683,7 +684,8 @@ export function closeAnchor(
   if (!Array.isArray(bodies)) return 'comments-unreadable';
   const marker = anchorCloseMarker(batch.id);
   if (!bodies.some((b) => typeof b === 'string' && b.startsWith(marker))) {
-    const body = renderAnchorCloseComment(batch, members);
+    // Public comment: no home-directory path reaches it (#1085).
+    const body = redactHomePaths(renderAnchorCloseComment(batch, members));
     if (exec('gh', ['issue', 'comment', anchor, '-R', repo, '--body', body], repoDir) === null) {
       return 'comment-failed';
     }

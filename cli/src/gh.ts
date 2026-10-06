@@ -16,6 +16,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { containsHomePath, redactHomePaths } from '@ai-dossier/core';
 
 /**
  * Fail on stderr and exit 1, so a calling dossier can detect it.
@@ -486,8 +487,52 @@ export function tryFetchIssueState(issue: string, repo?: string): IssueStateResu
   return { ok: true, state: parsed.state };
 }
 
+/**
+ * The repository's main checkout root — the directory every worktree of the repo agrees on
+ * (`dirname` of `git rev-parse --git-common-dir`; the common dir itself for a bare repo).
+ * This is the `<repo>` anchor portable paths are written and resolved against (#1085).
+ * `null` outside a git repository.
+ */
+export function localRepoAnchor(): string | null {
+  const res = exec('git', ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+  if (!res.ok || !path.isAbsolute(res.stdout)) return null;
+  return path.basename(res.stdout) === '.git' ? path.dirname(res.stdout) : res.stdout;
+}
+
+/** Absolute paths of this repository's local worktrees (`git worktree list`), or `[]`. */
+export function localWorktrees(): string[] {
+  const res = exec('git', ['worktree', 'list', '--porcelain']);
+  if (!res.ok) return [];
+  return res.stdout
+    .split('\n')
+    .filter((line) => line.startsWith('worktree '))
+    .map((line) => line.slice('worktree '.length));
+}
+
+/**
+ * The publishable form of a comment body: every home-directory path rewritten to
+ * `<repo>/…` or `<local>/<basename>` (#1085). The last guard before anything reaches
+ * GitHub — runstate already writes portable paths, this catches whatever slipped past.
+ */
+export function publishableBody(body: string): string {
+  if (!containsHomePath(body)) return body;
+  const safe = redactHomePaths(body, { anchor: localRepoAnchor() });
+  if (safe !== body) {
+    console.error(
+      '⚠️  Redacted local home-directory path(s) from the comment body before posting — pass repo-relative paths instead.'
+    );
+  }
+  return safe;
+}
+
 /** `--dry-run` support for comment-posting subcommands: show the body, post nothing. */
-export function printDryRun(body: string, json?: boolean, extra?: Record<string, unknown>): void {
+export function printDryRun(
+  rawBody: string,
+  json?: boolean,
+  extra?: Record<string, unknown>
+): void {
+  // The dry run shows exactly what a real post would publish.
+  const body = publishableBody(rawBody);
   if (json) {
     console.log(JSON.stringify({ posted: false, dryRun: true, ...extra, body }, null, 2));
   } else {
@@ -531,23 +576,29 @@ export function postIssueComment(options: {
   jsonExtras?: Record<string, unknown>;
   successLine: (url: string) => string;
 }): void {
+  const body = publishableBody(options.body);
   const res = exec('gh', [
     'issue',
     'comment',
     options.issue,
     '--body',
-    options.body,
+    body,
     ...repoArgs(options.repo),
   ]);
   if (!res.ok) {
     fail([
       ghFailure(options.action, res.error, options.repo),
-      retryHint(options.issue, options.repo, options.body, options.noun),
+      retryHint(options.issue, options.repo, body, options.noun),
     ]);
   }
 
   if (options.json) {
-    console.log(JSON.stringify({ posted: true, url: res.stdout, ...options.jsonExtras }, null, 2));
+    // A `body` echoed back in the extras must be the one actually posted.
+    const extras =
+      options.jsonExtras && 'body' in options.jsonExtras
+        ? { ...options.jsonExtras, body }
+        : options.jsonExtras;
+    console.log(JSON.stringify({ posted: true, url: res.stdout, ...extras }, null, 2));
   } else {
     console.log(options.successLine(res.stdout));
   }

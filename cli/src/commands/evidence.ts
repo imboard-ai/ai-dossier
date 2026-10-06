@@ -13,6 +13,7 @@ import {
   type EvidenceRef,
   parseDossierContent,
   parseEvidence,
+  redactHomePaths,
   validateEvidence,
 } from '@ai-dossier/core';
 import { type Command, Option } from 'commander';
@@ -319,9 +320,21 @@ function parseExtra(pairs: string[] | undefined): Record<string, string> | undef
       console.error(`\n❌ Invalid --extra '${pair}' — expected k=v\n`);
       process.exit(1);
     }
-    extra[pair.slice(0, idx)] = pair.slice(idx + 1);
+    extra[pair.slice(0, idx)] = publishableText(pair.slice(idx + 1), '--extra');
   }
   return extra;
+}
+
+/**
+ * The sidecar is published next to the dossier, so free text recorded into it must not
+ * carry a home-directory path (#1085) — rewrite it and say so.
+ */
+function publishableText(text: string, flag: string): string {
+  const safe = redactHomePaths(text);
+  if (safe !== text) {
+    console.error(`⚠️  ${flag}: redacted a local home-directory path — the sidecar is published`);
+  }
+  return safe;
 }
 
 /** Read + parse an existing sidecar file, exiting with a clean message on a corrupt one. */
@@ -505,7 +518,7 @@ function registerAddSubcommand(cmd: Command): void {
           ...record.entries,
           {
             anchor: options.anchor,
-            rationale: options.rationale,
+            rationale: publishableText(options.rationale, '--rationale'),
             created_at: new Date().toISOString(),
             evidence: [ref],
           },

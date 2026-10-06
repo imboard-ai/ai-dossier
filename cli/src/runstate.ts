@@ -12,6 +12,7 @@
  */
 
 import { randomBytes } from 'node:crypto';
+import { isPortablePath, LOCAL_PATH_TOKEN, REPO_PATH_TOKEN } from '@ai-dossier/core';
 
 /** Marker that opens every runstate comment. Readers filter on this exact prefix. */
 export const RUNSTATE_MARKER = '<!-- runstate:v1 -->';
@@ -68,9 +69,11 @@ export const STATUSES = ['done', 'partial', 'blocked', 'awaiting-merge', FENCE_S
 export type Status = (typeof STATUSES)[number];
 
 /**
- * Keys whose values are paths and must therefore be absolute — the dossier rule is
- * "paths are absolute", and a relative worktree path makes a resume unresolvable from
- * a different working directory.
+ * Keys whose values are local paths. `runstate post` rewrites them into a portable form
+ * before posting (#1085) — `<repo>/<relative>` inside the repository, `<local>/<basename>`
+ * elsewhere — because a milestone is a public comment and an absolute path leaks the
+ * operator's home directory. Readers resolve the portable form against their own machine.
+ * A bare relative value is refused: it is ambiguous once read from another directory.
  */
 export const PATH_KEYS = ['worktree', 'planning'] as const;
 
@@ -559,8 +562,12 @@ function firstKeyProblem(key: string, value: string): string | null {
   if (/\s/.test(value) && !isAcKey(key)) {
     return `Key '${key}' contains whitespace — values must not contain spaces (use '-' or ','); only ac* keys are exempt`;
   }
-  if ((PATH_KEYS as readonly string[]).includes(key) && !value.startsWith('/')) {
-    return `Key '${key}' must be an absolute path, got '${value}'`;
+  if (
+    (PATH_KEYS as readonly string[]).includes(key) &&
+    !value.startsWith('/') &&
+    !isPortablePath(value)
+  ) {
+    return `Key '${key}' must be a ${REPO_PATH_TOKEN}/… or ${LOCAL_PATH_TOKEN}/… path (runstate post rewrites absolute and cwd-relative paths into that form), got '${value}'`;
   }
   return null;
 }

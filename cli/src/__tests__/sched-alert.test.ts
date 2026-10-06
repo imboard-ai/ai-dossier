@@ -91,6 +91,12 @@ describe('createAlertNotifier comment dedupe (#945)', () => {
     expect(() => createAlertNotifier('p', 'o/r', 1, { api: bad })(crash)).not.toThrow();
   });
 
+  it('never publishes a home-directory path in the alert comment (#1085)', () => {
+    notifier()({ kind: 'engine-hung', message: 'state at /home/alice/.dossier/sched/x.json' });
+    expect(created[0]).toContain('<local>/x.json');
+    expect(created[0]).not.toContain('alice');
+  });
+
   it('parseAlertIssue validates', () => {
     expect(parseAlertIssue('12', {})).toBe(12);
     expect(parseAlertIssue(undefined, {})).toBeUndefined();
