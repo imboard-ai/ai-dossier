@@ -104,7 +104,9 @@ test('paragraphs that only introduce a list are skipped', () => {
 
 test('autolinks become plain urls', () => {
   assert.equal(
-    firstParagraph('# T\n\nDownload the installer from <https://example.com/install> to get going.'),
+    firstParagraph(
+      '# T\n\nDownload the installer from <https://example.com/install> to get going.'
+    ),
     'Download the installer from https://example.com/install to get going.'
   );
 });

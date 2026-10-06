@@ -53,8 +53,7 @@ export function trimTo(text, max = MAX_DESCRIPTION) {
 
 // Metadata lines ("Version: 1.0 Status: Stable ...") are not summary material; a leading
 // "Purpose:" style label is dropped and the sentence after it kept.
-const META =
-  /^(version|status|last updated|date|audience|time|prerequisites|difficulty)\s*:/i;
+const META = /^(version|status|last updated|date|audience|time|prerequisites|difficulty)\s*:/i;
 function clean(raw) {
   const text = plain(raw);
   if (META.test(text)) return '';
