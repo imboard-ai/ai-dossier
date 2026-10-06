@@ -1,3 +1,4 @@
+export * from './authority';
 export * from './budget';
 export * from './budget-types';
 export * from './canonical/export';
@@ -12,3 +13,12 @@ export * from './receipt/verify';
 export * from './redaction';
 export * from './state';
 export * from './status';
+export * from './vm/adapter';
+export * from './vm/bake';
+export * from './vm/broker';
+export * from './vm/cloud-init';
+export * from './vm/host';
+export * from './vm/local-qemu';
+export * from './vm/profile';
+export * from './vm/qemu-args';
+export * from './vm/teardown';

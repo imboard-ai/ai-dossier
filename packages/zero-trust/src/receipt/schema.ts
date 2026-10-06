@@ -37,7 +37,8 @@ export interface Receipt {
   candidateSha: string;
   profileDigest: string;
   policyDigest: string;
-  profile: { name: string; runtime: string; imageDigest: string };
+  /** `accelerator` records how the VM ran: same isolation, different speed. */
+  profile: { name: string; runtime: string; imageDigest: string; accelerator: 'kvm' | 'tcg' };
   commands: CommandEvidence[];
   networkPolicy: {
     acquisition: string;
@@ -90,6 +91,7 @@ export const RECEIPT_SCHEMA = object({
     name: text,
     runtime: text,
     imageDigest: { type: 'string', pattern: '^sha256:[a-f0-9]{64}$' },
+    accelerator: { enum: ['kvm', 'tcg'] },
   }),
   commands: {
     type: 'array',
