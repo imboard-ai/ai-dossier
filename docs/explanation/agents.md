@@ -1,6 +1,8 @@
 > **Deprecated** — This file is outdated and no longer maintained.
 > See the "For AI Agents" sections in each package README instead:
 > [`README.md`](../../README.md) (root) | [`mcp-server/README.md`](../../mcp-server/README.md)
+>
+> For how agents orchestrate multi-step work with Dossier, see [Model-driven orchestration for AI agents](model-driven-orchestration.md).
 
 # AGENTS.md
 

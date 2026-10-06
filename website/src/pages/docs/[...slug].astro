@@ -53,6 +53,21 @@ const editUrl = `https://github.com/imboard-ai/ai-dossier/blob/main/${source}`;
   </div>
 </Base>
 
+<script>
+  // Diagrams are authored as ```mermaid fences (see plugins/remark-mermaid.mjs); load the
+  // renderer only on pages that have one. Without JS the diagram source stays readable.
+  const blocks = document.querySelectorAll<HTMLElement>('pre.mermaid');
+  if (blocks.length) {
+    const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+    import('https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs' as string)
+      .then(({ default: mermaid }) => {
+        mermaid.initialize({ startOnLoad: false, theme: dark ? 'dark' : 'default', securityLevel: 'strict' });
+        return mermaid.run({ nodes: blocks });
+      })
+      .catch(() => {});
+  }
+</script>
+
 <style>
   .layout { display: grid; gap: 40px; grid-template-columns: 240px minmax(0, 1fr) 200px; align-items: start; }
   .side, .toc { position: sticky; top: 76px; max-height: calc(100vh - 92px); overflow-y: auto; font-size: .9rem; overscroll-behavior: contain; }
@@ -75,6 +90,7 @@ const editUrl = `https://github.com/imboard-ai/ai-dossier/blob/main/${source}`;
   .doc :global(h1) { margin-top: 0; font-size: var(--step-3); }
   .doc :global(h2) { margin-top: 2.6rem; padding-top: 1.4rem; border-top: 1px solid var(--line); }
   .doc :global(h1 + h2), .doc :global(h1 + p + h2), .doc :global(hr + h2) { border-top: 0; padding-top: 0; }
+  .doc :global(pre.mermaid) { background: transparent; border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; overflow-x: auto; text-align: center; }
   .doc :global(hr) { margin: 2rem 0 0; }
   .doc :global(h2), .doc :global(h3), .doc :global(h4) { scroll-margin-top: 76px; }
   .doc :global(li) { margin: .3rem 0; }
