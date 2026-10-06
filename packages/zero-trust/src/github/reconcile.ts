@@ -45,10 +45,13 @@ export function anonymousReader(fetchImpl: typeof fetch = fetch): GitHubRead {
 }
 
 type Unknown = { readonly kind: 'unknown' };
-type Ambiguous = {
-  readonly kind: 'ambiguous';
-  readonly reason: 'multiple_matches' | 'marker_missing' | 'foreign_author';
-};
+export type AmbiguityReason =
+  | 'multiple_matches'
+  | 'marker_missing'
+  | 'foreign_author'
+  /** The marked PR exists but its head no longer resolves (fork deleted or renamed). */
+  | 'fork_unverifiable';
+type Ambiguous = { readonly kind: 'ambiguous'; readonly reason: AmbiguityReason };
 
 /** Lists every page or reports unknown; a truncated listing is never treated as complete. */
 async function listAll(
@@ -88,6 +91,9 @@ export interface PrExpectation {
   readonly marker: string;
   readonly contributor: string;
   readonly candidateSha: string;
+  /** When the link was issued. Enables the base-only scan for a PR whose head no longer
+   * resolves; only PRs created since then can carry this intent's marker. */
+  readonly issuedAt?: string;
 }
 export type PrObservation =
   | {
@@ -146,9 +152,14 @@ export async function reconcilePr(
       return { kind: 'unknown' };
     pulls.push({ pr, headSha: head.sha });
   }
-  if (pulls.length === 0) return { kind: 'absent' };
+  if (pulls.length === 0)
+    return expected.issuedAt
+      ? findOrphan(read, repo, b.base, expected.marker, expected.issuedAt)
+      : { kind: 'absent' };
   if (pulls.length > 1) return { kind: 'ambiguous', reason: 'multiple_matches' };
   const [{ pr, headSha }] = pulls;
+  // A deleted fork leaves `head.repo` null: the head can no longer be verified.
+  if (obj(pr.head)?.repo === null) return { kind: 'ambiguous', reason: 'fork_unverifiable' };
   if (!hasOnlyMarker(pr.body, expected.marker))
     return { kind: 'ambiguous', reason: 'marker_missing' };
   if (login(pr.user) !== expected.contributor.toLowerCase())
@@ -165,9 +176,44 @@ export async function reconcilePr(
   };
 }
 
+/** A deleted fork drops the PR out of the head filter: scan the base, newest first, back to
+ * the issue time. A marked PR found there cannot be verified, so it hands off. */
+async function findOrphan(
+  read: GitHubRead,
+  repo: string,
+  base: string,
+  marker: string,
+  issuedAt: string
+): Promise<PrObservation> {
+  const since = Date.parse(issuedAt);
+  for (let page = 1; page <= MAX_PR_PAGES; page++) {
+    let response: GitHubResponse;
+    try {
+      response = await read(
+        `/repos/${repo}/pulls?state=all&base=${enc(base)}&sort=created&direction=desc&per_page=${PAGE_SIZE}&page=${page}`
+      );
+    } catch {
+      return { kind: 'unknown' };
+    }
+    if (response.status !== 200 || !Array.isArray(response.body)) return { kind: 'unknown' };
+    for (const item of response.body) {
+      const pr = obj(item);
+      const created = typeof pr?.created_at === 'string' ? Date.parse(pr.created_at) : Number.NaN;
+      if (!pr || !Number.isFinite(created)) return { kind: 'unknown' };
+      if (created < since) return { kind: 'absent' };
+      if (typeof pr.body === 'string' && pr.body.includes(marker))
+        return { kind: 'ambiguous', reason: 'fork_unverifiable' };
+    }
+    if (response.body.length < PAGE_SIZE) return { kind: 'absent' };
+  }
+  return { kind: 'unknown' };
+}
+
 export interface CommentExpectation {
   readonly marker: string;
   readonly contributor: string;
+  /** Only comments updated since the link was issued can carry its marker. */
+  readonly since?: string;
 }
 export type CommentObservation =
   | { readonly kind: 'found'; readonly url: string; readonly id: number }
@@ -184,7 +230,7 @@ export async function reconcileComment(
   const b = issueBinding(binding);
   const items = await listAll(
     read,
-    `/repos/${enc(b.upstream.owner)}/${enc(b.upstream.repo)}/issues/${b.issue}/comments?sort=created`,
+    `/repos/${enc(b.upstream.owner)}/${enc(b.upstream.repo)}/issues/${b.issue}/comments?${expected.since ? `since=${enc(expected.since)}` : 'sort=created'}`,
     MAX_COMMENT_PAGES
   );
   if (!items) return { kind: 'unknown' };

@@ -7,6 +7,8 @@ import path from 'node:path';
 import { replacePrivate } from '../durable-fs';
 import { type IntentInput, idempotencyKey } from '../intents';
 import type { Journal } from '../journal';
+import { receiptDigest } from '../receipt/issue';
+import { parseReceipt } from '../receipt/schema';
 import { isRecoveryEvent } from '../recovery';
 import { assertNoSecrets } from '../redaction';
 import { isRecord, ReasonCode, type RunRecord, restoreRun, transitionRun } from '../state';
@@ -24,8 +26,8 @@ import {
   type PreparedLink,
   prBinding,
 } from './handoff';
-import type { PrContent } from './pr-body';
-import { type GitHubRead, reconcileComment, reconcilePr } from './reconcile';
+import { buildPrContent, type PrContentInput } from './pr-body';
+import { type AmbiguityReason, type GitHubRead, reconcileComment, reconcilePr } from './reconcile';
 import { HandoffError } from './text';
 
 /** Admission is identical to a brokered write (PRD §5.9); each check runs fresh. */
@@ -36,8 +38,9 @@ export interface HandoffAdmission {
   contributorVerified(): Promise<boolean>;
   /** PR only: the fork is owned by the contributor and its parent is the bound upstream. */
   forkBindingVerified(): Promise<boolean>;
-  /** PR only: the authenticated receipt is valid for this candidate SHA. */
-  receiptValid(candidateSha: string): Promise<boolean>;
+  /** PR only: the authenticated receipt with this canonical SHA-256 (the one rendered in
+   * the body) is valid for this candidate SHA. */
+  receiptValid(candidateSha: string, receiptDigest: string): Promise<boolean>;
   /** PR only, provided by the verified push (#1066): the fork branch SHA read back from the
    * remote, or null when the branch is absent. Must equal the candidate. */
   remoteBranchSha(): Promise<string | null>;
@@ -51,10 +54,8 @@ export interface HandoffDeps {
   readonly now: () => string;
 }
 
-export const HANDOFF_BLOCK_REASONS = Object.freeze([
-  'ambiguous_submission',
-  'unexpected_head_sha',
-] as const);
+/** Only a moved head is terminal; an ambiguous match waits for a person (see resume). */
+export const HANDOFF_BLOCK_REASONS = Object.freeze(['unexpected_head_sha'] as const);
 export type HandoffBlockReason = (typeof HANDOFF_BLOCK_REASONS)[number];
 
 export interface HandoffRecord {
@@ -68,9 +69,16 @@ export interface HandoffRecord {
   readonly bodyFile: string;
   readonly bodyDigest: string;
   readonly status: 'link_issued' | 'observed' | 'blocked';
+  /** The run's time when the link was issued. */
+  readonly issuedAt: string;
   readonly artifactRef?: string;
+  /** PR only, once observed. */
+  readonly number?: number;
+  readonly headSha?: string;
+  readonly prState?: PrState;
   readonly reason?: HandoffBlockReason;
 }
+export type PrState = 'open' | 'closed' | 'merged';
 export interface HandoffState {
   readonly run: RunRecord;
   readonly contributionId: string;
@@ -96,15 +104,19 @@ export type HandoffOutcome =
   | {
       readonly kind: 'awaiting_contributor';
       readonly status: HandoffStatus;
-      /** `unknown`: GitHub could not be read; the same link stays valid, none is reissued. */
-      readonly reconciliation: 'absent' | 'unknown' | 'not_checked';
+      /** `unknown`: GitHub could not be read; the same link stays valid, none is reissued.
+       * `ambiguous`: a person must resolve the submissions (status says how), then resume. */
+      readonly reconciliation: 'absent' | 'unknown' | 'ambiguous' | 'not_checked';
+      readonly ambiguity?: AmbiguityReason;
     }
   | {
       readonly kind: 'observed';
       readonly operation: HandoffOperation;
       readonly url: string;
       /** PR only, as observed; a closed PR is surfaced, not hidden. */
-      readonly prState?: 'open' | 'closed' | 'merged';
+      readonly prState?: PrState;
+      readonly number?: number;
+      readonly headSha?: string;
       /** Never `green`: upstream CI is not observed here (scenario 12). */
       readonly ci: 'pending' | 'unknown';
     }
@@ -126,7 +138,16 @@ type Event =
       bodyDigest: string;
       run: RunRecord;
     }
-  | { v: 1; type: 'handoff_observed'; key: string; artifactRef: string; run: RunRecord }
+  | {
+      v: 1;
+      type: 'handoff_observed';
+      key: string;
+      artifactRef: string;
+      number?: number;
+      headSha?: string;
+      prState?: PrState;
+      run: RunRecord;
+    }
   | { v: 1; type: 'handoff_blocked'; key: string; reason: HandoffBlockReason; run: RunRecord };
 
 function fail(): never {
@@ -283,6 +304,7 @@ function reduce(state: HandoffState | undefined, raw: unknown): HandoffState {
         bodyFile: raw.bodyFile,
         bodyDigest: raw.bodyDigest,
         status: 'link_issued',
+        issuedAt: run.updatedAt,
       })
     );
     return { ...state, run, handoffs };
@@ -290,10 +312,24 @@ function reduce(state: HandoffState | undefined, raw: unknown): HandoffState {
   const record = typeof raw.key === 'string' ? handoffs.get(raw.key) : undefined;
   if (!record || record.status !== 'link_issued') fail();
   if (raw.type === 'handoff_observed') {
-    const prefix = `https://github.com/${record.binding.upstream.owner}/${record.binding.upstream.repo}/`;
+    const repo = `https://github.com/${record.binding.upstream.owner}/${record.binding.upstream.repo}`;
+    const isPr = record.input.operationKind === 'pr_create';
+    const expectedRef = isPr
+      ? `${repo}/pull/${raw.number}`
+      : `${repo}/issues/${(record.binding as IssueBinding).issue}#issuecomment-`;
     if (
       typeof raw.artifactRef !== 'string' ||
-      !raw.artifactRef.toLowerCase().startsWith(prefix.toLowerCase()) ||
+      (isPr
+        ? !Number.isSafeInteger(raw.number) ||
+          (raw.number as number) < 1 ||
+          raw.headSha !== record.input.candidateSha ||
+          !['open', 'closed', 'merged'].includes(raw.prState as string) ||
+          raw.artifactRef.toLowerCase() !== expectedRef.toLowerCase()
+        : raw.number !== undefined ||
+          raw.headSha !== undefined ||
+          raw.prState !== undefined ||
+          !raw.artifactRef.toLowerCase().startsWith(expectedRef.toLowerCase()) ||
+          !/^[1-9][0-9]*$/u.test(raw.artifactRef.slice(expectedRef.length))) ||
       !sameRun(
         run,
         transitionRun(state.run, observedReason(record.input.operationKind), run.updatedAt)
@@ -302,7 +338,18 @@ function reduce(state: HandoffState | undefined, raw: unknown): HandoffState {
       fail();
     handoffs.set(
       record.key,
-      Object.freeze({ ...record, status: 'observed', artifactRef: raw.artifactRef })
+      Object.freeze({
+        ...record,
+        status: 'observed',
+        artifactRef: raw.artifactRef,
+        ...(isPr
+          ? {
+              number: raw.number as number,
+              headSha: raw.headSha as string,
+              prState: raw.prState as PrState,
+            }
+          : {}),
+      })
     );
     return { ...state, run, handoffs };
   }
@@ -442,25 +489,24 @@ export class HandoffDriver {
   }
 
   /** Prefilled pull request for the verified, pushed candidate. */
-  issuePr(request: {
-    intent: IntentInput;
-    binding: PrBinding;
-    content: PrContent;
-  }): Promise<HandoffOutcome> {
+  issuePr(request: { binding: PrBinding; content: PrContentInput }): Promise<HandoffOutcome> {
     return this.serial(async () => {
-      const prior = await this.reconcileFirst(request.intent);
+      const intent = request.content?.intent;
+      const prior = await this.reconcileFirst(intent);
       if (prior) return prior;
-      const { intent } = request;
       const binding = bindingFor(this.state.run, intent, request.binding) as PrBinding;
       const sha = intent.candidateSha;
       if (intent.operationKind !== 'pr_create' || sha === null)
         throw new HandoffError('not_a_handoff');
       if (this.state.run.state !== 'shipping') throw new HandoffError('admission_state');
+      // The driver renders the content itself: the receipt it checks is the one in the body.
+      const content = buildPrContent(request.content);
+      const digest = receiptDigest(parseReceipt(request.content.receipt));
       const { admission } = this.deps;
       await this.check('policy', () => admission.policyFresh());
       await this.check('contributor', () => admission.contributorVerified());
       await this.check('fork_binding', () => admission.forkBindingVerified());
-      await this.check('receipt', () => admission.receiptValid(sha));
+      await this.check('receipt', () => admission.receiptValid(sha, digest));
       await this.check('remote_sha', async () => (await admission.remoteBranchSha()) === sha);
       // Never issue while any PR exists on this head/base, in any state.
       const existing = await reconcilePr(this.deps.read, binding, {
@@ -470,7 +516,7 @@ export class HandoffDriver {
       });
       if (existing.kind === 'unknown') throw new HandoffError('reconciliation_unavailable');
       if (existing.kind !== 'absent') throw new HandoffError('existing_submission');
-      const { title, body, commands } = request.content;
+      const { title, body, commands } = content;
       const link = compareLink(intent, binding, title, body, commands);
       return this.issue(intent, binding, link);
     });
@@ -526,6 +572,9 @@ export class HandoffDriver {
           kind: 'observed',
           operation: earlier.input.operationKind,
           url: earlier.artifactRef as string,
+          ...(earlier.prState === undefined
+            ? {}
+            : { prState: earlier.prState, number: earlier.number, headSha: earlier.headSha }),
           ci: 'unknown',
         };
   }
@@ -583,25 +632,31 @@ export class HandoffDriver {
     const marker = handoffMarker(record.input);
     let url: string;
     let ci: 'pending' | 'unknown' = 'unknown';
-    let prState: 'open' | 'closed' | 'merged' | undefined;
+    let pr: { prState: PrState; number: number; headSha: string } | undefined;
     if (record.input.operationKind === 'pr_create') {
       const observed = await reconcilePr(this.deps.read, record.binding as PrBinding, {
         marker,
         contributor,
         candidateSha: record.input.candidateSha as string,
+        issuedAt: record.issuedAt,
       });
-      if (observed.kind === 'ambiguous') return this.block(record, 'ambiguous_submission');
+      if (observed.kind === 'ambiguous') return this.waiting('ambiguous', observed.reason);
       if (observed.kind === 'head_mismatch') return this.block(record, 'unexpected_head_sha');
       if (observed.kind !== 'found') return this.waiting(observed.kind);
       url = observed.url;
-      prState = observed.merged ? 'merged' : observed.state;
-      if (prState === 'open') ci = 'pending';
+      pr = {
+        prState: observed.merged ? 'merged' : observed.state,
+        number: observed.number,
+        headSha: observed.headSha,
+      };
+      if (pr.prState === 'open') ci = 'pending';
     } else {
       const observed = await reconcileComment(this.deps.read, record.binding as IssueBinding, {
         marker,
         contributor,
+        since: record.issuedAt,
       });
-      if (observed.kind === 'ambiguous') return this.block(record, 'ambiguous_submission');
+      if (observed.kind === 'ambiguous') return this.waiting('ambiguous', observed.reason);
       if (observed.kind !== 'found') return this.waiting(observed.kind);
       url = observed.url;
     }
@@ -610,17 +665,37 @@ export class HandoffDriver {
       observedReason(record.input.operationKind),
       this.deps.now()
     );
-    this.persist({ v: 1, type: 'handoff_observed', key: record.key, artifactRef: url, run });
-    return {
-      kind: 'observed',
-      operation: record.input.operationKind,
-      url,
-      ...(prState === undefined ? {} : { prState }),
-      ci,
-    };
+    this.persist({
+      v: 1,
+      type: 'handoff_observed',
+      key: record.key,
+      artifactRef: url,
+      ...pr,
+      run,
+    });
+    return { kind: 'observed', operation: record.input.operationKind, url, ...pr, ci };
   }
 
-  private waiting(reconciliation: 'absent' | 'unknown'): HandoffOutcome {
-    return { kind: 'awaiting_contributor', status: this.status() as HandoffStatus, reconciliation };
+  private waiting(
+    reconciliation: 'absent' | 'unknown' | 'ambiguous',
+    ambiguity?: AmbiguityReason
+  ): HandoffOutcome {
+    const status = this.status() as HandoffStatus;
+    if (reconciliation !== 'ambiguous')
+      return { kind: 'awaiting_contributor', status, reconciliation };
+    // Hand-off: no new link, nothing recorded; a person resolves it, then resumes.
+    return {
+      kind: 'awaiting_contributor',
+      status: Object.freeze({
+        ...status,
+        nextPermittedAction:
+          'The run cannot tell which submission is yours: more than one matches, one lacks the ' +
+          'hidden marker, another account posted it, or the fork no longer resolves. Close or ' +
+          'fix the extra or unmarked submission so exactly one marked one remains, then resume. ' +
+          'No new link will be issued.',
+      }),
+      reconciliation,
+      ambiguity: ambiguity as AmbiguityReason,
+    };
   }
 }

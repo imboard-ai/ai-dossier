@@ -29,7 +29,7 @@ import {
 } from '../github/reconcile';
 import { assertContentPolicy } from '../github/text';
 import type { IntentInput } from '../intents';
-import { Journal } from '../journal';
+import { Journal, JournalError } from '../journal';
 import { receiptDigest } from '../receipt/issue';
 import { type CommandEvidence, evidenceVerified, RECEIPT_VERSION } from '../receipt/schema';
 import { SecretRedactionError } from '../redaction';
@@ -139,6 +139,7 @@ interface PullFixture {
   sha?: string;
   author?: string;
   label?: string;
+  created_at?: string;
 }
 function pull(f: PullFixture = {}) {
   const number = f.number ?? 5;
@@ -146,6 +147,7 @@ function pull(f: PullFixture = {}) {
     number,
     html_url: `https://github.com/up/proj/pull/${number}`,
     state: f.state ?? 'open',
+    created_at: f.created_at ?? '2026-10-06T00:30:00.000Z',
     merged_at: f.merged_at ?? null,
     body: f.body === undefined ? `Body\n${handoffMarker(prIntent)}` : f.body,
     user: { login: f.author ?? 'alice' },
@@ -163,12 +165,21 @@ function comment(id: number, body: string, author = 'alice') {
 }
 
 /** Mocked GitHub HTTP: GET only, by path prefix. Records every request. */
-function github(routes: { pulls?: unknown[]; comments?: unknown[]; status?: number }) {
+function github(routes: {
+  pulls?: unknown[];
+  basePulls?: unknown[];
+  comments?: unknown[];
+  status?: number;
+}) {
   const calls: string[] = [];
   const read: GitHubRead = async (p) => {
     calls.push(p);
     if (routes.status) return { status: routes.status, body: { message: 'rate limited' } };
-    const items = p.includes('/pulls?') ? (routes.pulls ?? []) : (routes.comments ?? []);
+    const items = p.includes('direction=desc')
+      ? (routes.basePulls ?? [])
+      : p.includes('/pulls?')
+        ? (routes.pulls ?? [])
+        : (routes.comments ?? []);
     const page = Number(/[?&]page=(\d+)/u.exec(p)?.[1] ?? '1');
     return { status: 200, body: items.slice((page - 1) * 100, page * 100) };
   };
@@ -380,7 +391,7 @@ describe('pull request content', () => {
     expect(body).not.toMatch(/all tests passed/iu);
     expect(body).toContain('[untrusted success claim]');
     expect(findHandoffMarkers(body)).toEqual([handoffMarker(prIntent)]);
-    expect(body).toContain('## Checklist');
+    expect(body).toContain('> ## Checklist');
   });
 
   it('retains the receipt locally when the template/policy does not allow the block', () => {
@@ -525,6 +536,15 @@ describe('reconciliation reads', () => {
     ).toEqual({ kind: 'ambiguous', reason: 'foreign_author' });
   });
 
+  it('a deleted fork (head.repo null) is never counted as submitted', async () => {
+    const orphan = pull();
+    const deleted = { ...orphan, head: { ...orphan.head, repo: null } };
+    expect(await reconcilePr(github({ pulls: [deleted] }).read, binding, expected)).toEqual({
+      kind: 'ambiguous',
+      reason: 'fork_unverifiable',
+    });
+  });
+
   it('author logins compare case-insensitively', async () => {
     expect(
       await reconcilePr(github({ pulls: [pull({ author: 'ALICE' })] }).read, binding, expected)
@@ -622,7 +642,8 @@ describe('awaiting_contributor hand-off driver', () => {
       policyFresh: async () => true,
       contributorVerified: async () => true,
       forkBindingVerified: async () => true,
-      receiptValid: async (sha) => sha === CANDIDATE,
+      receiptValid: async (sha, digest) =>
+        sha === CANDIDATE && digest === receiptDigest(receipt() as never),
       remoteBranchSha: async () => CANDIDATE,
       ...overrides,
     };
@@ -641,11 +662,7 @@ describe('awaiting_contributor hand-off driver', () => {
       { run, contributionId: 'contribution-1' }
     );
   }
-  const prRequest = () => ({
-    intent: prIntent,
-    binding,
-    content: buildPrContent(contentInput()),
-  });
+  const prRequest = () => ({ binding, content: contentInput() });
 
   it('issues the prefilled PR link durably and enters awaiting_contributor', async () => {
     const gh = github({ pulls: [] });
@@ -671,7 +688,7 @@ describe('awaiting_contributor hand-off driver', () => {
     expect(renderHandoffStatus(status as never)).toContain('author: "alice"');
     expect(d.snapshot().run.state).toBe('awaiting_contributor');
     const body = fs.readFileSync(status?.bodyFile as string, 'utf8');
-    expect(body).toBe(prRequest().content.body);
+    expect(body).toBe(buildPrContent(contentInput()).body);
     expect(fs.statSync(status?.bodyFile as string).mode & 0o777).toBe(0o600);
     // Reads only: the pre-issue reconciliation, no write of any kind.
     expect(gh.calls).toHaveLength(1);
@@ -731,7 +748,10 @@ describe('awaiting_contributor hand-off driver', () => {
       d.issuePr({ ...prRequest(), binding: { ...binding, headOwner: 'mallory' } })
     ).rejects.toThrow('invalid_binding');
     await expect(
-      d.issuePr({ ...prRequest(), intent: { ...prIntent, contributionId: 'other' } })
+      d.issuePr({
+        binding,
+        content: contentInput({ intent: { ...prIntent, contributionId: 'other' } }),
+      })
     ).rejects.toThrow('invalid_contribution');
     await expect(
       d.issueEngagement({ intent: engagementIntent, binding: issue, body: 'x' })
@@ -774,14 +794,27 @@ describe('awaiting_contributor hand-off driver', () => {
       operation: 'pr_create',
       url: 'https://github.com/up/proj/pull/5',
       prState: 'open',
+      number: 5,
+      headSha: CANDIDATE,
       ci: 'pending',
+    });
+    expect([...resumed.snapshot().handoffs.values()][0]).toMatchObject({
+      status: 'observed',
+      artifactRef: 'https://github.com/up/proj/pull/5',
+      number: 5,
+      headSha: CANDIDATE,
+      prState: 'open',
     });
     expect(resumed.snapshot().run.state).toBe('submitted');
     expect(resumed.snapshot().run.reasonCode).toBe(ReasonCode.PublicationObserved);
     expect(resumed.status()).toBeNull();
     expect(await resumed.resume()).toBeNull();
     // A later request for the same intent reports the observation; it never issues again.
-    expect(await resumed.issuePr(prRequest())).toMatchObject({ kind: 'observed', ci: 'unknown' });
+    expect(await resumed.issuePr(prRequest())).toMatchObject({
+      kind: 'observed',
+      number: 5,
+      ci: 'unknown',
+    });
     expect(replayHandoffs(reopened.read()).handoffs.size).toBe(1);
   });
 
@@ -800,22 +833,61 @@ describe('awaiting_contributor hand-off driver', () => {
     expect(await r.resume()).toMatchObject({ kind: 'observed', prState: 'merged', ci: 'unknown' });
   });
 
-  it.each([
-    [
-      'two PRs (submitted twice)',
-      [pull({ number: 6 }), pull({ number: 5, state: 'closed' })],
-      'ambiguous_submission',
-    ],
-    ['marker removed', [pull({ body: 'edited' })], 'ambiguous_submission'],
-    ['head SHA moved', [pull({ sha: OTHER })], 'unexpected_head_sha'],
-  ])('%s hands off and blocks', async (_name, pulls, reason) => {
+  it('a head SHA other than the verified candidate blocks', async () => {
     let gh = github({ pulls: [] });
     const d = driver((p) => gh.read(p));
     await d.issuePr(prRequest());
-    gh = github({ pulls });
+    gh = github({ pulls: [pull({ sha: OTHER })] });
+    const reason = 'unexpected_head_sha';
     expect(await d.resume()).toEqual({ kind: 'blocked', reason });
     expect(d.snapshot().run.state).toBe('blocked');
     expect(await d.issuePr(prRequest())).toEqual({ kind: 'blocked', reason });
+  });
+
+  it.each([
+    [
+      'two PRs (submitted twice)',
+      { pulls: [pull({ number: 6 }), pull({ number: 5, state: 'closed' })] },
+      'multiple_matches',
+    ],
+    ['marker removed', { pulls: [pull({ body: 'edited' })] }, 'marker_missing'],
+    ['submitted by another account', { pulls: [pull({ author: 'mallory' })] }, 'foreign_author'],
+    [
+      'fork deleted (head no longer resolves)',
+      { basePulls: [pull({ label: 'unknown:ztfc/fix-8' })] },
+      'fork_unverifiable',
+    ],
+  ])('%s hands off: waits for a person, issues no link, re-reconciles', async (_name, routes, reason) => {
+    let gh = github({ pulls: [] });
+    const d = driver((p) => gh.read(p));
+    await d.issuePr(prRequest());
+    const events = journal.read().length;
+    gh = github(routes);
+    const outcome = (await d.resume()) as Extract<HandoffOutcome, { kind: 'awaiting_contributor' }>;
+    expect(outcome).toMatchObject({
+      kind: 'awaiting_contributor',
+      reconciliation: 'ambiguous',
+      ambiguity: reason,
+    });
+    expect(outcome.status.nextPermittedAction).toContain('No new link will be issued');
+    expect(d.snapshot().run.state).toBe('awaiting_contributor');
+    expect(journal.read()).toHaveLength(events);
+    // Once a person leaves exactly one marked PR, resume observes it.
+    gh = github({ pulls: [pull()] });
+    expect(await d.resume()).toMatchObject({ kind: 'observed', number: 5 });
+  });
+
+  it('the base-only scan stops at the issue time and is skipped before issuance', async () => {
+    let gh = github({ pulls: [], basePulls: [pull({ created_at: '2026-10-05T00:00:00.000Z' })] });
+    const d = driver((p) => gh.read(p));
+    await d.issuePr(prRequest());
+    expect(gh.calls.some((c) => c.includes('direction=desc'))).toBe(false);
+    expect(await d.resume()).toMatchObject({ reconciliation: 'absent' });
+    expect(gh.calls.at(-1)).toBe(
+      '/repos/up/proj/pulls?state=all&base=main&sort=created&direction=desc&per_page=100&page=1'
+    );
+    gh = github({ status: 500 });
+    expect(await d.resume()).toMatchObject({ reconciliation: 'unknown' });
   });
 
   it('engagement: at most one disclosed request, reconciled by marker on the issue', async () => {
@@ -865,7 +937,16 @@ describe('awaiting_contributor hand-off driver', () => {
     await d.issueEngagement({ intent: engagementIntent, binding: issue, body });
     const marker = handoffMarker(engagementIntent);
     gh = github({ comments: [comment(1, marker), comment(2, marker)] });
-    expect(await d.resume()).toEqual({ kind: 'blocked', reason: 'ambiguous_submission' });
+    expect(await d.resume()).toMatchObject({
+      kind: 'awaiting_contributor',
+      reconciliation: 'ambiguous',
+      ambiguity: 'multiple_matches',
+    });
+    expect(d.snapshot().run.state).toBe('awaiting_contributor');
+    // Only comments updated since the link was issued are read.
+    expect(gh.calls[0]).toMatch(
+      /comments\?since=2026-10-06T00%3A00%3A\d\d\.000Z&per_page=100&page=1$/u
+    );
   });
 
   it('replay fails closed on a redirected link or a skipped transition', async () => {
@@ -955,6 +1036,22 @@ describe('awaiting_contributor hand-off driver', () => {
           { run: d.snapshot().run, contributionId: 'contribution-1' }
         )
     ).toThrow(HandoffError);
+  });
+
+  it('a second journal on the same directory cannot exist, so two drivers cannot race', () => {
+    expect(() => new Journal(path.join(dir, 'journal'))).toThrow(JournalError);
+  });
+
+  it('builds the PR content itself: content policy and receipt binding apply', async () => {
+    const d = driver(github({ pulls: [] }).read);
+    await expect(
+      d.issuePr({ binding, content: contentInput({ scope: 'Please star this repo' }) })
+    ).rejects.toThrow('promotional_content');
+    const other = receipt([command({ id: 'other' })]);
+    await expect(d.issuePr({ binding, content: contentInput({ receipt: other }) })).rejects.toThrow(
+      'admission_receipt'
+    );
+    expect(d.status()).toBeNull();
   });
 
   it('one driver per journal; a cancelled run stops reconciliation', async () => {

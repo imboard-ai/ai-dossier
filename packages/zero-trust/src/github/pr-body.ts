@@ -131,7 +131,7 @@ export function buildPrContent(input: PrContentInput): PrContent {
       : `Verification receipt retained by the contributor (SHA-256 \`${receiptDigest(receipt)}\`).`
   );
   if (input.template !== undefined)
-    sections.push('', '---', '', untrustedText(input.template, 16000));
+    sections.push('', '---', '', quoted(untrustedText(input.template, 16000)));
   sections.push('', marker);
 
   const body = sections.join('\n');

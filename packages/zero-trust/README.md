@@ -187,21 +187,28 @@ run prepares the exact content, issues a link, waits durably in
 - `reconcilePr` / `reconcileComment` (`src/github/reconcile.ts`) are credential-free
   reads (`anonymousReader`). PRs are listed by head + base + `state=all` and matched
   by marker and author. One match is found. Zero keeps waiting. Several matches, a
-  match without the marker, or one by another author is `ambiguous`. A PR at a head
-  SHA other than the candidate is `head_mismatch`. A truncated or failed listing is
+  match without the marker, one by another author, or a marked PR whose fork no
+  longer resolves (found by a base-only scan back to the issue time) is `ambiguous`.
+  A PR at a head SHA other than the candidate is `head_mismatch`. A truncated or failed listing is
   `unknown`. GitHub's duplicate-PR 422 is never relied on, because it only holds
   while the first PR is open.
 - `HandoffDriver` (`src/github/handoff-driver.ts`) journals `link_issued` and
   `handoff_observed` in its own controller-owned journal directory. Issuing a link is
-  never a write, and `IntentDriver` admits no write in `awaiting_contributor`. A link
-  is issued only after the same admission as a brokered write: fresh policy, verified
-  contributor, and for a PR also the verified fork binding, a receipt valid for the
-  candidate, and a remote branch SHA equal to the candidate (`HandoffAdmission`; the
+  never a write, and `IntentDriver` admits no write in `awaiting_contributor`.
+  `issuePr` renders the PR content itself from `PrContentInput`. A link is issued
+  only after the same admission as a brokered write: fresh policy, verified
+  contributor, and for a PR also the verified fork binding, the receipt rendered in
+  the body valid for the candidate (`receiptValid(sha, receiptDigest)`), and a remote branch SHA equal to the candidate (`HandoffAdmission`; the
   read-back comes from the verified push, #1066). No link is issued while any PR
   exists on the head/base, or while GitHub cannot be read. `resume()` reconciles
-  before anything else. An observed PR moves the run to `submitted` and reports CI
-  `pending` or `unknown`, never green. An observed engagement comment moves it to
-  `awaiting_maintainer`. Ambiguity or a moved head SHA blocks the run. `status()`
+  before anything else. An observed PR moves the run to `submitted`. The journal keeps
+  its URL, number, head SHA and state (`open`, `closed` or `merged`; a closed PR is
+  surfaced, not hidden), and CI is reported `pending` or `unknown`, never green. An
+  observed engagement comment moves it to `awaiting_maintainer`. An ambiguous match
+  is a hand-off: the run stays in `awaiting_contributor`, issues no link, tells the
+  contributor what to resolve, and reconciles again on resume. A moved head SHA
+  blocks the run. Replay re-derives every issued link from its binding, title and
+  body, and only the driver's own events may record an observation. `status()`
   shows the link, what it submits, and that the contributor is the author. Nothing
   is scheduled: no reminders, and no compute until an explicit resume.
 
