@@ -200,18 +200,23 @@ Locks record PID, boot-ID/process-start-ticks token, creation time and unique ID
 An orphan is reclaimed only on proof of PID absence or a different start token;
 live owners are never age-reclaimed. Unknown/legacy owners and unavailable process
 evidence still block admission (`lock_timeout`). Reclamation is fsynced into
-`<ledger>.recovery-journal/events.jsonl` before removing the dead owner's lock.
+`<ledger>.recovery-journal/events.jsonl` before removing the dead owner's lock;
+long basenames use `.zt-budget-recovery-<SHA-256-of-basename>/events.jsonl` in the
+same directory. Reserved controller metadata paths are rejected so a second ledger
+cannot replace another store's permanent guard or journal.
 Opening an existing ledger captures all pending reservation IDs as a resume barrier,
 even if the old controller released its mutation lock before crashing. Dead-lock
-recovery adds all pending IDs to that barrier and its durable audit. New **work**
-is fenced until every old hold is explicitly settled or released. Missing or empty
-established recovery journals fail closed; losing the sidecar never frees holds.
-`settle(id, null)` does not clear the fence;
+recovery adds all pending IDs to that barrier and its durable audit. All new
+reservations, including teardown, are fenced until every old hold is explicitly
+settled or released. Missing or empty journals within an existing recovery directory
+fail closed. Deletion of the entire audit directory is outside the trusted-storage
+contract: stop all existing handles and reopen before reconciling every old hold.
+`settle(id, null)` does not clear the fence.
 Every guarded admission also checks the freshly loaded rows: holds not acknowledged
 by a successful complete transaction of that exact ledger instance require
 reconciliation, even when the handle opened before another writer's final hold.
 Locally acknowledged holds may coexist; their full estimates still count.
-teardown remains available within its existing accounting limits.
+After reconciliation, teardown retains its protected allowance and accounting limits.
 Never infer safe lock removal from age or a PID alone. Leftover temp files are
 not committed state. Filesystem errors propagate; after write uncertainty reload
 and reconcile before retrying an action. A write/fsync failure poisons the live

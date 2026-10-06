@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import * as path from 'node:path';
 import {
@@ -291,6 +291,7 @@ export class BudgetLedger {
   private writeUncertain = false;
   private readonly resumePending = new Set<string>();
   private readonly acknowledged = new Set<string>();
+  private readonly recoveryDirectory: string;
   constructor(
     file: string,
     readonly contributionId: string,
@@ -301,6 +302,28 @@ export class BudgetLedger {
     // Normalize directory aliases so two callers cannot lock the same ledger
     // through different symlinked directory names. The supervisor provisions it.
     this.file = path.join(fs.realpathSync(path.dirname(path.resolve(file))), path.basename(file));
+    // Data paths must never alias another store's permanent guard or evidence.
+    // Parent metadata directories are reserved too, preventing nested aliases.
+    for (
+      let current = this.file;
+      current !== path.dirname(current);
+      current = path.dirname(current)
+    ) {
+      const name = path.basename(current);
+      if (
+        name.startsWith('.zt-') ||
+        /\.(lock|guard|recovery|recovery-journal)$/.test(name) ||
+        ['events.jsonl', 'nonce-initializing', 'lock-recovery'].includes(name) ||
+        name.includes('.quarantine-')
+      )
+        throw new BudgetError('invalid_budget', 'Ledger path is reserved for controller metadata');
+    }
+    const legacy = `${path.basename(this.file)}.recovery-journal`;
+    const name =
+      Buffer.byteLength(legacy) <= 255
+        ? legacy
+        : `.zt-budget-recovery-${createHash('sha256').update(path.basename(this.file)).digest('hex')}`;
+    this.recoveryDirectory = path.join(path.dirname(this.file), name);
     // Opening an existing ledger is a resume boundary, independent of whether
     // the dead controller held its short mutation lock when it crashed. Capture
     // ALL old unknown outcomes; a null observation never reconciles them.
@@ -373,14 +396,13 @@ export class BudgetLedger {
       throw new BudgetError('invalid_budget', 'Invalid reservation purpose');
     const reservation = this.mutate((state) => {
       const pending = new Set(this.resumePending);
-      if (fs.existsSync(`${this.file}.recovery-journal`)) {
-        for (const id of lockRecoveries(`${this.file}.recovery-journal`).flatMap(
+      if (fs.existsSync(this.recoveryDirectory)) {
+        for (const id of lockRecoveries(this.recoveryDirectory).flatMap(
           (event) => event.pendingReservations
         ))
           pending.add(id);
       }
       if (
-        purpose === 'work' &&
         state.reservations.some(
           (row) =>
             row.status === 'reserved' && (pending.has(row.id) || !this.acknowledged.has(row.id))
@@ -499,7 +521,7 @@ export class BudgetLedger {
                 .map((row) => row.id)
             : [];
           for (const id of pending) this.resumePending.add(id);
-          recordLockReclaim(`${this.file}.recovery-journal`, lock, owner, pending);
+          recordLockReclaim(this.recoveryDirectory, lock, owner, pending);
         },
         fn,
         () => this.writeUncertain

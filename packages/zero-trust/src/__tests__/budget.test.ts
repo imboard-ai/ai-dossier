@@ -167,7 +167,7 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
       source: 'work overrun',
     });
     const resumed = new BudgetLedger(file, 'contribution-1');
-    code(() => resumed.reserve('initial', estimate(5), 'teardown'), 'ceiling_exceeded');
+    code(() => resumed.reserve('initial', estimate(5), 'teardown'), 'persistence_uncertain');
     resumed.release(held.id, 'provider confirms cleanup never started');
     resumed.reserve('initial', estimate(6), 'teardown');
     expect(budgetTotals(resumed.snapshot(), 'initial')).toEqual({
@@ -227,13 +227,19 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
       timeMs: 100,
       source: 'invoice',
     });
-    ledger.reserve('initial', estimate(4), 'teardown');
+    const localCleanup = ledger.reserve('initial', estimate(4), 'teardown');
+    ledger.settle(localCleanup.id, {
+      money: { currency: 'USD', minor: 4 },
+      tokens: 10,
+      timeMs: 100,
+      source: 'reconciled cleanup invoice',
+    });
     const foreignCleanup = new BudgetLedger(file, 'contribution-1').reserve(
       'initial',
       estimate(6),
       'teardown'
     );
-    code(() => ledger.reserve('initial', estimate(1), 'teardown'), 'ceiling_exceeded');
+    code(() => ledger.reserve('initial', estimate(1), 'teardown'), 'persistence_uncertain');
     code(() => ledger.reserve('initial', estimate(0)), 'persistence_uncertain');
     ledger.settle(foreignCleanup.id, {
       money: { currency: 'USD', minor: 6 },
@@ -241,6 +247,7 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
       timeMs: 100,
       source: 'reconciled cleanup invoice',
     });
+    code(() => ledger.reserve('initial', estimate(1), 'teardown'), 'ceiling_exceeded');
     code(() => ledger.reserve('initial', estimate(0)), 'ceiling_exceeded');
     // Public numeric totals continue to reject unrepresentable sums, never cap them.
     code(() => budgetTotals(ledger.snapshot(), 'initial'), 'invalid_budget');
@@ -430,13 +437,23 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
       source: 'interrupted stream',
     });
     const module = compiledModule();
-    const script = `const {BudgetLedger}=require(${JSON.stringify(module)});try{new BudgetLedger(${JSON.stringify(file)},'contribution-1').reserve('initial',${JSON.stringify(estimate(6))},'teardown');process.exitCode=0;}catch(e){process.exitCode=e.code==='ceiling_exceeded'?2:3;}`;
+    const script = `const {BudgetLedger}=require(${JSON.stringify(module)});try{new BudgetLedger(${JSON.stringify(file)},'contribution-1').reserve('initial',${JSON.stringify(estimate(6))},'teardown');process.exitCode=0;}catch(e){process.exitCode=['ceiling_exceeded','persistence_uncertain'].includes(e.code)?2:3;}`;
     const exits = await runRacers(script);
     expect(exits.filter((c) => c === 0)).toHaveLength(1);
     expect(exits.filter((c) => c === 2)).toHaveLength(7);
     const resumed = new BudgetLedger(file, 'contribution-1');
+    const heldCleanup = resumed.snapshot().reservations.find((row) => row.status === 'reserved');
+    expect(heldCleanup).toBeDefined();
+    code(() => resumed.reserve('initial', estimate(4), 'teardown'), 'persistence_uncertain');
+    resumed.settle(heldCleanup?.id as string, {
+      money: { currency: 'USD', minor: 6 },
+      tokens: 10,
+      timeMs: 100,
+      source: 'reconciled cleanup invoice',
+    });
     resumed.reserve('initial', estimate(4), 'teardown');
-    expect(budgetTotals(resumed.snapshot(), 'initial').reserved).toBe(10);
+    expect(budgetTotals(resumed.snapshot(), 'initial').reserved).toBe(4);
+    expect(budgetTotals(resumed.snapshot(), 'initial').spent).toBe(156);
     code(() => resumed.reserve('initial', estimate(1), 'teardown'), 'ceiling_exceeded');
   });
 

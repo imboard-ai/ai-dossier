@@ -337,8 +337,11 @@ describe('ownership-proven store recovery', () => {
     expect(() => reopened.reserve('s', estimate)).toThrow('Reconcile recovered reservations');
     reopened.settle(held.id, null);
     expect(() => reopened.reserve('s', estimate)).toThrow('Reconcile recovered reservations');
-    reopened.reserve('s', estimate, 'teardown');
+    expect(() => reopened.reserve('s', estimate, 'teardown')).toThrow(
+      'Reconcile recovered reservations'
+    );
     reopened.release(held.id, 'provider proves never started');
+    reopened.reserve('s', estimate, 'teardown');
     reopened.reserve('s', estimate);
     expect(audit(`${ledger.file}.recovery-journal`)).toHaveLength(1);
   });

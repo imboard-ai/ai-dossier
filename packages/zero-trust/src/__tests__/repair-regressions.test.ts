@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -45,6 +46,9 @@ describe('authorized second-cycle crash repairs', () => {
     'a'.repeat(200),
     'b'.repeat(208),
     '账'.repeat(69),
+    'x'.repeat(239),
+    'y'.repeat(244),
+    '账'.repeat(81),
   ])('long basename initializes and recovers real dead owner: %s', async (name) => {
     const dir = directory();
     const file = path.join(dir, name);
@@ -62,7 +66,12 @@ describe('authorized second-cycle crash repairs', () => {
       `const fs=require('node:fs'),rename=fs.renameSync;fs.renameSync=(a,b)=>{rename(a,b);if(b===${JSON.stringify(`${file}.lock`)})process.kill(process.pid,'SIGKILL');};new (require(${JSON.stringify(module)}).BudgetLedger)(${JSON.stringify(file)},'c',100).reserve('s',${JSON.stringify(estimate)});`
     );
     new BudgetLedger(file, 'c', 100).reserve('s', estimate);
-    expect(events(`${file}.recovery-journal`)).toHaveLength(1);
+    const legacy = `${name}.recovery-journal`;
+    const recovery =
+      Buffer.byteLength(legacy) <= 255
+        ? `${file}.recovery-journal`
+        : path.join(dir, `.zt-budget-recovery-${createHash('sha256').update(name).digest('hex')}`);
+    expect(events(recovery)).toHaveLength(1);
     expect(fs.existsSync(`${file}.lock`)).toBe(false);
   });
   it('pre-opened survivor fences a later lock-free crashed reservation with zero ledger writes', async () => {
@@ -230,6 +239,66 @@ describe('authorized second-cycle crash repairs', () => {
     expect(() => resumed.reserve('s', estimate)).toThrow('Reconcile recovered reservations');
     resumed.release(resumed.snapshot().reservations[0].id, 'provider confirmed no charge');
     resumed.reserve('s', estimate);
+  });
+  it('recovered teardown holds fence ALL new admissions until reconciliation with zero ledger writes', async () => {
+    const dir = directory();
+    const ledger = budget(dir);
+    const module = compiledFixture(dir, 'budget');
+    const lock = `${ledger.file}.lock`;
+    await crash(
+      `const fs=require('node:fs'),remove=fs.rmSync;fs.rmSync=(file,...a)=>{if(file===${JSON.stringify(lock)})process.kill(process.pid,'SIGKILL');return remove(file,...a);};new (require(${JSON.stringify(module)}).BudgetLedger)(${JSON.stringify(ledger.file)},'c',100).reserve('s',${JSON.stringify(estimate)},'teardown');`
+    );
+    const resumed = new BudgetLedger(ledger.file, 'c', 100);
+    const before = fs.readFileSync(ledger.file);
+    const writes = vi.spyOn(fs, 'renameSync');
+    for (const purpose of ['work', 'teardown'] as const)
+      expect(() => resumed.reserve('s', estimate, purpose)).toThrow(
+        'Reconcile recovered reservations'
+      );
+    expect(writes.mock.calls.filter(([, to]) => to === ledger.file)).toHaveLength(0);
+    expect(fs.readFileSync(ledger.file)).toEqual(before);
+    resumed.release(
+      resumed.snapshot().reservations[0].id,
+      'provider confirmed cleanup never started'
+    );
+    resumed.reserve('s', estimate, 'teardown');
+  });
+  it.each([
+    '.lock.guard',
+    '.lock',
+    '.recovery-journal/events.jsonl',
+  ])('ledger path cannot alias another store metadata %s', (suffix) => {
+    const dir = directory();
+    const ledger = budget(dir);
+    const guard = `${ledger.file}.lock.guard`;
+    const inode = fs.statSync(guard).ino;
+    const writes = vi.spyOn(fs, 'renameSync');
+    expect(() =>
+      new BudgetLedger(`${ledger.file}${suffix}`, 'other', 100).initialize(['model'], [rate])
+    ).toThrow();
+    expect(writes).not.toHaveBeenCalled();
+    expect(fs.statSync(guard).ino).toBe(inode);
+  });
+  it.each([
+    '------------------------------------:1',
+    '00000000-0000-4000-8000-000000000000:01',
+  ])('malformed process start token never reclaims live retained owner: %s', (startToken) => {
+    const dir = directory();
+    const store = new ReceiptNonceStore(dir);
+    store.initialize();
+    vi.spyOn(Journal.prototype, 'append').mockImplementationOnce(() => {
+      throw new Error('uncertain append');
+    });
+    expect(() => store.consume(row)).toThrow('uncertain append');
+    vi.restoreAllMocks();
+    const lock = path.join(dir, 'receipt.lock');
+    const owner = JSON.parse(fs.readFileSync(lock, 'utf8'));
+    fs.writeFileSync(lock, JSON.stringify({ ...owner, startToken }));
+    const before = fs.readFileSync(lock);
+    const writes = vi.spyOn(Journal.prototype, 'append');
+    expect(() => new ReceiptNonceStore(dir).consume(row)).toThrow('store_locked');
+    expect(writes).not.toHaveBeenCalled();
+    expect(fs.readFileSync(lock)).toEqual(before);
   });
   it('foreign PID namespace never proves owner death or writes recovery/admission', () => {
     const dir = directory();

@@ -31,7 +31,15 @@ function keys(value: Record<string, unknown>, expected: string): boolean {
   return Object.keys(value).sort().join(',') === expected;
 }
 function uuid(value: unknown): boolean {
-  return typeof value === 'string' && /^[a-f0-9-]{36}$/.test(value);
+  return (
+    typeof value === 'string' &&
+    /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(value)
+  );
+}
+export function isProcessStartToken(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const parts = value.split(':');
+  return parts.length === 2 && uuid(parts[0]) && /^(0|[1-9][0-9]{0,19})$/.test(parts[1]);
 }
 export function isLockOwner(value: unknown): value is LockOwner {
   return (
@@ -39,8 +47,7 @@ export function isLockOwner(value: unknown): value is LockOwner {
     keys(value, 'createdAt,id,pid,pidNamespace,startToken') &&
     Number.isSafeInteger(value.pid) &&
     (value.pid as number) > 0 &&
-    typeof value.startToken === 'string' &&
-    /^[a-f0-9-]{36}:\d+$/.test(value.startToken) &&
+    isProcessStartToken(value.startToken) &&
     isTimestamp(value.createdAt) &&
     uuid(value.id) &&
     typeof value.pidNamespace === 'string' &&

@@ -7,6 +7,7 @@ import { Journal } from './journal';
 import {
   isLockOwner,
   isLockRecovery,
+  isProcessStartToken,
   isTailRecovery,
   type LockOwner,
   type LockRecovery,
@@ -51,7 +52,7 @@ export function processStartToken(pid: number): string | null {
     .trim()
     .split(/\s+/)[19];
   const token = `${boot}:${ticks}`;
-  if (!/^[a-f0-9-]{36}:\d+$/.test(token)) throw new StoreLockedError();
+  if (!isProcessStartToken(token)) throw new StoreLockedError();
   return token;
 }
 
