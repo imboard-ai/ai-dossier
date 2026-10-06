@@ -1,4 +1,6 @@
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { buildCommandPlan, CommandPlanError } from './commands';
@@ -26,33 +28,49 @@ describe('buildCommandPlan', () => {
     expect(Object.isFrozen(plan.verification[0].argv)).toBe(true);
   });
 
-  it('pip: hash-required, binary-only install; pytest offline', () => {
+  it('pip: isolated interpreter, venv outside the repository, hash-required binary-only install', () => {
     const plan = buildCommandPlan('pip', proxy, { testTargets: ['tests/test_regression.py'] });
     expect(plan.provisioning.map((c) => c.argv.join(' '))).toEqual([
-      'python -m venv .venv',
-      '.venv/bin/python -m pip install --require-hashes --no-deps --only-binary=:all: -r requirements.txt',
+      '/usr/local/bin/python -I -m venv --clear /opt/ztfc/env',
+      '/opt/ztfc/env/bin/python -I -m pip install --require-hashes --no-deps --only-binary=:all: -r requirements.txt',
     ]);
-    expect(plan.provisioning[1].env.PIP_INDEX_URL).toBe('http://pypi-proxy:5000/index/');
+    expect(plan.provisioning[1].env).toMatchObject({
+      PIP_INDEX_URL: 'http://pypi-proxy:5000/index/',
+      PIP_CONFIG_FILE: '/dev/null',
+    });
     expect(plan.verification[0]).toMatchObject({
       network: 'none',
-      argv: ['.venv/bin/python', '-m', 'pytest', 'tests/test_regression.py'],
+      argv: ['/opt/ztfc/env/bin/python', '-m', 'pytest', 'tests/test_regression.py'],
       env: { PIP_NO_INDEX: '1' },
     });
   });
 
-  it('uv: frozen sync without builds; offline, no-sync test run', () => {
+  it('uv: ignores repository config, never downloads Python, environment outside the repository', () => {
     const plan = buildCommandPlan('uv', proxy, {
       provisioningTimeoutMs: 60_000,
       verificationTimeoutMs: 120_000,
+      python: '/usr/bin/python3.12',
+      environmentDir: '/work/env',
     });
+    const common = [
+      '--frozen',
+      '--no-config',
+      '--no-python-downloads',
+      '--python',
+      '/usr/bin/python3.12',
+    ];
     expect(plan.provisioning[0]).toMatchObject({
-      argv: ['uv', 'sync', '--frozen', '--no-build'],
-      env: { UV_DEFAULT_INDEX: 'http://pypi-proxy:5000/index/', UV_NO_BUILD: '1' },
+      argv: ['uv', 'sync', ...common, '--no-build'],
+      env: {
+        UV_DEFAULT_INDEX: 'http://pypi-proxy:5000/index/',
+        UV_NO_BUILD: '1',
+        UV_PROJECT_ENVIRONMENT: '/work/env',
+      },
       timeoutMs: 60_000,
     });
     expect(plan.verification[0]).toMatchObject({
-      argv: ['uv', 'run', '--frozen', '--offline', '--no-sync', 'pytest'],
-      env: { UV_OFFLINE: '1' },
+      argv: ['uv', 'run', ...common, '--offline', '--no-sync', 'pytest'],
+      env: { UV_OFFLINE: '1', UV_PROJECT_ENVIRONMENT: '/work/env' },
       timeoutMs: 120_000,
     });
   });
@@ -70,7 +88,7 @@ describe('buildCommandPlan', () => {
     ['missing trailing slash', { ...proxy, pypiIndex: 'http://pypi-proxy:5000/index' }],
   ])('rejects a %s', (_name, endpoints) => {
     expect(() => buildCommandPlan('npm', endpoints)).toThrow(
-      expect.objectContaining({ code: 'invalid_endpoint' })
+      expect.objectContaining({ code: 'invalid_endpoint', field: expect.any(String) })
     );
     expect(() => buildCommandPlan('pip', endpoints)).toThrow(CommandPlanError);
   });
@@ -94,7 +112,16 @@ describe('buildCommandPlan', () => {
     [3 * 60 * 60 * 1000],
   ])('rejects timeout %s', (ms) => {
     expect(() => buildCommandPlan('npm', proxy, { verificationTimeoutMs: ms })).toThrow(
-      expect.objectContaining({ code: 'invalid_timeout' })
+      expect.objectContaining({ code: 'invalid_timeout', field: 'verificationTimeoutMs' })
+    );
+  });
+
+  it.each([['relative'], ['/opt/../etc'], ['/opt/ztfc env'], ['']])('rejects path %j', (dir) => {
+    expect(() => buildCommandPlan('pip', proxy, { environmentDir: dir })).toThrow(
+      expect.objectContaining({ code: 'invalid_path', field: 'environmentDir' })
+    );
+    expect(() => buildCommandPlan('uv', proxy, { python: dir })).toThrow(
+      expect.objectContaining({ code: 'invalid_path', field: 'python' })
     );
   });
 });
@@ -103,7 +130,7 @@ describe('no product path executes installs or tests on the host', () => {
   it('src/ecosystem imports no process, network or dynamic-code API', () => {
     const dir = __dirname;
     const sources = fs
-      .readdirSync(dir)
+      .readdirSync(dir, { recursive: true, encoding: 'utf8' })
       .filter((f) => f.endsWith('.ts') && !f.endsWith('.test.ts'))
       .map((f) => fs.readFileSync(path.join(dir, f), 'utf8'));
     expect(sources.length).toBeGreaterThanOrEqual(5);
@@ -114,3 +141,57 @@ describe('no product path executes installs or tests on the host', () => {
     }
   });
 });
+
+/** Security review HIGH #1, with the attacking input: a repository that ships its own
+ * `venv.py`, `pip.py` and `.venv` must not get them executed while provisioning has
+ * network access. Runs our own sentinel files with the host Python (a test control,
+ * not a product path); skipped where no Python 3 is installed. */
+describe.skipIf(!fs.existsSync('/usr/bin/python3'))(
+  'provisioning ignores repository Python code',
+  () => {
+    const python = '/usr/bin/python3';
+    const sentinelCode = (name: string) =>
+      `import pathlib; pathlib.Path(${JSON.stringify(name)}).write_text("ran")\n`;
+
+    it('a committed venv.py / pip.py / .venv runs under plain `-m`, but not under the plan', () => {
+      const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'zt-hostile-repo-'));
+      const env = fs.mkdtempSync(path.join(os.tmpdir(), 'zt-env-'));
+      try {
+        fs.writeFileSync(path.join(repo, 'venv.py'), sentinelCode('venv-sentinel'));
+        fs.writeFileSync(path.join(repo, 'pip.py'), sentinelCode('pip-sentinel'));
+        fs.mkdirSync(path.join(repo, '.venv', 'bin'), { recursive: true });
+        fs.writeFileSync(
+          path.join(repo, '.venv', 'bin', 'python'),
+          '#!/bin/sh\ntouch venv-bin-sentinel\n',
+          { mode: 0o755 }
+        );
+
+        // Positive control: the attack works against the naive `python -m venv .venv`.
+        spawnSync(python, ['-m', 'venv', '.venv'], { cwd: repo });
+        expect(fs.existsSync(path.join(repo, 'venv-sentinel'))).toBe(true);
+        fs.rmSync(path.join(repo, 'venv-sentinel'));
+
+        const plan = buildCommandPlan('pip', proxy, { python, environmentDir: env });
+        const [venv, install] = plan.provisioning;
+        const created = spawnSync(venv.argv[0], venv.argv.slice(1), {
+          cwd: repo,
+          encoding: 'utf8',
+        });
+        expect(created.status).toBe(0);
+        // Same interpreter flags as the install step, but only ask pip for its version.
+        const pip = spawnSync(install.argv[0], [...install.argv.slice(1, 4), '--version'], {
+          cwd: repo,
+          encoding: 'utf8',
+        });
+        expect(pip.status).toBe(0);
+        expect(pip.stdout).toContain(env);
+        for (const sentinel of ['venv-sentinel', 'pip-sentinel', 'venv-bin-sentinel'])
+          expect(fs.existsSync(path.join(repo, sentinel))).toBe(false);
+        expect(install.argv[0].startsWith(repo)).toBe(false);
+      } finally {
+        fs.rmSync(repo, { recursive: true, force: true });
+        fs.rmSync(env, { recursive: true, force: true });
+      }
+    }, 60_000);
+  }
+);

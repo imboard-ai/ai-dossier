@@ -15,14 +15,14 @@ export type CommandOutcome =
       readonly report: { readonly suites: number } | null;
     };
 
-/** `failed` needs a readable report: a non-zero exit with no report could equally be
- * a crash of the runner, so it stays inconclusive. */
+/** `failed` needs a readable report with at least one suite: a non-zero exit with
+ * no report, or with zero discovered suites, could equally be a crashed or
+ * misconfigured runner, so it stays inconclusive. */
 export function classifyOutcome(outcome: CommandOutcome): CommandStatus {
   if (outcome.kind !== 'exited') return 'inconclusive';
-  if (outcome.report === null || !Number.isSafeInteger(outcome.report.suites))
-    return 'inconclusive';
-  if (outcome.exitCode !== 0) return 'failed';
-  return outcome.report.suites > 0 ? 'passed' : 'inconclusive';
+  const suites = outcome.report?.suites;
+  if (suites === undefined || !Number.isSafeInteger(suites) || suites <= 0) return 'inconclusive';
+  return outcome.exitCode === 0 ? 'passed' : 'failed';
 }
 
 /** Maps an outcome to the receipt's command evidence (status, exit code, suites). */
@@ -44,7 +44,13 @@ export function commandEvidence(
       outcome.exitCode <= 255
         ? outcome.exitCode
         : 'unknown',
-    suites: exited && outcome.report !== null ? outcome.report.suites : 'unknown',
+    suites:
+      exited &&
+      outcome.report !== null &&
+      Number.isSafeInteger(outcome.report.suites) &&
+      outcome.report.suites >= 0
+        ? outcome.report.suites
+        : 'unknown',
     sanitizedLogDigest,
   };
 }
@@ -113,4 +119,18 @@ export function applyVerification(
   if (repairsUsed(run) < MAX_REPAIR_ATTEMPTS)
     return transitionRun(run, ReasonCode.RepairRequired, timestamp);
   return transitionRun(run, ReasonCode.ExecutionFailed, timestamp);
+}
+
+/** Applies the provisioning verdict. Provisioning installs only locked, prebuilt,
+ * proxy-served artifacts, so any failure (an unavailable or sdist-only dependency, a
+ * hash the proxy refused, a timeout) is `unsupported_environment` (PRD §5.5), never a
+ * repair and never a broader network. A pass leaves the run unchanged. */
+export function applyProvisioning(
+  run: RunRecord,
+  verdict: CommandStatus,
+  timestamp: string
+): RunRecord {
+  return verdict === 'passed'
+    ? run
+    : transitionRun(run, ReasonCode.UnsupportedEnvironment, timestamp);
 }

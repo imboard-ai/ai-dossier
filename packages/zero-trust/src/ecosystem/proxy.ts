@@ -5,7 +5,19 @@
 import { createHash } from 'node:crypto';
 import { parse as parseToml } from 'smol-toml';
 import { assertNoSecrets } from '../redaction';
-import { normalizeName, type PackageManager, parseHashedRequirements } from './detect';
+import { isRecord } from '../state';
+import type { PackageManager } from './detect';
+import {
+  NPM_REGISTRY,
+  NPM_REGISTRY_HOST,
+  NPM_SRI_SHA512,
+  PYPI_FILES_HOST,
+  PYPI_HOST,
+  PYPI_SIMPLE,
+  UV_SHA256,
+  uvArtifacts,
+} from './registries';
+import { normalizeName, parseHashedRequirements } from './requirements';
 
 export interface RegistryRule {
   readonly name: 'npm' | 'pypi-index' | 'pypi-files';
@@ -18,6 +30,8 @@ export interface ProxyPolicy {
   readonly version: 'ztfc-proxy-policy-v1';
   readonly methods: readonly ('GET' | 'HEAD')[];
   readonly rules: readonly RegistryRule[];
+  /** Redirect hops a mirror may follow. Squid cannot count hops across requests, so
+   * only 0 is enforceable there: `renderSquidConfig` then denies every 3xx response. */
   readonly maxRedirects: number;
   readonly maxResponseBytes: number;
 }
@@ -26,13 +40,15 @@ const NAME = '[A-Za-z0-9][A-Za-z0-9._~-]*';
 const SCOPE = `@${NAME}`;
 const PYPI_NAME = '[A-Za-z0-9][A-Za-z0-9._-]*';
 
+/** The `ztfc-proxy-policy-v1` allowlist: body-less GET/HEAD of package documents and
+ * artifacts per registry host, no redirects, 256 MiB responses. */
 export const PROXY_POLICY: ProxyPolicy = Object.freeze({
   version: 'ztfc-proxy-policy-v1',
   methods: Object.freeze(['GET', 'HEAD'] as const),
   rules: Object.freeze([
     Object.freeze({
       name: 'npm',
-      host: 'registry.npmjs.org',
+      host: NPM_REGISTRY_HOST,
       paths: Object.freeze([
         // Package document: /name, /@scope%2fname, /@scope/name
         `^/(${SCOPE}(%2[fF]|/))?${NAME}$`,
@@ -42,18 +58,20 @@ export const PROXY_POLICY: ProxyPolicy = Object.freeze({
     }),
     Object.freeze({
       name: 'pypi-index',
-      host: 'pypi.org',
+      host: PYPI_HOST,
       paths: Object.freeze([`^/simple/${PYPI_NAME}/$`]),
     }),
     Object.freeze({
       name: 'pypi-files',
-      host: 'files.pythonhosted.org',
+      host: PYPI_FILES_HOST,
       paths: Object.freeze([
         '^/packages/[a-f0-9]{2}/[a-f0-9]{2}/[a-f0-9]{60}/[A-Za-z0-9._+-]+\\.(whl|tar\\.gz|zip)(\\.metadata)?$',
       ]),
     }),
   ]),
-  maxRedirects: 3,
+  // Registry package documents and artifacts are served at canonical URLs; the
+  // mirrors request those directly, so no redirect needs to be followed.
+  maxRedirects: 0,
   maxResponseBytes: 256 * 1024 * 1024,
 });
 
@@ -116,14 +134,14 @@ export function evaluateRequest(
 }
 
 /** A redirect is followed only to a location that would itself be admitted as a
- * request (same rules, resolved against the original URL), within the hop limit. */
+ * request (same rules, resolved against the original URL), and only within the hop
+ * limit. The destination is judged first so an off-registry target is always named. */
 export function evaluateRedirect(
   fromUrl: string,
   location: string | undefined,
   hop: number,
   policy: ProxyPolicy = PROXY_POLICY
 ): Decision<RedirectDenial> {
-  if (hop >= policy.maxRedirects) return deny('redirect_limit');
   if (location === undefined || location.trim() === '') return deny('redirect_missing_location');
   let target: string;
   try {
@@ -132,12 +150,13 @@ export function evaluateRedirect(
     return deny('invalid_url');
   }
   const decision = urlDecision(policy, target);
-  if (decision.allowed) return decision;
-  return decision.reason === 'host_not_allowed' ||
-    decision.reason === 'scheme_not_allowed' ||
-    decision.reason === 'port_not_allowed'
-    ? deny('redirect_off_registry')
-    : decision;
+  if (!decision.allowed)
+    return decision.reason === 'host_not_allowed' ||
+      decision.reason === 'scheme_not_allowed' ||
+      decision.reason === 'port_not_allowed'
+      ? deny('redirect_off_registry')
+      : decision;
+  return hop >= policy.maxRedirects ? deny('redirect_limit') : decision;
 }
 
 /** Expected artifact digests taken from the lockfile, never from the registry. */
@@ -153,63 +172,92 @@ export interface ExpectedDigest {
 export type ArtifactDenial = 'artifact_not_in_lockfile' | 'hash_mismatch';
 
 export class LockIndexError extends Error {
-  constructor() {
-    super('Zero-trust lock index rejected');
+  constructor(readonly code: 'unparseable' | 'invalid_integrity' | 'invalid_artifact' | 'empty') {
+    super(`Zero-trust lock index rejected: ${code}`);
     this.name = 'LockIndexError';
   }
 }
 
-function sriToHex(integrity: string): ExpectedDigest {
-  const m = /^sha512-([A-Za-z0-9+/]+={0,2})$/.exec(integrity);
-  if (!m) throw new LockIndexError();
-  return { algorithm: 'sha512', hex: Buffer.from(m[1], 'base64').toString('hex') };
+function parseLock(manager: PackageManager, text: string): unknown {
+  try {
+    return manager === 'npm' ? JSON.parse(text) : parseToml(text);
+  } catch {
+    throw new LockIndexError('unparseable');
+  }
 }
 
-/** Builds the expected-digest index from a lockfile that detection already accepted. */
+function npmDigests(text: string, artifacts: Map<string, ExpectedDigest[]>): void {
+  const lock = parseLock('npm', text);
+  if (!isRecord(lock) || !isRecord(lock.packages)) throw new LockIndexError('unparseable');
+  for (const [key, entry] of Object.entries(lock.packages)) {
+    if (key === '') continue;
+    if (!isRecord(entry)) throw new LockIndexError('invalid_artifact');
+    // Mirrors detection: only a nested bundled package has no fetch of its own.
+    if (
+      entry.inBundle === true &&
+      key.indexOf('/node_modules/') > 0 &&
+      entry.resolved === undefined
+    )
+      continue;
+    if (typeof entry.resolved !== 'string' || !entry.resolved.startsWith(NPM_REGISTRY))
+      throw new LockIndexError('invalid_artifact');
+    const sri = typeof entry.integrity === 'string' ? NPM_SRI_SHA512.exec(entry.integrity) : null;
+    if (!sri) throw new LockIndexError('invalid_integrity');
+    artifacts.set(entry.resolved, [
+      { algorithm: 'sha512', hex: Buffer.from(sri[1], 'base64').toString('hex') },
+    ]);
+  }
+}
+
+function uvDigests(text: string, artifacts: Map<string, ExpectedDigest[]>): void {
+  const lock = parseLock('uv', text);
+  if (!isRecord(lock) || !Array.isArray(lock.package)) throw new LockIndexError('unparseable');
+  for (const pkg of lock.package) {
+    if (!isRecord(pkg) || !isRecord(pkg.source)) throw new LockIndexError('invalid_artifact');
+    if (pkg.source.registry !== PYPI_SIMPLE) continue;
+    for (const a of uvArtifacts(pkg)) {
+      if (!isRecord(a) || typeof a.url !== 'string') throw new LockIndexError('invalid_artifact');
+      const hash = typeof a.hash === 'string' ? UV_SHA256.exec(a.hash) : null;
+      if (!hash) throw new LockIndexError('invalid_integrity');
+      artifacts.set(a.url, [{ algorithm: 'sha256', hex: hash[1] }]);
+    }
+  }
+}
+
+function pipDigests(text: string, artifacts: Map<string, ExpectedDigest[]>): void {
+  const parsed = parseHashedRequirements(text);
+  if (!Array.isArray(parsed)) throw new LockIndexError('unparseable');
+  for (const r of parsed)
+    artifacts.set(
+      `${r.name}==${r.version}`,
+      r.hashes.map((hex) => ({ algorithm: 'sha256' as const, hex }))
+    );
+}
+
+/** Builds the expected-digest index from a lockfile, validating every entry itself
+ * rather than trusting that detection ran first. */
 export function buildLockIndex(manager: PackageManager, lockText: string): LockIndex {
   const artifacts = new Map<string, ExpectedDigest[]>();
-  try {
-    if (manager === 'npm') {
-      const lock = JSON.parse(lockText) as {
-        packages: Record<string, { resolved?: string; integrity?: string }>;
-      };
-      for (const [key, entry] of Object.entries(lock.packages)) {
-        if (key === '' || entry.resolved === undefined || entry.integrity === undefined) continue;
-        artifacts.set(entry.resolved, [sriToHex(entry.integrity)]);
-      }
-    } else if (manager === 'uv') {
-      const lock = parseToml(lockText) as {
-        package: {
-          sdist?: { url?: string; hash?: string };
-          wheels?: { url?: string; hash?: string }[];
-        }[];
-      };
-      for (const pkg of lock.package) {
-        for (const a of [...(pkg.sdist ? [pkg.sdist] : []), ...(pkg.wheels ?? [])]) {
-          if (typeof a.url !== 'string' || typeof a.hash !== 'string') throw new LockIndexError();
-          artifacts.set(a.url, [{ algorithm: 'sha256', hex: a.hash.replace(/^sha256:/, '') }]);
-        }
-      }
-    } else {
-      const parsed = parseHashedRequirements(lockText);
-      if (!Array.isArray(parsed)) throw new LockIndexError();
-      for (const r of parsed)
-        artifacts.set(
-          `${r.name}==${r.version}`,
-          r.hashes.map((hex) => ({ algorithm: 'sha256' as const, hex }))
-        );
-    }
-  } catch {
-    throw new LockIndexError();
-  }
-  if (artifacts.size === 0) throw new LockIndexError();
+  if (manager === 'npm') npmDigests(lockText, artifacts);
+  else if (manager === 'uv') uvDigests(lockText, artifacts);
+  else pipDigests(lockText, artifacts);
+  if (artifacts.size === 0) throw new LockIndexError('empty');
   return Object.freeze({ manager, artifacts });
 }
 
-/** Locates a pip artifact by the name/version in its wheel or sdist file name. */
-function pipKey(url: string): string | undefined {
-  const file = decodeURIComponent(new URL(url).pathname.split('/').pop() ?? '');
-  const m = /^([A-Za-z0-9._]+)-([0-9][A-Za-z0-9.+!]*)(-.+\.whl|\.tar\.gz|\.zip)$/.exec(file);
+/** `name==version` of a PyPI wheel or sdist URL that the policy admits on the files
+ * host, or `undefined` for anything else (including malformed URLs). Wheel names never
+ * contain `-`; an sdist's version follows its last `-`. Metadata sidecars are not artifacts. */
+export function pythonArtifactKey(
+  url: string,
+  policy: ProxyPolicy = PROXY_POLICY
+): string | undefined {
+  const decision = evaluateRequest({ method: 'GET', url }, policy);
+  if (!decision.allowed || decision.rule !== 'pypi-files') return undefined;
+  const file = new URL(url).pathname.split('/').pop() as string;
+  const m =
+    /^([A-Za-z0-9._]+)-([0-9][A-Za-z0-9.+!]*)-.+\.whl$/.exec(file) ??
+    /^(.+)-([0-9][A-Za-z0-9.+!]*)\.(tar\.gz|zip)$/.exec(file);
   return m ? `${normalizeName(m[1])}==${m[2]}` : undefined;
 }
 
@@ -220,7 +268,7 @@ export function checkArtifact(
   url: string,
   bytes: Buffer
 ): Decision<ArtifactDenial> {
-  const key = index.manager === 'pip' ? pipKey(url) : url;
+  const key = index.manager === 'pip' ? pythonArtifactKey(url) : url;
   const expected = key === undefined ? undefined : index.artifacts.get(key);
   if (expected === undefined) return deny('artifact_not_in_lockfile');
   const digests = new Map<string, string>();
@@ -235,14 +283,15 @@ export function checkArtifact(
 }
 
 export class ProxyConfigError extends Error {
-  constructor() {
-    super('Zero-trust proxy configuration rejected');
+  constructor(readonly code: 'squid_host' | 'port' | 'path' | 'mirror_cidrs' | 'policy_regex') {
+    super(`Zero-trust proxy configuration rejected: ${code}`);
     this.name = 'ProxyConfigError';
   }
 }
 
 const HOSTNAME = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/;
 const ABS_PATH = /^\/[A-Za-z0-9._/-]{0,255}$/;
+const IPV4_CIDR = /^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/;
 
 export interface ProxyDeployment {
   /** Squid's address on the isolated service network (host name of the container). */
@@ -259,18 +308,24 @@ export interface ProxyDeployment {
   readonly mirrorCidrs: readonly string[];
 }
 
-function checkDeployment(d: ProxyDeployment): void {
-  const ports = [d.squidPort, d.verdaccioPort, d.proxpiPort];
+/** Validates the deployment and returns Squid's URL for the mirrors' uplinks. */
+function squidUrl(d: ProxyDeployment): string {
+  if (!HOSTNAME.test(d.squidHost)) throw new ProxyConfigError('squid_host');
   if (
-    !HOSTNAME.test(d.squidHost) ||
-    !ports.every((p) => Number.isInteger(p) && p > 0 && p < 65536) ||
+    ![d.squidPort, d.verdaccioPort, d.proxpiPort].every(
+      (p) => Number.isInteger(p) && p > 0 && p < 65536
+    )
+  )
+    throw new ProxyConfigError('port');
+  if (
     ![d.squidCaCertPath, d.squidCaKeyPath, d.verdaccioStorage, d.proxpiCacheDir].every(
       (p) => ABS_PATH.test(p) && !p.split('/').includes('..')
-    ) ||
-    d.mirrorCidrs.length === 0 ||
-    !d.mirrorCidrs.every((c) => /^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/.test(c))
+    )
   )
-    throw new ProxyConfigError();
+    throw new ProxyConfigError('path');
+  if (d.mirrorCidrs.length === 0 || !d.mirrorCidrs.every((c) => IPV4_CIDR.test(c)))
+    throw new ProxyConfigError('mirror_cidrs');
+  return `http://${d.squidHost}:${d.squidPort}`;
 }
 
 /** Destination ranges Squid must never connect to, checked AFTER its own DNS
@@ -287,27 +342,35 @@ const FORBIDDEN_DESTINATIONS = [
   '198.18.0.0/15',
   '224.0.0.0/4',
   '240.0.0.0/4',
+  '::/128',
   '::1',
+  '::ffff:0:0/96',
+  '64:ff9b::/96',
+  '2002::/16',
   'fc00::/7',
   'fe80::/10',
+  'ff00::/8',
 ];
 
 function squidRegex(pattern: string): string {
   // Squid reads each ACL value as a whitespace-separated token.
-  if (/\s/.test(pattern)) throw new ProxyConfigError();
+  if (/\s/.test(pattern)) throw new ProxyConfigError('policy_regex');
   return pattern;
 }
 
 /** Squid configuration enforcing the policy on the mirrors' upstream traffic. */
 export function renderSquidConfig(d: ProxyDeployment, policy: ProxyPolicy = PROXY_POLICY): string {
-  checkDeployment(d);
+  squidUrl(d);
   const lines = [
     `# Generated from ${policy.version}. Do not edit; regenerate from the policy.`,
     `http_port ${d.squidPort} ssl-bump tls-cert=${d.squidCaCertPath} tls-key=${d.squidCaKeyPath} generate-host-certificates=on`,
     `acl mirrors src ${d.mirrorCidrs.join(' ')}`,
     `acl forbidden_dst dst ${FORBIDDEN_DESTINATIONS.join(' ')}`,
-    'acl ip_literal dstdom_regex ^[0-9.]+$ ^\\[',
+    'acl ip_literal dstdom_regex ^[0-9.]+$ ^\\[ ^[0-9a-fA-F:]+$',
     'acl tls_port port 443',
+    'acl https_proto proto HTTPS',
+    'acl has_body req_header Content-Length ^[1-9]',
+    'acl chunked_body req_header Transfer-Encoding .',
     'acl CONNECT method CONNECT',
     `acl package_methods method ${policy.methods.join(' ')}`,
     'acl redirect_status http_status 300-399',
@@ -315,12 +378,14 @@ export function renderSquidConfig(d: ProxyDeployment, policy: ProxyPolicy = PROX
   const allowed: string[] = [];
   for (const rule of policy.rules) {
     const id = rule.name.replace(/-/g, '_');
-    lines.push(`acl host_${id} dstdomain ${rule.host}`);
+    lines.push(`acl host_${id} dstdomain -n ${rule.host}`);
     lines.push(`acl path_${id} urlpath_regex ${rule.paths.map(squidRegex).join(' ')}`);
-    allowed.push(`http_access allow mirrors package_methods host_${id} path_${id}`);
+    allowed.push(
+      `http_access allow mirrors https_proto tls_port package_methods host_${id} path_${id}`
+    );
   }
   const hosts = policy.rules.map((r) => r.host.replace(/\./g, '\\.')).join('|');
-  lines.push(`acl registry_hosts dstdomain ${policy.rules.map((r) => r.host).join(' ')}`);
+  lines.push(`acl registry_hosts dstdomain -n ${policy.rules.map((r) => r.host).join(' ')}`);
   lines.push(`acl registry_location rep_header Location ^https://(${hosts})/`);
   lines.push(
     'ssl_bump bump all',
@@ -329,10 +394,18 @@ export function renderSquidConfig(d: ProxyDeployment, policy: ProxyPolicy = PROX
     'http_access deny ip_literal',
     'http_access allow CONNECT mirrors tls_port registry_hosts',
     'http_access deny CONNECT',
+    // Inside the bumped tunnel: HTTPS only, and no request body (Squid has no
+    // "max body 0"; `request_body_max_size 0` means unlimited).
+    'http_access deny !https_proto',
+    'http_access deny has_body',
+    'http_access deny chunked_body',
     ...allowed,
     'http_access deny all',
-    'http_reply_access deny redirect_status !registry_location',
-    'request_body_max_size 0 KB',
+    // Squid sees each hop as an unrelated request, so the only hop limit it can
+    // enforce is zero; otherwise it admits only redirects that stay on a registry.
+    policy.maxRedirects === 0
+      ? 'http_reply_access deny redirect_status'
+      : 'http_reply_access deny redirect_status !registry_location',
     `reply_body_max_size ${Math.floor(policy.maxResponseBytes / 1024)} KB`,
     'forwarded_for delete',
     'via off',
@@ -346,8 +419,7 @@ export function renderSquidConfig(d: ProxyDeployment, policy: ProxyPolicy = PROX
 /** Verdaccio: read-only npm mirror. Publishing, the web UI and auth are disabled; its
  * single uplink goes through Squid. */
 export function renderVerdaccioConfig(d: ProxyDeployment): string {
-  checkDeployment(d);
-  const proxy = `http://${d.squidHost}:${d.squidPort}`;
+  const proxy = squidUrl(d);
   const text = [
     `storage: ${JSON.stringify(d.verdaccioStorage)}`,
     `listen: ${JSON.stringify(`0.0.0.0:${d.verdaccioPort}`)}`,
@@ -359,7 +431,7 @@ export function renderVerdaccioConfig(d: ProxyDeployment): string {
     'auth: {}',
     'uplinks:',
     '  npmjs:',
-    '    url: "https://registry.npmjs.org/"',
+    `    url: ${JSON.stringify(NPM_REGISTRY)}`,
     '    cache: true',
     '    max_fails: 2',
     'packages:',
@@ -377,17 +449,16 @@ export function renderVerdaccioConfig(d: ProxyDeployment): string {
 
 /** Verdaccio's container environment: trust Squid's inspection CA for the uplink. */
 export function verdaccioEnvironment(d: ProxyDeployment): Readonly<Record<string, string>> {
-  checkDeployment(d);
+  squidUrl(d);
   return Object.freeze({ NODE_EXTRA_CA_CERTS: d.squidCaCertPath });
 }
 
 /** proxpi environment: a caching PyPI simple-index mirror that serves files itself,
  * with PyPI as its only index, reached through Squid. */
 export function proxpiEnvironment(d: ProxyDeployment): Readonly<Record<string, string>> {
-  checkDeployment(d);
-  const proxy = `http://${d.squidHost}:${d.squidPort}`;
+  const proxy = squidUrl(d);
   return Object.freeze({
-    PROXPI_INDEX_URL: 'https://pypi.org/simple/',
+    PROXPI_INDEX_URL: `${PYPI_SIMPLE}/`,
     PROXPI_EXTRA_INDEX_URLS: '',
     PROXPI_CACHE_DIR: d.proxpiCacheDir,
     PROXPI_BINARY_FILE_MIME_TYPE: '1',

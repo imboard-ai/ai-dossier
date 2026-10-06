@@ -6,10 +6,10 @@ import { ReasonCode } from '../state';
 import {
   type Detection,
   detectEcosystem,
-  parseHashedRequirements,
   type SourceFiles,
   sourceFilesFromManifest,
 } from './detect';
+import { parseHashedRequirements } from './requirements';
 
 const FIXTURES = path.join(__dirname, '../../fixtures/ecosystem');
 function fixtureFiles(name: string): Map<string, string> {
@@ -87,14 +87,10 @@ describe('supported ecosystems', () => {
     expect(Object.isFrozen(d)).toBe(true);
   });
 
-  it('accepts workspace links and bundled packages without a registry URL', () => {
+  it('accepts a package bundled inside another package without its own fetch', () => {
     const files = npm({
       'package-lock.json': lock(
-        {
-          'node_modules/ms': dep,
-          'node_modules/w': { link: true },
-          'node_modules/b': { inBundle: true },
-        },
+        { 'node_modules/ms': dep, 'node_modules/ms/node_modules/b': { inBundle: true } },
         2
       ),
     });
@@ -195,7 +191,7 @@ describe('unsupported setups fail closed with a specific reason', () => {
     [
       'lockfile only',
       new Map([['package-lock.json', lock({})]]),
-      'manifest_invalid',
+      'manifest_missing',
       'package.json',
     ],
     ['unparseable package.json', npm({ 'package.json': '{' }), 'manifest_invalid', 'package.json'],
@@ -345,6 +341,7 @@ describe('unsupported setups fail closed with a specific reason', () => {
       'pyproject.toml',
     ],
     ['setup.py only', new Map([['setup.py', '']]), 'lockfile_missing', 'setup.py'],
+    ['setup.cfg only', new Map([['setup.cfg', '']]), 'lockfile_missing', 'setup.cfg'],
     [
       'invalid pyproject',
       uv({ 'pyproject.toml': '[project' }),
@@ -360,7 +357,7 @@ describe('unsupported setups fail closed with a specific reason', () => {
     [
       'uv.lock without pyproject',
       new Map([['uv.lock', uvLock(root)]]),
-      'manifest_invalid',
+      'manifest_missing',
       'pyproject.toml',
     ],
     ['unparseable uv.lock', uv({ 'uv.lock': 'version = ' }), 'lockfile_invalid', 'uv.lock'],
@@ -420,5 +417,190 @@ describe('parseHashedRequirements', () => {
       `Some_Pkg[extra]==1.0 ; python_version >= "3.11" \\\n  --hash=sha256:${H('a')}  # pinned\n`
     );
     expect(parsed).toEqual([{ name: 'some-pkg', version: '1.0', hashes: [H('a')] }]);
+  });
+});
+
+/** Attacking inputs from the security review: each must be refused at detection. */
+describe('hostile repository inputs', () => {
+  const H64 = 'a'.repeat(64);
+  const hashed = `pytest==8.4.2 --hash=sha256:${H64}`;
+  const pip = (text: string) => detectEcosystem(new Map([['requirements.txt', text]]));
+
+  it.each<[string, string, string, string | undefined]>([
+    // pip does not continue a comment line, so the option below is live to pip.
+    [
+      'comment ending in a backslash',
+      `${hashed}\n# note \\\n--no-binary :all:\n`,
+      'unsupported_requirement_option',
+      '--no-binary',
+    ],
+    [
+      'comment continuation hiding an index',
+      `${hashed}\n# x \\\n--index-url https://evil.example/simple\n`,
+      'unsupported_requirement_option',
+      '--index-url',
+    ],
+    // pip splits lines on Python's str.splitlines() boundaries, not only \n.
+    [
+      '\\x1c line separator',
+      `${hashed} # c\x1c--no-binary :all:\n`,
+      'unsupported_requirement_option',
+      '--no-binary',
+    ],
+    ['\\f line separator', `${hashed}\f-r other.txt\n`, 'unsupported_requirement_option', '-r'],
+    ['\\u2028 line separator', `${hashed}\u2028-e .\n`, 'unsupported_requirement_option', '-e'],
+    // pip joins continued lines with NO separator.
+    [
+      'continuation joined without a space',
+      `pytest==8.4.2 --hash=sha256:${H64}\\\n--no-binary=:all:\n`,
+      'unsupported_requirement_option',
+      '--hash',
+    ],
+    [
+      'environment variable expansion',
+      `pytest==\${VERSION} --hash=sha256:${H64}\n`,
+      'lockfile_invalid',
+      'requirements.txt',
+    ],
+  ])('pip: %s', (_name, text, expected, detail) => {
+    expect(reason(pip(text))).toEqual([expected, detail]);
+  });
+
+  it('never echoes credentials or URLs in detail', () => {
+    const cases = [
+      pip('pkg @ https://user:ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@host/pkg.whl\n'),
+      pip('-ihttps://user:secret-token@host/simple\n'),
+      pip(`evil<<<${'x'.repeat(300)}\n`),
+      pip('https://user:tok@host/x.whl\n'),
+    ];
+    for (const d of cases) {
+      const [, detail] = reason(d);
+      expect(detail ?? '').not.toMatch(/ghp_|secret|tok@|:\/\//);
+      expect((detail ?? '').length).toBeLessThanOrEqual(214);
+    }
+  });
+
+  it.each<[string, SourceFiles, string, string | undefined]>([
+    [
+      'root .npmrc',
+      npm({ '.npmrc': '@evil:registry=https://evil.example/' }),
+      'unsupported_config',
+      '.npmrc',
+    ],
+    [
+      'uv.toml',
+      uv({ 'uv.toml': 'index-url = "https://evil.example"' }),
+      'unsupported_config',
+      'uv.toml',
+    ],
+    [
+      'pip.conf',
+      new Map([
+        ['requirements.txt', `${hashed}\n`],
+        ['pip.conf', ''],
+      ]),
+      'unsupported_config',
+      'pip.conf',
+    ],
+    [
+      '[tool.uv] index override',
+      uv({
+        'pyproject.toml': '[project]\nname = "a"\n[tool.uv]\nindex-url = "https://evil.example"\n',
+      }),
+      'unsupported_config',
+      'pyproject.toml#tool.uv',
+    ],
+    [
+      '[tool.uv] interpreter download mirror',
+      uv({
+        'pyproject.toml': '[project]\nname = "a"\n[tool.uv]\npython-downloads = "automatic"\n',
+      }),
+      'unsupported_config',
+      'pyproject.toml#tool.uv',
+    ],
+    [
+      'packageManager pointing at a URL',
+      npm({ 'package.json': pkg({ packageManager: 'npm@https://evil.example/npm.tgz' }) }),
+      'unsupported_manager',
+      'npm',
+    ],
+    [
+      'workspace link',
+      npm({
+        'package-lock.json': lock({
+          'node_modules/ms': dep,
+          'node_modules/w': { link: true, resolved: '../../etc' },
+        }),
+      }),
+      'non_registry_dependency',
+      'node_modules/w',
+    ],
+    [
+      'top-level inBundle entry fetched from elsewhere',
+      npm({
+        'package-lock.json': lock({
+          'node_modules/evil': { inBundle: true, resolved: 'https://evil.example/e.tgz' },
+        }),
+      }),
+      'non_registry_dependency',
+      'node_modules/evil',
+    ],
+    [
+      'nested inBundle entry with its own resolved URL',
+      npm({
+        'package-lock.json': lock({
+          'node_modules/ms': dep,
+          'node_modules/ms/node_modules/e': { inBundle: true, resolved: 'file:../e' },
+        }),
+      }),
+      'non_registry_dependency',
+      'node_modules/ms/node_modules/e',
+    ],
+    [
+      'uv artifact on another host',
+      uv({
+        'uv.lock': uvLock(
+          root + uvPkg('pytest').replace('https://files.pythonhosted.org', 'https://evil.example')
+        ),
+      }),
+      'non_registry_dependency',
+      'pytest',
+    ],
+    [
+      'uv artifact URL with a file scheme',
+      uv({
+        'uv.lock': uvLock(
+          root +
+            uvPkg('pytest').replace(
+              /https:\/\/files[^"]+/,
+              'file:///tmp/pytest-1.0-py3-none-any.whl'
+            )
+        ),
+      }),
+      'non_registry_dependency',
+      'pytest',
+    ],
+    [
+      'uv artifact of a different project',
+      uv({ 'uv.lock': uvLock(root + uvPkg('pytest').replace('/pytest-1.0-', '/evil-1.0-')) }),
+      'non_registry_dependency',
+      'pytest',
+    ],
+    [
+      'uv sdist-only package (would need a build)',
+      uv({
+        'uv.lock': uvLock(
+          `${root + uvPkg('pytest')}\n[[package]]\nname = "native"\nversion = "1.0"\nsource = { registry = "https://pypi.org/simple" }\nsdist = { url = "https://files.pythonhosted.org/packages/aa/bb/${'e'.repeat(60)}/native-1.0.tar.gz", hash = "sha256:${H64}" }\n`
+        ),
+      }),
+      'binary_unavailable',
+      'native',
+    ],
+  ])('%s', (_name, files, expected, detail) => {
+    expect(reason(detectEcosystem(files))).toEqual([expected, detail]);
+  });
+
+  it("accepts the fixtures' allowed [tool.uv] keys", () => {
+    expect(detectEcosystem(fixtureFiles('uv')).supported).toBe(true);
   });
 });

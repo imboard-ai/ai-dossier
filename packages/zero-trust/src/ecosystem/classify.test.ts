@@ -10,6 +10,7 @@ import {
   transitionRun,
 } from '../state';
 import {
+  applyProvisioning,
   applyVerification,
   assertRepairAllowed,
   type CommandOutcome,
@@ -49,6 +50,8 @@ describe('classifyOutcome', () => {
     ['exit 0 with a missing or unreadable report', exited(0, null), 'inconclusive'],
     ['non-zero exit with no report (runner crash?)', exited(1, null), 'inconclusive'],
     ['exit 0 but zero suites discovered', exited(0, 0), 'inconclusive'],
+    ['non-zero exit with zero suites discovered', exited(1, 0), 'inconclusive'],
+    ['negative suite count', exited(1, -1), 'inconclusive'],
     [
       'corrupt suite count',
       { kind: 'exited', exitCode: 0, report: { suites: Number.NaN } },
@@ -72,7 +75,7 @@ describe('commandEvidence', () => {
     const evidence = commandEvidence(command, { kind: 'timeout' }, digest);
     expect(evidence).toEqual({
       id: 'pytest',
-      command: '.venv/bin/python -m pytest',
+      command: '/opt/ztfc/env/bin/python -m pytest',
       required: true,
       status: 'inconclusive',
       exitStatus: 'unknown',
@@ -86,6 +89,11 @@ describe('commandEvidence', () => {
     const evidence = commandEvidence(command, exited(0, null), digest);
     expect(evidence).toMatchObject({ status: 'inconclusive', exitStatus: 0, suites: 'unknown' });
     expect(evidenceVerified([evidence])).toBe(false);
+  });
+
+  it('never copies an invalid suite count into the receipt', () => {
+    expect(commandEvidence(command, exited(0, -3), digest).suites).toBe('unknown');
+    expect(commandEvidence(command, exited(0, 1.5), digest).suites).toBe('unknown');
   });
 
   it('keeps out-of-range exit codes unknown and passes only on full evidence', () => {
@@ -118,6 +126,23 @@ describe('classifyRegression (scenario 6)', () => {
     ['skipped', 'passed', 'inconclusive'],
   ])('base %s, candidate %s → %s', (base, candidate, proof) => {
     expect(classifyRegression(base as never, candidate as never)).toBe(proof);
+  });
+});
+
+describe('applyProvisioning', () => {
+  it.each([
+    'failed',
+    'inconclusive',
+    'skipped',
+  ] as const)('a %s provisioning (e.g. an sdist-only dependency) is unsupported_environment', (verdict) => {
+    const run = applyProvisioning(verifying(), verdict, time);
+    expect(run.state).toBe('unsupported');
+    expect(run.history.at(-1)?.reasonCode).toBe(R.UnsupportedEnvironment);
+  });
+
+  it('a passing provisioning leaves the run unchanged', () => {
+    const run = verifying();
+    expect(applyProvisioning(run, 'passed', time)).toBe(run);
   });
 });
 

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ReasonCode } from '../state';
 import type { RuntimeDeclaration, SupportedDetection } from './detect';
 import {
@@ -245,9 +245,9 @@ describe('per-run profile record', () => {
     );
   });
 
-  it('fails closed when the record is missing, foreign or tampered', () => {
+  it('fails closed when the record is missing, foreign, malformed or tampered', () => {
     expect(() => loadProfileRecord(dir, 'run-1')).toThrow(
-      expect.objectContaining({ code: 'invalid_record' })
+      expect.objectContaining({ code: 'record_missing' })
     );
     expect(() => loadProfileRecord(dir, '../x')).toThrow(
       expect.objectContaining({ code: 'invalid_record' })
@@ -258,19 +258,58 @@ describe('per-run profile record', () => {
       expect.objectContaining({ code: 'invalid_record' })
     );
     const file = path.join(dir, 'run-1.profile.json');
-    const tampered = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const original = fs.readFileSync(file, 'utf8');
+    fs.writeFileSync(file, '{');
+    expect(() => loadProfileRecord(dir, 'run-1')).toThrow(
+      expect.objectContaining({ code: 'invalid_record' })
+    );
+    fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(original), manager: 'yarn' }));
+    expect(() => loadProfileRecord(dir, 'run-1')).toThrow(
+      expect.objectContaining({ code: 'invalid_record' })
+    );
+    const tampered = JSON.parse(original);
     tampered.profile.imageDigest = `sha256:${'0'.repeat(64)}`;
     fs.writeFileSync(file, JSON.stringify(tampered));
     expect(() => loadProfileRecord(dir, 'run-1')).toThrow(
-      expect.objectContaining({ code: 'record_mismatch' })
+      expect.objectContaining({ code: 'profile_changed' })
     );
+  });
+
+  it('propagates storage-integrity failures instead of calling them a mismatch', () => {
+    recordProfileSelection(dir, 'run-1', selection());
+    fs.chmodSync(path.join(dir, 'run-1.profile.json'), 0o644);
+    expect(() => recordProfileSelection(dir, 'run-1', selection())).toThrow(
+      'Controller storage unavailable'
+    );
+    expect(() => loadProfileRecord(dir, 'run-1')).toThrow('Controller storage unavailable');
+  });
+
+  it('a racing writer that already linked a different record is a mismatch', () => {
+    const file = path.join(dir, 'run-1.profile.json');
+    const other = ok(selectProfile(py(['.python-version', '3.11'])));
+    // Simulate the race: the file appears between the existence check and link(2).
+    const link = fs.linkSync;
+    const spy = vi.spyOn(fs, 'linkSync').mockImplementationOnce((src, dest) => {
+      recordProfileSelection(dir, 'run-1', other);
+      return link(src, dest);
+    });
+    try {
+      expect(() => recordProfileSelection(dir, 'run-1', selection())).toThrow(
+        expect.objectContaining({ code: 'record_mismatch' })
+      );
+    } finally {
+      spy.mockRestore();
+    }
+    expect(loadProfileRecord(dir, 'run-1').profile.id).toBe('python-3.11');
+    expect(fs.readdirSync(dir)).toEqual(['run-1.profile.json']);
+    expect(fs.existsSync(file)).toBe(true);
   });
 
   it('refuses a record made under a different manifest', () => {
     recordProfileSelection(dir, 'run-1', selection());
     const bumped = validateProfileManifest({ ...manifestJson, manifestVersion: '2026.11.0' });
     expect(() => loadProfileRecord(dir, 'run-1', bumped)).toThrow(
-      expect.objectContaining({ code: 'record_mismatch' })
+      expect.objectContaining({ code: 'manifest_changed' })
     );
   });
 

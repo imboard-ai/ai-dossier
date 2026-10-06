@@ -2,7 +2,11 @@
  * the controller reads files from the exported canonical snapshot. */
 import { parse as parseToml } from 'smol-toml';
 import type { SourceManifest } from '../canonical/export';
-import { ReasonCode } from '../state';
+import { assertNoSecrets } from '../redaction';
+import { isRecord, ReasonCode } from '../state';
+import { pythonArtifactKey } from './proxy';
+import { NPM_REGISTRY, NPM_SRI_SHA512, PYPI_SIMPLE, UV_SHA256, uvArtifacts } from './registries';
+import { normalizeName, parseHashedRequirements } from './requirements';
 
 export type Ecosystem = 'node' | 'python';
 export type PackageManager = 'npm' | 'pip' | 'uv';
@@ -14,12 +18,15 @@ export type UnsupportedReason =
   | 'mixed_ecosystems'
   | 'ambiguous_manager'
   | 'unsupported_manager'
+  | 'unsupported_config'
+  | 'manifest_missing'
   | 'manifest_invalid'
   | 'lockfile_missing'
   | 'lockfile_invalid'
   | 'lockfile_version'
   | 'non_registry_dependency'
   | 'missing_hashes'
+  | 'binary_unavailable'
   | 'unpinned_requirement'
   | 'unsupported_requirement_option'
   | 'test_runner_missing';
@@ -43,17 +50,17 @@ export interface SupportedDetection {
   readonly lockfile: 'package-lock.json' | 'requirements.txt' | 'uv.lock';
   readonly declarations: readonly RuntimeDeclaration[];
 }
-export interface UnsupportedDetection {
-  readonly supported: false;
+/** The shared shape of every `unsupported_environment` outcome in this module family. */
+export interface UnsupportedEnvironment<R extends string> {
   readonly reasonCode: ReasonCode.UnsupportedEnvironment;
-  readonly reason: UnsupportedReason;
-  /** Bounded, controller-generated detail (a file, option or package name). */
+  readonly reason: R;
+  /** Bounded identifier (file, field, option or package name); see `safeDetail`. */
   readonly detail?: string;
 }
+export interface UnsupportedDetection extends UnsupportedEnvironment<UnsupportedReason> {
+  readonly supported: false;
+}
 export type Detection = SupportedDetection | UnsupportedDetection;
-
-export const NPM_REGISTRY = 'https://registry.npmjs.org/';
-export const PYPI_SIMPLE = 'https://pypi.org/simple';
 
 const NODE_FILES = [
   'package.json',
@@ -90,9 +97,43 @@ const UNSUPPORTED_MANAGER_FILES: Readonly<Record<string, string>> = {
   'Pipfile.lock': 'pipenv',
   'pdm.lock': 'pdm',
 };
+/** Repository-local tool configuration that can redirect registries, indexes or
+ * interpreter downloads. Commands are planned without it, so its presence is unsupported. */
+const CONFIG_FILES = ['.npmrc', '.yarnrc', 'pip.conf', 'pip.ini', 'uv.toml'];
+/** `[tool.uv]` keys that cannot change where or how packages are fetched. */
+const UV_TOOL_KEYS = new Set(['package', 'default-groups']);
+const NPM_PACKAGE_MANAGER = /^npm@\d+\.\d+\.\d+(\+sha(256|512)\.[a-f0-9]+)?$/;
 const NPM_DEFAULT_TEST = 'echo "Error: no test specified" && exit 1';
-const SHA256_HASH = /^--hash=sha256:[a-f0-9]{64}$/;
-const PEP503_NAME = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
+/** npm package names are at most 214 characters; nothing else we echo is longer. */
+const DETAIL = /^[A-Za-z0-9@/._+,#-]{1,214}$/;
+
+/** `detail` is bounded and secret-free: repository text outside the narrow identifier
+ * alphabet (URLs, credentials, control characters) is dropped, never echoed. */
+function safeDetail(detail: string | undefined): string | undefined {
+  if (detail === undefined || !DETAIL.test(detail)) return undefined;
+  try {
+    assertNoSecrets(detail);
+    return detail;
+  } catch {
+    return undefined;
+  }
+}
+
+export function unsupportedEnvironment<R extends string>(
+  reason: R,
+  detail?: string
+): UnsupportedEnvironment<R> {
+  const safe = safeDetail(detail);
+  return Object.freeze({
+    reasonCode: ReasonCode.UnsupportedEnvironment,
+    reason,
+    ...(safe === undefined ? {} : { detail: safe }),
+  });
+}
+
+function unsupported(reason: UnsupportedReason, detail?: string): UnsupportedDetection {
+  return Object.freeze({ supported: false, ...unsupportedEnvironment(reason, detail) });
+}
 
 /** Decodes the root-level files of an exported canonical snapshot. */
 export function sourceFilesFromManifest(manifest: SourceManifest): SourceFiles {
@@ -102,15 +143,6 @@ export function sourceFilesFromManifest(manifest: SourceManifest): SourceFiles {
       files.set(entry.path, Buffer.from(entry.bytes, 'base64').toString('utf8'));
   }
   return files;
-}
-
-function unsupported(reason: UnsupportedReason, detail?: string): UnsupportedDetection {
-  return Object.freeze({
-    supported: false,
-    reasonCode: ReasonCode.UnsupportedEnvironment,
-    reason,
-    ...(detail === undefined ? {} : { detail }),
-  });
 }
 
 function supported(
@@ -126,10 +158,6 @@ function supported(
     lockfile,
     declarations: Object.freeze(declarations.map((d) => Object.freeze({ ...d }))),
   });
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function parseJson(text: string): unknown {
@@ -158,6 +186,8 @@ function versionFile(
   return [{ source: name, value }];
 }
 
+/** Classifies the snapshot's root-level files as exactly one supported manager and
+ * lockfile, or `unsupported_environment` with a specific reason. Reads text only. */
 export function detectEcosystem(files: SourceFiles): Detection {
   const node = NODE_FILES.some((name) => files.has(name));
   const python = PYTHON_FILES.some((name) => files.has(name));
@@ -166,46 +196,62 @@ export function detectEcosystem(files: SourceFiles): Detection {
   for (const [name, manager] of Object.entries(UNSUPPORTED_MANAGER_FILES)) {
     if (files.has(name)) return unsupported('unsupported_manager', manager);
   }
+  const config = CONFIG_FILES.find((name) => files.has(name));
+  if (config !== undefined) return unsupported('unsupported_config', config);
   return node ? detectNpm(files) : detectPython(files);
 }
 
-function detectNpm(files: SourceFiles): Detection {
-  const manifestText = files.get('package.json');
-  if (manifestText === undefined) return unsupported('manifest_invalid', 'package.json');
-  const manifest = parseJson(manifestText);
-  if (!isObject(manifest)) return unsupported('manifest_invalid', 'package.json');
-  const packageManager = manifest.packageManager;
-  if (packageManager !== undefined) {
-    const name = typeof packageManager === 'string' ? packageManager.split('@')[0] : '';
-    if (name !== 'npm') return unsupported('unsupported_manager', name || 'packageManager');
-  }
-  const lockText = files.get('package-lock.json');
-  if (lockText === undefined) return unsupported('lockfile_missing', 'package-lock.json');
-  const lock = parseJson(lockText);
-  if (!isObject(lock) || !isObject(lock.packages))
-    return unsupported('lockfile_invalid', 'package-lock.json');
+/** `node_modules/a/node_modules/b` is nested; `node_modules/b` is top-level. */
+function nestedKey(key: string): boolean {
+  return key.indexOf('/node_modules/') > 0;
+}
+
+/** Every package npm will fetch must come from the registry with a sha512 integrity. */
+function checkNpmLock(lock: Record<string, unknown>): UnsupportedDetection | undefined {
+  if (!isRecord(lock.packages)) return unsupported('lockfile_invalid', 'package-lock.json');
   if (lock.lockfileVersion !== 2 && lock.lockfileVersion !== 3)
     return unsupported('lockfile_version', 'package-lock.json');
   for (const [key, entry] of Object.entries(lock.packages)) {
     if (key === '') continue;
-    if (!isObject(entry)) return unsupported('lockfile_invalid', 'package-lock.json');
-    // Workspace links are local source; bundled packages ship inside their parent tarball.
-    if (entry.link === true || entry.inBundle === true) continue;
+    if (!isRecord(entry)) return unsupported('lockfile_invalid', 'package-lock.json');
+    // A package bundled INSIDE another package's tarball has no fetch of its own. A
+    // root-level `inBundle` entry, or one with its own `resolved`, is fetched by npm.
+    if (entry.inBundle === true && nestedKey(key) && entry.resolved === undefined) continue;
+    if (entry.link === true) return unsupported('non_registry_dependency', key);
     if (typeof entry.resolved !== 'string' || !entry.resolved.startsWith(NPM_REGISTRY))
       return unsupported('non_registry_dependency', key);
-    if (
-      typeof entry.integrity !== 'string' ||
-      !/^sha512-[A-Za-z0-9+/]+={0,2}$/.test(entry.integrity)
-    )
+    if (typeof entry.integrity !== 'string' || !NPM_SRI_SHA512.test(entry.integrity))
       return unsupported('missing_hashes', key);
   }
+  return undefined;
+}
+
+function detectNpm(files: SourceFiles): Detection {
+  const manifestText = files.get('package.json');
+  if (manifestText === undefined) return unsupported('manifest_missing', 'package.json');
+  const manifest = parseJson(manifestText);
+  if (!isRecord(manifest)) return unsupported('manifest_invalid', 'package.json');
+  const packageManager = manifest.packageManager;
+  if (
+    packageManager !== undefined &&
+    (typeof packageManager !== 'string' || !NPM_PACKAGE_MANAGER.test(packageManager))
+  ) {
+    const name = typeof packageManager === 'string' ? packageManager.split('@')[0] : '';
+    return unsupported('unsupported_manager', name || 'packageManager');
+  }
+  const lockText = files.get('package-lock.json');
+  if (lockText === undefined) return unsupported('lockfile_missing', 'package-lock.json');
+  const lock = parseJson(lockText);
+  if (!isRecord(lock)) return unsupported('lockfile_invalid', 'package-lock.json');
+  const rejected = checkNpmLock(lock);
+  if (rejected) return rejected;
   const scripts = manifest.scripts;
-  const test = isObject(scripts) ? scripts.test : undefined;
+  const test = isRecord(scripts) ? scripts.test : undefined;
   if (typeof test !== 'string' || test.trim() === '' || test.trim() === NPM_DEFAULT_TEST)
     return unsupported('test_runner_missing', 'scripts.test');
   const declarations: RuntimeDeclaration[] = [];
   const engines = manifest.engines;
-  if (isObject(engines) && engines.node !== undefined) {
+  if (isRecord(engines) && engines.node !== undefined) {
     if (typeof engines.node !== 'string')
       return unsupported('manifest_invalid', 'package.json#engines.node');
     declarations.push({ source: 'package.json#engines.node', value: engines.node });
@@ -214,22 +260,34 @@ function detectNpm(files: SourceFiles): Detection {
   return supported('node', 'npm', 'package-lock.json', declarations);
 }
 
+function checkPyproject(pyproject: Record<string, unknown>): UnsupportedDetection | undefined {
+  const tool = pyproject.tool;
+  if (!isRecord(tool)) return undefined;
+  if (isRecord(tool.poetry)) return unsupported('unsupported_manager', 'poetry');
+  if (
+    tool.uv !== undefined &&
+    (!isRecord(tool.uv) || Object.keys(tool.uv).some((key) => !UV_TOOL_KEYS.has(key)))
+  )
+    return unsupported('unsupported_config', 'pyproject.toml#tool.uv');
+  return undefined;
+}
+
 function detectPython(files: SourceFiles): Detection {
   let pyproject: Record<string, unknown> | undefined;
   const pyprojectText = files.get('pyproject.toml');
   if (pyprojectText !== undefined) {
     pyproject = parseTomlSafe(pyprojectText);
     if (pyproject === undefined) return unsupported('manifest_invalid', 'pyproject.toml');
-    const tool = pyproject.tool;
-    if (isObject(tool) && isObject(tool.poetry))
-      return unsupported('unsupported_manager', 'poetry');
+    const rejected = checkPyproject(pyproject);
+    if (rejected) return rejected;
   }
-  const hasUv = files.has('uv.lock');
-  const hasRequirements = files.has('requirements.txt');
-  if (hasUv && hasRequirements) return unsupported('ambiguous_manager', 'uv.lock,requirements.txt');
+  const uvLock = files.get('uv.lock');
+  const requirements = files.get('requirements.txt');
+  if (uvLock !== undefined && requirements !== undefined)
+    return unsupported('ambiguous_manager', 'uv.lock,requirements.txt');
   const declarations: RuntimeDeclaration[] = [];
   const project = pyproject?.project;
-  if (isObject(project) && project['requires-python'] !== undefined) {
+  if (isRecord(project) && project['requires-python'] !== undefined) {
     if (typeof project['requires-python'] !== 'string')
       return unsupported('manifest_invalid', 'pyproject.toml#project.requires-python');
     declarations.push({
@@ -238,41 +296,57 @@ function detectPython(files: SourceFiles): Detection {
     });
   }
   declarations.push(...versionFile(files, '.python-version'));
-  if (hasUv) return detectUv(files, pyproject, declarations);
-  if (hasRequirements) return detectPip(files.get('requirements.txt') as string, declarations);
-  return unsupported('lockfile_missing', pyproject ? 'pyproject.toml' : 'setup.py');
+  if (uvLock !== undefined) {
+    if (pyproject === undefined) return unsupported('manifest_missing', 'pyproject.toml');
+    return detectUv(uvLock, declarations);
+  }
+  if (requirements !== undefined) return detectPip(requirements, declarations);
+  return unsupported(
+    'lockfile_missing',
+    PYTHON_FILES.find((name) => files.has(name))
+  );
 }
 
-function detectUv(
-  files: SourceFiles,
-  pyproject: Record<string, unknown> | undefined,
-  declarations: RuntimeDeclaration[]
-): Detection {
-  if (pyproject === undefined) return unsupported('manifest_invalid', 'pyproject.toml');
-  const lock = parseTomlSafe(files.get('uv.lock') as string);
+/** One registry package of a uv lock: PyPI-only, every artifact hashed and a PyPI file
+ * of THIS name and version (`uv sync --frozen` downloads these exact URLs), and at
+ * least one wheel, because provisioning never builds an sdist. */
+function checkUvPackage(
+  pkg: Record<string, unknown>,
+  name: string
+): UnsupportedDetection | undefined {
+  const source = pkg.source as Record<string, unknown>;
+  if (source.registry !== PYPI_SIMPLE) return unsupported('non_registry_dependency', name);
+  const artifacts = uvArtifacts(pkg);
+  if (
+    artifacts.length === 0 ||
+    !artifacts.every((a) => isRecord(a) && typeof a.hash === 'string' && UV_SHA256.test(a.hash))
+  )
+    return unsupported('missing_hashes', name);
+  const expected = `${normalizeName(name)}==${String(pkg.version)}`;
+  if (
+    !artifacts.every(
+      (a) => isRecord(a) && typeof a.url === 'string' && pythonArtifactKey(a.url) === expected
+    )
+  )
+    return unsupported('non_registry_dependency', name);
+  if (!Array.isArray(pkg.wheels) || pkg.wheels.length === 0)
+    return unsupported('binary_unavailable', name);
+  return undefined;
+}
+
+function detectUv(text: string, declarations: RuntimeDeclaration[]): Detection {
+  const lock = parseTomlSafe(text);
   if (lock === undefined || !Array.isArray(lock.package))
     return unsupported('lockfile_invalid', 'uv.lock');
   if (lock.version !== 1) return unsupported('lockfile_version', 'uv.lock');
   let pytest = false;
   for (const pkg of lock.package as unknown[]) {
-    if (!isObject(pkg) || typeof pkg.name !== 'string' || !isObject(pkg.source))
+    if (!isRecord(pkg) || typeof pkg.name !== 'string' || !isRecord(pkg.source))
       return unsupported('lockfile_invalid', 'uv.lock');
-    const source = pkg.source;
     // The project itself is local source; every other package must come from PyPI.
-    if (source.editable === '.' || source.virtual === '.') continue;
-    if (source.registry !== PYPI_SIMPLE) return unsupported('non_registry_dependency', pkg.name);
-    const artifacts = [...(isObject(pkg.sdist) ? [pkg.sdist] : []), ...asArray(pkg.wheels)];
-    if (
-      artifacts.length === 0 ||
-      !artifacts.every(
-        (a) =>
-          isObject(a) &&
-          typeof a.url === 'string' &&
-          typeof a.hash === 'string' &&
-          /^sha256:[a-f0-9]{64}$/.test(a.hash)
-      )
-    )
-      return unsupported('missing_hashes', pkg.name);
+    if (pkg.source.editable === '.' || pkg.source.virtual === '.') continue;
+    const rejected = checkUvPackage(pkg, pkg.name);
+    if (rejected) return rejected;
     if (normalizeName(pkg.name) === 'pytest') pytest = true;
   }
   if (!pytest) return unsupported('test_runner_missing', 'pytest');
@@ -281,63 +355,9 @@ function detectUv(
   return supported('python', 'uv', 'uv.lock', declarations);
 }
 
-function asArray(value: unknown): unknown[] {
-  return Array.isArray(value) ? value : [];
-}
-
-/** PEP 503 normalization. */
-export function normalizeName(name: string): string {
-  return name.toLowerCase().replace(/[-_.]+/g, '-');
-}
-
-export interface PinnedRequirement {
-  readonly name: string;
-  readonly version: string;
-  readonly hashes: readonly string[];
-}
-
-/** Parses a fully pinned, hash-locked requirements file (`pip install --require-hashes`).
- * Any include, index, URL or unpinned line is rejected rather than interpreted. */
-export function parseHashedRequirements(text: string): PinnedRequirement[] | UnsupportedDetection {
-  const requirements: PinnedRequirement[] = [];
-  const logical = text.replace(/\\\r?\n/g, ' ').split(/\r?\n/);
-  for (const raw of logical) {
-    const line = raw.replace(/(^|\s)#.*$/, '').trim();
-    if (line === '') continue;
-    if (line.startsWith('-')) {
-      if (line === '--require-hashes') continue;
-      return unsupported('unsupported_requirement_option', line.split(/[\s=]/)[0]);
-    }
-    const tokens = line.split(/\s+/);
-    const hashAt = tokens.findIndex((t) => t.startsWith('-'));
-    const spec = (hashAt === -1 ? tokens : tokens.slice(0, hashAt)).join(' ');
-    const options = hashAt === -1 ? [] : tokens.slice(hashAt);
-    const requirement = spec.split(';')[0].trim();
-    if (requirement.includes('@') || requirement.includes('://'))
-      return unsupported('non_registry_dependency', requirement.split(/[\s@]/)[0]);
-    const match =
-      /^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[A-Za-z0-9._,\s-]*\])?\s*==\s*([A-Za-z0-9.+!-]+)$/.exec(
-        requirement
-      );
-    if (!match || !PEP503_NAME.test(match[1]))
-      return unsupported('unpinned_requirement', requirement.split(/[\s<>=!~[]/)[0] || line);
-    const bad = options.find((o) => !SHA256_HASH.test(o));
-    if (bad !== undefined) return unsupported('unsupported_requirement_option', bad.split('=')[0]);
-    if (options.length === 0) return unsupported('missing_hashes', match[1]);
-    requirements.push(
-      Object.freeze({
-        name: normalizeName(match[1]),
-        version: match[2],
-        hashes: Object.freeze(options.map((o) => o.slice('--hash=sha256:'.length))),
-      })
-    );
-  }
-  return requirements;
-}
-
 function detectPip(text: string, declarations: RuntimeDeclaration[]): Detection {
   const parsed = parseHashedRequirements(text);
-  if (!Array.isArray(parsed)) return parsed;
+  if (!Array.isArray(parsed)) return unsupported(parsed.reason, parsed.detail);
   if (parsed.length === 0) return unsupported('lockfile_invalid', 'requirements.txt');
   if (!parsed.some((r) => r.name === 'pytest')) return unsupported('test_runner_missing', 'pytest');
   return supported('python', 'pip', 'requirements.txt', declarations);

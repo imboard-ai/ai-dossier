@@ -77,12 +77,25 @@ describe('evaluateRequest', () => {
 
 describe('evaluateRedirect', () => {
   const from = 'https://pypi.org/simple/pytest/';
-  it('follows a redirect to another package path on an allowlisted registry', () => {
-    expect(evaluateRedirect(from, `${FILES}/pytest-8.4.2-py3-none-any.whl`, 0)).toEqual({
+  const oneHop = { ...PROXY_POLICY, maxRedirects: 1 };
+  it('with a hop budget, follows a redirect to another package path on a registry', () => {
+    expect(evaluateRedirect(from, `${FILES}/pytest-8.4.2-py3-none-any.whl`, 0, oneHop)).toEqual({
       allowed: true,
       rule: 'pypi-files',
     });
-    expect(evaluateRedirect(`${NPM}/MS`, '/ms', 1)).toEqual({ allowed: true, rule: 'npm' });
+    expect(evaluateRedirect(`${NPM}/MS`, '/ms', 0, oneHop)).toEqual({ allowed: true, rule: 'npm' });
+    expect(evaluateRedirect(`${NPM}/MS`, '/ms', 1, oneHop)).toEqual({
+      allowed: false,
+      reason: 'redirect_limit',
+    });
+  });
+
+  it('the default policy follows no redirect at all (the only limit Squid can enforce)', () => {
+    expect(PROXY_POLICY.maxRedirects).toBe(0);
+    expect(evaluateRedirect(from, `${FILES}/pytest-8.4.2-py3-none-any.whl`, 0)).toEqual({
+      allowed: false,
+      reason: 'redirect_limit',
+    });
   });
 
   // Rejection case 2: a redirect off the registry.
@@ -101,7 +114,7 @@ describe('evaluateRedirect', () => {
   });
 
   it('enforces the hop limit', () => {
-    expect(evaluateRedirect(from, from, PROXY_POLICY.maxRedirects)).toEqual({
+    expect(evaluateRedirect(from, from, 3, { ...PROXY_POLICY, maxRedirects: 3 })).toEqual({
       allowed: false,
       reason: 'redirect_limit',
     });
@@ -167,14 +180,64 @@ describe('lockfile hash enforcement', () => {
     });
   });
 
+  const uvPkg = (artifact: string) =>
+    `version = 1\n[[package]]\nname = "x"\nversion = "1"\nsource = { registry = "https://pypi.org/simple" }\nwheels = [${artifact}]\n`;
   it.each([
-    ['npm', 'nope'],
-    ['npm', JSON.stringify({ packages: { '': {} } })],
-    ['npm', JSON.stringify({ packages: { a: { resolved: 'x', integrity: 'sha1-x' } } })],
-    ['uv', 'version = 1\n[[package]]\nname = "x"\nwheels = [{ url = 1 }]\n'],
-    ['pip', 'pytest>=8\n'],
-  ] as const)('rejects an unusable %s lockfile', (manager, text) => {
+    ['npm', 'nope', 'unparseable'],
+    ['npm', JSON.stringify({ packages: { '': {} } }), 'empty'],
+    ['npm', JSON.stringify({ packages: { a: 'x' } }), 'invalid_artifact'],
+    ['npm', JSON.stringify({ packages: { a: { resolved: 7 } } }), 'invalid_artifact'],
+    [
+      'npm',
+      JSON.stringify({
+        packages: { a: { resolved: 'https://evil.example/a.tgz', integrity: 'sha512-AA==' } },
+      }),
+      'invalid_artifact',
+    ],
+    [
+      'npm',
+      JSON.stringify({
+        packages: { a: { resolved: `${NPM}/a/-/a-1.0.0.tgz`, integrity: 'sha1-x' } },
+      }),
+      'invalid_integrity',
+    ],
+    ['uv', 'version = ', 'unparseable'],
+    ['uv', 'version = 1\n[[package]]\nname = "x"\n', 'invalid_artifact'],
+    ['uv', uvPkg('{ url = 1 }'), 'invalid_artifact'],
+    ['uv', uvPkg(`{ url = "${FILES}/x-1-py3-none-any.whl", hash = "md5:x" }`), 'invalid_integrity'],
+    ['uv', 'version = 1\n[[package]]\nname = "app"\nsource = { virtual = "." }\n', 'empty'],
+    ['pip', 'pytest>=8\n', 'unparseable'],
+  ] as const)('rejects an unusable %s lockfile (%s)', (manager, text, code) => {
+    expect(() => buildLockIndex(manager, text)).toThrow(expect.objectContaining({ code }));
     expect(() => buildLockIndex(manager, text)).toThrow(LockIndexError);
+  });
+
+  it('skips only nested bundled npm packages, which have no fetch of their own', () => {
+    const url = `${NPM}/ms/-/ms-2.1.3.tgz`;
+    const index = buildLockIndex(
+      'npm',
+      JSON.stringify({
+        packages: {
+          '': {},
+          'node_modules/ms': { resolved: url, integrity: sri },
+          'node_modules/ms/node_modules/b': { inBundle: true },
+        },
+      })
+    );
+    expect([...index.artifacts.keys()]).toEqual([url]);
+  });
+
+  it('denies malformed or non-PyPI URLs instead of throwing', () => {
+    const index = buildLockIndex('pip', `x==1 --hash=sha256:${sha256}\n`);
+    for (const url of [
+      '%%%',
+      `${FILES}/x-1-py3-none-any.whl%`,
+      'https://evil.example/x-1-py3-none-any.whl',
+    ])
+      expect(checkArtifact(index, url, bytes)).toEqual({
+        allowed: false,
+        reason: 'artifact_not_in_lockfile',
+      });
   });
 });
 
@@ -194,14 +257,30 @@ describe('config rendering', () => {
   it('renders Squid ACLs from the same policy patterns the evaluator uses', () => {
     const conf = renderSquidConfig(deployment);
     for (const rule of PROXY_POLICY.rules) {
-      expect(conf).toContain(`dstdomain ${rule.host}`);
+      expect(conf).toContain(`dstdomain -n ${rule.host}`);
       for (const p of rule.paths) expect(conf).toContain(p);
     }
     expect(conf).toContain('acl package_methods method GET HEAD');
     expect(conf).toContain('http_access deny forbidden_dst');
     expect(conf).toContain('169.254.0.0/16');
     expect(conf).toContain('http_access allow CONNECT mirrors tls_port registry_hosts');
-    expect(conf).toContain('http_reply_access deny redirect_status !registry_location');
+    // Hop limit 0: Squid refuses every redirect response.
+    expect(conf).toContain('http_reply_access deny redirect_status\n');
+    expect(conf).not.toContain('!registry_location');
+    expect(renderSquidConfig(deployment, { ...PROXY_POLICY, maxRedirects: 2 })).toContain(
+      'http_reply_access deny redirect_status !registry_location'
+    );
+    // Scheme, port and body are enforced inside the bumped tunnel (security review #4, #5).
+    expect(conf).toContain('http_access deny !https_proto');
+    expect(conf).toContain('http_access deny has_body');
+    expect(conf).toContain('http_access deny chunked_body');
+    expect(conf).not.toContain('request_body_max_size');
+    for (const line of conf.split('\n').filter((l) => l.startsWith('http_access allow mirrors')))
+      expect(line).toContain('https_proto tls_port');
+    // IP-literal and IPv6 escape ranges (security review #9).
+    expect(conf).toContain('^[0-9a-fA-F:]+$');
+    for (const range of ['::ffff:0:0/96', '64:ff9b::/96', '2002::/16', '::/128', 'ff00::/8'])
+      expect(conf).toContain(range);
     expect(conf.trim().split('\n').indexOf('http_access deny all')).toBeGreaterThan(
       conf
         .trim()
@@ -225,15 +304,15 @@ describe('config rendering', () => {
   });
 
   it.each([
-    ['host injection', { squidHost: 'proxy\nhttp_access allow all' }],
-    ['relative path', { verdaccioStorage: 'storage' }],
-    ['path traversal', { proxpiCacheDir: '/var/../etc' }],
-    ['bad port', { squidPort: 70000 }],
-    ['no mirror range', { mirrorCidrs: [] }],
-    ['bad mirror range', { mirrorCidrs: ['all'] }],
-  ])('rejects %s', (_name, override) => {
+    ['host injection', { squidHost: 'proxy\nhttp_access allow all' }, 'squid_host'],
+    ['relative path', { verdaccioStorage: 'storage' }, 'path'],
+    ['path traversal', { proxpiCacheDir: '/var/../etc' }, 'path'],
+    ['bad port', { squidPort: 70000 }, 'port'],
+    ['no mirror range', { mirrorCidrs: [] }, 'mirror_cidrs'],
+    ['bad mirror range', { mirrorCidrs: ['all'] }, 'mirror_cidrs'],
+  ])('rejects %s', (_name, override, code) => {
     const bad = { ...deployment, ...override } as ProxyDeployment;
-    expect(() => renderSquidConfig(bad)).toThrow(ProxyConfigError);
+    expect(() => renderSquidConfig(bad)).toThrow(expect.objectContaining({ code }));
     expect(() => renderVerdaccioConfig(bad)).toThrow(ProxyConfigError);
     expect(() => proxpiEnvironment(bad)).toThrow(ProxyConfigError);
     expect(() => verdaccioEnvironment(bad)).toThrow(ProxyConfigError);

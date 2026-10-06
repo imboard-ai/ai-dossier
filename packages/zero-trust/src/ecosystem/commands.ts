@@ -32,18 +32,38 @@ export interface PlanOptions {
   readonly testTargets?: readonly string[];
   readonly provisioningTimeoutMs?: number;
   readonly verificationTimeoutMs?: number;
+  /** The profile image's interpreter (absolute). Default: the devcontainer location. */
+  readonly python?: string;
+  /** Python environment directory OUTSIDE the repository (absolute). */
+  readonly environmentDir?: string;
 }
 
+export type PlanField =
+  | 'npmRegistry'
+  | 'pypiIndex'
+  | 'testTargets'
+  | 'provisioningTimeoutMs'
+  | 'verificationTimeoutMs'
+  | 'python'
+  | 'environmentDir';
 export class CommandPlanError extends Error {
-  constructor(readonly code: 'invalid_endpoint' | 'invalid_target' | 'invalid_timeout') {
-    super(`Zero-trust command plan rejected: ${code}`);
+  constructor(
+    readonly code: 'invalid_endpoint' | 'invalid_target' | 'invalid_timeout' | 'invalid_path',
+    /** Which input was rejected; the value itself is never echoed. */
+    readonly field: PlanField
+  ) {
+    super(`Zero-trust command plan rejected: ${code} (${field})`);
     this.name = 'CommandPlanError';
   }
 }
 
 const DEFAULT_PROVISIONING_MS = 10 * 60 * 1000;
 const DEFAULT_VERIFICATION_MS = 15 * 60 * 1000;
+const MIN_TIMEOUT_MS = 1000;
 const MAX_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+const DEFAULT_PYTHON = '/usr/local/bin/python';
+const DEFAULT_ENVIRONMENT = '/opt/ztfc/env';
+const ABSOLUTE_PATH = /^(\/[A-Za-z0-9._-]+)+$/;
 /** Offline phases must not discover a network path through tool defaults. */
 const OFFLINE_ENV = Object.freeze({
   npm_config_offline: 'true',
@@ -54,12 +74,12 @@ const OFFLINE_ENV = Object.freeze({
   HTTPS_PROXY: '',
 });
 
-function endpoint(url: string): string {
+function endpoint(url: string, field: PlanField): string {
   let parsed: URL;
   try {
     parsed = new URL(url);
   } catch {
-    throw new CommandPlanError('invalid_endpoint');
+    throw new CommandPlanError('invalid_endpoint', field);
   }
   if (
     (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
@@ -69,14 +89,20 @@ function endpoint(url: string): string {
     parsed.hash !== '' ||
     !parsed.pathname.endsWith('/')
   )
-    throw new CommandPlanError('invalid_endpoint');
+    throw new CommandPlanError('invalid_endpoint', field);
   return parsed.href;
 }
 
-function timeout(value: number | undefined, fallback: number): number {
+function absolutePath(value: string, field: PlanField): string {
+  if (!ABSOLUTE_PATH.test(value) || value.split('/').some((p) => p === '.' || p === '..'))
+    throw new CommandPlanError('invalid_path', field);
+  return value;
+}
+
+function timeout(value: number | undefined, fallback: number, field: PlanField): number {
   const ms = value ?? fallback;
-  if (!Number.isSafeInteger(ms) || ms < 1000 || ms > MAX_TIMEOUT_MS)
-    throw new CommandPlanError('invalid_timeout');
+  if (!Number.isSafeInteger(ms) || ms < MIN_TIMEOUT_MS || ms > MAX_TIMEOUT_MS)
+    throw new CommandPlanError('invalid_timeout', field);
   return ms;
 }
 
@@ -85,10 +111,10 @@ function targets(values: readonly string[] | undefined): string[] {
     try {
       validateSourcePath(target);
     } catch {
-      throw new CommandPlanError('invalid_target');
+      throw new CommandPlanError('invalid_target', 'testTargets');
     }
     // An argv entry starting with `-` would be parsed as an option, not a path.
-    if (target.startsWith('-')) throw new CommandPlanError('invalid_target');
+    if (target.startsWith('-')) throw new CommandPlanError('invalid_target', 'testTargets');
     return target;
   });
 }
@@ -111,51 +137,62 @@ function command(
   });
 }
 
-/** Builds the plan for a supported manager. Provisioning never runs package lifecycle
- * scripts or builds sdists with network access; install scripts run later, offline. */
-export function buildCommandPlan(
-  manager: PackageManager,
-  proxy: ProxyEndpoints,
-  options: PlanOptions = {}
-): CommandPlan {
-  const provisionMs = timeout(options.provisioningTimeoutMs, DEFAULT_PROVISIONING_MS);
-  const verifyMs = timeout(options.verificationTimeoutMs, DEFAULT_VERIFICATION_MS);
-  const tests = targets(options.testTargets);
-  // Both endpoints are validated whatever the manager: a bad deployment fails closed early.
-  const npmRegistry = endpoint(proxy.npmRegistry);
-  const pypiIndex = endpoint(proxy.pypiIndex);
-  let provisioning: PlannedCommand[];
-  let verification: PlannedCommand[];
-  if (manager === 'npm') {
-    const env = { npm_config_registry: npmRegistry, npm_config_audit: 'false' };
-    provisioning = [
+interface PlanContext {
+  readonly npmRegistry: string;
+  readonly pypiIndex: string;
+  readonly tests: readonly string[];
+  readonly python: string;
+  readonly environment: string;
+  readonly provisionMs: number;
+  readonly verifyMs: number;
+}
+type Phases = Pick<CommandPlan, 'provisioning' | 'verification'>;
+
+function npmPlan(c: PlanContext): Phases {
+  const env = { npm_config_registry: c.npmRegistry, npm_config_audit: 'false' };
+  const test = c.tests.length ? ['npm', 'test', '--', ...c.tests] : ['npm', 'test'];
+  return {
+    provisioning: [
       command(
         'npm-ci',
         'provisioning',
         ['npm', 'ci', '--ignore-scripts', '--no-fund'],
         env,
-        provisionMs
+        c.provisionMs
       ),
-    ];
-    verification = [
-      command('npm-rebuild', 'verification', ['npm', 'rebuild'], env, verifyMs),
+    ],
+    verification: [
+      command('npm-rebuild', 'verification', ['npm', 'rebuild'], env, c.verifyMs),
+      command('npm-test', 'verification', test, env, c.verifyMs),
+    ],
+  };
+}
+
+/** The venv lives in a controller-chosen directory outside the repository, and the
+ * provisioning interpreter runs isolated (`-I`), so a committed `.venv`, `venv.py`,
+ * `pip.py` or `.pth` file cannot run while the package proxy is reachable. */
+function pipPlan(c: PlanContext): Phases {
+  const env = {
+    PIP_INDEX_URL: c.pypiIndex,
+    PIP_DISABLE_PIP_VERSION_CHECK: '1',
+    PIP_CONFIG_FILE: '/dev/null',
+  };
+  const venvPython = `${c.environment}/bin/python`;
+  return {
+    provisioning: [
       command(
-        'npm-test',
-        'verification',
-        tests.length ? ['npm', 'test', '--', ...tests] : ['npm', 'test'],
+        'venv',
+        'provisioning',
+        [c.python, '-I', '-m', 'venv', '--clear', c.environment],
         env,
-        verifyMs
+        c.provisionMs
       ),
-    ];
-  } else if (manager === 'pip') {
-    const env = { PIP_INDEX_URL: pypiIndex, PIP_DISABLE_PIP_VERSION_CHECK: '1' };
-    provisioning = [
-      command('venv', 'provisioning', ['python', '-m', 'venv', '.venv'], env, provisionMs),
       command(
         'pip-install',
         'provisioning',
         [
-          '.venv/bin/python',
+          venvPython,
+          '-I',
           '-m',
           'pip',
           'install',
@@ -166,42 +203,81 @@ export function buildCommandPlan(
           'requirements.txt',
         ],
         env,
-        provisionMs
+        c.provisionMs
       ),
-    ];
-    verification = [
-      command(
-        'pytest',
-        'verification',
-        ['.venv/bin/python', '-m', 'pytest', ...tests],
-        env,
-        verifyMs
-      ),
-    ];
-  } else {
-    const env = { UV_DEFAULT_INDEX: pypiIndex, UV_NO_BUILD: '1' };
-    provisioning = [
+    ],
+    verification: [
+      command('pytest', 'verification', [venvPython, '-m', 'pytest', ...c.tests], env, c.verifyMs),
+    ],
+  };
+}
+
+/** uv ignores repository config (`--no-config`), never downloads an interpreter, uses
+ * the profile's interpreter, and keeps its environment outside the repository. */
+function uvPlan(c: PlanContext): Phases {
+  const env = {
+    UV_DEFAULT_INDEX: c.pypiIndex,
+    UV_NO_BUILD: '1',
+    UV_PROJECT_ENVIRONMENT: c.environment,
+  };
+  const common = ['--frozen', '--no-config', '--no-python-downloads', '--python', c.python];
+  return {
+    provisioning: [
       command(
         'uv-sync',
         'provisioning',
-        ['uv', 'sync', '--frozen', '--no-build'],
+        ['uv', 'sync', ...common, '--no-build'],
         env,
-        provisionMs
+        c.provisionMs
       ),
-    ];
-    verification = [
+    ],
+    verification: [
       command(
         'pytest',
         'verification',
-        ['uv', 'run', '--frozen', '--offline', '--no-sync', 'pytest', ...tests],
+        ['uv', 'run', ...common, '--offline', '--no-sync', 'pytest', ...c.tests],
         env,
-        verifyMs
+        c.verifyMs
       ),
-    ];
-  }
+    ],
+  };
+}
+
+const PLANNERS: Readonly<Record<PackageManager, (c: PlanContext) => Phases>> = {
+  npm: npmPlan,
+  pip: pipPlan,
+  uv: uvPlan,
+};
+
+/** Builds the plan for a supported manager. Provisioning never runs package lifecycle
+ * scripts, sdist builds or repository code with network access; install scripts run
+ * later, offline. */
+export function buildCommandPlan(
+  manager: PackageManager,
+  proxy: ProxyEndpoints,
+  options: PlanOptions = {}
+): CommandPlan {
+  const phases = PLANNERS[manager]({
+    // Both endpoints are validated whatever the manager: a bad deployment fails closed early.
+    npmRegistry: endpoint(proxy.npmRegistry, 'npmRegistry'),
+    pypiIndex: endpoint(proxy.pypiIndex, 'pypiIndex'),
+    tests: targets(options.testTargets),
+    python: absolutePath(options.python ?? DEFAULT_PYTHON, 'python'),
+    environment: absolutePath(options.environmentDir ?? DEFAULT_ENVIRONMENT, 'environmentDir'),
+    provisionMs: timeout(
+      options.provisioningTimeoutMs,
+      DEFAULT_PROVISIONING_MS,
+      'provisioningTimeoutMs'
+    ),
+    verifyMs: timeout(
+      options.verificationTimeoutMs,
+      DEFAULT_VERIFICATION_MS,
+      'verificationTimeoutMs'
+    ),
+  });
   return Object.freeze({
     manager,
-    provisioning: Object.freeze(provisioning),
-    verification: Object.freeze(verification),
+    provisioning: Object.freeze([...phases.provisioning]),
+    verification: Object.freeze([...phases.verification]),
   });
 }

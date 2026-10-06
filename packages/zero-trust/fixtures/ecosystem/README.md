@@ -29,13 +29,19 @@ repository with three commits (base, regression, fix). It runs the package's own
 2. the regression test on the regression commit: **fail**
 3. the regression test and the suite on the fix commit: pass
 
-The `Zero-trust fixtures` workflow runs it on pull requests that touch the package.
-Public registries stand in for the proxy there. This is the only place fixture installs
+The `Zero-trust fixtures` workflow runs it on pull requests to, and pushes on, `main`
+that touch the package, the self-check script or the workflow. Public registries stand
+in for the proxy there, and the runner's Node and Python must match the profiles the
+fixtures select (locally a mismatch only warns). This is the only place fixture installs
 or tests run on a host. The product code builds plans as data and executes nothing.
 The isolated run behind the proxy belongs to #1010.
 
 ## Regenerating lockfiles
 
-Lockfiles were generated with `npm install --package-lock-only --ignore-scripts`,
-`uv pip compile --universal --generate-hashes --python-version 3.11` and `uv lock`.
+Lockfiles were generated, in each fixture's `base/`, with:
+
+- npm: `npm install --package-lock-only --ignore-scripts`
+- pip: `echo 'pytest==8.4.2' | uv pip compile - --universal --generate-hashes --python-version 3.11 --no-header -o requirements.txt`
+- uv: `uv lock`
+
 After a regeneration, re-run the self-check and update the patches if context lines moved.
