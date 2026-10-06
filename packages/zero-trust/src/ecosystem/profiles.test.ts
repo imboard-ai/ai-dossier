@@ -315,13 +315,14 @@ describe('per-run profile record', () => {
 
   it('binds the record into the receipt profile fields', () => {
     const record = recordProfileSelection(dir, 'run-1', selection());
-    const binding = profileReceiptBinding(record);
+    const binding = profileReceiptBinding(record, 'tcg');
     expect(binding.profile).toEqual({
       name: 'python-3.12',
       runtime: 'python@3.12.11',
       imageDigest: record.profile.imageDigest,
+      accelerator: 'tcg',
     });
     expect(binding.profileDigest).toMatch(/^[a-f0-9]{64}$/);
-    expect(profileReceiptBinding(loadProfileRecord(dir, 'run-1'))).toEqual(binding);
+    expect(profileReceiptBinding(loadProfileRecord(dir, 'run-1'), 'tcg')).toEqual(binding);
   });
 });

@@ -23,7 +23,7 @@ export const ATTACK_CATEGORIES = Object.freeze([
 export type AttackCategory = (typeof ATTACK_CATEGORIES)[number];
 
 export interface ProbeRecord {
-  readonly category: string;
+  readonly category: AttackCategory | 'witness';
   readonly attempt: string;
   readonly outcome: string;
   readonly detail?: string;
@@ -75,25 +75,45 @@ export function parseReports(output: string): { reports: ProbeReport[]; malforme
   return { reports, malformed };
 }
 
+/** Guest strings end up in violations, the evidence file and the CI summary,
+ * so only short, plain values are accepted; anything else counts as malformed. */
+const REPORT_TEXT = /^[A-Za-z0-9 ._:/=-]{1,200}$/;
+const OUTCOME = /^[a-z_-]{1,32}$/;
+const REPORT_CATEGORIES: readonly string[] = [...ATTACK_CATEGORIES, 'witness'];
+
 export function parseReport(value: unknown): ProbeReport {
   const v = value as ProbeReport;
   if (
     typeof value !== 'object' ||
     value === null ||
     typeof v.probe !== 'string' ||
+    !REPORT_TEXT.test(v.probe) ||
     typeof v.phase !== 'string' ||
+    !REPORT_TEXT.test(v.phase) ||
     !Array.isArray(v.records) ||
     v.records.some(
       (r) =>
         typeof r !== 'object' ||
         r === null ||
-        typeof r.category !== 'string' ||
+        !REPORT_CATEGORIES.includes(r.category) ||
         typeof r.attempt !== 'string' ||
-        typeof r.outcome !== 'string'
+        !REPORT_TEXT.test(r.attempt) ||
+        typeof r.outcome !== 'string' ||
+        !OUTCOME.test(r.outcome)
     )
   )
     throw new Error('Malformed probe report');
-  return v;
+  // A fresh object: nothing but the validated fields leaves the guest's report.
+  return {
+    probe: v.probe,
+    phase: v.phase,
+    records: v.records.map((r) => ({
+      category: r.category,
+      attempt: r.attempt,
+      outcome: r.outcome,
+      ...(typeof r.detail === 'string' ? { detail: r.detail.slice(0, 200) } : {}),
+    })),
+  };
 }
 
 /** Encodings of a canary to look for in guest output: raw, hex (both cases) and
@@ -160,7 +180,8 @@ export class BoundaryBreachError extends Error {
   }
 }
 
-/** A boundary failure blocks shipping authorization for the run (scenario 4). */
+/** Throws on any violation (scenario 4). Callers must treat a breach as blocking
+ * shipping authorization for the run; today the gate suite is the caller. */
 export function assertBoundaryHeld(evidence: BoundaryEvidence): void {
   if (!evidence.held) throw new BoundaryBreachError(evidence.violations);
 }

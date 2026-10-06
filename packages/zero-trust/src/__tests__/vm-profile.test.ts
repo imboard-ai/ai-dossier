@@ -17,6 +17,8 @@ import {
   bakeUserData,
 } from '../vm/cloud-init';
 import {
+  assertStandaloneQcow2,
+  DOCKER_ID,
   PROFILE_PINS,
   parseManifest,
   profileDigest,
@@ -227,7 +229,12 @@ describe('adapter errors', () => {
   it('VmCleanupError carries leftovers', () => {
     const error = new VmCleanupError([1, 2], ['/a']);
     expect(error.name).toBe('VmCleanupError');
-    expect(error.message).toBe('VM teardown incomplete');
+    expect(error.message).toBe(
+      'VM teardown incomplete: 2 process(es) [1, 2], 1 path(s) [/a] left behind'
+    );
+    expect(new VmCleanupError([], []).message).toBe(
+      'VM teardown incomplete: 0 process(es) [], 0 path(s) [] left behind'
+    );
     expect(error.leftoverPids).toEqual([1, 2]);
     expect(error.leftoverPaths).toEqual(['/a']);
   });
@@ -247,5 +254,89 @@ describe('adapter errors', () => {
       commandTimeoutMs: 1_200_000,
     });
     expect(Object.isFrozen(DEFAULT_LIMITS)).toBe(true);
+  });
+});
+
+describe('assertStandaloneQcow2', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zt-qcow2-'));
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  function image(
+    over: { magic?: number; version?: number; backing?: bigint; incompatible?: bigint } = {},
+    length = 104
+  ): string {
+    const header = Buffer.alloc(length);
+    const full = Buffer.alloc(Math.max(length, 104));
+    full.writeUInt32BE(over.magic ?? 0x514649fb, 0);
+    full.writeUInt32BE(over.version ?? 3, 4);
+    full.writeBigUInt64BE(over.backing ?? 0n, 8);
+    full.writeBigUInt64BE(over.incompatible ?? 0n, 72);
+    full.copy(header, 0, 0, length);
+    const file = path.join(dir, `img-${Math.random().toString(16).slice(2)}.qcow2`);
+    fs.writeFileSync(file, header);
+    return file;
+  }
+
+  function detail(file: string): string | undefined {
+    try {
+      assertStandaloneQcow2(file);
+      return undefined;
+    } catch (error) {
+      expect(error).toBeInstanceOf(UnsupportedEnvironmentError);
+      return (error as UnsupportedEnvironmentError).detail;
+    }
+  }
+
+  it('accepts a standalone v2 or v3 image', () => {
+    expect(detail(image({ version: 3 }))).toBeUndefined();
+    expect(detail(image({ version: 2 }))).toBeUndefined();
+    // v2 has no incompatible-features field; bytes there are not interpreted.
+    expect(detail(image({ version: 2, incompatible: 4n }))).toBeUndefined();
+    expect(detail(image({ version: 2 }, 72))).toBeUndefined();
+    // v3 tolerates incompatible-feature bits other than the external data file.
+    expect(detail(image({ version: 3, incompatible: 1n }))).toBeUndefined();
+  });
+
+  it('refuses an image that names a backing file', () => {
+    expect(detail(image({ backing: 0x1000n }))).toBe('profile_image_mismatch');
+    expect(detail(image({ version: 2, backing: 1n }))).toBe('profile_image_mismatch');
+  });
+
+  it('refuses a v3 image with an external data file', () => {
+    expect(detail(image({ incompatible: 4n }))).toBe('profile_image_mismatch');
+    expect(detail(image({ incompatible: 0x7n }))).toBe('profile_image_mismatch');
+  });
+
+  it('refuses a bad magic or an unknown version', () => {
+    expect(detail(image({ magic: 0x7f454c46 }))).toBe('profile_image_mismatch');
+    expect(detail(image({ version: 1 }))).toBe('profile_image_mismatch');
+    expect(detail(image({ version: 4 }))).toBe('profile_image_mismatch');
+  });
+
+  it('refuses a short file', () => {
+    expect(detail(image({}, 0))).toBe('profile_image_mismatch');
+    expect(detail(image({ version: 2 }, 71))).toBe('profile_image_mismatch');
+    // v3 needs the incompatible-features field at offset 72.
+    expect(detail(image({ version: 3 }, 76))).toBe('profile_image_mismatch');
+  });
+
+  it('refuses to follow a symlink and throws for a missing file', () => {
+    const link = path.join(dir, 'link');
+    fs.symlinkSync(image(), link);
+    expect(() => assertStandaloneQcow2(link)).toThrow(/ELOOP|EMLINK/);
+    expect(() => assertStandaloneQcow2(path.join(dir, 'missing'))).toThrow(/ENOENT/);
+  });
+});
+
+describe('DOCKER_ID', () => {
+  it('matches only sha256 image IDs', () => {
+    expect(DOCKER_ID.test(IMAGE_ID)).toBe(true);
+    expect(DOCKER_ID.test('1'.repeat(64))).toBe(false);
+    expect(DOCKER_ID.test(`sha256:${'A'.repeat(64)}`)).toBe(false);
   });
 });

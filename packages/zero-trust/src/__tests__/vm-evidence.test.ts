@@ -84,6 +84,45 @@ describe('parseReports — untrusted marker lines', () => {
     expect(() => parseReport(undefined)).toThrow('Malformed probe report');
     expect(() => parseReport(42)).toThrow('Malformed probe report');
   });
+
+  it('parseReport accepts every attack category and the witness category', () => {
+    const report = deniedReport([...ATTACK_CATEGORIES, 'witness']);
+    expect(parseReport(report).records).toHaveLength(ATTACK_CATEGORIES.length + 1);
+    expect(
+      parseReport({
+        probe: 'probe 1.2:x/y=z_-',
+        phase: 'vm-root',
+        records: [{ category: 'witness', attempt: 'a'.repeat(200), outcome: 'not_run-x' }],
+      }).records
+    ).toHaveLength(1);
+  });
+
+  const record = { category: ATTACK_CATEGORIES[0], attempt: 'try', outcome: 'denied' };
+  it.each<[string, unknown]>([
+    ['unknown category', { probe: 'p', phase: 'x', records: [{ ...record, category: 'other' }] }],
+    ['non-string category', { probe: 'p', phase: 'x', records: [{ ...record, category: 1 }] }],
+    ['empty probe', { probe: '', phase: 'x', records: [] }],
+    ['probe with a newline', { probe: 'p\nq', phase: 'x', records: [] }],
+    ['probe over 200 chars', { probe: 'p'.repeat(201), phase: 'x', records: [] }],
+    ['phase with markup', { probe: 'p', phase: '<b>x</b>', records: [] }],
+    ['phase not a string', { probe: 'p', phase: 3, records: [] }],
+    [
+      'attempt with a backtick',
+      { probe: 'p', phase: 'x', records: [{ ...record, attempt: '`x`' }] },
+    ],
+    ['empty attempt', { probe: 'p', phase: 'x', records: [{ ...record, attempt: '' }] }],
+    ['uppercase outcome', { probe: 'p', phase: 'x', records: [{ ...record, outcome: 'DENIED' }] }],
+    ['empty outcome', { probe: 'p', phase: 'x', records: [{ ...record, outcome: '' }] }],
+    ['long outcome', { probe: 'p', phase: 'x', records: [{ ...record, outcome: 'a'.repeat(33) }] }],
+    [
+      'outcome with a space',
+      { probe: 'p', phase: 'x', records: [{ ...record, outcome: 'de nied' }] },
+    ],
+    ['non-string outcome', { probe: 'p', phase: 'x', records: [{ ...record, outcome: 0 }] }],
+    ['null record', { probe: 'p', phase: 'x', records: [null] }],
+  ])('parseReport rejects %s', (_label, value) => {
+    expect(() => parseReport(value)).toThrow('Malformed probe report');
+  });
 });
 
 describe('evaluateBoundary', () => {

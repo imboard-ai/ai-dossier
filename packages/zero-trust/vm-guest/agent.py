@@ -99,15 +99,18 @@ def op_put(request):
         return {"ok": False, "error": "too_large"}
     parent = open_parent(parts, create=True)
     try:
+        # O_NONBLOCK: a FIFO planted by worker code must not wedge the agent.
+        # Truncate only after the target is known to be a regular file.
         fd = os.open(
             parts[-1],
-            os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+            os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
             0o644,
             dir_fd=parent,
         )
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
                 return {"ok": False, "error": "not_regular"}
+            os.ftruncate(fd, 0)
             os.write(fd, raw)
             os.fchmod(fd, 0o755 if request.get("executable") is True else 0o644)
             os.fchown(fd, WORKER_UID, WORKER_UID)

@@ -8,6 +8,7 @@ import semver from 'semver';
 import { sha256 } from '../canonical/export';
 import { readPrivate, syncDirectory } from '../durable-fs';
 import { canonicalJson, snapshotJson } from '../receipt/schema';
+import type { Accelerator } from '../vm/adapter';
 import {
   type Ecosystem,
   type PackageManager,
@@ -401,10 +402,14 @@ export function loadProfileRecord(
   return deepFreeze(record);
 }
 
-/** The receipt fields (`profileDigest`, `profile`) bound to this exact record. */
-export function profileReceiptBinding(record: ProfileRecord): {
+/** The receipt fields (`profileDigest`, `profile`) bound to this exact record and
+ * to the accelerator the VM actually ran with (`VmHandle.accelerator`). */
+export function profileReceiptBinding(
+  record: ProfileRecord,
+  accelerator: Accelerator
+): {
   profileDigest: string;
-  profile: { name: string; runtime: string; imageDigest: string };
+  profile: { name: string; runtime: string; imageDigest: string; accelerator: Accelerator };
 } {
   return {
     profileDigest: sha256(canonicalJson(record)),
@@ -412,6 +417,7 @@ export function profileReceiptBinding(record: ProfileRecord): {
       name: record.profile.id,
       runtime: `${record.profile.ecosystem}@${record.profile.runtimeVersion}`,
       imageDigest: record.profile.imageDigest,
+      accelerator,
     },
   };
 }

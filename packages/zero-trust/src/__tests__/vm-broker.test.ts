@@ -10,6 +10,7 @@ import {
   MAX_FILE_BYTES,
   MAX_FRAME_BYTES,
   MAX_STREAM_BYTES,
+  validateExecArgv,
   validateRequest,
 } from '../vm/broker';
 
@@ -254,6 +255,11 @@ describe('validateRequest', () => {
       () => validateRequest({ op: 'put', path: 'a', data: 'abc', executable: false }),
       'invalid_data'
     );
+    for (const data of [undefined, null, 42, ['aGk='], { s: 'aGk=' }])
+      throwsCode(
+        () => validateRequest({ op: 'put', path: 'a', data: data as never, executable: false }),
+        'invalid_data'
+      );
     throwsCode(
       () => validateRequest({ op: 'put', path: 'a', data: 'a b=', executable: false }),
       'invalid_data'
@@ -281,7 +287,66 @@ describe('validateRequest', () => {
   });
 });
 
+describe('validateExecArgv', () => {
+  it('returns the profile and a copy of argv', () => {
+    const argv = ['npm', 'test'];
+    const result = validateExecArgv('node', argv);
+    expect(result).toEqual({ profile: 'node', argv: ['npm', 'test'] });
+    expect(result.argv).not.toBe(argv);
+    expect(validateExecArgv('python', ['python3', '-V']).profile).toBe('python');
+  });
+
+  it.each([
+    ['an unknown profile', 'ruby', ['x'], 'invalid_profile'],
+    ['a non-string profile', 1, ['x'], 'invalid_profile'],
+    ['a missing argv', 'node', undefined, 'invalid_argv'],
+    ['a non-array argv', 'node', 'npm test', 'invalid_argv'],
+    ['an empty argv', 'node', [], 'invalid_argv'],
+    ['a non-string argument', 'node', ['npm', 1], 'invalid_argv'],
+    ['a NUL byte', 'node', ['a\0b'], 'invalid_argv'],
+    ['an oversized argument', 'node', ['x'.repeat(8193)], 'invalid_argv'],
+    ['too many arguments', 'node', Array.from({ length: 1000 }, () => 'x'), 'invalid_argv'],
+  ])('rejects %s', (_label, profile, argv, code) => {
+    throwsCode(() => validateExecArgv(profile, argv), code);
+  });
+
+  it('refuses secret-shaped arguments', () => {
+    expect(() => validateExecArgv('node', ['echo', `ghp_${'a'.repeat(36)}`])).toThrow(
+      SecretRedactionError
+    );
+  });
+
+  it('is what validateRequest applies to an exec', () => {
+    throwsCode(
+      () =>
+        validateRequest({
+          op: 'exec',
+          profile: 'ruby' as 'node',
+          argv: ['x'],
+          cwd: '',
+          timeoutMs: 1000,
+        }),
+      'invalid_profile'
+    );
+  });
+});
+
 describe('BrokerClient handshake', () => {
+  it('exposes the announced scope through a read-only getter, null before the hello', async () => {
+    const guest = guestPair();
+    const client = new BrokerClient(guest.stream);
+    clients.push(client);
+    expect(client.scope).toBeNull();
+    expect(() => {
+      (client as unknown as { scope: string }).scope = 'vm-root';
+    }).toThrow(TypeError);
+    const ready = client.waitReady(1000);
+    await guest.next();
+    guest.send(hello('container'));
+    expect(await ready).toBe('container');
+    expect(client.scope).toBe('container');
+  });
+
   it('resolves with vm-root scope and stays ready', async () => {
     const { client } = await readyClient('vm-root');
     expect(client.scope).toBe('vm-root');

@@ -1,5 +1,7 @@
 /** Provider-neutral disposable-VM contract (PRD §5.4). Implementations own the
  * hypervisor; callers only see typed lifecycle and broker operations. */
+import type { Journal } from '../journal';
+import { assertNoSecrets } from '../redaction';
 import { ReasonCode } from '../state';
 
 export type Accelerator = 'kvm' | 'tcg';
@@ -18,7 +20,8 @@ export interface VmLimits {
   readonly commandTimeoutMs: number;
 }
 
-/** PRD §5.1 defaults: 4 vCPU, 8 GiB RAM, 20 GiB scratch, 20 minutes per command. */
+/** PRD §5.1 defaults: 4 vCPU, 8 GiB RAM, 20 GiB scratch, 20 minutes per command. Space
+ * beyond the 16 GiB baked disk is not usable until the root partition is grown. */
 export const DEFAULT_LIMITS: VmLimits = Object.freeze({
   vcpus: 4,
   memoryMiB: 8192,
@@ -108,15 +111,37 @@ export class VmCleanupError extends Error {
     readonly leftoverPids: readonly number[],
     readonly leftoverPaths: readonly string[]
   ) {
-    super('VM teardown incomplete');
+    super(
+      `VM teardown incomplete: ${leftoverPids.length} process(es) [${leftoverPids.join(', ')}], ` +
+        `${leftoverPaths.length} path(s) [${leftoverPaths.join(', ')}] left behind`
+    );
     this.name = 'VmCleanupError';
   }
 }
 
-/** Raised when the guest breaks protocol; the VM is tainted and must be destroyed. */
+/** Broker failure. Host-side request rejections and `guest_*` error replies
+ * leave the VM usable; a protocol violation by the guest taints it
+ * (`BrokerClient.tainted`) and the VM must be destroyed. */
 export class BrokerError extends Error {
   constructor(readonly code: string) {
     super(`Worker broker rejected: ${code}`);
     this.name = 'BrokerError';
   }
+}
+
+/** Appends a VM lifecycle event to a journal dedicated to VM events, after
+ * checking every string in it, nested values included, for secret material. */
+export function appendVmEvent(
+  journal: Journal | undefined,
+  at: Date,
+  event: Record<string, unknown>
+): void {
+  if (!journal) return;
+  const scan = (value: unknown): void => {
+    if (typeof value === 'string') assertNoSecrets(value);
+    else if (Array.isArray(value)) value.forEach(scan);
+    else if (value !== null && typeof value === 'object') Object.values(value).forEach(scan);
+  };
+  scan(event);
+  journal.append({ v: 1, at: at.toISOString(), ...event });
 }

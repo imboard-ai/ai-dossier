@@ -2,8 +2,9 @@
  * pin changes the profile digest, which invalidates cached images and receipts. */
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
+import { sha256 } from '../canonical/export';
 import { canonicalJson } from '../receipt/schema';
-import { UnsupportedEnvironmentError } from './adapter';
+import { type ContainerProfile, UnsupportedEnvironmentError } from './adapter';
 
 export const PROFILE_PINS = Object.freeze({
   schema: 'zt-vm-profile-v1',
@@ -41,7 +42,7 @@ export interface VmProfileManifest {
   /** SHA-256 of the flattened, baked qcow2 that run overlays are built on. */
   readonly imageSha256: string;
   readonly imageFile: string;
-  readonly containerImages: Readonly<Record<'node' | 'python', string>>;
+  readonly containerImages: Readonly<Record<ContainerProfile, string>>;
   readonly bakedAt: string;
 }
 
@@ -62,19 +63,44 @@ export function sha256File(file: string): string {
 }
 
 export function profileDigest(agentSource: string): string {
-  return createHash('sha256')
-    .update(
-      canonicalJson({
-        pins: PROFILE_PINS,
-        recipe: BAKE_RECIPE_VERSION,
-        agent: createHash('sha256').update(agentSource).digest('hex'),
-      })
-    )
-    .digest('hex');
+  return sha256(
+    canonicalJson({ pins: PROFILE_PINS, recipe: BAKE_RECIPE_VERSION, agent: sha256(agentSource) })
+  );
+}
+
+const QCOW2_MAGIC = 0x514649fb;
+/** qcow2 v3 incompatible-feature bit for an external data file. */
+const QCOW2_EXTERNAL_DATA_FILE = 4n;
+
+/** The baked image must not reference another file. A qcow2 header can name a
+ * backing file or an external data file, and QEMU would open either with the
+ * controller's privileges, so a swapped image could expose host files as disk. */
+export function assertStandaloneQcow2(file: string): void {
+  const header = Buffer.alloc(80);
+  const fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  let read: number;
+  try {
+    read = fs.readSync(fd, header, 0, header.length, 0);
+  } finally {
+    fs.closeSync(fd);
+  }
+  const version = read >= 72 ? header.readUInt32BE(4) : 0;
+  const standalone =
+    read >= 72 &&
+    header.readUInt32BE(0) === QCOW2_MAGIC &&
+    (version === 2 || version === 3) &&
+    header.readBigUInt64BE(8) === 0n &&
+    (version === 2 ||
+      (read >= 80 && (header.readBigUInt64BE(72) & QCOW2_EXTERNAL_DATA_FILE) === 0n));
+  if (!standalone)
+    throw new UnsupportedEnvironmentError(
+      'profile_image_mismatch',
+      'the baked profile image is not a standalone qcow2 (it names a backing or data file)'
+    );
 }
 
 const HEX64 = /^[a-f0-9]{64}$/;
-const DOCKER_ID = /^sha256:[a-f0-9]{64}$/;
+export const DOCKER_ID = /^sha256:[a-f0-9]{64}$/;
 
 export function parseManifest(value: unknown, expectedDigest: string): VmProfileManifest {
   const m = value as VmProfileManifest;

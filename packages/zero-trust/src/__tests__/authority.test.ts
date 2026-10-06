@@ -179,6 +179,16 @@ describe('admitModelAction — hostile proposals from a compliant model (AC2 / s
     );
   });
 
+  it('rejects worker_write_file content carrying credential material', () => {
+    for (const content of ['token = ghp_abc123', 'Authorization: Bearer xyz', 'key=sk-ant-1'])
+      expect(admitCode({ kind: 'worker_write_file', path: 'a.txt', content })).toBe(
+        'credential_material'
+      );
+    expect(
+      admitModelAction({ kind: 'worker_write_file', path: 'a.txt', content: 'plain text' }, BINDING)
+    ).toEqual({ kind: 'worker_write_file', path: 'a.txt', content: 'plain text' });
+  });
+
   it('rejects worker_write_file content that is not a string or too large', () => {
     expect(admitCode({ kind: 'worker_write_file', path: 'a.txt', content: 1 })).toBe(
       'invalid_field'

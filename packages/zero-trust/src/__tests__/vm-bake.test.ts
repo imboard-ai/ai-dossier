@@ -84,20 +84,79 @@ describe('ensureBaseImage', () => {
 
   it('throws on a download hash mismatch and leaves no partial file', async () => {
     const fetchImpl = okFetch(Buffer.from('not the pinned image'));
+    const bytes = Buffer.from('not the pinned image');
+    const actual = createHash('sha256').update(bytes).digest('hex');
     await expect(ensureBaseImage(cacheDir, fetchImpl)).rejects.toThrow(
-      'Base image SHA-256 does not match the pin'
+      `Base image SHA-256 does not match the pin: expected ${PROFILE_PINS.baseImage.sha256}, got ${actual} (${bytes.length} bytes from ${PROFILE_PINS.baseImage.url})`
     );
     expect(fs.readdirSync(cacheDir)).toEqual([]);
   });
 
   it('throws on a non-ok response or a missing body', async () => {
     await expect(ensureBaseImage(cacheDir, okFetch(null, 404))).rejects.toThrow(
-      'Base image download failed: 404'
+      `Base image download from ${PROFILE_PINS.baseImage.url} failed: HTTP 404`
     );
     await expect(ensureBaseImage(cacheDir, okFetch(null, 200))).rejects.toThrow(
-      'Base image download failed: 200'
+      `Base image download from ${PROFILE_PINS.baseImage.url} failed: HTTP 200`
     );
     expect(fs.readdirSync(cacheDir)).toEqual([]);
+  });
+
+  it('passes an abort signal and abandons a request that stalls before responding', async () => {
+    vi.useFakeTimers();
+    try {
+      let signal: AbortSignal | undefined;
+      const fetchImpl = vi.fn(
+        (_url: unknown, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            signal = init?.signal ?? undefined;
+            signal?.addEventListener('abort', () =>
+              reject(new DOMException('aborted', 'AbortError'))
+            );
+          })
+      ) as unknown as typeof fetch;
+      const result = ensureBaseImage(cacheDir, fetchImpl).catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(119_000);
+      expect(signal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1_000);
+      const error = (await result) as Error;
+      expect(signal?.aborted).toBe(true);
+      expect(error.message).toBe(
+        `Base image download from ${PROFILE_PINS.baseImage.url} stalled for 120 s`
+      );
+      expect(fs.readdirSync(cacheDir)).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('abandons a body that stops delivering, keeping the idle timer alive per chunk', async () => {
+    vi.useFakeTimers();
+    try {
+      const fetchImpl = vi.fn(async (_url: unknown, init?: RequestInit) => {
+        const signal = init?.signal;
+        let sent = 0;
+        const body = new ReadableStream<Uint8Array>({
+          pull(controller) {
+            // Two chunks, then nothing until the request is aborted.
+            if (sent++ < 2) return controller.enqueue(new Uint8Array(10));
+            return new Promise<void>((_resolve, reject) =>
+              signal?.addEventListener('abort', () =>
+                reject(new DOMException('aborted', 'AbortError'))
+              )
+            );
+          },
+        });
+        return new Response(body);
+      }) as unknown as typeof fetch;
+      const result = ensureBaseImage(cacheDir, fetchImpl).catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(120_000);
+      const error = (await result) as Error;
+      expect(error.message).toMatch(/stalled for 120 s$/);
+      expect(fs.readdirSync(cacheDir)).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('uses the global fetch by default', async () => {
@@ -120,8 +179,12 @@ describe('parseBakeConsole', () => {
   });
 
   it('fails on the failure marker even with a result', () => {
-    expect(() => parseBakeConsole(`${BAKE_FAILED_MARKER} line=3\n${RESULT_LINE}`)).toThrow(
-      'Bake script failed inside the VM'
+    expect(() =>
+      parseBakeConsole(`boot\n  ${BAKE_FAILED_MARKER} line=3 exit=1  \n${RESULT_LINE}`)
+    ).toThrow(`Bake script failed inside the VM: ${BAKE_FAILED_MARKER} line=3 exit=1`);
+    const long = `${BAKE_FAILED_MARKER} ${'x'.repeat(500)}`;
+    expect(() => parseBakeConsole(long)).toThrow(
+      new Error(`Bake script failed inside the VM: ${long.slice(0, 200)}`)
     );
   });
 
@@ -159,6 +222,7 @@ describe('bakeProfile', () => {
     runs: { binary: string; args: readonly string[]; env: Record<string, string> }[];
     launches: { args: readonly string[]; env: Record<string, string>; stderrFile: string }[];
     kills: [number, NodeJS.Signals][];
+    listenersAtLaunch?: number;
   }
 
   function fakeOps(
@@ -176,6 +240,9 @@ describe('bakeProfile', () => {
         },
         async launch(_binary, args, env, stderrFile): Promise<Launched> {
           fake.launches.push({ args, env, stderrFile });
+          fake.listenersAtLaunch = process.listenerCount('SIGINT');
+          if (fs.existsSync(path.dirname(stderrFile)))
+            fs.writeFileSync(stderrFile, 'qemu: bake stderr\n');
           const serial = String(args[args.indexOf('-serial') + 1]);
           if (consoleText !== null) fs.writeFileSync(serial.slice('file:'.length), consoleText);
           return { pid: 777, exited };
@@ -240,6 +307,67 @@ describe('bakeProfile', () => {
     expect(args[args.indexOf('-smp') + 1]).toBe('2');
     expect(args[args.indexOf('-m') + 1]).toBe('2048');
     expect(log).toHaveBeenCalledWith('baking with kvm');
+    // The flattened image is written inside the work dir, then renamed into place.
+    const convert = fake.runs[2]?.args ?? [];
+    expect(path.dirname(String(convert.at(-1)))).toMatch(/\.bake-/);
+    expect(path.basename(String(convert.at(-1)))).toBe(manifest.imageFile);
+    expect(fs.readFileSync(path.join(profileDir, 'last-bake-qemu.err'), 'utf8')).toBe(
+      'qemu: bake stderr\n'
+    );
+  });
+
+  it('removes its SIGINT/SIGTERM listeners after a bake, successful or not', async () => {
+    seedCache();
+    const before = {
+      SIGINT: process.listenerCount('SIGINT'),
+      SIGTERM: process.listenerCount('SIGTERM'),
+    };
+    const fake = fakeOps(RESULT_LINE);
+    await bakeProfile({ profileDir, cacheDir, tools, ops: fake.ops });
+    expect(fake.listenersAtLaunch).toBe(before.SIGINT + 1);
+    const failing = fakeOps(`${BAKE_FAILED_MARKER} line=1\n`);
+    await expect(bakeProfile({ profileDir, cacheDir, tools, ops: failing.ops })).rejects.toThrow(
+      'Bake script failed'
+    );
+    expect(failing.listenersAtLaunch).toBe(before.SIGINT + 1);
+    expect(process.listenerCount('SIGINT')).toBe(before.SIGINT);
+    expect(process.listenerCount('SIGTERM')).toBe(before.SIGTERM);
+  });
+
+  it('on an interrupt kills the bake VM, removes the work dir and re-raises the signal', async () => {
+    seedCache();
+    const existing = new Set(process.listeners('SIGTERM'));
+    const reraised = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    try {
+      const interrupt = () => {
+        const listener = process.listeners('SIGTERM').find((l) => !existing.has(l));
+        if (!listener) throw new Error('expected the bake to listen for SIGTERM');
+        (listener as (signal: NodeJS.Signals) => void)('SIGTERM');
+      };
+      const exited = new Promise<string>((resolve) => setImmediate(resolve, '')).then((tail) => {
+        interrupt();
+        return tail;
+      });
+      const fake = fakeOps(null, exited);
+      const kill = fake.ops.kill;
+      fake.ops.kill = (pid, signal) => {
+        kill(pid, signal);
+        throw new Error('ESRCH');
+      };
+      const launch = fake.ops.launch;
+      fake.ops.launch = async (...args) => {
+        interrupt(); // before the PID is known: nothing to kill yet
+        return launch(...args);
+      };
+      await expect(bakeProfile({ profileDir, cacheDir, tools, ops: fake.ops })).rejects.toThrow(
+        'Bake VM did not start'
+      );
+      expect(fake.kills).toEqual([[777, 'SIGKILL']]);
+      expect(reraised).toHaveBeenCalledWith(process.pid, 'SIGTERM');
+      expect(leftovers()).toEqual([]);
+    } finally {
+      reraised.mockRestore();
+    }
   });
 
   it('replaces a previous image of the same profile', async () => {
@@ -254,7 +382,7 @@ describe('bakeProfile', () => {
     // Either way no process is launched, since the base image comes first.
     await expect(
       bakeProfile({ profileDir, cacheDir, fetchImpl: okFetch(null, 503) })
-    ).rejects.toThrow(/Execution profile refused|Base image download failed: 503/);
+    ).rejects.toThrow(/Execution profile refused|failed: HTTP 503/);
   });
 
   it('kills the VM and throws when the bake times out', async () => {
@@ -262,7 +390,9 @@ describe('bakeProfile', () => {
     const fake = fakeOps(null, new Promise<string>(() => undefined));
     await expect(
       bakeProfile({ profileDir, cacheDir, tools, ops: fake.ops, timeoutMs: 10 })
-    ).rejects.toThrow('Bake timed out');
+    ).rejects.toThrow(
+      `Bake timed out after 0 min under kvm; console kept at ${path.join(profileDir, 'last-bake-console.log')}`
+    );
     expect(fake.kills).toEqual([[777, 'SIGKILL']]);
     expect(leftovers()).toEqual([]);
     expect(fs.existsSync(path.join(profileDir, 'last-bake-console.log'))).toBe(false);
@@ -282,8 +412,13 @@ describe('bakeProfile', () => {
     const fake = fakeOps(`${BAKE_FAILED_MARKER} line=12\n`);
     await expect(
       bakeProfile({ profileDir, cacheDir, tools: { ...tools, accelerator: 'tcg' }, ops: fake.ops })
-    ).rejects.toThrow('Bake script failed inside the VM');
+    ).rejects.toThrow(
+      `Bake script failed inside the VM: ${BAKE_FAILED_MARKER} line=12; console kept at ${path.join(profileDir, 'last-bake-console.log')}; QEMU stderr: `
+    );
     expect(leftovers()).toEqual([]);
+    expect(fs.readFileSync(path.join(profileDir, 'last-bake-qemu.err'), 'utf8')).toBe(
+      'qemu: bake stderr\n'
+    );
     expect(fs.readFileSync(path.join(profileDir, 'last-bake-console.log'), 'utf8')).toContain(
       BAKE_FAILED_MARKER
     );

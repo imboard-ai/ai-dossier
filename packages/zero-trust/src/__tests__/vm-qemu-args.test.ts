@@ -4,8 +4,11 @@ import {
   BOOT_TIMEOUT_MS,
   BROKER_PORT_NAME,
   buildBakeArgs,
+  buildOverlayArgs,
   buildRunArgs,
   MAX_SOCKET_PATH_BYTES,
+  netdevValue,
+  QEMU_ENV,
   RUN_NETWORK_POLICY,
   type RunArgs,
   SCOPE_OEM_PREFIX,
@@ -43,6 +46,19 @@ describe('buildRunArgs — untrusted run boundary', () => {
   it('uses restricted user-mode networking with no forwards', () => {
     expect(valuesOf(argv, '-netdev')).toEqual(['user,id=net0,restrict=on']);
     expect(joined).not.toMatch(/hostfwd|guestfwd/);
+  });
+
+  it('derives the -netdev value from RUN_NETWORK_POLICY', () => {
+    const expected = [
+      'user',
+      'id=net0',
+      `restrict=${RUN_NETWORK_POLICY.restrict ? 'on' : 'off'}`,
+      ...RUN_NETWORK_POLICY.guestForwards.map((rule) => `guestfwd=${rule}`),
+      ...RUN_NETWORK_POLICY.hostForwards.map((rule) => `hostfwd=${rule}`),
+    ].join(',');
+    expect(valuesOf(argv, '-netdev')).toEqual([expected]);
+    // The policy is the only source: with no forwards and restrict on, the value is fixed.
+    expect(expected).toBe('user,id=net0,restrict=on');
   });
 
   it('shares no host filesystem and exposes only the broker chardev', () => {
@@ -202,5 +218,75 @@ describe('policy constants', () => {
     expect(TIMEOUT_SCALE.tcg).toBeGreaterThan(TIMEOUT_SCALE.kvm);
     expect(BOOT_TIMEOUT_MS.tcg).toBeGreaterThan(BOOT_TIMEOUT_MS.kvm);
     expect(Object.isFrozen(TIMEOUT_SCALE)).toBe(true);
+  });
+});
+
+describe('buildOverlayArgs', () => {
+  it('builds a qcow2 overlay on a qcow2 base', () => {
+    expect(buildOverlayArgs('/p/base.qcow2', '/s/disk.qcow2', 20)).toEqual([
+      'create',
+      '-q',
+      '-f',
+      'qcow2',
+      '-F',
+      'qcow2',
+      '-b',
+      '/p/base.qcow2',
+      '/s/disk.qcow2',
+      '20G',
+    ]);
+  });
+
+  it.each([
+    ['/p/base,file.qcow2', '/s/disk.qcow2'],
+    ['/p/base.qcow2', '/s/disk\nx.qcow2'],
+    ['/p/base.qcow2', '/s/a,b'],
+    ['', '/s/disk.qcow2'],
+    ['/p/base.qcow2', '/s/d\0'],
+  ])('rejects unsafe paths (%j, %j)', (base, disk) => {
+    expect(() => buildOverlayArgs(base, disk, 20)).toThrow('Unsafe QEMU option value');
+  });
+
+  it.each([
+    0,
+    -1,
+    1.5,
+    Number.NaN,
+    Number.POSITIVE_INFINITY,
+    2 ** 60,
+  ])('rejects disk size %j', (size) => {
+    expect(() => buildOverlayArgs('/p/base.qcow2', '/s/disk.qcow2', size)).toThrow(
+      'Invalid disk size'
+    );
+  });
+
+  it('accepts the smallest valid size', () => {
+    expect(buildOverlayArgs('/b', '/d', 1).at(-1)).toBe('1G');
+  });
+});
+
+describe('netdevValue', () => {
+  it('renders the run policy as restricted user-mode networking with no forwards', () => {
+    expect(netdevValue()).toBe('user,id=net0,restrict=on');
+  });
+
+  it('renders forwards and an unrestricted policy when one is given', () => {
+    expect(
+      netdevValue({
+        restrict: false,
+        guestForwards: ['tcp:10.0.2.100:80-tcp:127.0.0.1:3128'],
+        hostForwards: ['tcp::2222-:22'],
+      })
+    ).toBe(
+      'user,id=net0,restrict=off,guestfwd=tcp:10.0.2.100:80-tcp:127.0.0.1:3128,hostfwd=tcp::2222-:22'
+    );
+  });
+});
+
+describe('QEMU_ENV', () => {
+  it('carries only PATH and LANG and is frozen', () => {
+    expect(Object.keys(QEMU_ENV).sort()).toEqual(['LANG', 'PATH']);
+    expect(QEMU_ENV.LANG).toBe('C');
+    expect(Object.isFrozen(QEMU_ENV)).toBe(true);
   });
 });

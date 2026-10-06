@@ -1,8 +1,9 @@
 /** Bounded VM teardown (PRD §5.9, scenario 20). Three failed deletions put the
  * run in `blocked_cleanup`, which has no edge back to execution or shipping. */
+import { isAdmitted, type OperationKind } from '../intents';
 import type { Journal } from '../journal';
 import { ReasonCode, type RunRecord, transitionRun } from '../state';
-import { type VmAdapter, VmCleanupError, type VmHandle } from './adapter';
+import { appendVmEvent, type VmAdapter, VmCleanupError, type VmHandle } from './adapter';
 
 export const MAX_CLEANUP_ATTEMPTS = 3;
 
@@ -28,7 +29,11 @@ export async function teardownVm(
   handle: Pick<VmHandle, 'vmId' | 'runId'>,
   run: RunRecord,
   options: {
+    /** Dedicated VM event journal (see LocalQemuOptions.journal). */
     journal?: Journal;
+    /** Persists the blocked run where the admission fence reads it, e.g.
+     * `IntentDriver.observeRun`, before the outcome is returned. */
+    observeRun?: (run: RunRecord) => void;
     now: () => Date;
     retryDelayMs?: number;
     sleep?: (ms: number) => Promise<void>;
@@ -45,9 +50,7 @@ export async function teardownVm(
         error instanceof VmCleanupError
           ? error
           : new VmCleanupError([], [`unknown:${handle.vmId}`]);
-      options.journal?.append({
-        v: 1,
-        at: options.now().toISOString(),
+      appendVmEvent(options.journal, options.now(), {
         type: 'vm_cleanup_attempt_failed',
         runId: handle.runId,
         vmId: handle.vmId,
@@ -60,9 +63,8 @@ export async function teardownVm(
   }
   const failure = last as VmCleanupError;
   const blocked = transitionRun(run, ReasonCode.CleanupFailed, options.now().toISOString());
-  options.journal?.append({
-    v: 1,
-    at: options.now().toISOString(),
+  options.observeRun?.(blocked);
+  appendVmEvent(options.journal, options.now(), {
     type: 'vm_cleanup_blocked',
     runId: handle.runId,
     vmId: handle.vmId,
@@ -79,8 +81,8 @@ export async function teardownVm(
   };
 }
 
-/** Called by the shipping broker before any GitHub write. Only a run that is
- * currently `shipping` may publish; `blocked_cleanup` can never get there. */
-export function assertPublicationPermitted(run: RunRecord): void {
-  if (run.state !== 'shipping') throw new PublicationDeniedError(run.state);
+/** Must be called by the shipping broker before any GitHub write. Delegates to
+ * the intent admission table, which admits nothing in `blocked_cleanup`. */
+export function assertPublicationPermitted(run: RunRecord, operationKind: OperationKind): void {
+  if (!isAdmitted(operationKind, run.state)) throw new PublicationDeniedError(run.state);
 }

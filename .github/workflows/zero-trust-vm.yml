@@ -9,8 +9,6 @@ name: Zero-trust VM gate
 # only (never `pull_request_target`). The planted canaries are random per run.
 on:
   pull_request:
-    branches:
-      - main
     paths:
       - 'packages/zero-trust/**'
       - '.github/workflows/zero-trust-vm.yml'
@@ -60,8 +58,10 @@ jobs:
           npm ci --ignore-scripts
           make build-zero-trust
 
-      # Keyed by every input of the profile digest; the adapter re-verifies the
-      # image hash against the manifest before the first VM.
+      # Keyed by every input of the profile digest. The adapter re-checks the image
+      # against its manifest and refuses a qcow2 that names a backing or data file;
+      # that is integrity, not authentication. Cache entries a pull request writes
+      # are scoped to its own ref, so it can only poison its own runs.
       - name: Restore baked profile
         id: profile-cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -99,33 +99,22 @@ jobs:
         run: |
           export ZT_PROFILE_DIR="$RUNNER_TEMP/zt-profile"
           export ZT_EVIDENCE_OUT="$RUNNER_TEMP/gate-evidence-kvm.json"
-          npx vitest run src/__tests__/vm-gate.e2e.test.ts
+          # Guest output reaches this log; stop it from issuing workflow commands.
+          token=$(openssl rand -hex 16)
+          echo "::stop-commands::$token"
+          rc=0
+          npx vitest run src/__tests__/vm-gate.e2e.test.ts || rc=$?
+          echo "::$token::"
+          exit "$rc"
 
       # Run VMs have no console by design. When boot fails, boot the same image
       # once more with a serial log (no fixture code runs) so the cause is visible.
       - name: Diagnose run-VM boot
         if: failure()
+        working-directory: packages/zero-trust
         run: |
-          img=$(node -e 'const m=require(process.argv[1]);console.log(m.imageFile)' "$RUNNER_TEMP/zt-profile/manifest.json")
-          qemu-img create -q -f qcow2 -F qcow2 -b "$RUNNER_TEMP/zt-profile/$img" "$RUNNER_TEMP/diag.qcow2" 16G
-          qemu-system-x86_64 -machine q35,accel=kvm -cpu host -smp 2 -m 4096 \
-            -nodefaults -no-user-config -display none -no-reboot \
-            -serial "file:$RUNNER_TEMP/diag-console.log" \
-            -drive "file=$RUNNER_TEMP/diag.qcow2,if=virtio,format=qcow2" \
-            -netdev user,id=net0,restrict=on -device virtio-net-pci,netdev=net0 \
-            -device virtio-serial-pci -chardev "socket,id=broker,path=$RUNNER_TEMP/diag.sock,server=on,wait=off" \
-            -device virtserialport,chardev=broker,name=org.ai-dossier.zt.broker \
-            -smbios type=11,value=org.ai-dossier.zt.scope:vm-root &
-          qemu=$!
-          sleep 5
-          # The scope the guest announces for a controller-set vm-root flag.
-          node -e '
-            const s = require("net").connect(process.argv[1]);
-            s.on("data", (d) => { console.log("hello reply:", d.toString().trim()); process.exit(0); });
-            s.write(JSON.stringify({ v: 1, id: 0, op: "hello" }) + "\n");
-            setTimeout(() => { console.log("no hello reply"); process.exit(0); }, 120000);
-          ' "$RUNNER_TEMP/diag.sock" || true
-          kill "$qemu" || true
+          node scripts/zt-vm.mjs diagnose --profile-dir "$RUNNER_TEMP/zt-profile" \
+            --out-dir "$RUNNER_TEMP" --accel kvm --scope vm-root || true
           grep -n -i -E 'modules-load|zt-agent|docker' "$RUNNER_TEMP/diag-console.log" | tail -n 40 || true
           tail -n 60 "$RUNNER_TEMP/diag-console.log" || true
 
@@ -139,12 +128,14 @@ jobs:
             const smoke = read(`${t}/smoke-kvm.json`);
             const gate = read(`${t}/gate-evidence-kvm.json`);
             const lines = ["## Zero-trust VM gate (KVM)", ""];
-            lines.push(`Boundary held: **${gate ? gate.held : "no evidence"}**`);
+            lines.push(`Boundary held: **${gate ? gate.held === true : "no evidence"}**`);
+            // Coverage keys and violations carry guest text: keep them inside a code block.
+            const block = (value) => ["```", JSON.stringify(value, null, 1).replace(/`/g, "'").slice(0, 20000), "```"];
             if (gate) {
-              lines.push(`Attempts: ${gate.attempts}; host listener connections: ${gate.listenerConnections}`);
-              lines.push("", "Coverage: " + Object.entries(gate.coverage).map(([k, v]) => `${k}=${v}`).join(", "));
-              lines.push("", "Violations: " + (gate.violations.length ? gate.violations.join("; ") : "none"));
-              lines.push("", "Gate timings (ms): " + JSON.stringify(gate.timings));
+              lines.push(`Attempts: ${Number(gate.attempts)}; host listener connections: ${Number(gate.listenerConnections)}`);
+              lines.push("", "Coverage:", ...block(gate.coverage));
+              lines.push("", "Violations:", ...block(gate.violations));
+              lines.push("", "Gate timings (ms):", ...block(gate.timings));
             }
             if (smoke) lines.push("", "Smoke timings (ms): " + JSON.stringify(smoke));
             fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join("\n") + "\n");
@@ -160,6 +151,8 @@ jobs:
             ${{ runner.temp }}/gate-evidence-kvm.json
             ${{ runner.temp }}/zt-timings.env
             ${{ runner.temp }}/zt-profile/last-bake-console.log
+            ${{ runner.temp }}/zt-profile/last-bake-qemu.err
+            ${{ runner.temp }}/zt-state/diagnostics
             ${{ runner.temp }}/diag-console.log
           if-no-files-found: warn
 

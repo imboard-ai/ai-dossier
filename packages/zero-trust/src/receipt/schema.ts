@@ -1,7 +1,7 @@
 import Ajv from 'ajv';
 import { assertNoSecrets } from '../redaction';
 
-export const RECEIPT_VERSION = 'ztfc-receipt-v1' as const;
+export const RECEIPT_VERSION = 'ztfc-receipt-v2' as const;
 export const RECEIPT_TTL_MS = 15 * 60 * 1000;
 export const SHIPPING_KINDS = ['push_branch', 'pr_create', 'pr_update'] as const;
 export type ShippingKind = (typeof SHIPPING_KINDS)[number];

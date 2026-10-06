@@ -4,9 +4,9 @@
  * controller, never from the proposal. There is no action that reads secrets. */
 import type { IntentInput } from './intents';
 import { SHIPPING_KINDS, type ShippingKind } from './receipt/schema';
-import { assertNoSecrets } from './redaction';
+import { assertNoSecrets, SecretRedactionError } from './redaction';
 import type { ContainerProfile } from './vm/adapter';
-import { assertWorkspacePath, MAX_FILE_BYTES, validateRequest } from './vm/broker';
+import { assertWorkspacePath, MAX_FILE_BYTES, validateExecArgv } from './vm/broker';
 
 export interface AuthorityBinding {
   readonly contributionId: string;
@@ -37,12 +37,20 @@ export class AuthorityError extends Error {
   }
 }
 
+const MAX_TITLE_CHARS = 256;
+const MAX_BODY_CHARS = 65536;
+const MAX_REASON_CHARS = 2000;
+
 const FIELDS: Readonly<Record<AdmittedAction['kind'], readonly string[]>> = Object.freeze({
   worker_exec: ['kind', 'profile', 'argv'],
   worker_write_file: ['kind', 'path', 'content'],
   request_publication: ['kind', 'operation', 'title', 'body'],
   hand_off: ['kind', 'reason'],
 });
+
+function isActionKind(value: unknown): value is AdmittedAction['kind'] {
+  return typeof value === 'string' && Object.hasOwn(FIELDS, value);
+}
 
 function text(value: unknown, max: number): string {
   if (typeof value !== 'string' || value.length > max) throw new AuthorityError('invalid_field');
@@ -59,32 +67,20 @@ export function admitModelAction(proposal: unknown, binding: AuthorityBinding): 
     throw new AuthorityError('not_an_action');
   const raw = proposal as Record<string, unknown>;
   const kind = raw.kind;
-  if (typeof kind !== 'string' || !Object.hasOwn(FIELDS, kind))
-    throw new AuthorityError('unknown_action');
-  const allowed = FIELDS[kind as AdmittedAction['kind']];
+  if (!isActionKind(kind)) throw new AuthorityError('unknown_action');
+  const allowed = FIELDS[kind];
   // Any extra key (target, repo, base, head, token, network, budget...) is an override attempt.
   for (const key of Object.keys(raw))
     if (!allowed.includes(key)) throw new AuthorityError('unexpected_field');
   switch (kind) {
     case 'worker_exec': {
       try {
-        const request = validateRequest({
-          op: 'exec',
-          profile: raw.profile as ContainerProfile,
-          argv: raw.argv as string[],
-          cwd: '',
-          timeoutMs: 60_000,
-        });
-        if (request.op !== 'exec') throw new AuthorityError('invalid_field');
-        return { kind, profile: request.profile, argv: request.argv };
+        const { profile, argv } = validateExecArgv(raw.profile, raw.argv);
+        return { kind, profile, argv };
       } catch (error) {
-        throw error instanceof AuthorityError
-          ? error
-          : new AuthorityError(
-              error instanceof Error && error.name === 'SecretRedactionError'
-                ? 'credential_material'
-                : 'invalid_field'
-            );
+        throw new AuthorityError(
+          error instanceof SecretRedactionError ? 'credential_material' : 'invalid_field'
+        );
       }
     }
     case 'worker_write_file': {
@@ -97,6 +93,12 @@ export function admitModelAction(proposal: unknown, binding: AuthorityBinding): 
       const content = raw.content;
       if (typeof content !== 'string' || Buffer.byteLength(content) > MAX_FILE_BYTES)
         throw new AuthorityError('invalid_field');
+      // Written files can end up in the published candidate commit.
+      try {
+        assertNoSecrets(content);
+      } catch {
+        throw new AuthorityError('credential_material');
+      }
       return { kind, path, content };
     }
     case 'request_publication': {
@@ -113,11 +115,15 @@ export function admitModelAction(proposal: unknown, binding: AuthorityBinding): 
           operationKind: operation as ShippingKind,
           candidateSha: binding.candidateSha,
         },
-        title: text(raw.title, 256),
-        body: text(raw.body, 65536),
+        title: text(raw.title, MAX_TITLE_CHARS),
+        body: text(raw.body, MAX_BODY_CHARS),
       };
     }
-    default:
-      return { kind: 'hand_off', reason: text(raw.reason, 2000) };
+    case 'hand_off':
+      return { kind, reason: text(raw.reason, MAX_REASON_CHARS) };
+    default: {
+      const unhandled: never = kind;
+      throw new AuthorityError(`unknown_action:${String(unhandled)}`);
+    }
   }
 }

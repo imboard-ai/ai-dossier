@@ -3,7 +3,8 @@
  * violation taints the VM permanently — the caller must destroy it. */
 import type { Duplex } from 'node:stream';
 import { assertNoSecrets } from '../redaction';
-import { BrokerError, type ContainerProfile, type ExecResult } from './adapter';
+import { isRecord } from '../state';
+import { BrokerError, type ContainerProfile, type ExecResult, type ExecScope } from './adapter';
 
 export const BROKER_PROTOCOL = 'zt-broker-v1';
 export const MAX_FILE_BYTES = 1024 * 1024;
@@ -15,6 +16,8 @@ const MAX_ARG_BYTES = 8192;
 const MAX_ARGV_BYTES = 64 * 1024;
 const MAX_PATH_BYTES = 512;
 const PROFILES: readonly ContainerProfile[] = ['node', 'python'];
+const MIN_EXEC_TIMEOUT_MS = 1000;
+const MAX_EXEC_TIMEOUT_MS = 6 * 3600 * 1000;
 
 export type BrokerRequest =
   | {
@@ -43,37 +46,43 @@ export function assertWorkspacePath(value: unknown, allowEmpty = false): string 
   return value;
 }
 
+/** Container profile and argv of an exec, from untrusted input (a broker request
+ * or a model proposal). Secret-shaped arguments are refused. */
+export function validateExecArgv(
+  profile: unknown,
+  argv: unknown
+): { profile: ContainerProfile; argv: string[] } {
+  if (!PROFILES.includes(profile as ContainerProfile)) throw new BrokerError('invalid_profile');
+  if (
+    !Array.isArray(argv) ||
+    argv.length < 1 ||
+    argv.length > MAX_ARGV ||
+    argv.some(
+      (a) => typeof a !== 'string' || /\0/.test(a) || Buffer.byteLength(a) > MAX_ARG_BYTES
+    ) ||
+    argv.reduce((n, a) => n + Buffer.byteLength(a), 0) > MAX_ARGV_BYTES
+  )
+    throw new BrokerError('invalid_argv');
+  for (const arg of argv) assertNoSecrets(arg);
+  return { profile: profile as ContainerProfile, argv: [...argv] };
+}
+
 /** Controller-side allowlist. Nothing reaches the guest that fails here. */
 export function validateRequest(request: BrokerRequest): BrokerRequest {
   switch (request?.op) {
     case 'exec': {
-      const { argv, profile, timeoutMs } = request;
-      if (!PROFILES.includes(profile)) throw new BrokerError('invalid_profile');
+      const { profile, argv } = validateExecArgv(request.profile, request.argv);
+      const { timeoutMs } = request;
       if (
-        !Array.isArray(argv) ||
-        argv.length < 1 ||
-        argv.length > MAX_ARGV ||
-        argv.some(
-          (a) => typeof a !== 'string' || /\0/.test(a) || Buffer.byteLength(a) > MAX_ARG_BYTES
-        ) ||
-        argv.reduce((n, a) => n + Buffer.byteLength(a), 0) > MAX_ARGV_BYTES
+        !Number.isSafeInteger(timeoutMs) ||
+        timeoutMs < MIN_EXEC_TIMEOUT_MS ||
+        timeoutMs > MAX_EXEC_TIMEOUT_MS
       )
-        throw new BrokerError('invalid_argv');
-      for (const arg of argv) assertNoSecrets(arg);
-      if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 6 * 3600 * 1000)
         throw new BrokerError('invalid_timeout');
-      return {
-        op: 'exec',
-        profile,
-        argv: [...argv],
-        cwd: assertWorkspacePath(request.cwd, true),
-        timeoutMs,
-      };
+      return { op: 'exec', profile, argv, cwd: assertWorkspacePath(request.cwd, true), timeoutMs };
     }
     case 'put': {
-      const bytes = Buffer.from(String(request.data), 'base64');
-      if (bytes.toString('base64') !== request.data || bytes.length > MAX_FILE_BYTES)
-        throw new BrokerError('invalid_data');
+      decodeBase64Strict(request.data, MAX_FILE_BYTES, 'invalid_data');
       return {
         op: 'put',
         path: assertWorkspacePath(request.path),
@@ -88,16 +97,12 @@ export function validateRequest(request: BrokerRequest): BrokerRequest {
   }
 }
 
-function decodeStream(value: unknown): Buffer {
-  if (typeof value !== 'string') throw new BrokerError('malformed_response');
+/** Canonical base64 only (a round trip must reproduce it), capped at `max` bytes. */
+function decodeBase64Strict(value: unknown, max: number, code: string): Buffer {
+  if (typeof value !== 'string') throw new BrokerError(code);
   const bytes = Buffer.from(value, 'base64');
-  if (bytes.toString('base64') !== value || bytes.length > MAX_STREAM_BYTES)
-    throw new BrokerError('malformed_response');
+  if (bytes.toString('base64') !== value || bytes.length > max) throw new BrokerError(code);
   return bytes;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 interface Pending {
@@ -116,12 +121,17 @@ export class BrokerClient {
   private ready = false;
   private queue: Promise<unknown> = Promise.resolve();
   private failure: BrokerError | null = null;
-  scope: string | null = null;
+  private announcedScope: ExecScope | null = null;
 
   constructor(private readonly stream: Duplex) {
     stream.on('data', (chunk: Buffer) => this.onData(chunk));
     stream.on('error', () => this.taint('stream_error'));
     stream.on('close', () => this.taint('stream_closed'));
+  }
+
+  /** The scope the guest announced in its hello; null before it. */
+  get scope(): ExecScope | null {
+    return this.announcedScope;
   }
 
   get tainted(): BrokerError | null {
@@ -183,7 +193,7 @@ export class BrokerClient {
         return;
       }
       this.ready = true;
-      this.scope = frame.scope;
+      this.announcedScope = frame.scope;
       this.helloWaiter.resolve();
       this.helloWaiter = null;
       return;
@@ -204,16 +214,16 @@ export class BrokerClient {
 
   /** Sends the protocol hello and resolves with the guest's announced scope.
    * Data written before the guest opens its port stays queued in the socket. */
-  waitReady(timeoutMs: number): Promise<string> {
+  waitReady(timeoutMs: number): Promise<ExecScope> {
     if (this.failure) return Promise.reject(this.failure);
-    if (this.ready) return Promise.resolve(this.scope as string);
+    if (this.ready) return Promise.resolve(this.announcedScope as ExecScope);
     if (this.helloWaiter) return Promise.reject(new BrokerError('hello_pending'));
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => this.taint('boot_timeout'), timeoutMs);
       this.helloWaiter = {
         resolve: () => {
           clearTimeout(timer);
-          resolve(this.scope as string);
+          resolve(this.announcedScope as ExecScope);
         },
         reject: (e) => {
           clearTimeout(timer);
@@ -277,8 +287,8 @@ export class BrokerClient {
     let stdout: Buffer;
     let stderr: Buffer;
     try {
-      stdout = decodeStream(frame.stdout);
-      stderr = decodeStream(frame.stderr);
+      stdout = decodeBase64Strict(frame.stdout, MAX_STREAM_BYTES, 'malformed_response');
+      stderr = decodeBase64Strict(frame.stderr, MAX_STREAM_BYTES, 'malformed_response');
     } catch (error) {
       this.taint('malformed_response');
       throw error;
@@ -310,16 +320,12 @@ export class BrokerClient {
   async get(relativePath: string, timeoutMs: number): Promise<Buffer> {
     const frame = await this.send({ op: 'get', path: relativePath }, timeoutMs);
     if (frame.ok !== true) throw new BrokerError(this.errorCode(frame));
-    if (typeof frame.data !== 'string') {
+    try {
+      return decodeBase64Strict(frame.data, MAX_FILE_BYTES, 'malformed_response');
+    } catch {
       this.taint('malformed_response');
       throw this.failure;
     }
-    const bytes = Buffer.from(frame.data, 'base64');
-    if (bytes.toString('base64') !== frame.data || bytes.length > MAX_FILE_BYTES) {
-      this.taint('malformed_response');
-      throw this.failure;
-    }
-    return bytes;
   }
 
   /** Guest error codes are untrusted text: accept only a short slug. */

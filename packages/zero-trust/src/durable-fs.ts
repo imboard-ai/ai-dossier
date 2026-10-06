@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 /** LOCAL Linux controller storage. Persist directory entries before admission. */
@@ -10,6 +11,18 @@ export function syncDirectory(directory: string): void {
   } finally {
     fs.closeSync(fd);
   }
+}
+
+/** A 0700 directory owned by this user, never reached through a symlink. */
+export function privateDir(dir: string): string {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const stat = fs.lstatSync(dir);
+  if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== os.userInfo().uid)
+    throw new Error(
+      `Controller directory ${dir} is not private: it must be a real directory (not a symlink) owned by this user`
+    );
+  fs.chmodSync(dir, 0o700);
+  return dir;
 }
 
 export function readPrivate(file: string): Buffer {

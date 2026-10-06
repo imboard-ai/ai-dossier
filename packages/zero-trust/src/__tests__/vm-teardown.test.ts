@@ -2,17 +2,19 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { isAdmitted, OPERATION_KINDS } from '../intents';
 import { Journal } from '../journal';
 import {
   createRun,
   IllegalTransitionError,
   permittedTransitions,
   ReasonCode,
+  RUN_STATES,
   type RunRecord,
   TERMINAL_STATES,
   transitionRun,
 } from '../state';
-import { VmCleanupError } from '../vm/adapter';
+import { appendVmEvent, VmCleanupError } from '../vm/adapter';
 import {
   assertPublicationPermitted,
   MAX_CLEANUP_ATTEMPTS,
@@ -65,7 +67,8 @@ const now = () => new Date(at(30));
 describe('teardownVm — bounded cleanup (AC3 / scenario 20)', () => {
   it('three failed deletions block the run and deny publication', async () => {
     const run = runIn('shipping');
-    assertPublicationPermitted(run);
+    assertPublicationPermitted(run, 'push_branch');
+    const observed: RunRecord[] = [];
     const destroy = vi.fn(async () => {
       throw new VmCleanupError([4242], ['/var/lib/zt/run-1/overlay.qcow2']);
     });
@@ -77,6 +80,9 @@ describe('teardownVm — bounded cleanup (AC3 / scenario 20)', () => {
       sleep: async (ms) => {
         sleeps.push(ms);
       },
+      observeRun: (blocked) => {
+        observed.push(blocked);
+      },
     });
     expect(destroy).toHaveBeenCalledTimes(MAX_CLEANUP_ATTEMPTS);
     expect(destroy).toHaveBeenCalledWith(HANDLE);
@@ -85,6 +91,7 @@ describe('teardownVm — bounded cleanup (AC3 / scenario 20)', () => {
     expect(outcome.attempts).toBe(3);
     expect(outcome.run.state).toBe('blocked_cleanup');
     expect(outcome.run.reasonCode).toBe(ReasonCode.CleanupFailed);
+    expect(observed).toEqual([outcome.run]);
     if (outcome.kind !== 'blocked_cleanup') throw new Error('unreachable');
     expect(outcome.leftoverPids).toEqual([4242]);
     expect(outcome.leftoverPaths).toEqual(['/var/lib/zt/run-1/overlay.qcow2']);
@@ -106,9 +113,10 @@ describe('teardownVm — bounded cleanup (AC3 / scenario 20)', () => {
     });
     expect(events.at(-1)?.type).toBe('vm_cleanup_blocked');
 
-    expect(() => assertPublicationPermitted(outcome.run)).toThrow(PublicationDeniedError);
+    for (const kind of OPERATION_KINDS)
+      expect(() => assertPublicationPermitted(outcome.run, kind)).toThrow(PublicationDeniedError);
     try {
-      assertPublicationPermitted(outcome.run);
+      assertPublicationPermitted(outcome.run, 'pr_close');
     } catch (error) {
       expect((error as PublicationDeniedError).state).toBe('blocked_cleanup');
       expect((error as Error).message).toContain('blocked_cleanup');
@@ -137,6 +145,7 @@ describe('teardownVm — bounded cleanup (AC3 / scenario 20)', () => {
   it('success on the second attempt reports destroyed with attempts 2', async () => {
     const run = runIn('shipping');
     let calls = 0;
+    const observeRun = vi.fn();
     const outcome = await teardownVm(
       {
         destroy: async () => {
@@ -146,9 +155,10 @@ describe('teardownVm — bounded cleanup (AC3 / scenario 20)', () => {
       },
       HANDLE,
       run,
-      { journal, now, sleep: async () => {} }
+      { journal, now, sleep: async () => {}, observeRun }
     );
     expect(outcome).toEqual({ kind: 'destroyed', attempts: 2, run });
+    expect(observeRun).not.toHaveBeenCalled();
     expect(outcome.run.state).toBe('shipping');
     const events = journal.read() as { type: string }[];
     expect(events.map((e) => e.type)).toEqual(['vm_cleanup_attempt_failed']);
@@ -220,6 +230,22 @@ describe('teardownVm — bounded cleanup (AC3 / scenario 20)', () => {
     expect((await promise).kind).toBe('blocked_cleanup');
   });
 
+  it('refuses a secret in a leftover path before journaling it', async () => {
+    await expect(
+      teardownVm(
+        {
+          destroy: async () => {
+            throw new VmCleanupError([], ['/tmp/ghp_abcdefghijklmnopqrstuvwxyz0123456789']);
+          },
+        },
+        HANDLE,
+        runIn('shipping'),
+        { journal, now, retryDelayMs: 0, sleep: async () => {} }
+      )
+    ).rejects.toThrow(/credential/);
+    expect(journal.read()).toEqual([]);
+  });
+
   it('refuses to block a run whose state has no cleanup_failed edge', async () => {
     const terminal = transitionRun(runIn('gating'), ReasonCode.PolicyBlocked, at(5));
     await expect(
@@ -238,12 +264,36 @@ describe('teardownVm — bounded cleanup (AC3 / scenario 20)', () => {
 });
 
 describe('assertPublicationPermitted', () => {
-  it('passes only for shipping', () => {
-    expect(() => assertPublicationPermitted(runIn('shipping'))).not.toThrow();
-    for (const state of ['gating', 'planning', 'implementing', 'verifying'] as const)
-      expect(() => assertPublicationPermitted(runIn(state))).toThrow(PublicationDeniedError);
+  it('admits every shipping write while shipping, and none before it', () => {
+    for (const kind of ['fork_ensure', 'push_branch', 'pr_create', 'pr_update'] as const)
+      expect(() => assertPublicationPermitted(runIn('shipping'), kind)).not.toThrow();
+    for (const state of ['planning', 'implementing', 'verifying'] as const)
+      for (const kind of OPERATION_KINDS)
+        expect(() => assertPublicationPermitted(runIn(state), kind)).toThrow(
+          PublicationDeniedError
+        );
     const paused = transitionRun(runIn('shipping'), ReasonCode.UserPaused, at(10));
-    expect(() => assertPublicationPermitted(paused)).toThrow(PublicationDeniedError);
+    expect(() => assertPublicationPermitted(paused, 'push_branch')).toThrow(PublicationDeniedError);
+  });
+
+  it('follows the intent admission table outside shipping', () => {
+    const revising: RunRecord = { ...runIn('shipping'), state: 'revising' };
+    expect(() => assertPublicationPermitted(revising, 'pr_update')).not.toThrow();
+    expect(() => assertPublicationPermitted(revising, 'pr_close')).not.toThrow();
+    expect(() => assertPublicationPermitted(revising, 'push_branch')).toThrow(
+      PublicationDeniedError
+    );
+    expect(() => assertPublicationPermitted(runIn('gating'), 'engagement_comment')).not.toThrow();
+  });
+
+  it('agrees with isAdmitted for every state and operation kind', () => {
+    const base = runIn('shipping');
+    for (const state of RUN_STATES)
+      for (const kind of OPERATION_KINDS) {
+        const call = () => assertPublicationPermitted({ ...base, state }, kind);
+        if (isAdmitted(kind, state)) expect(call).not.toThrow();
+        else expect(call).toThrow(PublicationDeniedError);
+      }
   });
 });
 
@@ -277,6 +327,29 @@ describe('blocked_cleanup has no path back to shipping', () => {
     expect(TERMINAL_STATES).toContain('blocked');
     for (const code of Object.values(ReasonCode))
       expect(() => transitionRun(closed, code, at(50))).toThrow(IllegalTransitionError);
-    expect(() => assertPublicationPermitted(closed)).toThrow(PublicationDeniedError);
+    for (const kind of OPERATION_KINDS)
+      expect(() => assertPublicationPermitted(closed, kind)).toThrow(PublicationDeniedError);
+  });
+});
+
+describe('appendVmEvent', () => {
+  it('stamps v and at and appends the event', () => {
+    appendVmEvent(journal, now(), { type: 'vm_destroyed', vmId: 'vm-1', pids: [1, 2] });
+    expect(journal.read()).toEqual([
+      { v: 1, at: at(30), type: 'vm_destroyed', vmId: 'vm-1', pids: [1, 2] },
+    ]);
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ['a top-level string', { type: 'x', reason: 'ghp_abc' }],
+    ['a string in an array', { type: 'x', leftoverPaths: ['/ok', '/tmp/ghp_abc'] }],
+    ['a string in a nested object', { type: 'x', detail: { inner: ['Bearer abc'] } }],
+  ])('rejects secret material in %s and writes nothing', (_label, event) => {
+    expect(() => appendVmEvent(journal, now(), event)).toThrow(/credential/);
+    expect(journal.read()).toEqual([]);
+  });
+
+  it('is a no-op without a journal, even for a secret-bearing event', () => {
+    expect(() => appendVmEvent(undefined, now(), { type: 'x', reason: 'ghp_abc' })).not.toThrow();
   });
 });

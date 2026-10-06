@@ -26,7 +26,14 @@ import { PROFILE_PINS, profileDigest } from '../vm/profile';
 import { BROKER_PORT_NAME, SCOPE_OEM_PREFIX } from '../vm/qemu-args';
 
 const AGENT = 'print("fake guest agent")\n';
-const IMAGE_BYTES = Buffer.from('baked profile image');
+/** A minimal standalone qcow2 v3 header: magic, version 3, no backing file, no
+ * incompatible features. */
+const IMAGE_BYTES = (() => {
+  const header = Buffer.alloc(104);
+  header.writeUInt32BE(0x514649fb, 0);
+  header.writeUInt32BE(3, 4);
+  return header;
+})();
 const LIMITS: VmLimits = { vcpus: 2, memoryMiB: 2048, diskGiB: 16, commandTimeoutMs: 5000 };
 const PID = 4242;
 const CANARY = 'ZT_TEST_CANARY_SECRET';
@@ -88,6 +95,8 @@ interface FakeHost {
       stderrFile: string;
     }[];
     kill: [number, NodeJS.Signals][];
+    /** PIDs whose Launched.kill() handle was invoked. */
+    childKill: number[];
     connect: string[];
   };
   seen: Frame[];
@@ -108,7 +117,7 @@ interface FakeHost {
 
 function fakeHost(): FakeHost {
   const host: FakeHost = {
-    calls: { run: [], launch: [], kill: [], connect: [] },
+    calls: { run: [], launch: [], kill: [], childKill: [], connect: [] },
     seen: [],
     alive: new Set(),
     tokens: new Map(),
@@ -134,6 +143,9 @@ function fakeHost(): FakeHost {
       return {
         pid,
         exited: tail === undefined ? new Promise<string>(() => undefined) : Promise.resolve(tail),
+        kill: () => {
+          host.calls.childKill.push(pid);
+        },
       };
     },
     async connect(socketPath) {
@@ -172,8 +184,9 @@ const tools = (accelerator: 'kvm' | 'tcg' = 'kvm'): HostTools => ({
 
 function writeManifest(profileDir: string, over: Record<string, unknown> = {}): void {
   fs.writeFileSync(path.join(profileDir, 'image.qcow2'), IMAGE_BYTES);
+  const manifest = path.join(profileDir, 'manifest.json');
   fs.writeFileSync(
-    path.join(profileDir, 'manifest.json'),
+    manifest,
     JSON.stringify({
       schema: 'zt-vm-profile-v1',
       profileDigest: profileDigest(AGENT),
@@ -186,6 +199,8 @@ function writeManifest(profileDir: string, over: Record<string, unknown> = {}): 
       ...over,
     })
   );
+  // The adapter reads the manifest with readPrivate: no group/other bits.
+  fs.chmodSync(manifest, 0o600);
 }
 
 let root: string;
@@ -251,42 +266,109 @@ async function rejects<T extends Error>(
   return error as T;
 }
 
+function refusal(read: () => unknown): UnsupportedEnvironmentError {
+  try {
+    read();
+  } catch (error) {
+    expect(error).toBeInstanceOf(UnsupportedEnvironmentError);
+    return error as UnsupportedEnvironmentError;
+  }
+  throw new Error('expected refusal');
+}
+
 describe('LocalQemuAdapter construction', () => {
-  it('refuses a missing manifest', () => {
+  it('refuses a missing manifest on first use, naming the file', async () => {
     fs.rmSync(path.join(profileDir, 'manifest.json'));
-    try {
-      adapter();
-      throw new Error('expected refusal');
-    } catch (error) {
-      expect(error).toBeInstanceOf(UnsupportedEnvironmentError);
-      expect((error as UnsupportedEnvironmentError).detail).toBe('profile_image_missing');
-    }
+    const a = adapter();
+    const error = refusal(() => a.manifest);
+    expect(error.detail).toBe('profile_image_missing');
+    expect(error.message).toContain(path.join(profileDir, 'manifest.json'));
+    expect(error.message).toContain('run the bake');
+    // verifyImage: false — with image verification on, verifyImage() currently
+    // masks the manifest refusal as "baked profile image is missing".
+    const created = await rejects(
+      adapter({ verifyImage: false }).create(spec()),
+      UnsupportedEnvironmentError
+    );
+    expect(created.detail).toBe('profile_image_missing');
+    expect(created.message).toContain(path.join(profileDir, 'manifest.json'));
+    expect(host.calls.run).toEqual([]);
+    expect(host.calls.launch).toEqual([]);
   });
 
-  it('refuses a manifest for a different profile', () => {
+  it('refuses a manifest for a different profile on first use', () => {
     writeManifest(profileDir, { profileDigest: 'f'.repeat(64) });
-    expect(() => adapter()).toThrow(/profile_image_mismatch/);
+    const a = adapter();
+    expect(() => a.manifest).toThrow(/profile_image_mismatch/);
     writeManifest(profileDir);
-    expect(() => adapter({ agentSource: 'another agent' })).toThrow(/profile_image_mismatch/);
+    expect(() => adapter({ agentSource: 'another agent' }).manifest).toThrow(
+      /profile_image_mismatch/
+    );
   });
 
   it('defaults the agent source to the shipped guest agent', () => {
     // The fixture manifest is digested over AGENT, so the real agent mismatches.
-    expect(() => adapter({ agentSource: undefined })).toThrow(/profile_image_mismatch/);
+    expect(() => adapter({ agentSource: undefined }).manifest).toThrow(/profile_image_mismatch/);
   });
 
-  it('falls back to host preflight when no tools are injected', () => {
-    // Either preflight or the manifest refuses closed; neither starts anything.
+  it('falls back to host preflight when no tools are injected, lazily', () => {
     fs.rmSync(path.join(profileDir, 'manifest.json'));
-    expect(() => adapter({ tools: undefined, ops: undefined, now: undefined })).toThrow(
-      UnsupportedEnvironmentError
-    );
+    // Construction never probes the host or reads the profile.
+    const a = adapter({ tools: undefined, ops: undefined, now: undefined, accelerator: 'auto' });
+    let tools: HostTools | null = null;
+    try {
+      tools = a.tools;
+    } catch (error) {
+      // A host without QEMU refuses closed on first access.
+      expect(error).toBeInstanceOf(UnsupportedEnvironmentError);
+    }
+    if (tools) {
+      expect(path.isAbsolute(tools.qemu)).toBe(true);
+      expect(a.accelerator).toBe(tools.accelerator);
+      // Loaded once.
+      expect(a.tools).toBe(tools);
+    }
+    expect(refusal(() => a.manifest).detail).toBe('profile_image_missing');
+  });
+
+  it('works without a manifest or tools for teardown, listing and the kill switch', async () => {
+    fs.rmSync(path.join(profileDir, 'manifest.json'));
+    const a = adapter({ tools: undefined, accelerator: 'kvm' });
+    expect(a.killSwitchEngaged()).toBe(false);
+    expect(await a.listByRun('run-1')).toEqual([]);
+    await expect(a.destroy({ vmId: 'zt-0123456789ab', runId: 'run-1' })).resolves.toBeUndefined();
+    expect(await a.killAll('incident')).toEqual({ destroyed: [], failed: [] });
+    expect(a.killSwitchEngaged()).toBe(true);
+  });
+
+  it('cleans up VMs created by an earlier adapter after the profile is gone', async () => {
+    const handle = await adapter().create(spec());
+    fs.rmSync(path.join(profileDir, 'manifest.json'));
+    const a = adapter({ tools: undefined });
+    expect(await a.listByRun('run-1')).toHaveLength(1);
+    const result = await a.killAll('incident');
+    expect(result).toEqual({ destroyed: [handle.vmId], failed: [] });
+    expect(host.calls.kill).toEqual([[PID, 'SIGTERM']]);
+  });
+
+  it('resolves relative state and profile directories', async () => {
+    const cwd = process.cwd();
+    try {
+      process.chdir(root);
+      const a = adapter({ stateDir: 'state', profileDir: 'profile' });
+      expect(a.manifest.imageFile).toBe('image.qcow2');
+      await a.killAll('incident');
+      expect(fs.existsSync(path.join(root, 'state', KILL_SWITCH_FILE))).toBe(true);
+    } finally {
+      process.chdir(cwd);
+    }
   });
 
   it('exposes the accelerator and manifest', () => {
     const a = adapter({ tools: tools('tcg') });
     expect(a.accelerator).toBe('tcg');
     expect(a.manifest.imageFile).toBe('image.qcow2');
+    expect(a.manifest).toBe(a.manifest);
     expect(a.killSwitchEngaged()).toBe(false);
   });
 });
@@ -378,6 +460,57 @@ describe('LocalQemuAdapter.create', () => {
     expect(fs.readdirSync(path.join(stateDir, 'vms'))).toEqual([]);
   });
 
+  it('kills the launched child before cleanup when create fails', async () => {
+    host.state.guestScope = 'vm-root';
+    await rejects(adapter().create(spec()), BrokerError);
+    expect(host.calls.childKill).toEqual([PID]);
+  });
+
+  it('does not need a child kill handle (Launched.kill is optional)', async () => {
+    const launch = host.ops.launch;
+    host.ops.launch = async (...args) => {
+      const { pid, exited } = await launch(...args);
+      return { pid, exited };
+    };
+    host.state.guestScope = 'vm-root';
+    const error = await rejects(adapter().create(spec()), BrokerError);
+    expect(error.code).toBe('scope_mismatch');
+    expect(host.calls.childKill).toEqual([]);
+  });
+
+  it('journals the leftovers when cleanup after a failed create is incomplete', async () => {
+    const j = journal();
+    host.state.guestScope = 'vm-root';
+    host.state.dieOn = null; // QEMU survives SIGTERM and SIGKILL
+    const error = await rejects(adapter({ journal: j }).create(spec()), BrokerError);
+    // The caller still sees the boot error, not the cleanup error.
+    expect(error.code).toBe('scope_mismatch');
+    const [vmId] = fs.readdirSync(path.join(stateDir, 'vms'));
+    const events = j.read() as Record<string, unknown>[];
+    expect(events.find((e) => e.type === 'vm_cleanup_attempt_failed')).toEqual(
+      expect.objectContaining({
+        runId: 'run-1',
+        vmId,
+        attempt: 1,
+        leftoverPids: [PID],
+        leftoverPaths: [path.join(stateDir, 'vms', vmId as string)],
+      })
+    );
+    expect(events.some((e) => e.type === 'vm_destroyed')).toBe(false);
+  });
+
+  it('keeps the boot error when cleanup fails unexpectedly, without journaling', async () => {
+    const j = journal();
+    host.state.guestScope = 'vm-root';
+    host.ops.alive = () => {
+      throw new TypeError('proc unavailable');
+    };
+    const error = await rejects(adapter({ journal: j }).create(spec()), BrokerError);
+    expect(error.code).toBe('scope_mismatch');
+    const events = j.read() as Record<string, unknown>[];
+    expect(events.some((e) => e.type === 'vm_cleanup_attempt_failed')).toBe(false);
+  });
+
   it('passes vm-root scope through the SMBIOS OEM string', async () => {
     const handle = await adapter().create(spec('run-1', 'vm-root'));
     expect(handle.scope).toBe('vm-root');
@@ -443,6 +576,82 @@ describe('LocalQemuAdapter.create', () => {
     expect(host.calls.run).toEqual([]);
   });
 
+  it('refuses a group-readable manifest as unreadable', async () => {
+    fs.chmodSync(path.join(profileDir, 'manifest.json'), 0o640);
+    const error = await rejects(
+      adapter({ verifyImage: false }).create(spec()),
+      UnsupportedEnvironmentError
+    );
+    expect(error.detail).toBe('profile_image_missing');
+    expect(error.message).toContain('unreadable or not private');
+    expect(error.message).toContain(path.join(profileDir, 'manifest.json'));
+    expect(host.calls.run).toEqual([]);
+  });
+
+  it('refuses an image that names a backing file even when its digest matches', async () => {
+    const backed = Buffer.from(IMAGE_BYTES);
+    backed.writeBigUInt64BE(0x200n, 8);
+    writeManifest(profileDir, {
+      imageSha256: createHash('sha256').update(backed).digest('hex'),
+    });
+    fs.writeFileSync(path.join(profileDir, 'image.qcow2'), backed);
+    const error = await rejects(
+      adapter({ verifyImage: true }).create(spec()),
+      UnsupportedEnvironmentError
+    );
+    expect(error.detail).toBe('profile_image_mismatch');
+    expect(host.calls.run).toEqual([]);
+  });
+
+  it('re-checks the kill switch after QEMU launches and destroys the VM', async () => {
+    const launch = host.ops.launch;
+    host.ops.launch = async (...args) => {
+      const launched = await launch(...args);
+      fs.writeFileSync(path.join(stateDir, KILL_SWITCH_FILE), '{}');
+      return launched;
+    };
+    const error = await rejects(adapter().create(spec()), UnsupportedEnvironmentError);
+    expect(error.detail).toBe('kill_switch_engaged');
+    expect(host.calls.connect).toEqual([]);
+    expect(host.calls.kill).toEqual([[PID, 'SIGTERM']]);
+    expect(fs.readdirSync(path.join(stateDir, 'vms'))).toEqual([]);
+  });
+
+  it('re-checks the kill switch after the guest hello and destroys the VM', async () => {
+    const connect = host.ops.connect;
+    host.ops.connect = async (socket) => {
+      fs.writeFileSync(path.join(stateDir, KILL_SWITCH_FILE), '{}');
+      return connect(socket);
+    };
+    const error = await rejects(adapter().create(spec()), UnsupportedEnvironmentError);
+    expect(error.detail).toBe('kill_switch_engaged');
+    expect(host.calls.connect).toHaveLength(1);
+    expect(host.seen.some((f) => f.op === 'hello')).toBe(true);
+    expect(host.calls.kill).toEqual([[PID, 'SIGTERM']]);
+    expect(fs.readdirSync(path.join(stateDir, 'vms'))).toEqual([]);
+  });
+
+  it('records the pid before reading its start token, so a failure there is reported', async () => {
+    host.ops.startToken = () => {
+      throw new Error('EACCES');
+    };
+    const a = adapter();
+    await expect(a.create(spec())).rejects.toThrow('EACCES');
+    const [vmId] = fs.readdirSync(path.join(stateDir, 'vms'));
+    if (!vmId) throw new Error('expected the VM record to be kept');
+    const record = JSON.parse(fs.readFileSync(path.join(stateDir, 'vms', vmId, 'vm.json'), 'utf8'));
+    expect(record).toMatchObject({ pid: PID, startToken: null });
+    expect(host.calls.kill).toEqual([]);
+    const error = await rejects(a.destroy({ vmId, runId: 'run-1' }), VmCleanupError);
+    expect(error.leftoverPids).toEqual([PID]);
+    expect(error.leftoverPaths).toEqual([path.join(stateDir, 'vms', vmId)]);
+    // Even once /proc is readable again, a record without a start token is never signalled.
+    host.ops.startToken = () => `tok-${PID}`;
+    const again = await rejects(a.destroy({ vmId, runId: 'run-1' }), VmCleanupError);
+    expect(again.leftoverPids).toEqual([PID]);
+    expect(host.calls.kill).toEqual([]);
+  });
+
   it('skips the digest check when verifyImage is false', async () => {
     fs.writeFileSync(path.join(profileDir, 'image.qcow2'), 'tampered');
     await expect(adapter({ verifyImage: false }).create(spec())).resolves.toBeDefined();
@@ -452,7 +661,7 @@ describe('LocalQemuAdapter.create', () => {
     fs.mkdirSync(path.join(root, 'real'));
     fs.symlinkSync(path.join(root, 'real'), path.join(root, 'link'));
     await expect(adapter({ runtimeDir: path.join(root, 'link') }).create(spec())).rejects.toThrow(
-      'Controller directory is not private'
+      /is not private/
     );
   });
 
@@ -530,6 +739,18 @@ describe('LocalQemuAdapter broker operations', () => {
     expect(() => a.getFile(ghost, 'a')).toThrow(/unknown_vm/);
   });
 
+  it('reports unknown_vm when the record is gone, even with an explicit timeout', async () => {
+    const a = adapter();
+    const handle = await a.create(spec());
+    fs.rmSync(path.join(stateDir, 'vms', handle.vmId, 'vm.json'));
+    const error = await rejects(
+      a.exec(handle, { profile: 'node', argv: ['x'], timeoutMs: 2000 }),
+      BrokerError
+    );
+    expect(error.code).toBe('unknown_vm');
+    expect(host.seen.some((f) => f.op === 'exec')).toBe(false);
+  });
+
   it('rethrows the taint for a broken guest', async () => {
     host.state.respond = (f) => ({ v: 1, id: f.id, ok: true, exitCode: 999 });
     const a = adapter();
@@ -554,6 +775,70 @@ describe('LocalQemuAdapter.destroy', () => {
     expect(fs.existsSync(vmDir)).toBe(false);
     expect(j.read()).toContainEqual(expect.objectContaining({ type: 'vm_destroyed' }));
     await expect(a.exec(handle, { profile: 'node', argv: ['x'] })).rejects.toThrow(/unknown_vm/);
+  });
+
+  it("keeps QEMU's stderr as a diagnostic after removing the VM dir", async () => {
+    const { a, handle, vmDir } = await created();
+    fs.writeFileSync(path.join(vmDir, 'qemu.err'), 'qemu: warning\n');
+    await a.destroy(handle);
+    expect(fs.existsSync(vmDir)).toBe(false);
+    const copy = path.join(stateDir, 'diagnostics', `${handle.vmId}.qemu.err`);
+    expect(fs.readFileSync(copy, 'utf8')).toBe('qemu: warning\n');
+    expect(fs.statSync(path.join(stateDir, 'diagnostics')).mode & 0o777).toBe(0o700);
+  });
+
+  it('treats a missing qemu.err as best effort, and skips the copy while QEMU survives', async () => {
+    const { a, handle } = await created();
+    await a.destroy(handle);
+    expect(fs.existsSync(path.join(stateDir, 'diagnostics', `${handle.vmId}.qemu.err`))).toBe(
+      false
+    );
+    host.state.dieOn = null;
+    const stuck = await created(a);
+    fs.writeFileSync(path.join(stuck.vmDir, 'qemu.err'), 'still running');
+    await rejects(a.destroy(stuck.handle), VmCleanupError);
+    expect(fs.existsSync(path.join(stateDir, 'diagnostics', `${stuck.handle.vmId}.qemu.err`))).toBe(
+      false
+    );
+  });
+
+  it.each([
+    ['a pid of 1', { pid: 1 }],
+    ['a pid of 0', { pid: 0 }],
+    ['a fractional pid', { pid: 4242.5 }],
+    ['a string pid', { pid: '4242' }],
+    ['a numeric start token', { startToken: 7 }],
+    ['a numeric run ID', { runId: 7 }],
+    ['a zero command timeout', { limits: { ...LIMITS, commandTimeoutMs: 0 } }],
+    ['a fractional command timeout', { limits: { ...LIMITS, commandTimeoutMs: 1.5 } }],
+    ['no limits', { limits: null }],
+    ['a non-string socket', { socket: 5 }],
+  ])('distrusts a record with %s', async (_label, patch) => {
+    const { a, handle, vmDir } = await created();
+    const recordFile = path.join(vmDir, 'vm.json');
+    const record = JSON.parse(fs.readFileSync(recordFile, 'utf8'));
+    fs.writeFileSync(recordFile, JSON.stringify({ ...record, ...patch }));
+    fs.chmodSync(recordFile, 0o600);
+    expect(await a.listByRun('run-1')).toEqual([]);
+    await expect(a.exec(handle, { profile: 'node', argv: ['x'] })).rejects.toThrow(/unknown_vm/);
+    const result = await a.killAll('incident');
+    expect(result.destroyed).toEqual([]);
+    expect(result.failed.map((f) => f.leftoverPaths)).toEqual([[vmDir]]);
+    expect(host.calls.kill).toEqual([]);
+  });
+
+  it('accepts a record whose pid is null', async () => {
+    const { a, handle, vmDir } = await created();
+    const recordFile = path.join(vmDir, 'vm.json');
+    const record = JSON.parse(fs.readFileSync(recordFile, 'utf8'));
+    fs.writeFileSync(recordFile, JSON.stringify({ ...record, pid: null, startToken: null }));
+    fs.chmodSync(recordFile, 0o600);
+    expect(await a.listByRun('run-1')).toEqual([
+      expect.objectContaining({ vmId: handle.vmId, pid: null, alive: false }),
+    ]);
+    await a.destroy(handle);
+    expect(host.calls.kill).toEqual([]);
+    expect(fs.existsSync(vmDir)).toBe(false);
   });
 
   it('escalates to SIGKILL when SIGTERM is ignored', async () => {
@@ -631,6 +916,54 @@ describe('LocalQemuAdapter.destroy', () => {
     expect(error.leftoverPaths).toContain(socket);
   });
 
+  it.each([
+    'zt-0123',
+    '../zt-0123456789ab',
+    'zt-0123456789AB',
+    'vm-1',
+    '',
+  ])('refuses invalid VM ID %j', async (vmId) => {
+    await expect(adapter().destroy({ vmId, runId: 'run-1' })).rejects.toThrow('Invalid VM ID');
+    expect(host.calls.kill).toEqual([]);
+  });
+
+  it('ignores a tampered record whose vmDir points elsewhere', async () => {
+    const { a, handle, vmDir } = await created();
+    const recordFile = path.join(vmDir, 'vm.json');
+    const elsewhere = path.join(root, 'elsewhere');
+    fs.mkdirSync(elsewhere);
+    const record = JSON.parse(fs.readFileSync(recordFile, 'utf8'));
+    fs.writeFileSync(recordFile, JSON.stringify({ ...record, vmDir: elsewhere }));
+    fs.chmodSync(recordFile, 0o600);
+    expect(await a.listByRun('run-1')).toEqual([]);
+    await a.destroy(handle);
+    // No record: the PID is never signalled and the foreign directory survives.
+    expect(host.calls.kill).toEqual([]);
+    expect(fs.existsSync(elsewhere)).toBe(true);
+    expect(fs.existsSync(vmDir)).toBe(false);
+  });
+
+  it('ignores a tampered record whose socket names another VM', async () => {
+    const { a, handle, vmDir } = await created();
+    const recordFile = path.join(vmDir, 'vm.json');
+    const record = JSON.parse(fs.readFileSync(recordFile, 'utf8'));
+    const foreign = path.join(root, 'victim');
+    fs.writeFileSync(foreign, 'keep');
+    fs.writeFileSync(recordFile, JSON.stringify({ ...record, socket: foreign }));
+    fs.chmodSync(recordFile, 0o600);
+    await a.destroy(handle);
+    expect(host.calls.kill).toEqual([]);
+    expect(fs.readFileSync(foreign, 'utf8')).toBe('keep');
+  });
+
+  it('ignores a group-readable record', async () => {
+    const { a, handle, vmDir } = await created();
+    fs.chmodSync(path.join(vmDir, 'vm.json'), 0o644);
+    expect(await a.listByRun('run-1')).toEqual([]);
+    await a.destroy(handle);
+    expect(host.calls.kill).toEqual([]);
+  });
+
   it('is a no-op for a VM without a record', async () => {
     await expect(
       adapter().destroy({ vmId: 'zt-0123456789ab', runId: 'run-1' })
@@ -700,16 +1033,59 @@ describe('LocalQemuAdapter listing and kill switch', () => {
     expect(stuck.vmId).toMatch(/^zt-/);
   });
 
-  it('rethrows unexpected destroy errors and refuses secret reasons', async () => {
+  it('records unexpected destroy errors as failures, continues, and refuses secret reasons', async () => {
     const a = adapter();
-    await a.create(spec());
+    const first = await a.create(spec('run-a'));
+    const second = await a.create(spec('run-b'));
     await expect(a.killAll('Bearer abc')).rejects.toThrow(/credential/);
     expect(a.killSwitchEngaged()).toBe(false);
-    host.ops.alive = () => {
-      throw new TypeError('proc unavailable');
+    const alive = host.ops.alive;
+    let calls = 0;
+    // The first VM's teardown hits an unexpected error; the second must still be destroyed.
+    host.ops.alive = (pid) => {
+      if (calls++ === 0) throw new TypeError('proc unavailable');
+      return alive(pid);
     };
-    await expect(a.killAll('incident')).rejects.toThrow('proc unavailable');
+    const result = await a.killAll('incident');
     expect(a.killSwitchEngaged()).toBe(true);
+    expect(result.failed).toHaveLength(1);
+    const [failure] = result.failed;
+    expect(failure).toBeInstanceOf(VmCleanupError);
+    expect(failure?.leftoverPids).toEqual([]);
+    const ids = [first.vmId, second.vmId];
+    const failedDir = failure?.leftoverPaths[0] ?? '';
+    expect(failure?.leftoverPaths).toHaveLength(1);
+    expect(ids.map((id) => path.join(stateDir, 'vms', id))).toContain(failedDir);
+    expect(result.destroyed).toEqual(
+      ids.filter((id) => path.join(stateDir, 'vms', id) !== failedDir)
+    );
+  });
+
+  it('reports VM directories without a trustworthy record as failed', async () => {
+    const a = adapter();
+    const ok = await a.create(spec());
+    const vms = path.join(stateDir, 'vms');
+    const missing = path.join(vms, 'zt-aaaaaaaaaaaa');
+    fs.mkdirSync(missing);
+    const garbled = path.join(vms, 'zt-bbbbbbbbbbbb');
+    fs.mkdirSync(garbled);
+    fs.writeFileSync(path.join(garbled, 'vm.json'), '{"vmId":"zt-bbbbbbbbbbbb"}', { mode: 0o600 });
+    const readable = path.join(vms, 'zt-cccccccccccc');
+    fs.mkdirSync(readable);
+    fs.writeFileSync(path.join(readable, 'vm.json'), '{}', { mode: 0o644 });
+    // Not a VM directory name: ignored entirely.
+    fs.mkdirSync(path.join(vms, 'junk'));
+    const result = await a.killAll('incident');
+    expect(result.destroyed).toEqual([ok.vmId]);
+    expect(result.failed.map((f) => f.leftoverPaths).sort()).toEqual(
+      [[missing], [garbled], [readable]].sort()
+    );
+    for (const f of result.failed) {
+      expect(f).toBeInstanceOf(VmCleanupError);
+      expect(f.leftoverPids).toEqual([]);
+    }
+    // Untrustworthy directories are left for an operator, never removed blindly.
+    for (const dir of [missing, garbled, readable]) expect(fs.existsSync(dir)).toBe(true);
   });
 });
 
@@ -725,7 +1101,25 @@ describe('systemOps', () => {
 
   it('run resolves on success and reports the binary on failure', async () => {
     await expect(systemOps.run('/bin/true', [], env)).resolves.toBeUndefined();
-    await expect(systemOps.run('/bin/false', [], env)).rejects.toThrow('false failed');
+    await expect(systemOps.run('/bin/false', [], env)).rejects.toThrow('false failed, exit 1: ');
+    await expect(systemOps.run('/bin/sh', ['-c', 'echo boom >&2; exit 3'], env)).rejects.toThrow(
+      'sh failed, exit 3: boom'
+    );
+    await expect(systemOps.run('/bin/sh', ['-c', 'kill -TERM $$'], env)).rejects.toThrow(
+      /sh failed, exit (null|unknown) \(SIGTERM\)/
+    );
+  });
+
+  it('launch returns a kill() that terminates the spawned child', async () => {
+    const launched = await systemOps.launch('/bin/sleep', ['30'], env, path.join(dir, 's.log'));
+    expect(systemOps.alive(launched.pid)).toBe(true);
+    const started = Date.now();
+    launched.kill?.();
+    await launched.exited;
+    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(systemOps.alive(launched.pid)).toBe(false);
+    // A second kill after exit is a no-op, never a signal to a reused PID.
+    expect(() => launched.kill?.()).not.toThrow();
   });
 
   it('launch detaches and reports the stderr tail on exit', async () => {

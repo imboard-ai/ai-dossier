@@ -8,6 +8,11 @@ export const BROKER_PORT_NAME = 'org.ai-dossier.zt.broker';
 export const SCOPE_OEM_PREFIX = 'org.ai-dossier.zt.scope:';
 /** sun_path is 108 bytes including the terminator. */
 export const MAX_SOCKET_PATH_BYTES = 107;
+/** QEMU and qemu-img never need the controller's environment; secrets in it must not reach them. */
+export const QEMU_ENV: Readonly<Record<string, string>> = Object.freeze({
+  PATH: '/usr/local/bin:/usr/bin:/bin',
+  LANG: 'C',
+});
 
 /** Host-side egress policy (PRD §5.5): user-mode networking with `restrict=on`
  * isolates the guest from the host, LAN, metadata services and the internet
@@ -91,6 +96,29 @@ function common(args: CommonArgs): string[] {
   ];
 }
 
+/** The user-mode `-netdev` value that enforces a network policy. */
+export function netdevValue(
+  policy: Pick<
+    typeof RUN_NETWORK_POLICY,
+    'restrict' | 'guestForwards' | 'hostForwards'
+  > = RUN_NETWORK_POLICY
+): string {
+  return [
+    'user',
+    'id=net0',
+    `restrict=${policy.restrict ? 'on' : 'off'}`,
+    ...policy.guestForwards.map((rule) => `guestfwd=${rule}`),
+    ...policy.hostForwards.map((rule) => `hostfwd=${rule}`),
+  ].join(',');
+}
+
+/** `qemu-img create` argv for a copy-on-write overlay on a qcow2 base. */
+export function buildOverlayArgs(base: string, disk: string, sizeGiB: number): string[] {
+  for (const value of [base, disk]) assertSafeValue(value);
+  if (!Number.isSafeInteger(sizeGiB) || sizeGiB < 1) throw new Error('Invalid disk size');
+  return ['create', '-q', '-f', 'qcow2', '-F', 'qcow2', '-b', base, disk, `${sizeGiB}G`];
+}
+
 /** Untrusted run: restricted network, broker port, no console, no shared files. */
 export function buildRunArgs(args: RunArgs): string[] {
   assertSafeValue(args.brokerSocket);
@@ -102,7 +130,7 @@ export function buildRunArgs(args: RunArgs): string[] {
     '-serial',
     'none',
     '-netdev',
-    'user,id=net0,restrict=on',
+    netdevValue(),
     '-device',
     'virtio-net-pci,netdev=net0',
     '-device',

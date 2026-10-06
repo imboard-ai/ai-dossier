@@ -6,13 +6,14 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import type { Duplex } from 'node:stream';
-import { replacePrivate } from '../durable-fs';
+import { privateDir, readPrivate, replacePrivate } from '../durable-fs';
 import type { Journal } from '../journal';
 import { processStartToken } from '../lock';
 import { assertNoSecrets } from '../redaction';
 import {
   type Accelerator,
   type AcceleratorRequest,
+  appendVmEvent,
   BrokerError,
   type ExecRequest,
   type ExecResult,
@@ -28,26 +29,43 @@ import {
 import { BrokerClient } from './broker';
 import { type HostTools, preflightHost } from './host';
 import {
+  assertStandaloneQcow2,
   BAKED_DISK_GIB,
   parseManifest,
   profileDigest,
   sha256File,
   type VmProfileManifest,
 } from './profile';
-import { BOOT_TIMEOUT_MS, buildRunArgs, MAX_SOCKET_PATH_BYTES, TIMEOUT_SCALE } from './qemu-args';
+import {
+  BOOT_TIMEOUT_MS,
+  buildOverlayArgs,
+  buildRunArgs,
+  MAX_SOCKET_PATH_BYTES,
+  QEMU_ENV,
+  TIMEOUT_SCALE,
+} from './qemu-args';
 
 export const AGENT_SOURCE_PATH = path.join(__dirname, '..', '..', 'vm-guest', 'agent.py');
 export const KILL_SWITCH_FILE = 'KILL_SWITCH';
 const ID = /^[A-Za-z0-9_-]{1,128}$/;
 const VM_ID = /^zt-[a-f0-9]{12}$/;
-/** QEMU never needs the controller's environment; secrets in it must not reach it. */
-const QEMU_ENV = Object.freeze({ PATH: '/usr/local/bin:/usr/bin:/bin', LANG: 'C' });
+/** Base wall clock for put/get and the grace added to an exec, before TCG scaling. */
+const BROKER_RPC_TIMEOUT_MS = 60_000;
+/** How long QEMU gets to create the broker socket after start. */
+const SOCKET_WAIT_MS = 30_000;
+const POLL_MS = 100;
+/** Wait after SIGTERM, then after SIGKILL, before a PID is reported as left behind. */
+const KILL_GRACE_MS = 5000;
+const RUN_TOOL_TIMEOUT_MS = 30 * 60_000;
+const STDERR_TAIL_BYTES = 2000;
 
 /** Everything that touches processes or sockets; replaced in unit tests. */
 export interface Launched {
   readonly pid: number;
   /** Settles with QEMU's own stderr tail when the process exits. */
   readonly exited: Promise<string>;
+  /** Signals the spawned child itself; a no-op once it has exited (never a reused PID). */
+  readonly kill?: () => void;
 }
 
 export interface HostOps {
@@ -71,11 +89,22 @@ export interface HostOps {
 export const systemOps: HostOps = {
   run(binary, args, env) {
     return new Promise((resolve, reject) => {
-      execFile(binary, [...args], { env, timeout: 30 * 60_000 }, (error, _stdout, stderr) => {
-        if (error)
-          reject(new Error(`${path.basename(binary)} failed: ${String(stderr).slice(0, 2000)}`));
-        else resolve();
-      });
+      execFile(
+        binary,
+        [...args],
+        { env, timeout: RUN_TOOL_TIMEOUT_MS },
+        (error, _stdout, stderr) => {
+          if (!error) return resolve();
+          const status = error.killed
+            ? `killed after ${RUN_TOOL_TIMEOUT_MS / 60_000} min`
+            : `exit ${error.code ?? 'unknown'}${error.signal ? ` (${error.signal})` : ''}`;
+          reject(
+            new Error(
+              `${path.basename(binary)} failed, ${status}: ${String(stderr).slice(0, STDERR_TAIL_BYTES)}`
+            )
+          );
+        }
+      );
     });
   },
   launch(binary, args, env, stderrFile) {
@@ -92,7 +121,7 @@ export const systemOps: HostOps = {
         child.once('exit', () => {
           let tail = '';
           try {
-            tail = fs.readFileSync(stderrFile, 'utf8').slice(-2000);
+            tail = fs.readFileSync(stderrFile, 'utf8').slice(-STDERR_TAIL_BYTES);
           } catch {
             // missing log is reported as empty
           }
@@ -101,7 +130,13 @@ export const systemOps: HostOps = {
       });
       child.once('spawn', () => {
         child.unref();
-        resolve({ pid: child.pid as number, exited });
+        resolve({
+          pid: child.pid as number,
+          exited,
+          kill: () => {
+            if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+          },
+        });
       });
     });
   },
@@ -152,6 +187,8 @@ export interface LocalQemuOptions {
   readonly accelerator?: AcceleratorRequest;
   /** Short directory for broker sockets (sun_path limit). */
   readonly runtimeDir?: string;
+  /** A journal dedicated to VM lifecycle events. Not the run's intent journal:
+   * intent replay rejects event types it does not know. */
   readonly journal?: Journal;
   readonly tools?: HostTools;
   readonly ops?: HostOps;
@@ -168,40 +205,52 @@ function defaultRuntimeDir(): string {
     : path.join(os.tmpdir(), `ai-dossier-zt-${os.userInfo().uid}`);
 }
 
-/** A 0700 directory we own, never reached through a symlink. */
-function privateDir(dir: string): string {
-  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const stat = fs.lstatSync(dir);
-  if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== os.userInfo().uid)
-    throw new Error('Controller directory is not private');
-  fs.chmodSync(dir, 0o700);
-  return dir;
-}
-
 export class LocalQemuAdapter implements VmAdapter {
-  readonly tools: HostTools;
-  readonly manifest: VmProfileManifest;
+  private readonly options: LocalQemuOptions;
   private readonly ops: HostOps;
   private readonly clients = new Map<string, BrokerClient>();
   private imageVerified: boolean;
   private readonly now: () => Date;
+  private loadedTools: HostTools | null;
+  private loadedManifest: VmProfileManifest | null = null;
 
-  constructor(private readonly options: LocalQemuOptions) {
-    this.tools = options.tools ?? preflightHost(options.accelerator ?? 'auto');
+  /** Host tools and the profile are loaded on first use, so teardown, listing and
+   * the kill switch keep working when QEMU or a current profile is missing. */
+  constructor(options: LocalQemuOptions) {
+    this.options = {
+      ...options,
+      stateDir: path.resolve(options.stateDir),
+      profileDir: path.resolve(options.profileDir),
+    };
     this.ops = options.ops ?? systemOps;
     this.now = options.now ?? (() => new Date());
-    const agent = options.agentSource ?? fs.readFileSync(AGENT_SOURCE_PATH, 'utf8');
+    this.loadedTools = options.tools ?? null;
+    this.imageVerified = options.verifyImage === false;
+  }
+
+  get tools(): HostTools {
+    this.loadedTools ??= preflightHost(this.options.accelerator ?? 'auto');
+    return this.loadedTools;
+  }
+
+  get manifest(): VmProfileManifest {
+    if (this.loadedManifest) return this.loadedManifest;
+    const file = path.join(this.options.profileDir, 'manifest.json');
+    const agent = this.options.agentSource ?? fs.readFileSync(AGENT_SOURCE_PATH, 'utf8');
     let raw: unknown;
     try {
-      raw = JSON.parse(fs.readFileSync(path.join(options.profileDir, 'manifest.json'), 'utf8'));
-    } catch {
+      raw = JSON.parse(readPrivate(file).toString('utf8'));
+    } catch (error) {
+      const missing = (error as NodeJS.ErrnoException).code === 'ENOENT';
       throw new UnsupportedEnvironmentError(
         'profile_image_missing',
-        'no baked profile image found; run the bake (scripts/zt-vm.mjs bake) first'
+        missing
+          ? `no baked profile at ${file}; run the bake (scripts/zt-vm.mjs bake) first`
+          : `${file} is unreadable or not private (mode 0600, owned by this user): ${(error as Error).message}`
       );
     }
-    this.manifest = parseManifest(raw, profileDigest(agent));
-    this.imageVerified = options.verifyImage === false;
+    this.loadedManifest = parseManifest(raw, profileDigest(agent));
+    return this.loadedManifest;
   }
 
   get accelerator(): Accelerator {
@@ -218,9 +267,10 @@ export class LocalQemuAdapter implements VmAdapter {
 
   private verifyImage(): void {
     if (this.imageVerified) return;
+    const image = this.imagePath(); // manifest refusals surface with their own reason
     let digest: string;
     try {
-      digest = sha256File(this.imagePath());
+      digest = sha256File(image);
     } catch {
       throw new UnsupportedEnvironmentError(
         'profile_image_missing',
@@ -232,6 +282,7 @@ export class LocalQemuAdapter implements VmAdapter {
         'profile_image_mismatch',
         'baked profile image does not match its manifest digest'
       );
+    assertStandaloneQcow2(image);
     this.imageVerified = true;
   }
 
@@ -243,30 +294,45 @@ export class LocalQemuAdapter implements VmAdapter {
     replacePrivate(path.join(record.vmDir, 'vm.json'), Buffer.from(JSON.stringify(record)));
   }
 
+  /** The record decides which PID is signalled and which paths are removed, so
+   * it must live where this adapter put it and name only its own paths. */
   private readRecord(vmId: string): VmRecord | null {
     if (!VM_ID.test(vmId)) return null;
+    const vmDir = path.join(this.vmsDir, vmId);
     try {
       const record = JSON.parse(
-        fs.readFileSync(path.join(this.vmsDir, vmId, 'vm.json'), 'utf8')
+        readPrivate(path.join(vmDir, 'vm.json')).toString('utf8')
       ) as VmRecord;
-      return record.vmId === vmId ? record : null;
+      const valid =
+        record.vmId === vmId &&
+        record.vmDir === vmDir &&
+        typeof record.socket === 'string' &&
+        path.basename(record.socket) === `${vmId}.sock` &&
+        typeof record.runId === 'string' &&
+        (record.pid === null || (Number.isSafeInteger(record.pid) && record.pid > 1)) &&
+        (record.startToken === null || typeof record.startToken === 'string') &&
+        Number.isSafeInteger(record.limits?.commandTimeoutMs) &&
+        record.limits.commandTimeoutMs > 0;
+      return valid ? record : null;
     } catch {
       return null;
     }
   }
 
   private journal(event: Record<string, unknown>): void {
-    if (!this.options.journal) return;
-    for (const value of Object.values(event)) if (typeof value === 'string') assertNoSecrets(value);
-    this.options.journal.append({ v: 1, at: this.now().toISOString(), ...event });
+    appendVmEvent(this.options.journal, this.now(), event);
   }
 
-  async create(spec: VmSpec): Promise<VmHandle> {
+  private refuseIfKillSwitchEngaged(): void {
     if (this.killSwitchEngaged())
       throw new UnsupportedEnvironmentError(
         'kill_switch_engaged',
-        'the incident kill switch is engaged; no new VMs are admitted'
+        `the incident kill switch is engaged (${path.join(this.options.stateDir, KILL_SWITCH_FILE)}); no new VMs are admitted until an operator removes it`
       );
+  }
+
+  async create(spec: VmSpec): Promise<VmHandle> {
+    this.refuseIfKillSwitchEngaged();
     if (!ID.test(spec.runId)) throw new Error('Invalid run ID');
     if (!Number.isSafeInteger(spec.limits.diskGiB) || spec.limits.diskGiB < BAKED_DISK_GIB)
       throw new Error(`Disk limit must be at least the baked image size (${BAKED_DISK_GIB} GiB)`);
@@ -305,21 +371,11 @@ export class LocalQemuAdapter implements VmAdapter {
       profileDigest: this.manifest.profileDigest,
       scope: spec.scope,
     });
+    let launched: Launched | null = null;
     try {
       await this.ops.run(
         this.tools.qemuImg,
-        [
-          'create',
-          '-q',
-          '-f',
-          'qcow2',
-          '-F',
-          'qcow2',
-          '-b',
-          this.imagePath(),
-          disk,
-          `${spec.limits.diskGiB}G`,
-        ],
+        buildOverlayArgs(this.imagePath(), disk, spec.limits.diskGiB),
         { ...QEMU_ENV }
       );
       const args = buildRunArgs({
@@ -331,15 +387,20 @@ export class LocalQemuAdapter implements VmAdapter {
         brokerSocket: socket,
         scope: spec.scope,
       });
-      const launched = await this.ops.launch(
+      launched = await this.ops.launch(
         this.tools.qemu,
         args,
         { ...QEMU_ENV },
         path.join(vmDir, 'qemu.err')
       );
       const pid = launched.pid;
-      record = { ...record, pid, startToken: this.ops.startToken(pid) };
+      // Record the PID before anything else can fail: a PID without a start
+      // token is never signalled and never treated as cleaned up.
+      record = { ...record, pid };
       this.writeRecord(record);
+      record = { ...record, startToken: this.ops.startToken(pid) };
+      this.writeRecord(record);
+      this.refuseIfKillSwitchEngaged();
       this.journal({
         type: 'vm_created',
         runId: spec.runId,
@@ -354,7 +415,7 @@ export class LocalQemuAdapter implements VmAdapter {
         memoryMiB: spec.limits.memoryMiB,
         diskGiB: spec.limits.diskGiB,
       });
-      const exited = launched.exited.then((tail) => {
+      const exited = (launched as Launched).exited.then((tail) => {
         throw new Error(`QEMU exited during boot: ${tail.trim().slice(-500)}`);
       });
       const client = new BrokerClient(await this.connectWhenListening(socket, exited));
@@ -367,9 +428,24 @@ export class LocalQemuAdapter implements VmAdapter {
         client.taint('scope_mismatch');
         throw new BrokerError('scope_mismatch');
       }
+      // A kill-all that started during boot may have missed this VM.
+      this.refuseIfKillSwitchEngaged();
       return handle;
     } catch (error) {
-      await this.destroy(handle).catch(() => undefined);
+      // The child handle is the one reference that survives a failed record write.
+      launched?.kill?.();
+      await this.destroy(handle).catch((cleanup: unknown) => {
+        // The caller only sees the boot error; keep the leftovers on record.
+        if (cleanup instanceof VmCleanupError)
+          this.journal({
+            type: 'vm_cleanup_attempt_failed',
+            runId: spec.runId,
+            vmId,
+            attempt: 1,
+            leftoverPids: cleanup.leftoverPids,
+            leftoverPaths: cleanup.leftoverPaths,
+          });
+      });
       throw error;
     }
   }
@@ -380,12 +456,12 @@ export class LocalQemuAdapter implements VmAdapter {
     exited.catch((error) => {
       failure = error;
     });
-    for (let waited = 0; waited < 30_000; waited += 100) {
+    for (let waited = 0; waited < SOCKET_WAIT_MS; waited += POLL_MS) {
       if (failure) throw failure;
       try {
         return await this.ops.connect(socket);
       } catch {
-        await this.ops.sleep(100);
+        await this.ops.sleep(POLL_MS);
       }
     }
     throw new BrokerError('socket_unavailable');
@@ -404,8 +480,8 @@ export class LocalQemuAdapter implements VmAdapter {
 
   async exec(handle: VmHandle, request: ExecRequest): Promise<ExecResult> {
     const record = this.readRecord(handle.vmId);
-    const base = request.timeoutMs ?? record?.limits.commandTimeoutMs;
-    if (!base) throw new BrokerError('unknown_vm');
+    if (!record) throw new BrokerError('unknown_vm');
+    const base = request.timeoutMs ?? record.limits.commandTimeoutMs;
     return this.client(handle).exec(
       {
         profile: request.profile,
@@ -413,7 +489,7 @@ export class LocalQemuAdapter implements VmAdapter {
         cwd: request.cwd,
         timeoutMs: this.scaled(base, handle),
       },
-      this.scaled(60_000, handle)
+      this.scaled(BROKER_RPC_TIMEOUT_MS, handle)
     );
   }
 
@@ -423,15 +499,21 @@ export class LocalQemuAdapter implements VmAdapter {
     bytes: Buffer,
     executable = false
   ): Promise<void> {
-    return this.client(handle).put(relativePath, bytes, executable, this.scaled(60_000, handle));
+    return this.client(handle).put(
+      relativePath,
+      bytes,
+      executable,
+      this.scaled(BROKER_RPC_TIMEOUT_MS, handle)
+    );
   }
 
   getFile(handle: VmHandle, relativePath: string): Promise<Buffer> {
-    return this.client(handle).get(relativePath, this.scaled(60_000, handle));
+    return this.client(handle).get(relativePath, this.scaled(BROKER_RPC_TIMEOUT_MS, handle));
   }
 
   /** One attempt. Never signals a PID whose start token no longer matches. */
   async destroy(handle: Pick<VmHandle, 'vmId' | 'runId'>): Promise<void> {
+    if (!VM_ID.test(handle.vmId)) throw new Error('Invalid VM ID');
     this.clients.get(handle.vmId)?.close();
     this.clients.delete(handle.vmId);
     const record = this.readRecord(handle.vmId);
@@ -440,22 +522,24 @@ export class LocalQemuAdapter implements VmAdapter {
     const ownership = record ? this.ownership(record) : 'gone';
     if (ownership === 'unknown' && record?.pid) leftoverPids.push(record.pid);
     if (ownership === 'owned' && record?.pid) {
-      for (const [signal, waitMs] of [
-        ['SIGTERM', 5000],
-        ['SIGKILL', 5000],
-      ] as const) {
+      for (const signal of ['SIGTERM', 'SIGKILL'] as const) {
         if (!this.ops.alive(record.pid)) break;
         try {
           this.ops.kill(record.pid, signal);
         } catch {
           // ESRCH races are rechecked below; EPERM leaves it alive and reported.
         }
-        for (let waited = 0; waited < waitMs && this.ops.alive(record.pid); waited += 100)
-          await this.ops.sleep(100);
+        for (
+          let waited = 0;
+          waited < KILL_GRACE_MS && this.ops.alive(record.pid);
+          waited += POLL_MS
+        )
+          await this.ops.sleep(POLL_MS);
       }
       if (this.ops.alive(record.pid)) leftoverPids.push(record.pid);
     }
     const leftoverPaths: string[] = [];
+    if (!leftoverPids.length) this.keepDiagnostics(handle.vmId, vmDir);
     // Keep the record while the process may still be running, so a retry can find it.
     const targets = leftoverPids.length ? [record?.socket] : [record?.socket, vmDir];
     for (const target of targets) {
@@ -473,6 +557,17 @@ export class LocalQemuAdapter implements VmAdapter {
     this.journal({ type: 'vm_destroyed', runId: handle.runId, vmId: handle.vmId });
   }
 
+  /** Run VMs have no console, so QEMU's own stderr is the only boot evidence.
+   * It is host-side output (never guest bytes) and outlives the VM directory. */
+  private keepDiagnostics(vmId: string, vmDir: string): void {
+    try {
+      const target = privateDir(path.join(this.options.stateDir, 'diagnostics'));
+      fs.copyFileSync(path.join(vmDir, 'qemu.err'), path.join(target, `${vmId}.qemu.err`));
+    } catch {
+      // best effort: a missing log is not a cleanup failure
+    }
+  }
+
   /** `gone` also covers a recycled PID; `unknown` (unreadable /proc) is never
    * signalled and never treated as cleaned up. */
   private ownership(record: VmRecord): 'owned' | 'gone' | 'unknown' {
@@ -488,13 +583,17 @@ export class LocalQemuAdapter implements VmAdapter {
   }
 
   private records(): VmRecord[] {
-    let names: string[];
+    return this.vmDirNames()
+      .map((name) => this.readRecord(name))
+      .filter((r): r is VmRecord => r !== null);
+  }
+
+  private vmDirNames(): string[] {
     try {
-      names = fs.readdirSync(this.vmsDir);
+      return fs.readdirSync(this.vmsDir).filter((name) => VM_ID.test(name));
     } catch {
       return [];
     }
-    return names.map((name) => this.readRecord(name)).filter((r): r is VmRecord => r !== null);
   }
 
   async listByRun(runId: string): Promise<VmListing[]> {
@@ -526,13 +625,19 @@ export class LocalQemuAdapter implements VmAdapter {
     this.journal({ type: 'vm_kill_switch', reason });
     const destroyed: string[] = [];
     const failed: VmCleanupError[] = [];
-    for (const record of this.records()) {
+    for (const vmId of this.vmDirNames()) {
+      const vmDir = path.join(this.vmsDir, vmId);
+      // A VM directory without a trustworthy record cannot be proven clean.
+      const record = this.readRecord(vmId);
+      if (!record) {
+        failed.push(new VmCleanupError([], [vmDir]));
+        continue;
+      }
       try {
         await this.destroy(record);
-        destroyed.push(record.vmId);
+        destroyed.push(vmId);
       } catch (error) {
-        if (error instanceof VmCleanupError) failed.push(error);
-        else throw error;
+        failed.push(error instanceof VmCleanupError ? error : new VmCleanupError([], [vmDir]));
       }
     }
     return { destroyed, failed };

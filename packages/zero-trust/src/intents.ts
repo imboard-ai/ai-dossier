@@ -170,6 +170,11 @@ const ADMISSION: Readonly<Record<OperationKind, readonly RunState[]>> = Object.f
   pr_close: ['shipping', 'submitted', 'awaiting_review', 'revising', 'accepted'],
 });
 
+/** Whether the run state admits this GitHub write; the single admission table. */
+export function isAdmitted(operationKind: OperationKind, state: RunState): boolean {
+  return ADMISSION[operationKind].includes(state);
+}
+
 function reduce(state: IntentState | undefined, raw: unknown): IntentState {
   if (!isRecord(raw) || raw.v !== 1) throw new IntentError();
   if (raw.type === 'run') {
@@ -397,11 +402,7 @@ export class IntentDriver {
     return this.serial(() => this.reconcileAll());
   }
   private admit(operationKind: OperationKind): void {
-    if (
-      this.failed ||
-      this.state.blockedReason ||
-      !ADMISSION[operationKind].includes(this.state.run.state)
-    )
+    if (this.failed || this.state.blockedReason || !isAdmitted(operationKind, this.state.run.state))
       throw new WriteBlockedError();
   }
   execute(input: IntentInput): Promise<string> {

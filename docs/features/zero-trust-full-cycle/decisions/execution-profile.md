@@ -37,8 +37,9 @@ The suite runs again on every pull request that touches `packages/zero-trust/`.
 
 ## Host preflight
 
-`src/vm/host.ts` refuses closed with reason `unsupported_environment` and a detail code. There is
-no fallback to host Docker, and the container runtime is never probed on the host.
+Host preflight (`src/vm/host.ts`) and the adapter (`src/vm/local-qemu.ts`, `src/vm/profile.ts`)
+refuse closed with reason `unsupported_environment` and a detail code. There is no fallback to
+host Docker, and the container runtime is never probed on the host.
 
 | Condition | Detail |
 |---|---|
@@ -48,7 +49,8 @@ no fallback to host Docker, and the container runtime is never probed on the hos
 | `qemu-img` not on PATH | `qemu_img_missing` |
 | No `genisoimage`/`mkisofs`/`xorrisofs` (cloud-init seed) | `iso_tool_missing` |
 | `kvm` requested but `/dev/kvm` is not read-write for this user | `kvm_unavailable` (never downgraded) |
-| No baked profile, or manifest/image digest mismatch | `profile_image_missing` / `profile_image_mismatch` |
+| No baked profile, or a manifest that is not private (mode 0600, this user) | `profile_image_missing` |
+| A manifest that does not match the current pins, recipe or guest agent, an image digest mismatch, or a qcow2 that names a backing or data file | `profile_image_mismatch` |
 | Broker socket path over 107 bytes | `socket_path_too_long` |
 | Incident kill switch engaged | `kill_switch_engaged` |
 
@@ -65,16 +67,16 @@ Run VM (untrusted code):
 
 | Flag | Why |
 |---|---|
-| `-machine q35,accel=kvm\|tcg`, `-cpu host` (KVM) / `-cpu max` (TCG) | Accelerator from preflight; recorded in the journal and the receipt profile |
+| `-machine q35,accel=kvm\|tcg`, `-cpu host` (KVM) / `-cpu max` (TCG) | Accelerator from preflight; recorded in the `vm_created` journal event, and the receipt schema (`ztfc-receipt-v2`) requires it in `profile.accelerator`, which the caller takes from `VmHandle.accelerator` |
 | `-smp N -m MiB`, overlay disk `qemu-img create -b <baked image> <size>` | PRD §5.1 limits (default 4 vCPU, 8 GiB, 20 GiB) |
 | `-nodefaults -no-user-config -display none -no-reboot` | No implicit devices, no host config files, no display, reboot ends the VM |
 | `-sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny` | QEMU's own seccomp filter: no privilege change, no helper processes |
 | `-serial none` | No guest-controlled console file on the host (disk-fill vector) |
-| `-netdev user,id=net0,restrict=on` + `virtio-net-pci` | User-mode networking isolated from the host and the outside (below); no `hostfwd`/`guestfwd` |
+| `-netdev user,id=net0,restrict=on` + `virtio-net-pci` | User-mode networking isolated from the host and the outside (below); no `hostfwd`/`guestfwd`. The value is rendered from `RUN_NETWORK_POLICY` |
 | `virtio-serial-pci` + `-chardev socket,path=<0700 runtime dir>/<vm>.sock,server=on,wait=off` + `virtserialport,name=org.ai-dossier.zt.broker` | The broker channel, the only data path |
 | `-smbios type=11,value=org.ai-dossier.zt.scope:container\|vm-root` | Controller-set execution scope as an SMBIOS OEM string; the guest agent reads it through `dmi_sysfs`, announces it back, and a mismatch taints the VM. (fw_cfg was tried first; the cloud image kernel does not ship `qemu_fw_cfg`, and the agent fell back to `container`, which is the safe default.) |
 | `-drive file=<overlay>,if=virtio,format=qcow2,discard=unmap`, `virtio-rng-pci` | Per-run copy-on-write disk on the hash-verified baked image |
-| `-pidfile` | Process identity; teardown also checks the process start token before signalling |
+| `-pidfile` | Written for operators and diagnostics; teardown uses the recorded spawn PID and checks its process start token before signalling |
 
 No `-virtfs`, `-fsdev`, virtiofs, 9p or `vhost-user-fs` device exists in the run arguments, and
 unit tests assert their absence. QEMU is started detached in its own session by the controller
@@ -90,13 +92,14 @@ involved in a bake.
 
 - Base: Ubuntu 24.04 cloud image `release-20260926`, SHA-256 pinned, re-verified on every use
   of the download cache.
-- Bake (`src/vm/cloud-init.ts`, `src/vm/bake.ts`): no users, no passwords, SSH removed and
-  masked, root locked, snapd and unattended upgrades purged, cloud-init disabled after the bake.
+- Bake (`src/vm/cloud-init.ts`, `src/vm/bake.ts`): no users, no passwords, SSH disabled and
+  masked, apt timers masked, root locked, snapd and unattended upgrades purged, cloud-init disabled after the bake.
   Node and Python container images derive from
   `mcr.microsoft.com/devcontainers/base:ubuntu24.04` pinned by digest; sudo is purged and every
   setuid/setgid bit is stripped at build time. The flattened image is hashed into a manifest
   together with the profile digest (pins, recipe version, guest agent source). The adapter
-  re-hashes the image before its first VM.
+  re-hashes the image before its first VM and refuses a qcow2 whose header names a backing file
+  or an external data file (QEMU would open either with the controller's privileges).
 - Worker container (`vm-guest/agent.py`): `--network none --cap-drop ALL --security-opt
   no-new-privileges=true --read-only --tmpfs /tmp --pids-limit 1024 --memory/--memory-swap
   --cpus --user 1000:1000`, only the workspace bind-mounted.
@@ -127,15 +130,17 @@ argv, workspace-relative paths without traversal, 1 MiB file cap, timeout bounds
 response it receives (frame size cap, schema, request id, canonical base64, stream caps, short
 error slugs). Any protocol violation by the guest taints the VM permanently; it must be
 destroyed. A request the host rejects never reaches the guest and does not taint the VM. The
-guest walks workspace paths with `O_NOFOLLOW` from the workspace root. The VM holds no model,
-GitHub or other credentials.
+guest walks workspace paths with `O_NOFOLLOW` from the workspace root and opens files it writes
+non-blocking, so a FIFO planted by worker code cannot wedge it. The VM holds no model, GitHub or
+other credentials.
 
 ## Accelerator choice and measured overhead
 
 KVM is used when `/dev/kvm` is read-write for the controller's user; otherwise TCG. A forced `kvm`
 request without KVM is refused, never downgraded. TCG is the same image and the same isolation;
-only clocks change: command timeouts ×4 and boot timeout 20 min (KVM: 3 min). The accelerator is
-recorded in the `vm_created` journal event and in the receipt profile.
+only clocks change: command and broker request timeouts ×4, and boot timeout 20 min (KVM: 3 min).
+The accelerator is recorded in the `vm_created` journal event and bound into the receipt
+(`profile.accelerator`).
 
 Measured on GitHub-hosted `ubuntu-24.04` runners (same image, same smoke workload; the TCG
 job has no `/dev/kvm` access), CI run 37499725515:
@@ -208,32 +213,42 @@ report proves nothing alone. The real gate is what the host measures itself:
 - the planted host listeners accepted zero connections;
 - every host-side broker-abuse request was rejected before reaching the guest.
 
-`assertBoundaryHeld` throws `BoundaryBreachError` on any violation; a boundary failure blocks
-shipping authorization for the run.
+Report fields are validated before use (known categories, short plain-text attempts and outcomes);
+anything else counts as a malformed report.
+
+`assertBoundaryHeld` throws `BoundaryBreachError` on any violation; the gate suite calls it.
+Making it a precondition of shipping authorization for a run is follow-up work (S2–S5).
 
 ## Teardown and kill switch (scenario 20)
 
 `destroy` is one attempt: SIGTERM then SIGKILL, only after the process start token matches the
 recorded one (a recycled PID is never signalled), then the overlay and socket are removed.
 `teardownVm` retries up to three times; on exhaustion the run transitions to `blocked_cleanup`
-with leftover PIDs and disk paths journaled, and `assertPublicationPermitted` denies publication
-in any state but `shipping`. `blocked_cleanup` has no edge back to execution or shipping. The
-incident kill switch writes an admission-blocking marker first, then destroys every VM.
+with leftover PIDs and disk paths journaled, and the blocked run is handed to `observeRun`
+(e.g. `IntentDriver.observeRun`) so the admission fence sees it. `assertPublicationPermitted`
+delegates to the intent admission table, which admits no GitHub write in `blocked_cleanup`, and
+`blocked_cleanup` has no edge back to execution or shipping. A failed create still journals what
+its cleanup left behind. The incident kill switch writes an admission-blocking marker first, then
+destroys every VM; it needs only the state directory (no QEMU, no current profile), reports VM
+directories without a trustworthy record as failures, and `create` re-checks the marker after
+QEMU starts and after the guest answers, so a VM booting during an incident is also stopped.
+QEMU's own stderr for each VM is kept under `<stateDir>/diagnostics/`.
 
 ## Authority boundary (scenario 5)
 
 `src/authority.ts`: model output can only propose one of a closed set of actions (`worker_exec`,
 `worker_write_file`, `request_publication`, `hand_off`). Any extra field (target, repo, base,
 token, network, budget) is rejected as an override attempt; publication targets and the
-candidate SHA come from the controller binding, never from the proposal; secret-shaped text is
-rejected; there is no action that reads secrets. A stub model that fully complies with an
+candidate SHA come from the controller binding, never from the proposal; secret-shaped argv,
+written file content, publication titles and bodies, and hand-off reasons are rejected; there is
+no action that reads secrets. A stub model that fully complies with an
 injected "reveal credentials / retarget the PR" instruction is rejected in every case, and a
 retargeted intent fails `authorizeShipping`.
 
 ## CI
 
 `.github/workflows/zero-trust-vm.yml` runs on every pull request touching
-`packages/zero-trust/**` (and the workflow file):
+`packages/zero-trust/**` (and the workflow file), and on manual `workflow_dispatch`:
 
 - **KVM job:** udev rule granting the runner user `/dev/kvm`, QEMU from the Ubuntu archive, bake
   (or restore the cached profile keyed by every profile-digest input), KVM smoke, then the hostile
@@ -242,8 +257,12 @@ retargeted intent fails `authorizeShipping`.
 - **TCG job:** no udev rule, so `/dev/kvm` stays closed; smoke test on the same cached image with
   `--accel tcg`.
 - No repository secrets reach either job: `permissions: contents: read`, no `secrets.*`
-  references, no environment derived from secrets, `persist-credentials: false`, `pull_request`
-  only, actions pinned by commit SHA.
+  references, no environment derived from secrets, `persist-credentials: false`,
+  `pull_request`/`workflow_dispatch` only (never `pull_request_target`), actions pinned by commit
+  SHA. `scripts/zero-trust-vm-workflow.test.mjs` enforces each of these and fails if a secret,
+  token expression, wider permission or unpinned action is added.
+- Guest output reaches the job log, so the suite runs between `::stop-commands::` markers and
+  the step summary renders guest-derived text inside code blocks.
 
 ## Residual risks
 
@@ -261,18 +280,26 @@ retargeted intent fails `authorizeShipping`.
   short private runtime directory, and an over-length path fails closed
   (`socket_path_too_long`) rather than being truncated.
 - **`-daemonize` with seccomp.** `-daemonize` cannot be combined with `-sandbox spawn=deny`, so
-  the controller detaches QEMU itself (own session, pidfile, start-token check). A controller crash
+  the controller detaches QEMU itself (own session, recorded spawn PID, start-token check). A controller crash
   leaves QEMU running until the kill switch or the next teardown reconciles it.
 - **Bake supply chain.** Distro packages and the container base come from the Ubuntu archive and
   the Microsoft registry (apt signatures, image digest); the resulting image is hash-pinned, but
   the bake itself trusts those sources. In CI the baked image is shared through the Actions cache
-  of the same repository; a pull request can only write cache entries scoped to its own ref.
+  of the same repository; a pull request can only write cache entries scoped to its own ref. The
+  manifest check is integrity, not authentication: whoever can write the profile directory can
+  supply a different image, so it must stay private to the controller's user.
 - **slirp `restrict=on` semantics** are measured by the suite on the pinned QEMU version, not
   assumed; a QEMU upgrade must re-run the gate.
 - **Disk size.** A run overlay cannot be smaller than the 16 GiB baked disk (the guest kernel
   rejects the partition table and finds no root), so smaller limits are refused. Space beyond
   16 GiB is not usable until the root partition is grown, which run VMs do not do yet.
-- **Diagnostic boot in CI.** When the KVM job fails, it boots the baked image once more with a
-  serial log so a boot failure is visible. No fixture code runs in that boot.
+- **Diagnostic boot in CI.** When the KVM job fails, `zt-vm.mjs diagnose` boots the baked image
+  once more with the run-VM arguments plus a serial log, so a boot failure is visible. No fixture
+  code runs in that boot.
+- **Kill switch release.** Nothing lifts the kill switch; an operator deletes
+  `<stateDir>/KILL_SWITCH` after the incident. The refusal names that file.
+- **Receipt schema.** Adding the required `profile.accelerator` moved receipts to
+  `ztfc-receipt-v2`; v1 receipts no longer verify (the package is private and receipts expire
+  after 15 minutes).
 - **Linux x86_64 hosts only.** macOS (Virtualization.framework) and Windows (WSL2) refuse with
   `unsupported_os` until their profiles exist.
