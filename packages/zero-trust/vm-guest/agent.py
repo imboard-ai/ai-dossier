@@ -15,7 +15,8 @@ import threading
 import time
 
 PORT = "/dev/virtio-ports/org.ai-dossier.zt.broker"
-SCOPE_FILE = "/sys/firmware/qemu_fw_cfg/by_name/opt/org.ai-dossier.zt/scope/raw"
+DMI_ENTRIES = "/sys/firmware/dmi/entries"
+SCOPE_OEM = b"org.ai-dossier.zt.scope:"
 WORKSPACE = "/var/lib/zt/workspace"
 IMAGES = {"node": "zt-node:profile", "python": "zt-python:profile"}
 WORKER_UID = 1000
@@ -26,12 +27,20 @@ MAX_FILE = 1024 * 1024
 
 def read_scope():
     # Only an explicit controller flag selects vm-root; anything else is container.
+    # The flag is an SMBIOS type 11 OEM string set on the QEMU command line.
     try:
-        subprocess.run(["modprobe", "qemu_fw_cfg"], check=False, capture_output=True)
-        with open(SCOPE_FILE, "rb") as handle:
-            return "vm-root" if handle.read(16) == b"vm-root" else "container"
-    except OSError:
-        return "container"
+        subprocess.run(["modprobe", "dmi_sysfs"], check=False, capture_output=True)
+        for entry in os.listdir(DMI_ENTRIES):
+            if not entry.startswith("11-"):
+                continue
+            with open(os.path.join(DMI_ENTRIES, entry, "raw"), "rb") as handle:
+                raw = handle.read(4096)
+            # Formatted area (length in byte 1), then NUL-terminated strings.
+            if SCOPE_OEM + b"vm-root" in raw[raw[1]:].split(b"\0"):
+                return "vm-root"
+    except (OSError, IndexError):
+        pass
+    return "container"
 
 
 def container_limits():

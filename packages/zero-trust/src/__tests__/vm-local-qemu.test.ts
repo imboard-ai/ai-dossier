@@ -23,7 +23,7 @@ import {
   systemOps,
 } from '../vm/local-qemu';
 import { PROFILE_PINS, profileDigest } from '../vm/profile';
-import { BROKER_PORT_NAME, SCOPE_FW_CFG } from '../vm/qemu-args';
+import { BROKER_PORT_NAME, SCOPE_OEM_PREFIX } from '../vm/qemu-args';
 
 const AGENT = 'print("fake guest agent")\n';
 const IMAGE_BYTES = Buffer.from('baked profile image');
@@ -122,8 +122,8 @@ function fakeHost(): FakeHost {
     },
     async launch(binary, args, env, stderrFile) {
       host.calls.launch.push({ binary, args, env, stderrFile });
-      const fw = String(args[args.indexOf('-fw_cfg') + 1]);
-      scope = fw.slice(fw.indexOf('string=') + 'string='.length);
+      const oem = String(args[args.indexOf('-smbios') + 1]);
+      scope = oem.slice(oem.indexOf(SCOPE_OEM_PREFIX) + SCOPE_OEM_PREFIX.length);
       const pid = host.state.nextPid++;
       host.alive.add(pid);
       host.tokens.set(
@@ -314,7 +314,7 @@ describe('LocalQemuAdapter.create', () => {
     const [launch] = host.calls.launch;
     expect(launch?.binary).toBe('/opt/fake/qemu-system-x86_64');
     expect(launch?.args).toContain('user,id=net0,restrict=on');
-    expect(launch?.args).toContain(`name=${SCOPE_FW_CFG},string=container`);
+    expect(launch?.args).toContain(`type=11,value=${SCOPE_OEM_PREFIX}container`);
     expect(launch?.args.join(' ')).toContain(BROKER_PORT_NAME);
     const vmDir = path.join(stateDir, 'vms', handle.vmId);
     expect(launch?.stderrFile).toBe(path.join(vmDir, 'qemu.err'));
@@ -378,10 +378,10 @@ describe('LocalQemuAdapter.create', () => {
     expect(fs.readdirSync(path.join(stateDir, 'vms'))).toEqual([]);
   });
 
-  it('passes vm-root scope through fw_cfg', async () => {
+  it('passes vm-root scope through the SMBIOS OEM string', async () => {
     const handle = await adapter().create(spec('run-1', 'vm-root'));
     expect(handle.scope).toBe('vm-root');
-    expect(host.calls.launch[0]?.args).toContain(`name=${SCOPE_FW_CFG},string=vm-root`);
+    expect(host.calls.launch[0]?.args).toContain(`type=11,value=${SCOPE_OEM_PREFIX}vm-root`);
   });
 
   it('rejects with the stderr tail when QEMU exits before the socket opens', async () => {

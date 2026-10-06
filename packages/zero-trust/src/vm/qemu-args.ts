@@ -3,7 +3,9 @@
 import type { Accelerator, ExecScope, VmLimits } from './adapter';
 
 export const BROKER_PORT_NAME = 'org.ai-dossier.zt.broker';
-export const SCOPE_FW_CFG = 'opt/org.ai-dossier.zt/scope';
+/** SMBIOS type 11 OEM string carrying the controller-set scope. fw_cfg would need
+ * `qemu_fw_cfg`, which the cloud image kernel does not ship; `dmi_sysfs` it does. */
+export const SCOPE_OEM_PREFIX = 'org.ai-dossier.zt.scope:';
 /** sun_path is 108 bytes including the terminator. */
 export const MAX_SOCKET_PATH_BYTES = 107;
 
@@ -109,8 +111,8 @@ export function buildRunArgs(args: RunArgs): string[] {
     `socket,id=broker,path=${args.brokerSocket},server=on,wait=off`,
     '-device',
     `virtserialport,chardev=broker,name=${BROKER_PORT_NAME}`,
-    '-fw_cfg',
-    `name=${SCOPE_FW_CFG},string=${args.scope}`,
+    '-smbios',
+    `type=11,value=${SCOPE_OEM_PREFIX}${args.scope}`,
   ];
 }
 

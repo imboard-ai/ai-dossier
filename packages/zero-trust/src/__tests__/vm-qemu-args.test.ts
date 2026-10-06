@@ -8,7 +8,7 @@ import {
   MAX_SOCKET_PATH_BYTES,
   RUN_NETWORK_POLICY,
   type RunArgs,
-  SCOPE_FW_CFG,
+  SCOPE_OEM_PREFIX,
   TIMEOUT_SCALE,
 } from '../vm/qemu-args';
 
@@ -89,10 +89,10 @@ describe('buildRunArgs — untrusted run boundary', () => {
     ).toEqual(['262144']);
   });
 
-  it('passes the scope through fw_cfg', () => {
-    expect(valuesOf(argv, '-fw_cfg')).toEqual([`name=${SCOPE_FW_CFG},string=container`]);
-    expect(valuesOf(buildRunArgs({ ...RUN, scope: 'vm-root' }), '-fw_cfg')).toEqual([
-      'name=opt/org.ai-dossier.zt/scope,string=vm-root',
+  it('passes the scope through an SMBIOS OEM string', () => {
+    expect(valuesOf(argv, '-smbios')).toEqual([`type=11,value=${SCOPE_OEM_PREFIX}container`]);
+    expect(valuesOf(buildRunArgs({ ...RUN, scope: 'vm-root' }), '-smbios')).toEqual([
+      'type=11,value=org.ai-dossier.zt.scope:vm-root',
     ]);
   });
 

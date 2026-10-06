@@ -26,7 +26,7 @@ export const PROFILE_PINS = Object.freeze({
 });
 
 /** Bumped whenever cloud-init, the guest agent or the hardening changes. */
-export const BAKE_RECIPE_VERSION = 1;
+export const BAKE_RECIPE_VERSION = 2;
 
 /** Virtual size of the baked disk. A run overlay may not be smaller: the guest
  * kernel rejects a GPT whose partitions end past the disk and cannot find root. */

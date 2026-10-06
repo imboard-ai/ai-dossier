@@ -73,7 +73,7 @@ export function bakeUserData(agentSource: string): string {
   const files: [string, string, string][] = [
     ['/usr/local/lib/zt/agent.py', '0700', agentSource],
     ['/etc/systemd/system/zt-agent.service', '0644', AGENT_UNIT],
-    ['/etc/modules-load.d/zt-fw-cfg.conf', '0644', 'qemu_fw_cfg\n'],
+    ['/etc/modules-load.d/zt-dmi-sysfs.conf', '0644', 'dmi_sysfs\n'],
     ['/var/lib/zt/build/node/Dockerfile', '0644', dockerfile(PROFILE_PINS.containerProfiles.node)],
     [
       '/var/lib/zt/build/python/Dockerfile',

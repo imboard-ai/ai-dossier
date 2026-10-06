@@ -172,12 +172,12 @@ describe('cloud-init', () => {
     expect([...writeFiles().keys()]).toEqual([
       '/usr/local/lib/zt/agent.py',
       '/etc/systemd/system/zt-agent.service',
-      '/etc/modules-load.d/zt-fw-cfg.conf',
+      '/etc/modules-load.d/zt-dmi-sysfs.conf',
       '/var/lib/zt/build/node/Dockerfile',
       '/var/lib/zt/build/python/Dockerfile',
       '/usr/local/lib/zt/bake.sh',
     ]);
-    expect(writeFiles().get('/etc/modules-load.d/zt-fw-cfg.conf')?.content).toBe('qemu_fw_cfg\n');
+    expect(writeFiles().get('/etc/modules-load.d/zt-dmi-sysfs.conf')?.content).toBe('dmi_sysfs\n');
   });
 
   it.each([

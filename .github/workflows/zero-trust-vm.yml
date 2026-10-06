@@ -115,7 +115,7 @@ jobs:
             -netdev user,id=net0,restrict=on -device virtio-net-pci,netdev=net0 \
             -device virtio-serial-pci -chardev "socket,id=broker,path=$RUNNER_TEMP/diag.sock,server=on,wait=off" \
             -device virtserialport,chardev=broker,name=org.ai-dossier.zt.broker \
-            -fw_cfg name=opt/org.ai-dossier.zt/scope,string=vm-root &
+            -smbios type=11,value=org.ai-dossier.zt.scope:vm-root &
           qemu=$!
           sleep 5
           # The scope the guest announces for a controller-set vm-root flag.
@@ -126,18 +126,8 @@ jobs:
             setTimeout(() => { console.log("no hello reply"); process.exit(0); }, 120000);
           ' "$RUNNER_TEMP/diag.sock" || true
           kill "$qemu" || true
-          grep -n -i -E 'fw_cfg|modules-load|zt-agent|docker' "$RUNNER_TEMP/diag-console.log" | tail -n 40 || true
+          grep -n -i -E 'modules-load|zt-agent|docker' "$RUNNER_TEMP/diag-console.log" | tail -n 40 || true
           tail -n 60 "$RUNNER_TEMP/diag-console.log" || true
-          cd packages/zero-trust && node -e '
-            const zt = require("./dist/index.js");
-            (async () => {
-              const a = new zt.LocalQemuAdapter({ profileDir: process.argv[1], stateDir: process.argv[2], accelerator: "kvm" });
-              const vm = await a.create({ runId: "diag", limits: { ...zt.DEFAULT_LIMITS, vcpus: 2, memoryMiB: 4096 }, scope: "container" });
-              const r = await a.exec(vm, { profile: "python", argv: ["sh", "-c", "grep -i -E \"fw_cfg|dmi\" /proc/modules; uname -r; ls /sys/firmware 2>&1 | head"] });
-              console.log(r.stdout, r.stderr);
-              await a.destroy(vm);
-            })().catch((e) => console.log("diag exec failed:", e.message));
-          ' "$RUNNER_TEMP/zt-profile" "$RUNNER_TEMP/zt-diag-state" || true
 
       - name: Summarize evidence
         if: always()
