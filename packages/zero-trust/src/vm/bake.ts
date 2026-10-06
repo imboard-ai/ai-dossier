@@ -93,6 +93,9 @@ export async function ensureBaseImage(
     throw error;
   } finally {
     clearTimeout(idle);
+    // Destroying a stream with a write still queued emits ERR_STREAM_DESTROYED; the
+    // download already failed or finished, so that late error carries nothing.
+    out?.on('error', () => undefined);
     out?.destroy();
     fs.rmSync(part, { force: true });
   }

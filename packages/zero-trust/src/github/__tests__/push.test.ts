@@ -16,6 +16,7 @@ import {
 import { Journal } from '../../journal';
 import { ReceiptNonceStore } from '../../receipt/nonces';
 import { ReceiptError } from '../../receipt/schema';
+import { evaluateBoundary } from '../../vm/evidence';
 import { CredentialBrokerError, type ForkCredentialBroker } from '../broker';
 import { ForkRefError, forkTarget, parseForkTarget, readForkBranch } from '../fork-ref';
 import type { HandoffAdmission } from '../handoff-driver';
@@ -29,6 +30,7 @@ import {
   DIGEST,
   FORK,
   type Grant,
+  HELD_BOUNDARY,
   journals,
   MINT,
   pushOf,
@@ -293,6 +295,37 @@ describe('verified CAS push to the fork (#1066)', () => {
       'policy denies shipping',
       'policy_denied',
       (g) => ({ ...g, context: { policyPermitsShipping: false } }),
+    ],
+    [
+      'the isolation boundary was breached (#1076)',
+      'boundary_not_held',
+      (g) => ({
+        ...g,
+        context: {
+          boundaryEvidence: evaluateBoundary({ ...HELD_BOUNDARY, listenerConnections: 1 }),
+        },
+      }),
+    ],
+    [
+      'a probe report was malformed (#1076)',
+      'boundary_not_held',
+      (g) => ({
+        ...g,
+        context: { boundaryEvidence: evaluateBoundary({ ...HELD_BOUNDARY, malformedReports: 1 }) },
+      }),
+    ],
+    [
+      "the boundary evidence is another run's (#1076)",
+      'boundary_wrong_run',
+      (g) => ({
+        ...g,
+        context: { boundaryEvidence: evaluateBoundary({ ...HELD_BOUNDARY, runId: 'other-run' }) },
+      }),
+    ],
+    [
+      'the boundary evidence is missing (#1076)',
+      'boundary_evidence_missing',
+      (g) => ({ ...g, context: { boundaryEvidence: null as never } }),
     ],
   ])('refuses %s before minting a token (scenarios 10/17, AC1/AC7)', async (_name, code, mutate) => {
     const r = await rig();

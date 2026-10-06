@@ -227,7 +227,16 @@ Report fields are validated before use (known categories, short plain-text attem
 anything else counts as a malformed report.
 
 `assertBoundaryHeld` throws `BoundaryBreachError` on any violation; the gate suite calls it.
-Making it a precondition of shipping authorization for a run is follow-up work (S2–S5).
+In production the run's evidence is part of the controller's `ReceiptContext`
+(`boundaryEvidence`, gathered with the run's ID), and `authorizeShipping` refuses before any
+nonce is consumed unless it is that run's own clean verdict (`isCleanHeldVerdict`: held, no
+violations, at least one attempt). Any violation (breach, malformed report, canary leak,
+missing coverage) or a verdict with no attempts is `boundary_not_held`, absent evidence is
+`boundary_evidence_missing`, and a verdict gathered for another run, or for no run, is
+`boundary_wrong_run`. The evidence is checked on its own snapshot first, so guest text in a
+breach verdict always classifies as `boundary_not_held`. Its production caller,
+`ForkPusher.admit`, turns either into `WriteRefusedError('authorization_refused', …)` before a
+token is minted, so the fork ref is never touched.
 
 ## Teardown and kill switch (scenario 20)
 

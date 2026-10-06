@@ -493,7 +493,10 @@ invent counts or omit required checks to obtain authorization.
 Use `authorizeShipping` inside the trusted `WriteAdapter.mutate` after `IntentDriver`
 has persisted its attempted intent. Pass the exact expected remote SHA (`null` for
 PR operations) and a `ReceiptNonceStore` in a **separate, controller-owned local
-directory**. Grants bind the existing `idempotencyKey`, operation kind/target,
+directory**. The context must carry the run's `boundaryEvidence` (from
+`evaluateBoundary` with that run's ID): anything but that run's clean held verdict is
+refused (`boundary_not_held`, `boundary_evidence_missing`, `boundary_wrong_run`) before a
+nonce is consumed. Grants bind the existing `idempotencyKey`, operation kind/target,
 expected remote SHA and a unique controller-generated nonce. Receipts expire exactly
 15 minutes after issuance. Each grant is consumed and fsynced before authorization
 returns. The returned grant permits only that one mutation, not repeated calls.

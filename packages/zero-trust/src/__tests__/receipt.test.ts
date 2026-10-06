@@ -18,6 +18,7 @@ import { renderReceipt } from '../receipt/render';
 import { canonicalJson, parseReceipt, RECEIPT_TTL_MS } from '../receipt/schema';
 import { authorizeShipping, type ReceiptContext, verifyReceipt } from '../receipt/verify';
 import { createRun, ReasonCode, transitionRun } from '../state';
+import { type BoundaryInput, evaluateBoundary } from '../vm/evidence';
 import { compiledFixture } from './compiled-fixture';
 
 const SHA = 'a'.repeat(40);
@@ -109,6 +110,7 @@ beforeEach(async () => {
     allowedShippingOperations: [
       { kind: 'push_branch', target: operation.target, expectedRemoteSha: SHA },
     ],
+    boundaryEvidence: evaluateBoundary({ ...HELD_INPUT, runId: bindings.runId }),
   };
   fs.mkdirSync(path.join(directory, 'nonces'));
   store = new ReceiptNonceStore(path.join(directory, 'nonces'));
@@ -123,6 +125,136 @@ const verify = (r: SignedReceipt, c = context, clock = AT) =>
   verifyReceipt(r, publicKey, c, () => clock);
 const authorize = (r: SignedReceipt, i = intent, s = store) =>
   authorizeShipping(r, publicKey, context, i, SHA, s, () => AT);
+
+/** A minimal clean gate result: one host-side broker check, rejected. */
+const HELD_INPUT: BoundaryInput = {
+  reports: [],
+  guestOutputs: [],
+  canaries: [],
+  listenerConnections: 0,
+  brokerChecks: [{ attempt: 'op-outside-set', rejected: true }],
+  malformedReports: 0,
+  requiredCategories: ['broker-abuse'],
+};
+
+describe('shipping requires held boundary evidence (scenario 4, #1076)', () => {
+  it.each([
+    [
+      'a breach',
+      () => evaluateBoundary({ ...HELD_INPUT, listenerConnections: 1 }),
+      'boundary_not_held',
+    ],
+    [
+      'a malformed probe report',
+      () => evaluateBoundary({ ...HELD_INPUT, malformedReports: 1 }),
+      'boundary_not_held',
+    ],
+    [
+      'a canary leak',
+      () =>
+        evaluateBoundary({
+          ...HELD_INPUT,
+          canaries: ['zt-canary-0123456789abcdef'],
+          guestOutputs: ['x zt-canary-0123456789abcdef'],
+        }),
+      'boundary_not_held',
+    ],
+    ['missing evidence', () => null, 'boundary_evidence_missing'],
+    [
+      'a hand-made held flag with violations',
+      () => ({ held: true, violations: ['x'], coverage: {}, attempts: 1 }),
+      'boundary_not_held',
+    ],
+    [
+      'a held flag with no attempts',
+      () => ({ held: true, violations: [], coverage: {}, attempts: 0 }),
+      'boundary_not_held',
+    ],
+  ])('refuses %s without consuming the nonce', async (_name, evidence, code) => {
+    const r = await issue();
+    const consume = vi.spyOn(store, 'consume');
+    await expect(
+      authorizeShipping(
+        r,
+        publicKey,
+        { ...context, boundaryEvidence: evidence() as never },
+        intent,
+        SHA,
+        store,
+        () => AT
+      )
+    ).rejects.toThrow(code);
+    expect(consume).not.toHaveBeenCalled();
+  });
+
+  it("refuses another run's held verdict", async () => {
+    const r = await issue();
+    const other = evaluateBoundary({ ...HELD_INPUT, runId: 'some-other-run' });
+    const unbound = evaluateBoundary(HELD_INPUT);
+    for (const boundaryEvidence of [other, unbound])
+      await expect(
+        authorizeShipping(
+          r,
+          publicKey,
+          { ...context, boundaryEvidence },
+          intent,
+          SHA,
+          store,
+          () => AT
+        )
+      ).rejects.toThrow('boundary_wrong_run');
+  });
+
+  it('classifies a breach whose guest text looks like a credential as boundary_not_held', async () => {
+    const r = await issue();
+    const token = `ghp_${'a'.repeat(36)}`;
+    const breach = evaluateBoundary({
+      ...HELD_INPUT,
+      runId: context.runId,
+      reports: [
+        {
+          probe: 'node',
+          phase: 'test',
+          records: [{ category: 'dns', attempt: token, outcome: 'succeeded' }],
+        },
+      ],
+    });
+    const consume = vi.spyOn(store, 'consume');
+    await expect(
+      authorizeShipping(
+        r,
+        publicKey,
+        { ...context, boundaryEvidence: breach },
+        intent,
+        SHA,
+        store,
+        () => AT
+      )
+    ).rejects.toThrow('boundary_not_held');
+    expect(consume).not.toHaveBeenCalled();
+  });
+
+  it('refuses a context without the evidence field at all', async () => {
+    const r = await issue();
+    const { boundaryEvidence: _evidence, ...withoutEvidence } = context;
+    await expect(
+      authorizeShipping(
+        r,
+        publicKey,
+        withoutEvidence as ReceiptContext,
+        intent,
+        SHA,
+        store,
+        () => AT
+      )
+    ).rejects.toThrow('boundary_evidence_missing');
+  });
+
+  it('authorizes when the evidence shows the boundary held', async () => {
+    const r = await issue();
+    await expect(authorize(r, intent)).resolves.toMatchObject({ kind: 'push_branch' });
+  });
+});
 
 describe('controller receipt — scenarios 10/17, contributor integrity, S3/S4', () => {
   it.each([
