@@ -1,0 +1,188 @@
+name: Zero-trust VM gate
+
+# Feasibility gate 1 (#1009): runs the hostile-fixture suite inside the local
+# QEMU execution profile under KVM, plus a TCG smoke test of the same image.
+#
+# The jobs execute deliberately hostile fixture code (inside a VM), so they get
+# nothing worth stealing: read-only token, no `secrets` references, no env
+# derived from secrets, checkout credentials not persisted, and `pull_request`
+# only (never `pull_request_target`). The planted canaries are random per run.
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'packages/zero-trust/**'
+      - '.github/workflows/zero-trust-vm.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: zero-trust-vm-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  kvm-gate:
+    name: Hostile suite (KVM)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      # GitHub-hosted Linux runners expose /dev/kvm, but only root can open it
+      # until a udev rule grants the runner user access. QEMU itself runs
+      # unprivileged; sudo is used for host setup only.
+      - name: Enable KVM and install QEMU
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-zt-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils genisoimage
+          test -r /dev/kvm && test -w /dev/kvm
+
+      - name: Install dependencies and build
+        run: |
+          npm ci --ignore-scripts
+          make build-zero-trust
+
+      # Keyed by every input of the profile digest; the adapter re-verifies the
+      # image hash against the manifest before the first VM.
+      - name: Restore baked profile
+        id: profile-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/zt-profile
+          key: zt-profile-${{ hashFiles('packages/zero-trust/src/vm/profile.ts', 'packages/zero-trust/src/vm/cloud-init.ts', 'packages/zero-trust/src/vm/bake.ts', 'packages/zero-trust/vm-guest/agent.py') }}
+
+      - name: Bake profile (KVM)
+        if: steps.profile-cache.outputs.cache-hit != 'true'
+        working-directory: packages/zero-trust
+        run: |
+          start=$(date +%s)
+          node scripts/zt-vm.mjs bake --profile-dir "$RUNNER_TEMP/zt-profile" \
+            --cache-dir "$RUNNER_TEMP/zt-images" --accel kvm
+          echo "bake_seconds=$(( $(date +%s) - start ))" >> "$RUNNER_TEMP/zt-timings.env"
+
+      - name: Save baked profile
+        if: steps.profile-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/zt-profile
+          key: ${{ steps.profile-cache.outputs.cache-primary-key }}
+
+      - name: Smoke test (KVM)
+        working-directory: packages/zero-trust
+        run: |
+          node scripts/zt-vm.mjs smoke --profile-dir "$RUNNER_TEMP/zt-profile" \
+            --state-dir "$RUNNER_TEMP/zt-state" --accel kvm --timings-out "$RUNNER_TEMP/smoke-kvm.json"
+
+      - name: Hostile suite (KVM)
+        working-directory: packages/zero-trust
+        env:
+          ZT_VM_E2E: '1'
+          ZT_ACCEL: kvm
+        run: |
+          export ZT_PROFILE_DIR="$RUNNER_TEMP/zt-profile"
+          export ZT_EVIDENCE_OUT="$RUNNER_TEMP/gate-evidence-kvm.json"
+          npx vitest run src/__tests__/vm-gate.e2e.test.ts
+
+      - name: Summarize evidence
+        if: always()
+        run: |
+          node -e '
+            const fs = require("fs");
+            const read = (f) => { try { return JSON.parse(fs.readFileSync(f, "utf8")); } catch { return null; } };
+            const t = process.env.RUNNER_TEMP;
+            const smoke = read(`${t}/smoke-kvm.json`);
+            const gate = read(`${t}/gate-evidence-kvm.json`);
+            const lines = ["## Zero-trust VM gate (KVM)", ""];
+            lines.push(`Boundary held: **${gate ? gate.held : "no evidence"}**`);
+            if (gate) {
+              lines.push(`Attempts: ${gate.attempts}; host listener connections: ${gate.listenerConnections}`);
+              lines.push("", "Coverage: " + Object.entries(gate.coverage).map(([k, v]) => `${k}=${v}`).join(", "));
+              lines.push("", "Violations: " + (gate.violations.length ? gate.violations.join("; ") : "none"));
+              lines.push("", "Gate timings (ms): " + JSON.stringify(gate.timings));
+            }
+            if (smoke) lines.push("", "Smoke timings (ms): " + JSON.stringify(smoke));
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join("\n") + "\n");
+          '
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: zero-trust-vm-evidence-kvm
+          path: |
+            ${{ runner.temp }}/smoke-kvm.json
+            ${{ runner.temp }}/gate-evidence-kvm.json
+            ${{ runner.temp }}/zt-timings.env
+            ${{ runner.temp }}/zt-profile/last-bake-console.log
+          if-no-files-found: warn
+
+  tcg-smoke:
+    name: Smoke test (TCG)
+    needs: kvm-gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      # No udev rule here: /dev/kvm stays inaccessible, so this proves the
+      # software-emulation path end to end on the same baked image.
+      - name: Install QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils genisoimage
+
+      - name: Install dependencies and build
+        run: |
+          npm ci --ignore-scripts
+          make build-zero-trust
+
+      - name: Restore baked profile
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/zt-profile
+          key: zt-profile-${{ hashFiles('packages/zero-trust/src/vm/profile.ts', 'packages/zero-trust/src/vm/cloud-init.ts', 'packages/zero-trust/src/vm/bake.ts', 'packages/zero-trust/vm-guest/agent.py') }}
+          fail-on-cache-miss: true
+
+      - name: Smoke test (TCG)
+        working-directory: packages/zero-trust
+        run: |
+          node scripts/zt-vm.mjs smoke --profile-dir "$RUNNER_TEMP/zt-profile" \
+            --state-dir "$RUNNER_TEMP/zt-state" --accel tcg --timings-out "$RUNNER_TEMP/smoke-tcg.json"
+          printf '## Zero-trust VM smoke (TCG)\n\nTimings (ms): %s\n' "$(cat "$RUNNER_TEMP/smoke-tcg.json" | tr -d '\n ')" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: zero-trust-vm-evidence-tcg
+          path: ${{ runner.temp }}/smoke-tcg.json
+          if-no-files-found: warn
