@@ -9,6 +9,7 @@ import {
   type BrokerRequest,
   MAX_FILE_BYTES,
   MAX_FRAME_BYTES,
+  MAX_REPORT_BYTES,
   MAX_STREAM_BYTES,
   validateExecArgv,
   validateRequest,
@@ -80,8 +81,8 @@ afterEach(() => {
   for (const client of clients.splice(0)) client.close();
 });
 
-function hello(scope = 'container'): Frame {
-  return { v: 1, id: 0, hello: BROKER_PROTOCOL, scope };
+function hello(scope = 'container', phase = 'verification'): Frame {
+  return { v: 1, id: 0, hello: BROKER_PROTOCOL, scope, phase };
 }
 
 async function readyClient(scope = 'container'): Promise<{ client: BrokerClient; guest: Guest }> {
@@ -196,8 +197,48 @@ describe('validateRequest', () => {
       argv: ['npm', 'test'],
       cwd: 'pkg',
       timeoutMs: 1000,
+      network: 'none',
+      env: {},
+      report: false,
     });
     expect((out as { argv: string[] }).argv).not.toBe(argv);
+  });
+
+  it('carries the network, a validated environment and the report flag', () => {
+    expect(
+      validateRequest(
+        exec({ network: 'package_proxy', env: { npm_config_registry: 'http://r/' }, report: true })
+      )
+    ).toMatchObject({
+      network: 'package_proxy',
+      env: { npm_config_registry: 'http://r/' },
+      report: true,
+    });
+    expect(validateRequest(exec({ report: 'yes' as never }))).toMatchObject({ report: false });
+    throwsCode(() => validateRequest(exec({ network: 'host' as never })), 'invalid_network');
+  });
+
+  it.each([
+    ['non-object', 'A=1'],
+    ['array', ['A=1']],
+    ['bad name', { '1A': 'x' }],
+    ['dynamic loader', { LD_PRELOAD: '/x.so' }],
+    ['non-string value', { A: 1 }],
+    ['newline', { A: 'x\ny' }],
+    ['oversize value', { A: 'x'.repeat(4097) }],
+    ['too many', Object.fromEntries(Array.from({ length: 33 }, (_, i) => [`V${i}`, 'x']))],
+  ])('rejects an invalid environment: %s', (_label, env) => {
+    throwsCode(() => validateRequest(exec({ env: env as never })), 'invalid_env');
+  });
+
+  it('rejects a secret-shaped environment value', () => {
+    expect(() => validateRequest(exec({ env: { TOKEN: 'ghp_abcdef' } }))).toThrow(
+      SecretRedactionError
+    );
+  });
+
+  it('accepts shutdown with no payload', () => {
+    expect(validateRequest({ op: 'shutdown', extra: 1 } as never)).toEqual({ op: 'shutdown' });
   });
 
   it('rejects an unknown profile', () => {
@@ -347,6 +388,18 @@ describe('BrokerClient handshake', () => {
     expect(client.scope).toBe('container');
   });
 
+  it('exposes the announced network phase, null before the hello', async () => {
+    const guest = guestPair();
+    const client = new BrokerClient(guest.stream);
+    clients.push(client);
+    expect(client.phase).toBeNull();
+    const ready = client.waitReady(1000);
+    await guest.next();
+    guest.send(hello('container', 'provisioning'));
+    await ready;
+    expect(client.phase).toBe('provisioning');
+  });
+
   it('resolves with vm-root scope and stays ready', async () => {
     const { client } = await readyClient('vm-root');
     expect(client.scope).toBe('vm-root');
@@ -355,9 +408,17 @@ describe('BrokerClient handshake', () => {
   });
 
   it.each([
-    ['wrong protocol', { v: 1, id: 0, hello: 'zt-broker-v2', scope: 'container' }],
-    ['wrong scope', { v: 1, id: 0, hello: BROKER_PROTOCOL, scope: 'host' }],
-    ['wrong id', { v: 1, id: 1, hello: BROKER_PROTOCOL, scope: 'container' }],
+    [
+      'wrong protocol',
+      { v: 1, id: 0, hello: 'zt-broker-v2', scope: 'container', phase: 'verification' },
+    ],
+    ['wrong scope', { v: 1, id: 0, hello: BROKER_PROTOCOL, scope: 'host', phase: 'verification' }],
+    [
+      'wrong id',
+      { v: 1, id: 1, hello: BROKER_PROTOCOL, scope: 'container', phase: 'verification' },
+    ],
+    ['missing phase', { v: 1, id: 0, hello: BROKER_PROTOCOL, scope: 'container' }],
+    ['unknown phase', { v: 1, id: 0, hello: BROKER_PROTOCOL, scope: 'container', phase: 'build' }],
   ])('taints on a bad hello: %s', async (_label, frame) => {
     const guest = guestPair();
     const client = new BrokerClient(guest.stream);
@@ -438,6 +499,9 @@ describe('BrokerClient exec', () => {
       argv: ['node', '-v'],
       cwd: 'pkg',
       timeoutMs: 1000,
+      network: 'none',
+      env: {},
+      report: false,
     });
     guest.send(execOk(1, { exitCode: null, timedOut: true, truncated: true }));
     expect(await result).toMatchObject({
@@ -452,6 +516,49 @@ describe('BrokerClient exec', () => {
     guest.send(execOk(2, { exitCode: 255 }));
     expect((await second).exitCode).toBe(255);
     expect(client.tainted).toBeNull();
+  });
+
+  it('returns a requested report, or null when the guest found none', async () => {
+    const { client, guest } = await readyClient();
+    const withReport = client.exec({ ...execReq, report: true }, 50);
+    expect(await guest.next()).toMatchObject({ id: 1, report: true });
+    guest.send(execOk(1, { report: b64('<testsuites/>') }));
+    expect((await withReport).report?.toString()).toBe('<testsuites/>');
+    const without = client.exec({ ...execReq, report: true }, 50);
+    await guest.next();
+    guest.send(execOk(2, { report: null }));
+    expect((await without).report).toBeNull();
+    const plain = client.exec(execReq, 50);
+    await guest.next();
+    guest.send(execOk(3));
+    expect('report' in (await plain)).toBe(false);
+    expect(client.tainted).toBeNull();
+  });
+
+  it.each([
+    ['unsolicited report', false, { report: b64('x') }],
+    ['missing requested report', true, {}],
+    ['non-canonical report', true, { report: 'a=b' }],
+    ['oversize report', true, { report: Buffer.alloc(MAX_REPORT_BYTES + 1).toString('base64') }],
+  ])('taints on a malformed report: %s', async (_label, report, extra) => {
+    const { client, guest } = await readyClient();
+    const pending = client.exec({ ...execReq, report }, 50);
+    await guest.next();
+    guest.send(execOk(1, extra));
+    await rejectsCode(pending, 'malformed_response');
+    expect(client.tainted?.code).toBe('malformed_response');
+  });
+
+  it('sends shutdown and maps the answer', async () => {
+    const { client, guest } = await readyClient();
+    const done = client.shutdown(50);
+    expect(await guest.next()).toEqual({ v: 1, id: 1, op: 'shutdown' });
+    guest.send({ v: 1, id: 1, ok: true });
+    await done;
+    const refused = client.shutdown(50);
+    await guest.next();
+    guest.send({ v: 1, id: 2, ok: false, error: 'busy' });
+    await rejectsCode(refused, 'guest_busy');
   });
 
   it.each([

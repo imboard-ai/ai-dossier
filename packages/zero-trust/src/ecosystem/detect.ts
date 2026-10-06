@@ -29,7 +29,10 @@ export type UnsupportedReason =
   | 'binary_unavailable'
   | 'unpinned_requirement'
   | 'unsupported_requirement_option'
-  | 'test_runner_missing';
+  | 'test_runner_missing'
+  /** The uv project installs itself (editable): that runs its own build backend,
+   * which is repository code, so it cannot happen while the proxy is reachable. */
+  | 'project_build_required';
 
 export type DeclarationSource =
   | 'package.json#engines.node'
@@ -344,7 +347,9 @@ function detectUv(text: string, declarations: RuntimeDeclaration[]): Detection {
     if (!isRecord(pkg) || typeof pkg.name !== 'string' || !isRecord(pkg.source))
       return unsupported('lockfile_invalid', 'uv.lock');
     // The project itself is local source; every other package must come from PyPI.
-    if (pkg.source.editable === '.' || pkg.source.virtual === '.') continue;
+    // Only a virtual project (`[tool.uv] package = false`) installs nothing of its own.
+    if (pkg.source.editable === '.') return unsupported('project_build_required', 'uv.lock');
+    if (pkg.source.virtual === '.') continue;
     const rejected = checkUvPackage(pkg, pkg.name);
     if (rejected) return rejected;
     if (normalizeName(pkg.name) === 'pytest') pytest = true;

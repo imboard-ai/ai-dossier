@@ -161,7 +161,14 @@ function check(name, python) {
   const hostRuntime = checkRuntime(selection.profile, python);
   const ctx = { name, work: mkdtempSync(join(tmpdir(), `ztfc-${name}-`)), steps: [] };
   const env = mkdtempSync(join(tmpdir(), `ztfc-${name}-env-`));
-  const options = { ...TIMEOUTS, python: python.executable, environmentDir: env };
+  // Environment and exported requirements live outside the fixture, as in the VM.
+  const options = {
+    ...TIMEOUTS,
+    python: python.executable,
+    environmentDir: join(env, 'venv'),
+    exportFile: join(env, 'uv-requirements.txt'),
+    reportFile: join(env, 'report.xml'),
+  };
   try {
     cpSync(base, ctx.work, { recursive: true });
     git(['init', '-q', '-b', 'main'], ctx.work, 'init');

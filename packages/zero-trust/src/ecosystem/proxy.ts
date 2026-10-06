@@ -358,9 +358,77 @@ function squidRegex(pattern: string): string {
   return pattern;
 }
 
+/** Where a running Squid keeps its generated-certificate store, logs and pid. */
+export interface SquidRuntime {
+  /** Squid's certificate generator helper (`security_file_certgen`). */
+  readonly certgenProgram: string;
+  /** Directory of the certificate store (initialized before Squid starts). */
+  readonly certDbDir: string;
+  /** One line per request: time, client, method, URL, status, Squid result code, bytes. */
+  readonly accessLog: string;
+  readonly cacheLog: string;
+  readonly pidFile: string;
+}
+
+/** The access log format `renderSquidConfig` writes, parsed by `parseSquidAccessLog`. */
+export const SQUID_LOG_FORMAT = 'ztfc %ts.%03tu %>a %rm %ru %>Hs %Ss %<st';
+
+export interface SquidLogEntry {
+  readonly client: string;
+  readonly method: string;
+  readonly url: string;
+  /** HTTP status sent to the client; 0 when none was. */
+  readonly status: number;
+  /** Squid's result code, e.g. `TCP_MISS`, `TCP_DENIED`, `NONE_NONE`. */
+  readonly result: string;
+}
+
+/** Parses an access log written with `SQUID_LOG_FORMAT`. Unparseable lines are counted,
+ * never guessed at. */
+export function parseSquidAccessLog(text: string): {
+  entries: SquidLogEntry[];
+  malformed: number;
+} {
+  const entries: SquidLogEntry[] = [];
+  let malformed = 0;
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    const m = /^\d+\.\d{3} (\S+) (\S+) (\S+) (\d{3}|-) ([A-Z_]+)(?:\/\d+)? (\d+|-)$/.exec(
+      line.trim()
+    );
+    if (!m) {
+      malformed++;
+      continue;
+    }
+    entries.push({
+      client: m[1],
+      method: m[2],
+      url: m[3],
+      status: m[4] === '-' ? 0 : Number(m[4]),
+      result: m[5],
+    });
+  }
+  return { entries, malformed };
+}
+
 /** Squid configuration enforcing the policy on the mirrors' upstream traffic. */
-export function renderSquidConfig(d: ProxyDeployment, policy: ProxyPolicy = PROXY_POLICY): string {
+export function renderSquidConfig(
+  d: ProxyDeployment,
+  policy: ProxyPolicy = PROXY_POLICY,
+  runtime?: SquidRuntime
+): string {
   squidUrl(d);
+  if (
+    runtime &&
+    ![
+      runtime.certgenProgram,
+      runtime.certDbDir,
+      runtime.accessLog,
+      runtime.cacheLog,
+      runtime.pidFile,
+    ].every((p) => ABS_PATH.test(p) && !p.split('/').includes('..'))
+  )
+    throw new ProxyConfigError('path');
   const lines = [
     `# Generated from ${policy.version}. Do not edit; regenerate from the policy.`,
     `http_port ${d.squidPort} ssl-bump tls-cert=${d.squidCaCertPath} tls-key=${d.squidCaKeyPath} generate-host-certificates=on`,
@@ -388,6 +456,13 @@ export function renderSquidConfig(d: ProxyDeployment, policy: ProxyPolicy = PROX
   lines.push(`acl registry_hosts dstdomain -n ${policy.rules.map((r) => r.host).join(' ')}`);
   lines.push(`acl registry_location rep_header Location ^https://(${hosts})/`);
   lines.push(
+    // Peek at the client hello, stare at the server certificate, then bump: the
+    // generated certificate mimics the real one and carries the Authority Key
+    // Identifier that strict TLS clients (Python 3.13+) require. Bumping at step 1
+    // would generate a bare certificate the PyPI mirror rejects (#1010).
+    'acl step1 at_step SslBump1',
+    'ssl_bump peek step1',
+    'ssl_bump stare all',
     'ssl_bump bump all',
     'http_access deny !mirrors',
     'http_access deny forbidden_dst',
@@ -411,6 +486,17 @@ export function renderSquidConfig(d: ProxyDeployment, policy: ProxyPolicy = PROX
     'via off',
     'cache deny all'
   );
+  if (runtime)
+    lines.push(
+      `sslcrtd_program ${runtime.certgenProgram} -s ${runtime.certDbDir} -M 16MB`,
+      'sslcrtd_children 4',
+      `logformat ${SQUID_LOG_FORMAT}`,
+      `access_log stdio:${runtime.accessLog} ztfc`,
+      `cache_log stdio:${runtime.cacheLog}`,
+      `pid_filename ${runtime.pidFile}`,
+      // Logs are evidence the controller reads; nothing secret is written to them.
+      'umask 022'
+    );
   const text = `${lines.join('\n')}\n`;
   assertNoSecrets(text);
   return text;

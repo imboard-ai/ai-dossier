@@ -27,5 +27,6 @@ export * from './vm/evidence';
 export * from './vm/host';
 export * from './vm/local-qemu';
 export * from './vm/profile';
+export * from './vm/provision-channel';
 export * from './vm/qemu-args';
 export * from './vm/teardown';

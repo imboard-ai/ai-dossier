@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { buildCommandPlan, CommandPlanError } from './commands';
+import { buildCommandPlan, CommandPlanError, REPORT_PATH } from './commands';
 
 const proxy = { npmRegistry: 'http://npm-proxy:4873/', pypiIndex: 'http://pypi-proxy:5000/index/' };
 
@@ -16,8 +16,13 @@ describe('buildCommandPlan', () => {
         phase: 'provisioning',
         network: 'package_proxy',
         argv: ['npm', 'ci', '--ignore-scripts', '--no-fund'],
-        env: { npm_config_registry: 'http://npm-proxy:4873/', npm_config_audit: 'false' },
+        env: {
+          npm_config_registry: 'http://npm-proxy:4873/',
+          npm_config_audit: 'false',
+          npm_config_update_notifier: 'false',
+        },
         required: true,
+        captureReport: false,
       }),
     ]);
     expect(plan.verification.map((c) => [c.id, c.network, c.argv.join(' ')])).toEqual([
@@ -25,6 +30,11 @@ describe('buildCommandPlan', () => {
       ['npm-test', 'none', 'npm test'],
     ]);
     expect(plan.verification[1].env).toMatchObject({ npm_config_offline: 'true', HTTPS_PROXY: '' });
+    // The test command writes junit to the supervisor's report path; rebuild has no report.
+    expect(plan.verification.map((c) => c.captureReport)).toEqual([false, true]);
+    expect(plan.verification[1].env.NODE_OPTIONS).toContain(
+      `--test-reporter=junit --test-reporter-destination=${REPORT_PATH}`
+    );
     expect(Object.isFrozen(plan.verification[0].argv)).toBe(true);
   });
 
@@ -37,12 +47,20 @@ describe('buildCommandPlan', () => {
     expect(plan.provisioning[1].env).toMatchObject({
       PIP_INDEX_URL: 'http://pypi-proxy:5000/index/',
       PIP_CONFIG_FILE: '/dev/null',
+      // pip ignores a plain-HTTP index unless its host is trusted.
+      PIP_TRUSTED_HOST: 'pypi-proxy',
     });
     expect(plan.verification[0]).toMatchObject({
       network: 'none',
       argv: ['/opt/ztfc/env/bin/python', '-m', 'pytest', 'tests/test_regression.py'],
-      env: { PIP_NO_INDEX: '1' },
+      env: { PIP_NO_INDEX: '1', PYTEST_ADDOPTS: `--junitxml=${REPORT_PATH}` },
+      captureReport: true,
     });
+  });
+
+  it('pip: an HTTPS index needs no trusted host', () => {
+    const plan = buildCommandPlan('pip', { ...proxy, pypiIndex: 'https://pypi.org/simple/' });
+    expect(plan.provisioning[1].env.PIP_TRUSTED_HOST).toBeUndefined();
   });
 
   it('uv: ignores repository config, never downloads Python, environment outside the repository', () => {
@@ -59,8 +77,16 @@ describe('buildCommandPlan', () => {
       '--python',
       '/usr/bin/python3.12',
     ];
-    expect(plan.provisioning[0]).toMatchObject({
-      argv: ['uv', 'sync', ...common, '--no-build'],
+    // Not `uv sync --frozen`: it fetches the lockfile's file URLs directly and would
+    // bypass the mirror. The lock is exported offline and installed from the mirror.
+    expect(plan.provisioning.map((c) => c.argv.join(' '))).toEqual([
+      'uv export --frozen --offline --no-config --no-python-downloads --format requirements.txt --no-emit-project --no-header --output-file /opt/ztfc/uv-requirements.txt',
+      'uv venv --no-config --no-python-downloads --python /usr/bin/python3.12 /work/env',
+      'uv pip install --no-config --no-python-downloads --python /work/env/bin/python --require-hashes --no-deps --only-binary :all: --index-url http://pypi-proxy:5000/index/ -r /opt/ztfc/uv-requirements.txt',
+    ]);
+    expect(plan.provisioning.every((c) => c.argv[1] !== 'sync')).toBe(true);
+    expect(plan.provisioning[2]).toMatchObject({
+      network: 'package_proxy',
       env: {
         UV_DEFAULT_INDEX: 'http://pypi-proxy:5000/index/',
         UV_NO_BUILD: '1',
@@ -70,9 +96,23 @@ describe('buildCommandPlan', () => {
     });
     expect(plan.verification[0]).toMatchObject({
       argv: ['uv', 'run', ...common, '--offline', '--no-sync', 'pytest'],
-      env: { UV_OFFLINE: '1', UV_PROJECT_ENVIRONMENT: '/work/env' },
+      env: {
+        UV_OFFLINE: '1',
+        UV_PROJECT_ENVIRONMENT: '/work/env',
+        PYTEST_ADDOPTS: `--junitxml=${REPORT_PATH}`,
+      },
       timeoutMs: 120_000,
+      captureReport: true,
     });
+  });
+
+  it('uv: the export file is controller-chosen and validated', () => {
+    const plan = buildCommandPlan('uv', proxy, { exportFile: '/work/reqs.txt' });
+    expect(plan.provisioning[0].argv.at(-1)).toBe('/work/reqs.txt');
+    expect(plan.provisioning[2].argv.at(-1)).toBe('/work/reqs.txt');
+    expect(() => buildCommandPlan('uv', proxy, { exportFile: 'reqs.txt' })).toThrow(
+      'invalid_path (exportFile)'
+    );
   });
 
   it('npm: passes test targets after the script separator', () => {

@@ -2,6 +2,9 @@ name: Zero-trust VM gate
 
 # Feasibility gate 1 (#1009): runs the hostile-fixture suite inside the local
 # QEMU execution profile under KVM, plus a TCG smoke test of the same image.
+# Feasibility gate 2 (#1010): npm, pip and uv fixtures provision through the
+# package proxy (Squid + Verdaccio + proxpi, on the runner) via the VM's one
+# provisioning forward, then verify offline; KVM proof plus a TCG timing run.
 #
 # The jobs execute deliberately hostile fixture code (inside a VM), so they get
 # nothing worth stealing: read-only token, no `secrets` references, no env
@@ -67,7 +70,7 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ runner.temp }}/zt-profile
-          key: zt-profile-${{ hashFiles('packages/zero-trust/src/vm/profile.ts', 'packages/zero-trust/src/vm/cloud-init.ts', 'packages/zero-trust/src/vm/bake.ts', 'packages/zero-trust/vm-guest/agent.py') }}
+          key: zt-profile-${{ hashFiles('packages/zero-trust/src/vm/profile.ts', 'packages/zero-trust/src/vm/cloud-init.ts', 'packages/zero-trust/src/vm/bake.ts', 'packages/zero-trust/vm-guest/agent.py', 'packages/zero-trust/src/ecosystem/profiles.json') }}
 
       - name: Bake profile (KVM)
         if: steps.profile-cache.outputs.cache-hit != 'true'
@@ -194,7 +197,7 @@ jobs:
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: ${{ runner.temp }}/zt-profile
-          key: zt-profile-${{ hashFiles('packages/zero-trust/src/vm/profile.ts', 'packages/zero-trust/src/vm/cloud-init.ts', 'packages/zero-trust/src/vm/bake.ts', 'packages/zero-trust/vm-guest/agent.py') }}
+          key: zt-profile-${{ hashFiles('packages/zero-trust/src/vm/profile.ts', 'packages/zero-trust/src/vm/cloud-init.ts', 'packages/zero-trust/src/vm/bake.ts', 'packages/zero-trust/vm-guest/agent.py', 'packages/zero-trust/src/ecosystem/profiles.json') }}
           fail-on-cache-miss: true
 
       - name: Smoke test (TCG)
@@ -210,4 +213,205 @@ jobs:
         with:
           name: zero-trust-vm-evidence-tcg
           path: ${{ runner.temp }}/smoke-tcg.json
+          if-no-files-found: warn
+
+  proxy-proof:
+    name: Package proxy proof (KVM)
+    needs: kvm-gate
+    # The KVM job saves the baked profile before its suite runs.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Enable KVM and install QEMU
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-zt-kvm.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils genisoimage
+          test -r /dev/kvm && test -w /dev/kvm
+
+      - name: Install dependencies and build
+        run: |
+          npm ci --ignore-scripts
+          make build-zero-trust
+
+      - name: Restore baked profile
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/zt-profile
+          key: zt-profile-${{ hashFiles('packages/zero-trust/src/vm/profile.ts', 'packages/zero-trust/src/vm/cloud-init.ts', 'packages/zero-trust/src/vm/bake.ts', 'packages/zero-trust/vm-guest/agent.py', 'packages/zero-trust/src/ecosystem/profiles.json') }}
+          fail-on-cache-miss: true
+
+      # Trusted infrastructure on the runner, outside the VM: the mirrors sit on an
+      # internal Docker network whose only way out is Squid.
+      - name: Start package proxy
+        working-directory: packages/zero-trust
+        run: |
+          start=$(date +%s)
+          node scripts/zt-proxy.mjs up --state-dir "$RUNNER_TEMP/zt-proxy" --out "$RUNNER_TEMP/zt-proxy-endpoints.json"
+          echo "proxy_up_seconds=$(( $(date +%s) - start ))" >> "$RUNNER_TEMP/zt-proxy-timings.env"
+
+      - name: Proxy policy checks
+        working-directory: packages/zero-trust
+        run: node scripts/zt-proxy.mjs check --state-dir "$RUNNER_TEMP/zt-proxy" --out "$RUNNER_TEMP/proxy-checks.json"
+
+      - name: Package proxy proof (KVM)
+        working-directory: packages/zero-trust
+        env:
+          ZT_PROXY_E2E: '1'
+          ZT_ACCEL: kvm
+        run: |
+          export ZT_PROFILE_DIR="$RUNNER_TEMP/zt-profile"
+          export ZT_PROXY_ENDPOINTS="$RUNNER_TEMP/zt-proxy-endpoints.json"
+          export ZT_EVIDENCE_OUT="$RUNNER_TEMP/proxy-evidence-kvm.json"
+          # Guest output reaches this log; stop it from issuing workflow commands.
+          token=$(openssl rand -hex 16)
+          echo "::stop-commands::$token"
+          rc=0
+          npx vitest run src/__tests__/vm-proxy.e2e.test.ts || rc=$?
+          echo "::$token::"
+          exit "$rc"
+
+      - name: Summarize evidence
+        if: always()
+        run: |
+          node -e '
+            const fs = require("fs");
+            const read = (f) => { try { return JSON.parse(fs.readFileSync(f, "utf8")); } catch { return null; } };
+            const t = process.env.RUNNER_TEMP;
+            const ev = read(`${t}/proxy-evidence-kvm.json`);
+            const checks = read(`${t}/proxy-checks.json`);
+            const block = (value) => ["```", JSON.stringify(value, null, 1).replace(/`/g, "\u2018").slice(0, 20000), "```"];
+            const lines = ["## Zero-trust package proxy proof (KVM)", ""];
+            if (checks) lines.push(`Proxy policy checks passed: **${checks.passed === true}**`, ...block(checks.results.map((r) => [r.id, r.expect, r.outcome])));
+            if (ev) {
+              lines.push(`Boundary held: **${ev.boundary ? ev.boundary.held === true : "no evidence"}**`);
+              lines.push("", "Fixtures:", ...block(ev.fixtures));
+              lines.push("", "Commands (fixture, commit, id, network, exit, suites, status, ms):",
+                ...block(ev.commands.map((c) => [c.fixture, c.commit, c.id, c.network, c.exitCode, c.suites, c.status, c.durationMs])));
+              lines.push("", "Squid audit:", ...block(ev.squidAudit), "", "Cache audit:", ...block(ev.cacheAudit));
+              lines.push("", "Tamper:", ...block(ev.tamper), "", "uv sync --frozen:", ...block(ev.uvSyncFrozen));
+              lines.push("", "Timings (ms):", ...block(ev.timings));
+            }
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join("\n") + "\n");
+          '
+
+      - name: Collect proxy logs
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/proxy-logs"
+          cp "$RUNNER_TEMP/zt-proxy/logs/access.log" "$RUNNER_TEMP/zt-proxy/logs/cache.log" "$RUNNER_TEMP/proxy-logs/" 2>/dev/null || true
+          for c in zt-verdaccio zt-proxpi; do docker logs "$c" > "$RUNNER_TEMP/proxy-logs/$c.log" 2>&1 || true; done
+          node packages/zero-trust/scripts/zt-proxy.mjs down --state-dir "$RUNNER_TEMP/zt-proxy" || true
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: zero-trust-proxy-evidence-kvm
+          path: |
+            ${{ runner.temp }}/proxy-evidence-kvm.json
+            ${{ runner.temp }}/proxy-checks.json
+            ${{ runner.temp }}/zt-proxy-endpoints.json
+            ${{ runner.temp }}/zt-proxy-timings.env
+            ${{ runner.temp }}/proxy-logs
+            ${{ runner.temp }}/zt-profile/manifest.json
+          if-no-files-found: warn
+
+  proxy-tcg:
+    name: Package proxy timings (TCG)
+    needs: kvm-gate
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      # No udev rule: /dev/kvm stays closed, so the same proof runs under TCG.
+      - name: Install QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils genisoimage
+
+      - name: Install dependencies and build
+        run: |
+          npm ci --ignore-scripts
+          make build-zero-trust
+
+      - name: Restore baked profile
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/zt-profile
+          key: zt-profile-${{ hashFiles('packages/zero-trust/src/vm/profile.ts', 'packages/zero-trust/src/vm/cloud-init.ts', 'packages/zero-trust/src/vm/bake.ts', 'packages/zero-trust/vm-guest/agent.py', 'packages/zero-trust/src/ecosystem/profiles.json') }}
+          fail-on-cache-miss: true
+
+      - name: Start package proxy
+        working-directory: packages/zero-trust
+        run: node scripts/zt-proxy.mjs up --state-dir "$RUNNER_TEMP/zt-proxy" --out "$RUNNER_TEMP/zt-proxy-endpoints.json"
+
+      # One fixture: TCG is for timings (and the timeout scale), not coverage.
+      - name: Package proxy proof, npm fixture (TCG)
+        working-directory: packages/zero-trust
+        env:
+          ZT_PROXY_E2E: '1'
+          ZT_ACCEL: tcg
+          ZT_PROXY_FULL: '0'
+          ZT_PROXY_FIXTURES: npm
+        run: |
+          export ZT_PROFILE_DIR="$RUNNER_TEMP/zt-profile"
+          export ZT_PROXY_ENDPOINTS="$RUNNER_TEMP/zt-proxy-endpoints.json"
+          export ZT_EVIDENCE_OUT="$RUNNER_TEMP/proxy-evidence-tcg.json"
+          token=$(openssl rand -hex 16)
+          echo "::stop-commands::$token"
+          rc=0
+          npx vitest run src/__tests__/vm-proxy.e2e.test.ts || rc=$?
+          echo "::$token::"
+          exit "$rc"
+
+      - name: Summarize timings
+        if: always()
+        run: |
+          node -e '
+            const fs = require("fs");
+            let ev = null;
+            try { ev = JSON.parse(fs.readFileSync(`${process.env.RUNNER_TEMP}/proxy-evidence-tcg.json`, "utf8")); } catch {}
+            const lines = ["## Zero-trust package proxy timings (TCG)", ""];
+            if (ev) lines.push("```", JSON.stringify({ timings: ev.timings, commands: ev.commands.map((c) => [c.commit, c.id, c.status, c.durationMs]) }, null, 1).slice(0, 20000), "```");
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join("\n") + "\n");
+          '
+          node packages/zero-trust/scripts/zt-proxy.mjs down --state-dir "$RUNNER_TEMP/zt-proxy" || true
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: zero-trust-proxy-evidence-tcg
+          path: ${{ runner.temp }}/proxy-evidence-tcg.json
           if-no-files-found: warn

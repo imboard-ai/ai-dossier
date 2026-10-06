@@ -3,8 +3,36 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import { sha256 } from '../canonical/export';
+import { PROFILE_MANIFEST } from '../ecosystem/profiles';
 import { canonicalJson } from '../receipt/schema';
 import { type ContainerProfile, UnsupportedEnvironmentError } from './adapter';
+
+export interface WorkerPin {
+  /** The `profiles.json` profile this worker image is built from. */
+  readonly profileId: string;
+  readonly runtimeVersion: string;
+  readonly image: string;
+  readonly digest: string;
+}
+
+const WORKER_HARDENING = (() => {
+  const hardening = PROFILE_MANIFEST.workerHardening;
+  if (!hardening) throw new Error('profiles.json has no workerHardening section');
+  return hardening;
+})();
+
+function workerPin(ecosystem: ContainerProfile): WorkerPin {
+  const profile = PROFILE_MANIFEST.profiles.find(
+    (p) => p.ecosystem === ecosystem && WORKER_HARDENING.vmProfiles.includes(p.id)
+  );
+  if (!profile) throw new Error(`profiles.json names no VM profile for ${ecosystem}`);
+  return Object.freeze({
+    profileId: profile.id,
+    runtimeVersion: profile.runtimeVersion,
+    image: profile.image,
+    digest: profile.imageDigest,
+  });
+}
 
 export const PROFILE_PINS = Object.freeze({
   schema: 'zt-vm-profile-v1',
@@ -14,20 +42,20 @@ export const PROFILE_PINS = Object.freeze({
     url: 'https://cloud-images.ubuntu.com/releases/noble/release-20260926/ubuntu-24.04-server-cloudimg-amd64.img',
     sha256: '6a81c37564db9b1ee84e141922625e1d7c5b389b99bb3c572e0243607d5bb4d2',
   }),
-  /** Multi-arch index digest of mcr.microsoft.com/devcontainers/base:ubuntu24.04. */
-  containerBase: Object.freeze({
-    image: 'mcr.microsoft.com/devcontainers/base',
-    tag: 'ubuntu24.04',
-    digest: 'sha256:d7c468679f45a52ad3673d06656b5bf16e488990b17216a1fa295d9e1f89d724',
+  /** Worker images derive from the ecosystem profile images (`profiles.json`), by
+   * digest, with the manifest's hardening recipe; uv comes from its own pinned image. */
+  hardening: Object.freeze({
+    recipe: WORKER_HARDENING.recipe,
+    uv: Object.freeze({ ...WORKER_HARDENING.uv }),
   }),
   containerProfiles: Object.freeze({
-    node: Object.freeze(['nodejs', 'npm']),
-    python: Object.freeze(['python3', 'python3-pip', 'python3-venv', 'python3-setuptools']),
+    node: workerPin('node'),
+    python: workerPin('python'),
   }),
 });
 
 /** Bumped whenever cloud-init, the guest agent or the hardening changes. */
-export const BAKE_RECIPE_VERSION = 2;
+export const BAKE_RECIPE_VERSION = 3;
 
 /** Virtual size of the baked disk. A run overlay may not be smaller: the guest
  * kernel rejects a GPT whose partitions end past the disk and cannot find root. */
@@ -38,7 +66,8 @@ export interface VmProfileManifest {
   /** Digest over pins + recipe version + guest agent source. */
   readonly profileDigest: string;
   readonly baseImageSha256: string;
-  readonly containerBaseDigest: string;
+  /** The `profiles.json` profile each worker image was built from. */
+  readonly workerProfiles: Readonly<Record<ContainerProfile, string>>;
   /** SHA-256 of the flattened, baked qcow2 that run overlays are built on. */
   readonly imageSha256: string;
   readonly imageFile: string;
@@ -110,7 +139,8 @@ export function parseManifest(value: unknown, expectedDigest: string): VmProfile
     m.schema !== 'zt-vm-profile-v1' ||
     m.profileDigest !== expectedDigest ||
     m.baseImageSha256 !== PROFILE_PINS.baseImage.sha256 ||
-    m.containerBaseDigest !== PROFILE_PINS.containerBase.digest ||
+    m.workerProfiles?.node !== PROFILE_PINS.containerProfiles.node.profileId ||
+    m.workerProfiles?.python !== PROFILE_PINS.containerProfiles.python.profileId ||
     !HEX64.test(m.imageSha256 ?? '') ||
     typeof m.imageFile !== 'string' ||
     !/^[A-Za-z0-9._-]+$/.test(m.imageFile) ||
@@ -122,4 +152,14 @@ export function parseManifest(value: unknown, expectedDigest: string): VmProfile
       'the baked profile manifest does not match the pinned profile; re-run the bake'
     );
   return m;
+}
+
+/** A run may only use a profile whose worker image this VM profile carries; any other
+ * selection is `unsupported_environment`, never a substitute image. */
+export function assertProfileBaked(ecosystem: ContainerProfile, profileId: string): void {
+  if (PROFILE_PINS.containerProfiles[ecosystem].profileId !== profileId)
+    throw new UnsupportedEnvironmentError(
+      'profile_not_baked',
+      `the VM profile carries ${PROFILE_PINS.containerProfiles[ecosystem].profileId} for ${ecosystem}, not ${profileId}`
+    );
 }

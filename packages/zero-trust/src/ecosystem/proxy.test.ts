@@ -11,9 +11,12 @@ import {
   PROXY_POLICY,
   ProxyConfigError,
   type ProxyDeployment,
+  parseSquidAccessLog,
   proxpiEnvironment,
   renderSquidConfig,
   renderVerdaccioConfig,
+  SQUID_LOG_FORMAT,
+  type SquidRuntime,
   verdaccioEnvironment,
 } from './proxy';
 
@@ -241,6 +244,74 @@ describe('lockfile hash enforcement', () => {
   });
 });
 
+describe('Squid runtime settings and access log', () => {
+  const deployment: ProxyDeployment = {
+    squidHost: '172.31.250.2',
+    squidPort: 3128,
+    squidCaCertPath: '/etc/zt-ca/ca.crt',
+    squidCaKeyPath: '/etc/zt-ca/ca.key',
+    verdaccioPort: 4873,
+    verdaccioStorage: '/verdaccio/storage',
+    proxpiPort: 5000,
+    proxpiCacheDir: '/var/cache/proxpi',
+    mirrorCidrs: ['172.31.250.3/32'],
+  };
+  const runtime: SquidRuntime = {
+    certgenProgram: '/usr/lib/squid/security_file_certgen',
+    certDbDir: '/var/lib/zt-ssl_db',
+    accessLog: '/var/log/zt/access.log',
+    cacheLog: '/var/log/zt/cache.log',
+    pidFile: '/var/log/zt/squid.pid',
+  };
+
+  it('adds the certificate generator, an evidence log format, logs and pid', () => {
+    const conf = renderSquidConfig(deployment, PROXY_POLICY, runtime);
+    expect(conf).toContain(
+      'sslcrtd_program /usr/lib/squid/security_file_certgen -s /var/lib/zt-ssl_db -M 16MB'
+    );
+    expect(conf).toContain(`logformat ${SQUID_LOG_FORMAT}`);
+    expect(conf).toContain('access_log stdio:/var/log/zt/access.log ztfc');
+    expect(conf).toContain('pid_filename /var/log/zt/squid.pid');
+    // Rules come first: runtime settings never precede an http_access line.
+    expect(conf.indexOf('http_access deny all')).toBeLessThan(conf.indexOf('sslcrtd_program'));
+  });
+
+  it('refuses a runtime path that could inject configuration', () => {
+    for (const bad of [
+      'relative/log',
+      '/var/log/zt/../../etc/x',
+      '/var/log/zt/a b',
+      '/x\nhttp_access allow all',
+    ])
+      expect(() =>
+        renderSquidConfig(deployment, PROXY_POLICY, { ...runtime, accessLog: bad })
+      ).toThrow(ProxyConfigError);
+  });
+
+  it('parses the access log, counting what it cannot read', () => {
+    const text = [
+      '1791314084.315 172.31.250.3 CONNECT registry.npmjs.org:443 200 NONE_NONE 0',
+      '1791314084.387 172.31.250.3 GET https://registry.npmjs.org/ms 200 TCP_MISS 93192',
+      '1791314088.895 172.31.250.4 GET https://pypi.org/simple/PyTest/ 403 TCP_DENIED_REPLY 3389',
+      '1791314075.430 172.31.250.1 - error:transaction-end-before-headers - NONE_NONE -',
+      'garbage line',
+      '',
+    ].join('\n');
+    const { entries, malformed } = parseSquidAccessLog(text);
+    expect(malformed).toBe(1);
+    expect(entries.map((e) => [e.method, e.status, e.result])).toEqual([
+      ['CONNECT', 200, 'NONE_NONE'],
+      ['GET', 200, 'TCP_MISS'],
+      ['GET', 403, 'TCP_DENIED_REPLY'],
+      ['-', 0, 'NONE_NONE'],
+    ]);
+    expect(entries[1]).toMatchObject({
+      client: '172.31.250.3',
+      url: 'https://registry.npmjs.org/ms',
+    });
+  });
+});
+
 describe('config rendering', () => {
   const deployment: ProxyDeployment = {
     squidHost: 'egress-proxy',
@@ -270,6 +341,10 @@ describe('config rendering', () => {
     expect(renderSquidConfig(deployment, { ...PROXY_POLICY, maxRedirects: 2 })).toContain(
       'http_reply_access deny redirect_status !registry_location'
     );
+    // Peek, stare, then bump: the generated certificate mimics the origin's and carries
+    // the Authority Key Identifier that strict TLS clients need (#1010).
+    expect(conf).toContain('ssl_bump peek step1\nssl_bump stare all\nssl_bump bump all\n');
+    expect(conf).not.toContain('sslcrtd_program');
     // Scheme, port and body are enforced inside the bumped tunnel (security review #4, #5).
     expect(conf).toContain('http_access deny !https_proto');
     expect(conf).toContain('http_access deny has_body');

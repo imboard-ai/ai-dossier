@@ -6,8 +6,11 @@ import {
   buildBakeArgs,
   buildOverlayArgs,
   buildRunArgs,
+  GUEST_RELAY_PORT,
   MAX_SOCKET_PATH_BYTES,
   netdevValue,
+  PHASE_OEM_PREFIX,
+  provisioningNetworkPolicy,
   QEMU_ENV,
   RUN_NETWORK_POLICY,
   type RunArgs,
@@ -106,10 +109,49 @@ describe('buildRunArgs — untrusted run boundary', () => {
   });
 
   it('passes the scope through an SMBIOS OEM string', () => {
-    expect(valuesOf(argv, '-smbios')).toEqual([`type=11,value=${SCOPE_OEM_PREFIX}container`]);
-    expect(valuesOf(buildRunArgs({ ...RUN, scope: 'vm-root' }), '-smbios')).toEqual([
-      'type=11,value=org.ai-dossier.zt.scope:vm-root',
+    expect(valuesOf(argv, '-smbios')).toEqual([
+      `type=11,value=${SCOPE_OEM_PREFIX}container,value=${PHASE_OEM_PREFIX}verification`,
     ]);
+    expect(valuesOf(buildRunArgs({ ...RUN, scope: 'vm-root' }), '-smbios')).toEqual([
+      'type=11,value=org.ai-dossier.zt.scope:vm-root,value=org.ai-dossier.zt.phase:verification',
+    ]);
+  });
+
+  it('provisioning adds exactly one loopback host forward to the relay, and nothing else', () => {
+    const prov = buildRunArgs({ ...RUN, phase: 'provisioning', forwardHostPort: 40123 });
+    expect(valuesOf(prov, '-netdev')).toEqual([
+      `user,id=net0,restrict=on,hostfwd=tcp:127.0.0.1:40123-:${GUEST_RELAY_PORT}`,
+    ]);
+    expect(valuesOf(prov, '-smbios')).toEqual([
+      `type=11,value=${SCOPE_OEM_PREFIX}container,value=${PHASE_OEM_PREFIX}provisioning`,
+    ]);
+    expect(prov.join(' ')).not.toContain('guestfwd');
+    // Every other argument is the verification argv's.
+    const strip = (a: string[]) =>
+      a.filter((v) => !v.startsWith('user,') && !v.startsWith('type=11'));
+    expect(strip(prov)).toEqual(strip(argv));
+  });
+
+  it('requires a forward port in, and only in, provisioning', () => {
+    expect(() => buildRunArgs({ ...RUN, phase: 'provisioning' })).toThrow('forward port');
+    expect(() => buildRunArgs({ ...RUN, forwardHostPort: 40123 })).toThrow('forward port');
+    expect(() => buildRunArgs({ ...RUN, phase: 'build' as never })).toThrow('Invalid phase');
+    for (const port of [0, 80, 65536, 1.5])
+      expect(() => buildRunArgs({ ...RUN, phase: 'provisioning', forwardHostPort: port })).toThrow(
+        'Invalid forward port'
+      );
+  });
+
+  it('provisioningNetworkPolicy keeps restrict=on and only adds the forward', () => {
+    const policy = provisioningNetworkPolicy(40123);
+    expect(policy).toMatchObject({
+      restrict: true,
+      guestForwards: [],
+      hostFilesystemSharing: 'none',
+    });
+    expect(policy.hostForwards).toEqual([`tcp:127.0.0.1:40123-:${GUEST_RELAY_PORT}`]);
+    expect(Object.isFrozen(policy.hostForwards)).toBe(true);
+    expect(RUN_NETWORK_POLICY.hostForwards).toEqual([]);
   });
 
   it('includes disk and pidfile', () => {

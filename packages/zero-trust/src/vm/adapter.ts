@@ -11,6 +11,18 @@ export type AcceleratorRequest = Accelerator | 'auto';
  * assumed container escape; it is set by the controller, never by a request. */
 export type ExecScope = 'container' | 'vm-root';
 export type ContainerProfile = 'node' | 'python';
+/** `provisioning` has exactly one host forward to the package proxy; `verification`
+ * (build and test) has none. A VM starts in one and only ever moves forward. */
+export type NetworkPhase = 'provisioning' | 'verification';
+/** A worker command's network: the package proxy (provisioning only) or nothing. */
+export type ExecNetwork = 'none' | 'package_proxy';
+
+/** The one upstream the provisioning connector splices guest connections to: the
+ * package mirror for this run, on the host side. An IPv4 literal, never a name. */
+export interface ProxyTarget {
+  readonly host: string;
+  readonly port: number;
+}
 
 export interface VmLimits {
   readonly vcpus: number;
@@ -33,6 +45,9 @@ export interface VmSpec {
   readonly runId: string;
   readonly limits: VmLimits;
   readonly scope: ExecScope;
+  /** Default `verification`. `provisioning` requires `proxyTarget`. */
+  readonly phase?: NetworkPhase;
+  readonly proxyTarget?: ProxyTarget;
 }
 
 export interface VmHandle {
@@ -49,6 +64,13 @@ export interface ExecRequest {
   /** Relative to the worker workspace. */
   readonly cwd?: string;
   readonly timeoutMs?: number;
+  /** Default `none`. `package_proxy` is refused outside the provisioning phase. */
+  readonly network?: ExecNetwork;
+  /** Controller-set environment for the worker command. */
+  readonly env?: Readonly<Record<string, string>>;
+  /** Give the command a fresh, empty report directory outside the workspace
+   * (`REPORT_DIR` in the container) and return `REPORT_FILE` from it. */
+  readonly report?: boolean;
 }
 
 export interface ExecResult {
@@ -58,7 +80,16 @@ export interface ExecResult {
   readonly stderr: string;
   readonly truncated: boolean;
   readonly durationMs: number;
+  /** Present when a report was requested: its bytes, or null when none was written. */
+  readonly report?: Buffer | null;
 }
+
+/** Where a worker command finds its supervisor-owned report directory. */
+export const REPORT_DIR = '/ztfc/report';
+export const REPORT_FILE = 'report.xml';
+/** Writable worker directory outside the workspace that survives between commands
+ * (environments, exported requirements); never part of the repository tree. */
+export const ENVIRONMENT_ROOT = '/opt/ztfc';
 
 export interface VmListing {
   readonly vmId: string;
@@ -78,6 +109,10 @@ export interface VmAdapter {
     executable?: boolean
   ): Promise<void>;
   getFile(handle: VmHandle, relativePath: string): Promise<Buffer>;
+  /** Ends the provisioning phase: the guest is powered off and the VM restarts on
+   * the same disk with no forward at all. A no-op is never allowed: a VM not in
+   * provisioning is refused. */
+  endProvisioning(handle: VmHandle): Promise<void>;
   /** One deletion attempt; throws VmCleanupError with what is left behind. */
   destroy(handle: Pick<VmHandle, 'vmId' | 'runId'>): Promise<void>;
   listByRun(runId: string): Promise<VmListing[]>;
@@ -92,6 +127,7 @@ export type UnsupportedDetail =
   | 'kvm_unavailable'
   | 'profile_image_missing'
   | 'profile_image_mismatch'
+  | 'profile_not_baked'
   | 'socket_path_too_long'
   | 'kill_switch_engaged';
 

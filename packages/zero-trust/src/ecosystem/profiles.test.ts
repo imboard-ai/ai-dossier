@@ -45,7 +45,21 @@ const ok = (s: ProfileSelection) => {
   return s;
 };
 
+const hardening = manifestJson.workerHardening;
+
 describe('profile manifest', () => {
+  it('names one VM profile per ecosystem and pins uv by digest (2026.10.1)', () => {
+    expect(PROFILE_MANIFEST.manifestVersion).toBe('2026.10.1');
+    expect(PROFILE_MANIFEST.workerHardening).toMatchObject({
+      recipe: 'ztfc-worker-hardening-v1',
+      vmProfiles: ['node-22', 'python-3.13'],
+      uv: {
+        image: 'ghcr.io/astral-sh/uv',
+        imageDigest: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
+      },
+    });
+  });
+
   it('ships a valid, frozen manifest with digest-pinned images', () => {
     expect(PROFILE_MANIFEST.schemaVersion).toBe('ztfc-profiles-v1');
     expect(Object.isFrozen(PROFILE_MANIFEST.profiles[0])).toBe(true);
@@ -76,6 +90,22 @@ describe('profile manifest', () => {
       },
     ],
     ['no profiles', { ...manifestJson, profiles: [] }],
+    [
+      'VM profile that is not in the manifest',
+      { ...manifestJson, workerHardening: { ...hardening, vmProfiles: ['node-18'] } },
+    ],
+    [
+      'two VM profiles for one ecosystem',
+      { ...manifestJson, workerHardening: { ...hardening, vmProfiles: ['node-20', 'node-22'] } },
+    ],
+    [
+      'uv pinned by tag',
+      {
+        ...manifestJson,
+        workerHardening: { ...hardening, uv: { ...hardening.uv, imageDigest: 'latest' } },
+      },
+    ],
+    ['hardening extra field', { ...manifestJson, workerHardening: { ...hardening, sudo: true } }],
   ])('rejects %s', (_name, value) => {
     expect(() => validateProfileManifest(value)).toThrow(ProfileError);
   });
@@ -193,8 +223,9 @@ describe('selectProfile', () => {
   });
 
   it('refuses a manager no profile supports', () => {
+    const { workerHardening: _vm, ...rest } = manifestJson;
     const only: ProfileManifest = validateProfileManifest({
-      ...manifestJson,
+      ...rest,
       profiles: manifestJson.profiles.filter((p) => p.ecosystem === 'node'),
     });
     expect(picked(selectProfile(py(['.python-version', '3.12']), only))).toBe(

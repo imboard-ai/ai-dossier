@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { PROFILE_MANIFEST } from '../ecosystem/profiles';
 import { ReasonCode } from '../state';
 import {
   BrokerError,
@@ -17,6 +18,7 @@ import {
   bakeUserData,
 } from '../vm/cloud-init';
 import {
+  assertProfileBaked,
   assertStandaloneQcow2,
   DOCKER_ID,
   PROFILE_PINS,
@@ -35,7 +37,7 @@ function manifest(overrides: Record<string, unknown> = {}): Record<string, unkno
     schema: 'zt-vm-profile-v1',
     profileDigest: DIGEST,
     baseImageSha256: PROFILE_PINS.baseImage.sha256,
-    containerBaseDigest: PROFILE_PINS.containerBase.digest,
+    workerProfiles: { node: 'node-22', python: 'python-3.13' },
     imageSha256: 'f'.repeat(64),
     imageFile: 'profile-v1.qcow2',
     containerImages: { node: IMAGE_ID, python: `sha256:${'2'.repeat(64)}` },
@@ -72,7 +74,8 @@ describe('parseManifest', () => {
     ['schema', { schema: 'zt-vm-profile-v2' }],
     ['profileDigest', { profileDigest: profileDigest('other agent') }],
     ['baseImageSha256', { baseImageSha256: '0'.repeat(64) }],
-    ['containerBaseDigest', { containerBaseDigest: `sha256:${'0'.repeat(64)}` }],
+    ['workerProfiles node', { workerProfiles: { node: 'node-20', python: 'python-3.13' } }],
+    ['workerProfiles missing', { workerProfiles: undefined }],
     ['imageSha256 short', { imageSha256: 'f'.repeat(63) }],
     ['imageSha256 upper', { imageSha256: 'F'.repeat(64) }],
     ['imageSha256 missing', { imageSha256: undefined }],
@@ -88,6 +91,29 @@ describe('parseManifest', () => {
     const error = mismatch(manifest(overrides));
     expect(error.detail).toBe('profile_image_mismatch');
     expect(error.reasonCode).toBe(ReasonCode.UnsupportedEnvironment);
+  });
+});
+
+describe('assertProfileBaked', () => {
+  it('accepts the profiles the VM carries and refuses any other', () => {
+    expect(() => assertProfileBaked('node', 'node-22')).not.toThrow();
+    expect(() => assertProfileBaked('python', 'python-3.13')).not.toThrow();
+    for (const [ecosystem, id] of [
+      ['node', 'node-20'],
+      ['python', 'python-3.11'],
+      ['python', 'node-22'],
+    ] as const) {
+      const error = (() => {
+        try {
+          assertProfileBaked(ecosystem, id);
+        } catch (e) {
+          return e as UnsupportedEnvironmentError;
+        }
+        throw new Error('expected refusal');
+      })();
+      expect(error).toBeInstanceOf(UnsupportedEnvironmentError);
+      expect(error.detail).toBe('profile_not_baked');
+    }
   });
 });
 
@@ -183,20 +209,28 @@ describe('cloud-init', () => {
   });
 
   it.each([
-    ['node', PROFILE_PINS.containerProfiles.node],
-    ['python', PROFILE_PINS.containerProfiles.python],
-  ] as const)('%s Dockerfile is pinned by digest, purges sudo and strips setuid', (name, pkgs) => {
+    ['node', PROFILE_PINS.containerProfiles.node, 'node-22'],
+    ['python', PROFILE_PINS.containerProfiles.python, 'python-3.13'],
+  ] as const)('%s Dockerfile builds on the profile image by digest, purges sudo and strips setuid', (name, pin, profileId) => {
+    expect(pin.profileId).toBe(profileId);
+    const profile = PROFILE_MANIFEST.profiles.find((p) => p.id === profileId);
+    expect(pin).toMatchObject({ image: profile?.image, digest: profile?.imageDigest });
     const dockerfile = writeFiles().get(`/var/lib/zt/build/${name}/Dockerfile`)?.content ?? '';
-    expect(dockerfile.split('\n')[0]).toBe(
-      `FROM ${PROFILE_PINS.containerBase.image}@${PROFILE_PINS.containerBase.digest}`
-    );
-    expect(dockerfile).toContain(pkgs.join(' '));
+    expect(dockerfile.split('\n')[0]).toBe(`FROM ${pin.image}@${pin.digest}`);
     expect(dockerfile).toContain('apt-get purge -y sudo');
     expect(dockerfile).toContain('rm -rf /etc/sudoers /etc/sudoers.d');
     expect(dockerfile).toContain('-perm /6000 -exec chmod ug-s {} +');
     expect(dockerfile).toContain('USER 1000:1000');
-    expect(dockerfile).not.toContain(`:${PROFILE_PINS.containerBase.tag}`);
     expect(dockerfile.match(/^FROM /gm)).toHaveLength(1);
+    const { uv } = PROFILE_PINS.hardening;
+    const copiesUv = dockerfile.includes(`COPY --from=${uv.image}@${uv.imageDigest} /uv /uvx`);
+    expect(copiesUv).toBe(name === 'python');
+  });
+
+  it('bake removes every pulled base image after building the workers', () => {
+    const script = writeFiles().get('/usr/local/lib/zt/bake.sh')?.content ?? '';
+    for (const pin of Object.values(PROFILE_PINS.containerProfiles))
+      expect(script).toContain(`${pin.image}@${pin.digest}`);
   });
 
   it('bake script reports result/failed markers and disables ssh', () => {
