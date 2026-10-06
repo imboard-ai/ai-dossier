@@ -42,12 +42,13 @@ const example = `---dossier
 The skill an AI agent follows, written in plain markdown.
 The header above is what makes them verifiable.`;
 ---
-<Base bare title="AI Dossier" schema={softwareApplicationSchema(new URL('/', Astro.site).href)} description="Your agent skills, versioned and signed. Publish a skill once, install it on every machine, and let teammates and customers verify it came from you.">
+<Base bare title="Signed Agent Skills for Model-Driven Orchestration" schema={softwareApplicationSchema(new URL('/', Astro.site).href)} description="Signed, versioned agent skills for model-driven orchestration. Publish once, install anywhere, and let anyone verify who wrote it.">
   <section class="hero">
     <div class="wrap hero-grid">
       <div class="hero-copy">
         <p class="pill"><svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3 3 7-7.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>Signed &middot; Verifiable &middot; Open source</p>
         <h1>Your agent skills, versioned and signed</h1>
+        <p class="category">Signed, versioned agent skills for model-driven orchestration</p>
         <p class="lead">
           A <strong>dossier</strong> is an agent skill with a version and a signature. Copying skill files
           between machines, teammates and customers works, until nobody knows which version they are
@@ -107,6 +108,32 @@ The header above is what makes them verifiable.`;
           <p>No Node.js required. A checksum-verified download from <a href={`${repo}/releases`}>GitHub releases</a> for Linux and macOS.</p>
         </article>
       </div>
+    </section>
+
+    <section aria-labelledby="orchestration" class="block">
+      <p class="eyebrow">How it runs</p>
+      <h2 id="orchestration">Model-driven orchestration, with a deterministic shell</h2>
+      <p class="orch-lead">
+        In <em>model-driven orchestration</em> the model decides the steps, the tool calls, the retries and when
+        the work is done. A hand-coded DAG doesn't. Dossier makes that safe to share and repeat. Every skill is
+        signed and version-pinned. Multi-step runs sit inside a deterministic scheduler that never calls an LLM.
+      </p>
+      <div class="orch">
+        <div>
+          <h3>Code-driven</h3>
+          <p>You write the control flow and the model fills in a step. Predictable and cheap, but brittle when reality leaves the script.</p>
+        </div>
+        <div>
+          <h3>Model-driven</h3>
+          <p>You hand the model a goal and tools, and it plans. Flexible, but the path can differ run to run, and whoever controls the instructions controls the agent.</p>
+        </div>
+        <div class="orch-yes">
+          <h3>Dossier (hybrid)</h3>
+          <p>Model-driven inside each skill, deterministic around it: signed, version-pinned skills, <code>ai-dossier run</code> verification before the model reads them, and <code>@ai-dossier/sched</code> to queue and reconcile batch runs.</p>
+        </div>
+      </div>
+      <p class="muted">Verification proves integrity and origin. It does not make a skill safe to run. The <em>model-driven approach</em> was popularised by AWS Strands Agents; Dossier adds signing, versioning and the scheduler.</p>
+      <p><a class="more" href="/docs/explanation/model-driven-orchestration/">Read: what is model-driven orchestration &rarr;</a></p>
     </section>
 
     {featured.length > 0 && (
@@ -192,6 +219,7 @@ ai-dossier --help</code></pre>
       <p class="eyebrow">Integrations</p>
       <h2 id="works">Works with</h2>
       <ul class="works">
+        <li><strong>Agent Skills / <code>SKILL.md</code></strong><span>A layer on top, not a rival format: signing and versioning for agent skills. Move skills in and out with <code>install-skill</code> and <code>skill-export</code>.</span></li>
         <li><strong>Claude Code</strong><span>Install dossiers as skills with <code>ai-dossier install-skill</code>, or use the MCP server.</span></li>
         <li><strong>Claude Desktop and other MCP clients</strong><span>Any client that can launch a stdio MCP server (Claude Desktop config is documented): <code>npx @ai-dossier/mcp-server</code>.</span></li>
         <li><strong>opencode</strong><span><code>install-skill</code> and <code>sync-skills</code> write opencode skill wrappers; <code>run</code> can target it.</span></li>
@@ -237,6 +265,7 @@ ai-dossier --help</code></pre>
   }
   .hero h1 { font-size: var(--step-4); line-height: 1.05; letter-spacing: -0.04em; margin: 0 0 20px; }
   .lead { font-size: var(--step-1); color: var(--muted); max-width: 38em; margin: 0; line-height: 1.6; }
+  .category { margin: -8px 0 16px; font-size: var(--step-1); font-weight: 600; color: var(--accent); letter-spacing: -0.01em; }
   .lead strong { color: var(--fg); font-weight: 600; }
   .cta { display: flex; gap: 10px; flex-wrap: wrap; margin: 28px 0 8px; }
   .installs { max-width: 560px; }
@@ -248,6 +277,14 @@ ai-dossier --help</code></pre>
   .feat p, .works span { margin: 0; color: var(--muted); font-size: .92rem; }
   .feat-meta { display: flex; gap: 6px; flex-wrap: wrap; margin-top: auto !important; padding-top: 4px; }
   .steps pre { margin: 12px 0 0; font-size: .8rem; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .orch-lead { max-width: 46em; color: var(--muted); font-size: var(--step-1); line-height: 1.6; margin: 0 0 8px; }
+  .orch-lead em { color: var(--fg); font-style: normal; font-weight: 600; }
+  .orch { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); margin: 20px 0 12px; }
+  .orch > div { border: 1px solid var(--line); border-radius: var(--radius); padding: 4px 20px 14px; min-width: 0; background: var(--bg-soft); }
+  .orch > .orch-yes { border-color: var(--accent-line); background: linear-gradient(160deg, var(--accent-soft), transparent 55%), var(--bg-soft); }
+  .orch p { color: var(--muted); font-size: .95rem; margin: 0; }
+  .orch-yes code { overflow-wrap: anywhere; }
+  .more { font-weight: 600; }
   .vs { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); margin-top: 24px; }
   .vs > div { border: 1px solid var(--line); border-radius: var(--radius); padding: 4px 20px 14px; background: var(--bg-soft); }
   .vs > .vs-yes { border-color: var(--accent-line); }
