@@ -1,11 +1,19 @@
 /** Pure QEMU argv construction. Everything here is controller policy; nothing is
  * derived from repository, worker or model input. */
-import type { Accelerator, ExecScope, VmLimits } from './adapter';
+import type { Accelerator, ExecScope, NetworkPhase, VmLimits } from './adapter';
 
 export const BROKER_PORT_NAME = 'org.ai-dossier.zt.broker';
 /** SMBIOS type 11 OEM string carrying the controller-set scope. fw_cfg would need
  * `qemu_fw_cfg`, which the cloud image kernel does not ship; `dmi_sysfs` it does. */
 export const SCOPE_OEM_PREFIX = 'org.ai-dossier.zt.scope:';
+/** Second OEM string: the controller-set network phase. The guest announces it back;
+ * it only selects guest-side behaviour, the forward itself is host policy. */
+export const PHASE_OEM_PREFIX = 'org.ai-dossier.zt.phase:';
+/** Guest TCP port of the provisioning relay; the one host forward lands here. */
+export const GUEST_RELAY_PORT = 7480;
+/** Where provisioning workers reach the package mirror: the relay on the gateway of
+ * the VM's internal provisioning network (`vm-guest/agent.py`). */
+export const WORKER_RELAY = Object.freeze({ host: '172.30.255.1', port: 7481 });
 /** sun_path is 108 bytes including the terminator. */
 export const MAX_SOCKET_PATH_BYTES = 107;
 /** QEMU and qemu-img never need the controller's environment; secrets in it must not reach them. */
@@ -16,8 +24,9 @@ export const QEMU_ENV: Readonly<Record<string, string>> = Object.freeze({
 
 /** Host-side egress policy (PRD §5.5): user-mode networking with `restrict=on`
  * isolates the guest from the host, LAN, metadata services and the internet
- * no matter what runs as root inside the VM. Forwards are added only by the
- * provisioning proxy (#1010); build/test phases have none. */
+ * no matter what runs as root inside the VM. This is the verification (build and
+ * test) policy: no forwards at all. Only the provisioning phase adds one, see
+ * `provisioningNetworkPolicy`. */
 export const RUN_NETWORK_POLICY = Object.freeze({
   backend: 'qemu-user-mode',
   restrict: true,
@@ -26,10 +35,30 @@ export const RUN_NETWORK_POLICY = Object.freeze({
   hostFilesystemSharing: 'none',
 });
 
-/** TCG is software emulation: same image and isolation, longer clocks. */
+/** Provisioning policy (#1010): the verification policy plus exactly one host
+ * forward, from a loopback port on the host to the guest relay. The guest still
+ * cannot open any connection; the controller's connector dials in through this
+ * forward and splices each connection to the package proxy. A `guestfwd` cannot do
+ * this: QEMU gives it either one shared chardev stream or a spawned process per
+ * connection, which `-sandbox spawn=deny` forbids. */
+export function provisioningNetworkPolicy(hostPort: number): typeof RUN_NETWORK_POLICY {
+  if (!Number.isSafeInteger(hostPort) || hostPort < 1024 || hostPort > 65535)
+    throw new Error('Invalid forward port');
+  return Object.freeze({
+    ...RUN_NETWORK_POLICY,
+    hostForwards: Object.freeze([`tcp:127.0.0.1:${hostPort}-:${GUEST_RELAY_PORT}`]),
+  });
+}
+
+/** TCG is software emulation: same image and isolation, longer clocks. Measured on
+ * GitHub-hosted runners (#1009, #1010), multi-second steps ran 10–15× slower than under
+ * KVM and sub-second commands up to 19× (container start-up dominates those, far inside
+ * their budgets). ×4 timed out commands that need more than a quarter of their KVM
+ * budget; 16 covers the long ones and keeps the 20-minute default under the broker's
+ * 6-hour exec cap. */
 export const TIMEOUT_SCALE: Readonly<Record<Accelerator, number>> = Object.freeze({
   kvm: 1,
-  tcg: 4,
+  tcg: 16,
 });
 export const BOOT_TIMEOUT_MS: Readonly<Record<Accelerator, number>> = Object.freeze({
   kvm: 3 * 60 * 1000,
@@ -47,6 +76,10 @@ interface CommonArgs {
 export interface RunArgs extends CommonArgs {
   readonly brokerSocket: string;
   readonly scope: ExecScope;
+  /** Default `verification`: no forwards. */
+  readonly phase?: NetworkPhase;
+  /** Host loopback port of the provisioning forward; required in, and only in, provisioning. */
+  readonly forwardHostPort?: number;
 }
 
 export interface BakeArgs extends CommonArgs {
@@ -125,12 +158,19 @@ export function buildRunArgs(args: RunArgs): string[] {
   if (Buffer.byteLength(args.brokerSocket) > MAX_SOCKET_PATH_BYTES)
     throw new Error('Broker socket path too long');
   if (args.scope !== 'container' && args.scope !== 'vm-root') throw new Error('Invalid scope');
+  const phase = args.phase ?? 'verification';
+  if (phase !== 'provisioning' && phase !== 'verification') throw new Error('Invalid phase');
+  const { forwardHostPort } = args;
+  if ((phase === 'provisioning') !== (forwardHostPort !== undefined))
+    throw new Error('A forward port is required in, and only in, the provisioning phase');
+  const policy =
+    forwardHostPort === undefined ? RUN_NETWORK_POLICY : provisioningNetworkPolicy(forwardHostPort);
   return [
     ...common(args),
     '-serial',
     'none',
     '-netdev',
-    netdevValue(),
+    netdevValue(policy),
     '-device',
     'virtio-net-pci,netdev=net0',
     '-device',
@@ -140,7 +180,7 @@ export function buildRunArgs(args: RunArgs): string[] {
     '-device',
     `virtserialport,chardev=broker,name=${BROKER_PORT_NAME}`,
     '-smbios',
-    `type=11,value=${SCOPE_OEM_PREFIX}${args.scope}`,
+    `type=11,value=${SCOPE_OEM_PREFIX}${args.scope},value=${PHASE_OEM_PREFIX}${phase}`,
   ];
 }
 

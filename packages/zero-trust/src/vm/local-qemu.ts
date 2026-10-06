@@ -19,6 +19,8 @@ import {
   type ExecRequest,
   type ExecResult,
   type ExecScope,
+  type NetworkPhase,
+  type ProxyTarget,
   UnsupportedEnvironmentError,
   type VmAdapter,
   VmCleanupError,
@@ -37,6 +39,7 @@ import {
   sha256File,
   type VmProfileManifest,
 } from './profile';
+import { assertProxyTarget, ProvisionChannel, RELAY_KEY_BYTES } from './provision-channel';
 import {
   BOOT_TIMEOUT_MS,
   buildOverlayArgs,
@@ -57,6 +60,8 @@ const SOCKET_WAIT_MS = 30_000;
 const POLL_MS = 100;
 /** Wait after SIGTERM, then after SIGKILL, before a PID is reported as left behind. */
 const KILL_GRACE_MS = 5000;
+/** How long a guest gets to power off cleanly at the end of provisioning (before TCG scaling). */
+const SHUTDOWN_WAIT_MS = 60_000;
 const RUN_TOOL_TIMEOUT_MS = 30 * 60_000;
 const STDERR_TAIL_BYTES = 2000;
 
@@ -79,6 +84,8 @@ export interface HostOps {
     stderrFile: string
   ): Promise<Launched>;
   connect(socketPath: string): Promise<Duplex>;
+  /** A currently free TCP port on host loopback, for the provisioning forward. */
+  freePort(): Promise<number>;
   startToken(pid: number): string | null;
   /** argv of a process, or null when it does not exist; throws when it cannot be read. */
   cmdline(pid: number): string[] | null;
@@ -152,6 +159,16 @@ export const systemOps: HostOps = {
       socket.once('error', reject);
     });
   },
+  freePort() {
+    return new Promise((resolve, reject) => {
+      const server = net.createServer();
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', () => {
+        const { port } = server.address() as net.AddressInfo;
+        server.close(() => resolve(port));
+      });
+    });
+  },
   startToken: processStartToken,
   cmdline(pid) {
     let raw: string;
@@ -185,6 +202,16 @@ export const systemOps: HostOps = {
   },
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 };
+
+/** Records written before phases existed have none: verification. */
+function phaseOf(record: { readonly phase?: NetworkPhase }): NetworkPhase {
+  return record.phase ?? 'verification';
+}
+
+/** One QEMU stderr log per phase, so the relaunch keeps the provisioning boot's. */
+function stderrFileOf(phase: NetworkPhase): string {
+  return phase === 'verification' ? 'qemu.err' : `qemu.${phase}.err`;
+}
 
 /** The `-pidfile` operand of a QEMU process, or null for anything else. An
  * argument that merely mentions the path (an editor or `tail` on the pidfile)
@@ -226,6 +253,9 @@ interface VmRecord {
   readonly startToken: string | null;
   readonly limits: VmLimits;
   readonly createdAt: string;
+  /** Absent in records written before phases existed: verification. */
+  readonly phase?: NetworkPhase;
+  readonly proxyTarget?: ProxyTarget | null;
 }
 
 export interface LocalQemuOptions {
@@ -258,6 +288,9 @@ export class LocalQemuAdapter implements VmAdapter {
   private readonly options: LocalQemuOptions;
   private readonly ops: HostOps;
   private readonly clients = new Map<string, BrokerClient>();
+  private readonly channels = new Map<string, ProvisionChannel>();
+  /** VMs with a phase switch in flight. */
+  private readonly switching = new Set<string>();
   private imageVerified: boolean;
   private readonly now: () => Date;
   private loadedTools: HostTools | null;
@@ -392,6 +425,11 @@ export class LocalQemuAdapter implements VmAdapter {
     if (!ID.test(spec.runId)) throw new Error('Invalid run ID');
     if (!Number.isSafeInteger(spec.limits.diskGiB) || spec.limits.diskGiB < BAKED_DISK_GIB)
       throw new Error(`Disk limit must be at least the baked image size (${BAKED_DISK_GIB} GiB)`);
+    const phase = spec.phase ?? 'verification';
+    if (phase !== 'provisioning' && phase !== 'verification') throw new Error('Invalid phase');
+    if ((phase === 'provisioning') !== (spec.proxyTarget !== undefined))
+      throw new Error('A proxy target is required in, and only in, the provisioning phase');
+    const proxyTarget = spec.proxyTarget ? assertProxyTarget(spec.proxyTarget) : null;
     assertNoSecrets(spec.runId);
     this.verifyImage();
     const vmId = `zt-${randomBytes(6).toString('hex')}`;
@@ -404,9 +442,7 @@ export class LocalQemuAdapter implements VmAdapter {
       );
     privateDir(this.vmsDir);
     const vmDir = privateDir(path.join(this.vmsDir, vmId));
-    const disk = path.join(vmDir, 'disk.qcow2');
-    const pidFile = path.join(vmDir, 'qemu.pid');
-    let record: VmRecord = {
+    const record: VmRecord = {
       vmId,
       runId: spec.runId,
       accelerator: this.accelerator,
@@ -418,6 +454,8 @@ export class LocalQemuAdapter implements VmAdapter {
       startToken: null,
       limits: spec.limits,
       createdAt: this.now().toISOString(),
+      phase,
+      proxyTarget,
     };
     this.writeRecord(record);
     const handle: VmHandle = Object.freeze({
@@ -427,71 +465,15 @@ export class LocalQemuAdapter implements VmAdapter {
       profileDigest: this.manifest.profileDigest,
       scope: spec.scope,
     });
-    let launched: Launched | null = null;
     try {
       await this.ops.run(
         this.tools.qemuImg,
-        buildOverlayArgs(this.imagePath(), disk, spec.limits.diskGiB),
+        buildOverlayArgs(this.imagePath(), path.join(vmDir, 'disk.qcow2'), spec.limits.diskGiB),
         { ...QEMU_ENV }
       );
-      const args = buildRunArgs({
-        name: vmId,
-        accelerator: this.accelerator,
-        limits: spec.limits,
-        disk,
-        pidFile,
-        brokerSocket: socket,
-        scope: spec.scope,
-      });
-      launched = await this.ops.launch(
-        this.tools.qemu,
-        args,
-        { ...QEMU_ENV },
-        path.join(vmDir, 'qemu.err')
-      );
-      const pid = launched.pid;
-      // Record the PID before anything else can fail: a PID without a start
-      // token is never signalled and never treated as cleaned up.
-      record = { ...record, pid };
-      this.writeRecord(record);
-      record = { ...record, startToken: this.ops.startToken(pid) };
-      this.writeRecord(record);
-      this.refuseIfKillSwitchEngaged();
-      this.journal({
-        type: 'vm_created',
-        runId: spec.runId,
-        vmId,
-        provider: 'local-qemu',
-        accelerator: this.accelerator,
-        scope: spec.scope,
-        profileDigest: this.manifest.profileDigest,
-        imageSha256: this.manifest.imageSha256,
-        pid,
-        vcpus: spec.limits.vcpus,
-        memoryMiB: spec.limits.memoryMiB,
-        diskGiB: spec.limits.diskGiB,
-      });
-      const exited = (launched as Launched).exited.then((tail) => {
-        throw new Error(`QEMU exited during boot: ${tail.trim().slice(-500)}`);
-      });
-      const client = new BrokerClient(await this.connectWhenListening(socket, exited), (code) =>
-        this.journal({ type: 'vm_broker_tainted', runId: spec.runId, vmId, code })
-      );
-      this.clients.set(vmId, client);
-      const scope = await Promise.race([
-        client.waitReady(BOOT_TIMEOUT_MS[this.accelerator]),
-        exited,
-      ]);
-      if (scope !== spec.scope) {
-        client.taint('scope_mismatch');
-        throw new BrokerError('scope_mismatch');
-      }
-      // A kill-all that started during boot may have missed this VM.
-      this.refuseIfKillSwitchEngaged();
+      await this.boot(record, 'vm_created');
       return handle;
     } catch (error) {
-      // The child handle is the one reference that survives a failed record write.
-      launched?.kill?.();
       await this.destroy(handle).catch((cleanup: unknown) => {
         // The caller only sees the boot error; keep the leftovers on record.
         if (cleanup instanceof VmCleanupError)
@@ -506,6 +488,192 @@ export class LocalQemuAdapter implements VmAdapter {
       });
       throw error;
     }
+  }
+
+  /** Launches QEMU on the record's overlay with its phase's network policy, waits for
+   * the guest hello, and checks that the guest announces the scope and phase the
+   * controller set. In provisioning, starts the connector for the one forward; it
+   * closes when this QEMU process exits, whatever ends it. */
+  private async boot(initial: VmRecord, event: 'vm_created' | 'vm_phase_changed'): Promise<void> {
+    let record = initial;
+    const phase = phaseOf(record);
+    const forwardPort = phase === 'provisioning' ? await this.ops.freePort() : undefined;
+    // Per boot: proves to the guest relay that a connection came from this controller.
+    const relayKey = forwardPort === undefined ? undefined : randomBytes(RELAY_KEY_BYTES);
+    const args = buildRunArgs({
+      name: record.vmId,
+      accelerator: record.accelerator,
+      limits: record.limits,
+      disk: path.join(record.vmDir, 'disk.qcow2'),
+      pidFile: path.join(record.vmDir, 'qemu.pid'),
+      brokerSocket: record.socket,
+      scope: record.scope,
+      phase,
+      forwardHostPort: forwardPort,
+    });
+    let launched: Launched | null = null;
+    try {
+      launched = await this.ops.launch(
+        this.tools.qemu,
+        args,
+        { ...QEMU_ENV },
+        path.join(record.vmDir, stderrFileOf(phase))
+      );
+      const pid = launched.pid;
+      // Record the PID before anything else can fail: a PID without a start
+      // token is never signalled and never treated as cleaned up.
+      record = { ...record, pid, startToken: null };
+      this.writeRecord(record);
+      record = { ...record, startToken: this.ops.startToken(pid) };
+      this.writeRecord(record);
+      this.refuseIfKillSwitchEngaged();
+      this.journal({
+        type: event,
+        runId: record.runId,
+        vmId: record.vmId,
+        provider: 'local-qemu',
+        accelerator: record.accelerator,
+        scope: record.scope,
+        phase,
+        hostForwards: forwardPort === undefined ? 0 : 1,
+        profileDigest: this.manifest.profileDigest,
+        imageSha256: this.manifest.imageSha256,
+        pid,
+        vcpus: record.limits.vcpus,
+        memoryMiB: record.limits.memoryMiB,
+        diskGiB: record.limits.diskGiB,
+      });
+      const exited = launched.exited.then((tail) => {
+        throw new Error(`QEMU exited during boot: ${tail.trim().slice(-500)}`);
+      });
+      const client = new BrokerClient(
+        await this.connectWhenListening(record.socket, exited),
+        (code) =>
+          this.journal({ type: 'vm_broker_tainted', runId: record.runId, vmId: record.vmId, code })
+      );
+      this.clients.set(record.vmId, client);
+      const scope = await Promise.race([
+        client.waitReady(BOOT_TIMEOUT_MS[record.accelerator], relayKey),
+        exited,
+      ]);
+      if (scope !== record.scope) {
+        client.taint('scope_mismatch');
+        throw new BrokerError('scope_mismatch');
+      }
+      if (client.phase !== phase) {
+        client.taint('phase_mismatch');
+        throw new BrokerError('phase_mismatch');
+      }
+      // A kill-all that started during boot may have missed this VM.
+      this.refuseIfKillSwitchEngaged();
+      if (forwardPort !== undefined && relayKey && record.proxyTarget) {
+        const channel = new ProvisionChannel({
+          forwardPort,
+          target: record.proxyTarget,
+          relayKey,
+        });
+        this.channels.set(record.vmId, channel);
+        // A QEMU that dies without endProvisioning/destroy must not leave the connector
+        // redialing a loopback port some other process could then bind.
+        launched.exited.then(() => this.closeChannel(record.vmId, record.runId, 'qemu_exited'));
+        channel.start();
+      }
+    } catch (error) {
+      // The child handle is the one reference that survives a failed record write.
+      launched?.kill?.();
+      throw error;
+    }
+  }
+
+  /** Closes a VM's provisioning connector once, journaling what it carried, so an
+   * operator can tell a relay that never answered (dialed, none spliced) from an
+   * unreachable mirror (upstream failures) from a refused request (spliced). */
+  private closeChannel(vmId: string, runId: string, reason: string): void {
+    const channel = this.channels.get(vmId);
+    if (!channel) return;
+    this.channels.delete(vmId);
+    channel.close();
+    this.journal({ type: 'vm_provisioning_channel_closed', runId, vmId, reason, ...channel.stats });
+  }
+
+  /** Provisioning → verification. The guest is asked to sync and power off (its
+   * answer is not trusted), QEMU must exit or is killed, and QEMU is relaunched on the
+   * same overlay with the forward-free verification argv. Nothing the guest does can
+   * keep or add a forward: the new process's arguments are controller policy. One
+   * switch per VM at a time; a failed switch leaves the VM for the caller to destroy. */
+  endProvisioning(handle: VmHandle): Promise<void> {
+    if (this.switching.has(handle.vmId))
+      return Promise.reject(new BrokerError('phase_switch_in_progress'));
+    this.switching.add(handle.vmId);
+    return this.switchToVerification(handle).finally(() => this.switching.delete(handle.vmId));
+  }
+
+  private async switchToVerification(handle: VmHandle): Promise<void> {
+    const record = this.readRecord(handle.vmId);
+    if (!record) throw new BrokerError('unknown_vm');
+    if (phaseOf(record) !== 'provisioning') throw new BrokerError('not_provisioning');
+    let stage = 'shutdown';
+    try {
+      this.closeChannel(handle.vmId, handle.runId, 'end_of_provisioning');
+      const client = this.clients.get(handle.vmId);
+      let shutdown = 'not_sent';
+      if (client && !client.tainted)
+        shutdown = await client
+          .shutdown(this.scaled(BROKER_RPC_TIMEOUT_MS, handle))
+          .then(() => 'acknowledged')
+          .catch((error: BrokerError) => error.code ?? 'failed');
+      client?.close();
+      this.clients.delete(handle.vmId);
+      stage = 'stop';
+      const stop = await this.stopProcess(record, this.scaled(SHUTDOWN_WAIT_MS, handle));
+      // Killed means the guest may not have synced its disk; the record says so.
+      this.journal({
+        type: 'vm_provisioning_stopped',
+        runId: handle.runId,
+        vmId: handle.vmId,
+        shutdown,
+        ended: stop.ended,
+      });
+      if (stop.leftover !== null)
+        throw new VmCleanupError([stop.leftover], [record.vmDir], handle.vmId);
+      this.ops.rm(record.socket);
+      stage = 'relaunch';
+      const next: VmRecord = {
+        ...record,
+        pid: null,
+        startToken: null,
+        phase: 'verification',
+        proxyTarget: null,
+      };
+      this.writeRecord(next);
+      await this.boot(next, 'vm_phase_changed');
+    } catch (error) {
+      this.journal({
+        type: 'vm_phase_change_failed',
+        runId: handle.runId,
+        vmId: handle.vmId,
+        stage,
+        error: error instanceof BrokerError ? error.code : (error as Error).name,
+      });
+      throw error;
+    }
+  }
+
+  /** Waits up to `graceMs` for this VM's QEMU to exit by itself, then stops it.
+   * `leftover` is the PID when it is still alive (or cannot be judged). */
+  private async stopProcess(
+    record: VmRecord,
+    graceMs: number
+  ): Promise<{ ended: 'gone' | 'exited' | 'killed' | 'leftover'; leftover: number | null }> {
+    const { pid, ownership } = this.resolveProcess(record.vmId, record);
+    if (ownership === 'unknown' && pid) return { ended: 'leftover', leftover: pid };
+    if (ownership !== 'owned' || !pid) return { ended: 'gone', leftover: null };
+    for (let waited = 0; waited < graceMs && this.ops.alive(pid); waited += POLL_MS)
+      await this.ops.sleep(POLL_MS);
+    if (!this.ops.alive(pid)) return { ended: 'exited', leftover: null };
+    return (await this.stop(pid))
+      ? { ended: 'leftover', leftover: pid }
+      : { ended: 'killed', leftover: null };
   }
 
   /** QEMU creates the listening socket shortly after start. */
@@ -539,6 +707,10 @@ export class LocalQemuAdapter implements VmAdapter {
   async exec(handle: VmHandle, request: ExecRequest): Promise<ExecResult> {
     const record = this.readRecord(handle.vmId);
     if (!record) throw new BrokerError('unknown_vm');
+    const network = request.network ?? 'none';
+    // Host-side check first; the guest refuses it too, but must not be relied on.
+    if (network === 'package_proxy' && phaseOf(record) !== 'provisioning')
+      throw new BrokerError('network_not_allowed');
     const base = request.timeoutMs ?? record.limits.commandTimeoutMs;
     return this.client(handle).exec(
       {
@@ -546,6 +718,9 @@ export class LocalQemuAdapter implements VmAdapter {
         argv: request.argv,
         cwd: request.cwd,
         timeoutMs: this.scaled(base, handle),
+        network,
+        env: request.env,
+        report: request.report,
       },
       this.scaled(BROKER_RPC_TIMEOUT_MS, handle)
     );
@@ -577,6 +752,7 @@ export class LocalQemuAdapter implements VmAdapter {
     this.clients.delete(handle.vmId);
     const record = this.readRecord(handle.vmId);
     const vmDir = path.join(this.vmsDir, handle.vmId);
+    this.closeChannel(handle.vmId, handle.runId, 'destroy');
     const leftoverPids: number[] = [];
     const { pid, ownership } = this.resolveProcess(handle.vmId, record);
     if (ownership === 'unknown' && pid) leftoverPids.push(pid);
@@ -627,7 +803,11 @@ export class LocalQemuAdapter implements VmAdapter {
   private keepDiagnostics(vmId: string, vmDir: string): void {
     try {
       const target = privateDir(path.join(this.options.stateDir, 'diagnostics'));
-      fs.copyFileSync(path.join(vmDir, 'qemu.err'), path.join(target, `${vmId}.qemu.err`));
+      for (const phase of ['provisioning', 'verification'] as const) {
+        const file = path.join(vmDir, stderrFileOf(phase));
+        if (fs.existsSync(file))
+          fs.copyFileSync(file, path.join(target, `${vmId}.${stderrFileOf(phase)}`));
+      }
     } catch {
       // best effort: a missing log is not a cleanup failure
     }

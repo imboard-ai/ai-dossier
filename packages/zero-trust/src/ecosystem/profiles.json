@@ -1,6 +1,15 @@
 {
   "schemaVersion": "ztfc-profiles-v1",
-  "manifestVersion": "2026.10.0",
+  "manifestVersion": "2026.10.1",
+  "workerHardening": {
+    "recipe": "ztfc-worker-hardening-v1",
+    "vmProfiles": ["node-22", "python-3.13"],
+    "uv": {
+      "image": "ghcr.io/astral-sh/uv",
+      "version": "0.12.5",
+      "imageDigest": "sha256:e85be844203885286c60ffad8a858d48afb6c5a5c237ca0e67f12e74b8f174b1"
+    }
+  },
   "profiles": [
     {
       "id": "node-20",

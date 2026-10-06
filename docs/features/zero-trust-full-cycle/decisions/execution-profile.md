@@ -76,9 +76,9 @@ Run VM (untrusted code):
 | `-nodefaults -no-user-config -display none -no-reboot` | No implicit devices, no host config files, no display, reboot ends the VM |
 | `-sandbox on,obsolete=deny,elevateprivileges=deny,spawn=deny,resourcecontrol=deny` | QEMU's own seccomp filter: no privilege change, no helper processes |
 | `-serial none` | No guest-controlled console file on the host (disk-fill vector) |
-| `-netdev user,id=net0,restrict=on` + `virtio-net-pci` | User-mode networking isolated from the host and the outside (below); no `hostfwd`/`guestfwd`. The value is rendered from `RUN_NETWORK_POLICY` |
+| `-netdev user,id=net0,restrict=on` + `virtio-net-pci` | User-mode networking isolated from the host and the outside (below). Build and test: no forwards (`RUN_NETWORK_POLICY`). Provisioning (#1010): exactly one `hostfwd` from host loopback to the guest relay on 7480 (`provisioningNetworkPolicy`), never a `guestfwd` |
 | `virtio-serial-pci` + `-chardev socket,path=<0700 runtime dir>/<vm>.sock,server=on,wait=off` + `virtserialport,name=org.ai-dossier.zt.broker` | The broker channel, the only data path |
-| `-smbios type=11,value=org.ai-dossier.zt.scope:container\|vm-root` | Controller-set execution scope as an SMBIOS OEM string; the guest agent reads it through `dmi_sysfs`, announces it back, and a mismatch taints the VM. (fw_cfg was tried first; the cloud image kernel does not ship `qemu_fw_cfg`, and the agent fell back to `container`, which is the safe default.) |
+| `-smbios type=11,value=org.ai-dossier.zt.scope:container\|vm-root,value=org.ai-dossier.zt.phase:provisioning\|verification` | Controller-set execution scope and network phase as SMBIOS OEM strings; the guest agent reads them through `dmi_sysfs`, announces both back, and a mismatch taints the VM. (fw_cfg was tried first; the cloud image kernel does not ship `qemu_fw_cfg`, and the agent fell back to `container`, which is the safe default.) |
 | `-drive file=<overlay>,if=virtio,format=qcow2,discard=unmap`, `virtio-rng-pci` | Per-run copy-on-write disk on the hash-verified baked image |
 | `-pidfile` | Written for operators and diagnostics; teardown uses the recorded spawn PID and checks its process start token before signalling |
 
@@ -98,9 +98,10 @@ involved in a bake.
   of the download cache.
 - Bake (`src/vm/cloud-init.ts`, `src/vm/bake.ts`): no users, no passwords, SSH disabled and
   masked, apt timers masked, root locked, snapd and unattended upgrades purged, cloud-init disabled after the bake.
-  Node and Python container images derive from
-  `mcr.microsoft.com/devcontainers/base:ubuntu24.04` pinned by digest; sudo is purged and every
-  setuid/setgid bit is stripped at build time. The flattened image is hashed into a manifest
+  Node and Python container images derive from the `profiles.json` profile images
+  (`node-22`, `python-3.13`, devcontainer images pinned by digest; uv added from its own
+  digest-pinned image since #1010); sudo is purged and every setuid/setgid bit is stripped at
+  build time. The flattened image is hashed into a manifest
   together with the profile digest (pins, recipe version, guest agent source). The adapter
   re-hashes the image before its first VM and refuses a qcow2 whose header names a backing file
   or an external data file (QEMU would open either with the controller's privileges), or an
@@ -122,8 +123,12 @@ root inside the VM:
   map to the host's loopback), the LAN, the metadata addresses (`169.254.169.254`,
   `fd00:ec2::254`) and the internet are dropped. slirp's DNS forwarder (`10.0.2.3`) does not
   answer under `restrict=on`, so DNS cannot be used for exfiltration either.
-- No forwards in build and test phases. The provisioning proxy (#1010) will be the only explicit
-  forward, added by the controller for the dependency phase.
+- No forwards in build and test phases. The provisioning phase (#1010) has exactly one forward:
+  a `hostfwd` from a host loopback port to the guest relay, through which the controller dials in
+  and splices each connection to the package mirror. The guest still opens no connection of its
+  own. The phase ends by powering the guest off and restarting it on the same disk with the
+  forward-free arguments. See the [package-proxy record](package-proxy.md) for why it is a
+  `hostfwd` and not a `guestfwd`.
 - Inside the VM, worker containers have `--network none`: a second, independent layer.
 - The gate exercises both layers: the fixtures run once in the worker container, and once as
   root on the VM's own network stack (scope `vm-root`, assumed container escape). Only categories
@@ -132,11 +137,17 @@ root inside the VM:
 ## Broker
 
 `src/vm/broker.ts` (host) and `vm-guest/agent.py` (guest): JSON lines over virtio-serial with
-three operations — `exec`, `put`, `get` — after a protocol hello. The host validates every request
-before it is sent (operation allowlist, container profile, argv count and size, secret-shaped
-argv, workspace-relative paths without traversal, 1 MiB file cap, timeout bounds) and every
-response it receives (frame size cap, schema, request id, canonical base64, stream caps, short
-error slugs). Any protocol violation by the guest taints the VM permanently; it must be
+four operations — `exec`, `put`, `get` and, since #1010, `shutdown` — after a protocol hello in
+which the guest announces its scope and network phase (and, in provisioning, receives the
+per-boot relay key). `exec` carries a network (`none`, or `package_proxy` in provisioning only),
+a controller-set environment (at most 32 variables, plain names, no `LD_*`, no secret-shaped
+values) and an optional report request. The host validates every request before it is sent
+(operation allowlist, container profile, argv count and size, secret-shaped argv and
+environment values, workspace-relative paths without traversal, 1 MiB file cap, timeout bounds,
+network) and every response it receives (frame size cap, schema, request id, canonical base64,
+stream caps, a report only when one was requested and at most 256 KiB, short error slugs). The
+protocol name stays `zt-broker-v1`: host and guest cannot drift apart, because the guest
+agent's source is part of the profile digest that is checked before any VM starts. Any protocol violation by the guest taints the VM permanently; it must be
 destroyed. A request the host rejects never reaches the guest and does not taint the VM. The
 guest walks workspace paths with `O_NOFOLLOW` from the workspace root and opens files it writes
 non-blocking, so a FIFO planted by worker code cannot wedge it. The VM holds no model, GitHub or
@@ -146,7 +157,8 @@ other credentials.
 
 KVM is used when `/dev/kvm` is read-write for the controller's user; otherwise TCG. A forced `kvm`
 request without KVM is refused, never downgraded. TCG is the same image and the same isolation;
-only clocks change: command and broker request timeouts ×4, and boot timeout 20 min (KVM: 3 min).
+only clocks change: command and broker request timeouts ×16 (×4 until #1010 re-measured it), and
+boot timeout 20 min (KVM: 3 min).
 The accelerator is recorded in the `vm_created` journal event and bound into the receipt
 (`profile.accelerator`).
 
@@ -170,9 +182,10 @@ a cached profile. The probe time is dominated by its own 3–4 s connection and 
 
 On a development machine without `/dev/kvm`, a TCG bake ran for over an hour without finishing
 (the earlier sketch measured about 330 s for the unbaked image's first boot alone), so bakes belong
-on a KVM host or in CI. Container start-up costs more under TCG than the ×4 command-timeout scale
-assumes for short commands (8.8–15×); the 20-minute base timeout leaves headroom for build and
-test commands, but the scale should be re-measured with real repositories in #1010.
+on a KVM host or in CI. Container start-up costs more under TCG than the original ×4
+command-timeout scale assumed for short commands (8.8–15×). #1010 re-measured it with the gate 2
+fixtures (multi-second steps 10–15×, sub-second commands up to 19×) and raised the scale
+to ×16; see the [package-proxy record](package-proxy.md#timings-and-the-tcg-timeout-scale).
 
 ## Attack categories (scenario 4)
 
@@ -318,8 +331,8 @@ retargeted intent fails `authorizeShipping`.
   the controller detaches QEMU itself (own session, recorded spawn PID, start-token check). A controller crash
   leaves QEMU running until the kill switch, `reconcile --destroy` or the next teardown stops it;
   QEMU's own pidfile and argv identify it even when the crash came before the PID was recorded.
-- **Bake supply chain.** Distro packages and the container base come from the Ubuntu archive and
-  the Microsoft registry (apt signatures, image digest); the resulting image is hash-pinned, but
+- **Bake supply chain.** Distro packages, the container images and uv come from the Ubuntu
+  archive, the Microsoft registry and ghcr.io (apt signatures, image digests); the resulting image is hash-pinned, but
   the bake itself trusts those sources. In CI the baked image is shared through the Actions cache
   of the same repository; a pull request can only write cache entries scoped to its own ref. The
   manifest check is integrity, not authentication: whoever can write the profile directory can

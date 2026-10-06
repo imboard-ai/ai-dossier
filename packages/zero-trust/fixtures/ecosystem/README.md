@@ -34,7 +34,8 @@ that touch the package, the self-check script or the workflow. Public registries
 in for the proxy there, and the runner's Node and Python must match the profiles the
 fixtures select (locally a mismatch only warns). This is the only place fixture installs
 or tests run on a host. The product code builds plans as data and executes nothing.
-The isolated run behind the proxy belongs to #1010.
+The isolated run behind the proxy is `src/__tests__/vm-proxy.e2e.test.ts` (#1010); see the
+[package-proxy decision record](../../../../docs/features/zero-trust-full-cycle/decisions/package-proxy.md).
 
 ## Regenerating lockfiles
 

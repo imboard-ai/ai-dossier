@@ -300,7 +300,10 @@ async function bakeLocked(
         schema: PROFILE_PINS.schema,
         profileDigest: digest,
         baseImageSha256: PROFILE_PINS.baseImage.sha256,
-        containerBaseDigest: PROFILE_PINS.containerBase.digest,
+        workerProfiles: {
+          node: PROFILE_PINS.containerProfiles.node.profileId,
+          python: PROFILE_PINS.containerProfiles.python.profileId,
+        },
         imageSha256,
         imageFile,
         containerImages: images,

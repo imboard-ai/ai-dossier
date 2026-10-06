@@ -1,6 +1,7 @@
 /** Typed command plans for the worker. This module only BUILDS argv data; it has no
  * process API. The isolated worker executes plans under the phase's network policy. */
 import { validateSourcePath } from '../canonical/export';
+import { ENVIRONMENT_ROOT, REPORT_DIR, REPORT_FILE } from '../vm/adapter';
 import type { PackageManager } from './detect';
 
 export type CommandPhase = 'provisioning' | 'verification';
@@ -15,7 +16,13 @@ export interface PlannedCommand {
   readonly env: Readonly<Record<string, string>>;
   readonly timeoutMs: number;
   readonly required: boolean;
+  /** The supervisor gives this command a fresh report directory (`REPORT_DIR`) and
+   * classifies it from the junit report it reads back from `REPORT_PATH`. */
+  readonly captureReport: boolean;
 }
+/** Where a test command writes its junit report: inside the supervisor's per-command
+ * report directory, outside the repository (vm/adapter `REPORT_DIR`/`REPORT_FILE`). */
+export const REPORT_PATH = `${REPORT_DIR}/${REPORT_FILE}`;
 export interface CommandPlan {
   readonly manager: PackageManager;
   readonly provisioning: readonly PlannedCommand[];
@@ -36,6 +43,10 @@ export interface PlanOptions {
   readonly python?: string;
   /** Python environment directory OUTSIDE the repository (absolute). */
   readonly environmentDir?: string;
+  /** uv only: where the lock is exported as hashed requirements, OUTSIDE the repository. */
+  readonly exportFile?: string;
+  /** Where test commands write junit (absolute; default `REPORT_PATH`, the VM supervisor's). */
+  readonly reportFile?: string;
 }
 
 export type PlanField =
@@ -45,7 +56,9 @@ export type PlanField =
   | 'provisioningTimeoutMs'
   | 'verificationTimeoutMs'
   | 'python'
-  | 'environmentDir';
+  | 'environmentDir'
+  | 'exportFile'
+  | 'reportFile';
 export class CommandPlanError extends Error {
   constructor(
     readonly code: 'invalid_endpoint' | 'invalid_target' | 'invalid_timeout' | 'invalid_path',
@@ -62,7 +75,16 @@ const DEFAULT_VERIFICATION_MS = 15 * 60 * 1000;
 const MIN_TIMEOUT_MS = 1000;
 const MAX_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const DEFAULT_PYTHON = '/usr/local/bin/python';
-const DEFAULT_ENVIRONMENT = '/opt/ztfc/env';
+const DEFAULT_ENVIRONMENT = `${ENVIRONMENT_ROOT}/env`;
+const DEFAULT_EXPORT = `${ENVIRONMENT_ROOT}/uv-requirements.txt`;
+/** Test runners write junit to the supervisor's report path. Node's test runner takes
+ * reporters from NODE_OPTIONS whatever `scripts.test` says; pytest from PYTEST_ADDOPTS.
+ * A runner that ignores them writes no report, which is inconclusive, never a pass. */
+const nodeReportEnv = (file: string) =>
+  Object.freeze({
+    NODE_OPTIONS: `--test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=${file}`,
+  });
+const pytestReportEnv = (file: string) => Object.freeze({ PYTEST_ADDOPTS: `--junitxml=${file}` });
 const ABSOLUTE_PATH = /^(\/[A-Za-z0-9._-]+)+$/;
 /** Offline phases must not discover a network path through tool defaults. */
 const OFFLINE_ENV = Object.freeze({
@@ -124,16 +146,20 @@ function command(
   phase: CommandPhase,
   argv: string[],
   env: Record<string, string>,
-  timeoutMs: number
+  timeoutMs: number,
+  report?: Readonly<Record<string, string>>
 ): PlannedCommand {
   return Object.freeze({
     id,
     phase,
     network: phase === 'provisioning' ? 'package_proxy' : 'none',
     argv: Object.freeze(argv),
-    env: Object.freeze(phase === 'provisioning' ? env : { ...env, ...OFFLINE_ENV }),
+    env: Object.freeze(
+      phase === 'provisioning' ? env : { ...env, ...(report ?? {}), ...OFFLINE_ENV }
+    ),
     timeoutMs,
     required: true,
+    captureReport: report !== undefined,
   });
 }
 
@@ -143,13 +169,19 @@ interface PlanContext {
   readonly tests: readonly string[];
   readonly python: string;
   readonly environment: string;
+  readonly exportFile: string;
+  readonly reportFile: string;
   readonly provisionMs: number;
   readonly verifyMs: number;
 }
 type Phases = Pick<CommandPlan, 'provisioning' | 'verification'>;
 
 function npmPlan(c: PlanContext): Phases {
-  const env = { npm_config_registry: c.npmRegistry, npm_config_audit: 'false' };
+  const env = {
+    npm_config_registry: c.npmRegistry,
+    npm_config_audit: 'false',
+    npm_config_update_notifier: 'false',
+  };
   const test = c.tests.length ? ['npm', 'test', '--', ...c.tests] : ['npm', 'test'];
   return {
     provisioning: [
@@ -163,7 +195,7 @@ function npmPlan(c: PlanContext): Phases {
     ],
     verification: [
       command('npm-rebuild', 'verification', ['npm', 'rebuild'], env, c.verifyMs),
-      command('npm-test', 'verification', test, env, c.verifyMs),
+      command('npm-test', 'verification', test, env, c.verifyMs, nodeReportEnv(c.reportFile)),
     ],
   };
 }
@@ -172,11 +204,15 @@ function npmPlan(c: PlanContext): Phases {
  * provisioning interpreter runs isolated (`-I`), so a committed `.venv`, `venv.py`,
  * `pip.py` or `.pth` file cannot run while the package proxy is reachable. */
 function pipPlan(c: PlanContext): Phases {
-  const env = {
+  const env: Record<string, string> = {
     PIP_INDEX_URL: c.pypiIndex,
     PIP_DISABLE_PIP_VERSION_CHECK: '1',
     PIP_CONFIG_FILE: '/dev/null',
   };
+  // pip ignores a plain-HTTP index unless its host is trusted. The mirror sits on the
+  // isolated provisioning network; artifact integrity comes from --require-hashes.
+  const index = new URL(c.pypiIndex);
+  if (index.protocol === 'http:') env.PIP_TRUSTED_HOST = index.hostname;
   const venvPython = `${c.environment}/bin/python`;
   return {
     provisioning: [
@@ -207,26 +243,80 @@ function pipPlan(c: PlanContext): Phases {
       ),
     ],
     verification: [
-      command('pytest', 'verification', [venvPython, '-m', 'pytest', ...c.tests], env, c.verifyMs),
+      command(
+        'pytest',
+        'verification',
+        [venvPython, '-m', 'pytest', ...c.tests],
+        env,
+        c.verifyMs,
+        pytestReportEnv(c.reportFile)
+      ),
     ],
   };
 }
 
 /** uv ignores repository config (`--no-config`), never downloads an interpreter, uses
- * the profile's interpreter, and keeps its environment outside the repository. */
+ * the profile's interpreter, and keeps its environment outside the repository.
+ *
+ * Provisioning does NOT use `uv sync --frozen`: that downloads the artifact URLs
+ * recorded in `uv.lock` (files.pythonhosted.org) directly and ignores the configured
+ * index, so it would bypass the mirror (#1010). Instead the lock is exported offline
+ * as hashed requirements and installed from the mirror with every hash enforced. */
 function uvPlan(c: PlanContext): Phases {
   const env = {
     UV_DEFAULT_INDEX: c.pypiIndex,
     UV_NO_BUILD: '1',
     UV_PROJECT_ENVIRONMENT: c.environment,
   };
-  const common = ['--frozen', '--no-config', '--no-python-downloads', '--python', c.python];
+  const noConfig = ['--no-config', '--no-python-downloads'];
+  const common = ['--frozen', ...noConfig, '--python', c.python];
   return {
     provisioning: [
       command(
-        'uv-sync',
+        'uv-export',
         'provisioning',
-        ['uv', 'sync', ...common, '--no-build'],
+        [
+          'uv',
+          'export',
+          '--frozen',
+          '--offline',
+          ...noConfig,
+          '--format',
+          'requirements.txt',
+          '--no-emit-project',
+          '--no-header',
+          '--output-file',
+          c.exportFile,
+        ],
+        env,
+        c.provisionMs
+      ),
+      command(
+        'uv-venv',
+        'provisioning',
+        ['uv', 'venv', ...noConfig, '--python', c.python, c.environment],
+        env,
+        c.provisionMs
+      ),
+      command(
+        'uv-install',
+        'provisioning',
+        [
+          'uv',
+          'pip',
+          'install',
+          ...noConfig,
+          '--python',
+          `${c.environment}/bin/python`,
+          '--require-hashes',
+          '--no-deps',
+          '--only-binary',
+          ':all:',
+          '--index-url',
+          c.pypiIndex,
+          '-r',
+          c.exportFile,
+        ],
         env,
         c.provisionMs
       ),
@@ -237,7 +327,8 @@ function uvPlan(c: PlanContext): Phases {
         'verification',
         ['uv', 'run', ...common, '--offline', '--no-sync', 'pytest', ...c.tests],
         env,
-        c.verifyMs
+        c.verifyMs,
+        pytestReportEnv(c.reportFile)
       ),
     ],
   };
@@ -264,6 +355,8 @@ export function buildCommandPlan(
     tests: targets(options.testTargets),
     python: absolutePath(options.python ?? DEFAULT_PYTHON, 'python'),
     environment: absolutePath(options.environmentDir ?? DEFAULT_ENVIRONMENT, 'environmentDir'),
+    exportFile: absolutePath(options.exportFile ?? DEFAULT_EXPORT, 'exportFile'),
+    reportFile: absolutePath(options.reportFile ?? REPORT_PATH, 'reportFile'),
     provisionMs: timeout(
       options.provisioningTimeoutMs,
       DEFAULT_PROVISIONING_MS,

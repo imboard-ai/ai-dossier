@@ -26,7 +26,14 @@ import {
   systemOps,
 } from '../vm/local-qemu';
 import { PROFILE_PINS, profileDigest } from '../vm/profile';
-import { BROKER_PORT_NAME, SCOPE_OEM_PREFIX } from '../vm/qemu-args';
+import {
+  BROKER_PORT_NAME,
+  GUEST_RELAY_PORT,
+  PHASE_OEM_PREFIX,
+  SCOPE_OEM_PREFIX,
+  TIMEOUT_SCALE,
+  WORKER_RELAY,
+} from '../vm/qemu-args';
 
 const AGENT = 'print("fake guest agent")\n';
 /** A minimal standalone qcow2 v3 header: magic, version 3, no backing file, no
@@ -44,8 +51,8 @@ const CANARY = 'ZT_TEST_CANARY_SECRET';
 type Frame = Record<string, unknown>;
 type Responder = (frame: Frame) => Frame | null;
 
-/** Guest end of a broker socket: answers hello with `scope`, then `respond`. */
-function fakeGuest(scope: string | null, respond: Responder, seen: Frame[]): Duplex {
+/** Guest end of a broker socket: answers hello with `scope` and `phase`, then `respond`. */
+function fakeGuest(scope: string | null, phase: string, respond: Responder, seen: Frame[]): Duplex {
   let buffer = '';
   const stream: Duplex = new Duplex({
     read() {},
@@ -59,7 +66,7 @@ function fakeGuest(scope: string | null, respond: Responder, seen: Frame[]): Dup
           frame.op === 'hello'
             ? scope === null
               ? null
-              : { v: 1, id: 0, hello: 'zt-broker-v1', scope }
+              : { v: 1, id: 0, hello: 'zt-broker-v1', scope, phase }
             : respond(frame);
         if (reply) setImmediate(() => stream.push(`${JSON.stringify(reply)}\n`));
       }
@@ -111,6 +118,8 @@ interface FakeHost {
     nextPid: number;
     /** Overrides the scope the guest announces; null = never answer hello. */
     guestScope?: string | null;
+    /** Overrides the phase the guest announces. */
+    guestPhase?: string;
     respond: Responder;
     exitTail?: string;
     connectFails?: boolean;
@@ -131,6 +140,7 @@ function fakeHost(): FakeHost {
     ops: undefined as unknown as HostOps,
   };
   let scope: string | null = null;
+  let phase = 'verification';
   host.ops = {
     async run(binary, args, env) {
       host.calls.run.push({ binary, args, env });
@@ -138,7 +148,8 @@ function fakeHost(): FakeHost {
     async launch(binary, args, env, stderrFile) {
       host.calls.launch.push({ binary, args, env, stderrFile });
       const oem = String(args[args.indexOf('-smbios') + 1]);
-      scope = oem.slice(oem.indexOf(SCOPE_OEM_PREFIX) + SCOPE_OEM_PREFIX.length);
+      scope = new RegExp(`${SCOPE_OEM_PREFIX}([a-z-]+)`).exec(oem)?.[1] ?? null;
+      phase = new RegExp(`${PHASE_OEM_PREFIX}([a-z-]+)`).exec(oem)?.[1] ?? 'verification';
       const pid = host.state.nextPid++;
       host.alive.add(pid);
       host.argv.set(pid, [binary, ...args]);
@@ -159,7 +170,15 @@ function fakeHost(): FakeHost {
       host.calls.connect.push(socketPath);
       if (host.state.connectFails) throw new Error('ECONNREFUSED');
       const announced = host.state.guestScope === undefined ? scope : host.state.guestScope;
-      return fakeGuest(announced, (f) => host.state.respond(f), host.seen);
+      return fakeGuest(
+        announced,
+        host.state.guestPhase ?? phase,
+        (f) => host.state.respond(f),
+        host.seen
+      );
+    },
+    async freePort() {
+      return 40123;
     },
     startToken(pid) {
       const token = host.tokens.get(pid);
@@ -212,7 +231,10 @@ function writeManifest(profileDir: string, over: Record<string, unknown> = {}): 
       schema: 'zt-vm-profile-v1',
       profileDigest: profileDigest(AGENT),
       baseImageSha256: PROFILE_PINS.baseImage.sha256,
-      containerBaseDigest: PROFILE_PINS.containerBase.digest,
+      workerProfiles: {
+        node: PROFILE_PINS.containerProfiles.node.profileId,
+        python: PROFILE_PINS.containerProfiles.python.profileId,
+      },
       imageSha256: createHash('sha256').update(IMAGE_BYTES).digest('hex'),
       imageFile: 'image.qcow2',
       containerImages: { node: `sha256:${'a'.repeat(64)}`, python: `sha256:${'b'.repeat(64)}` },
@@ -417,7 +439,10 @@ describe('LocalQemuAdapter.create', () => {
     const [launch] = host.calls.launch;
     expect(launch?.binary).toBe('/opt/fake/qemu-system-x86_64');
     expect(launch?.args).toContain('user,id=net0,restrict=on');
-    expect(launch?.args).toContain(`type=11,value=${SCOPE_OEM_PREFIX}container`);
+    expect(launch?.args).toContain(
+      `type=11,value=${SCOPE_OEM_PREFIX}container,value=${PHASE_OEM_PREFIX}verification`
+    );
+    expect(launch?.args.join(' ')).not.toContain('hostfwd');
     expect(launch?.args.join(' ')).toContain(BROKER_PORT_NAME);
     const vmDir = path.join(stateDir, 'vms', handle.vmId);
     expect(launch?.stderrFile).toBe(path.join(vmDir, 'qemu.err'));
@@ -535,7 +560,9 @@ describe('LocalQemuAdapter.create', () => {
   it('passes vm-root scope through the SMBIOS OEM string', async () => {
     const handle = await adapter().create(spec('run-1', 'vm-root'));
     expect(handle.scope).toBe('vm-root');
-    expect(host.calls.launch[0]?.args).toContain(`type=11,value=${SCOPE_OEM_PREFIX}vm-root`);
+    expect(host.calls.launch[0]?.args).toContain(
+      `type=11,value=${SCOPE_OEM_PREFIX}vm-root,value=${PHASE_OEM_PREFIX}verification`
+    );
   });
 
   it('rejects with the stderr tail when QEMU exits before the socket opens', async () => {
@@ -707,16 +734,241 @@ describe('LocalQemuAdapter.create', () => {
   });
 });
 
+describe('LocalQemuAdapter provisioning phase', () => {
+  const target = { host: '172.31.250.3', port: 4873 };
+  const provisioning = (runId = 'run-1') => ({
+    ...spec(runId),
+    phase: 'provisioning' as const,
+    proxyTarget: target,
+  });
+  /** The guest powers off when asked: its QEMU process exits. */
+  const poweroffOnShutdown = () => {
+    host.state.respond = (frame) => {
+      if (frame.op !== 'shutdown') return defaultResponder(frame);
+      for (const pid of [...host.alive]) host.alive.delete(pid);
+      return { v: 1, id: frame.id, ok: true };
+    };
+  };
+
+  it('requires a proxy target in, and only in, the provisioning phase', async () => {
+    const a = adapter();
+    await expect(a.create({ ...spec(), phase: 'provisioning' })).rejects.toThrow('proxy target');
+    await expect(a.create({ ...spec(), proxyTarget: target })).rejects.toThrow('proxy target');
+    await expect(
+      a.create({ ...provisioning(), proxyTarget: { host: 'mirror.local', port: 4873 } })
+    ).rejects.toThrow('Invalid provisioning proxy target');
+    expect(host.calls.launch).toEqual([]);
+  });
+
+  it('launches with exactly one loopback host forward to the relay and the provisioning flag', async () => {
+    const j = journal();
+    const a = adapter({ journal: j });
+    const handle = await a.create(provisioning());
+    try {
+      const args = host.calls.launch[0]?.args ?? [];
+      const netdev = String(args[args.indexOf('-netdev') + 1]);
+      expect(netdev).toBe(
+        `user,id=net0,restrict=on,hostfwd=tcp:127.0.0.1:40123-:${GUEST_RELAY_PORT}`
+      );
+      expect(args.join(' ')).not.toContain('guestfwd');
+      expect(args).toContain(
+        `type=11,value=${SCOPE_OEM_PREFIX}container,value=${PHASE_OEM_PREFIX}provisioning`
+      );
+      const record = JSON.parse(
+        fs.readFileSync(path.join(stateDir, 'vms', handle.vmId, 'vm.json'), 'utf8')
+      );
+      expect(record).toMatchObject({ phase: 'provisioning', proxyTarget: target });
+      expect(j.read().at(-1)).toMatchObject({
+        type: 'vm_created',
+        phase: 'provisioning',
+        hostForwards: 1,
+      });
+    } finally {
+      await a.destroy(handle);
+    }
+  });
+
+  it('destroys a VM whose guest announces a different phase', async () => {
+    host.state.guestPhase = 'verification';
+    const a = adapter();
+    const error = await rejects(a.create(provisioning()), BrokerError);
+    expect(error.code).toBe('phase_mismatch');
+    expect(await a.listByRun('run-1')).toEqual([]);
+  });
+
+  it('refuses the package proxy network outside provisioning, before the guest', async () => {
+    const a = adapter();
+    const handle = await a.create(spec());
+    const error = await rejects(
+      a.exec(handle, { profile: 'node', argv: ['npm', 'ci'], network: 'package_proxy' }),
+      BrokerError
+    );
+    expect(error.code).toBe('network_not_allowed');
+    expect(host.seen.filter((f) => f.op === 'exec')).toEqual([]);
+  });
+
+  it('passes network, environment and report request through to the guest', async () => {
+    const a = adapter();
+    const handle = await a.create(provisioning());
+    try {
+      await a.exec(handle, {
+        profile: 'node',
+        argv: ['npm', 'ci'],
+        network: 'package_proxy',
+        env: { npm_config_registry: `http://${WORKER_RELAY.host}:${WORKER_RELAY.port}/` },
+      });
+      expect(host.seen.find((f) => f.op === 'exec')).toMatchObject({
+        network: 'package_proxy',
+        env: { npm_config_registry: `http://${WORKER_RELAY.host}:${WORKER_RELAY.port}/` },
+        report: false,
+      });
+    } finally {
+      await a.destroy(handle);
+    }
+  });
+
+  it('ends provisioning: guest shutdown, then a relaunch on the same disk with no forward', async () => {
+    poweroffOnShutdown();
+    const j = journal();
+    const a = adapter({ journal: j });
+    const handle = await a.create(provisioning());
+    try {
+      await a.endProvisioning(handle);
+      expect(host.seen.filter((f) => f.op === 'shutdown')).toHaveLength(1);
+      expect(host.calls.kill).toEqual([]);
+      expect(host.calls.launch).toHaveLength(2);
+      const relaunch = host.calls.launch[1]?.args ?? [];
+      expect(relaunch.join(' ')).not.toContain('hostfwd');
+      expect(relaunch).toContain('user,id=net0,restrict=on');
+      expect(relaunch).toContain(
+        `type=11,value=${SCOPE_OEM_PREFIX}container,value=${PHASE_OEM_PREFIX}verification`
+      );
+      // The overlay is reused, not recreated.
+      expect(host.calls.run).toHaveLength(1);
+      const disk = path.join(stateDir, 'vms', handle.vmId, 'disk.qcow2');
+      expect(relaunch).toContain(`file=${disk},if=virtio,format=qcow2,discard=unmap`);
+      const events = j.read() as Record<string, unknown>[];
+      // The powered-off guest's broker stream closing is journaled too, in any order.
+      expect(events.find((e) => e.type === 'vm_phase_changed')).toMatchObject({
+        type: 'vm_phase_changed',
+        phase: 'verification',
+        hostForwards: 0,
+        pid: PID + 1,
+      });
+      // The connector's traffic and how the guest stopped are on record.
+      expect(events.find((e) => e.type === 'vm_provisioning_channel_closed')).toMatchObject({
+        reason: 'end_of_provisioning',
+        spliced: 0,
+      });
+      expect(events.find((e) => e.type === 'vm_provisioning_stopped')).toMatchObject({
+        shutdown: 'acknowledged',
+        ended: 'exited',
+      });
+      // Each phase keeps its own QEMU stderr log.
+      expect(host.calls.launch.map((l) => path.basename(l.stderrFile))).toEqual([
+        'qemu.provisioning.err',
+        'qemu.err',
+      ]);
+      const refused = await rejects(
+        a.exec(handle, { profile: 'node', argv: ['true'], network: 'package_proxy' }),
+        BrokerError
+      );
+      expect(refused.code).toBe('network_not_allowed');
+      expect((await rejects(a.endProvisioning(handle), BrokerError)).code).toBe('not_provisioning');
+    } finally {
+      await a.destroy(handle);
+    }
+    expect(host.alive.size).toBe(0);
+  });
+
+  it('kills a guest that does not power off, and still relaunches without the forward', async () => {
+    // The guest claims success but keeps running.
+    host.state.respond = (frame) =>
+      frame.op === 'shutdown' ? { v: 1, id: frame.id, ok: true } : defaultResponder(frame);
+    const j = journal();
+    const a = adapter({ journal: j });
+    const handle = await a.create(provisioning());
+    try {
+      await a.endProvisioning(handle);
+      expect(host.calls.kill[0]).toEqual([PID, 'SIGTERM']);
+      expect(
+        (j.read() as Record<string, unknown>[]).find((e) => e.type === 'vm_provisioning_stopped')
+      ).toMatchObject({ ended: 'killed' });
+      expect(host.calls.launch[1]?.args.join(' ')).not.toContain('hostfwd');
+    } finally {
+      await a.destroy(handle);
+    }
+  });
+
+  it('hands the guest a fresh relay key in the provisioning hello only', async () => {
+    const a = adapter();
+    const prov = await a.create(provisioning());
+    const plain = await a.create(spec('run-2'));
+    try {
+      const hellos = host.seen.filter((f) => f.op === 'hello');
+      expect(hellos[0]?.relayKey).toMatch(/^[a-f0-9]{64}$/);
+      expect(hellos[1]).not.toHaveProperty('relayKey');
+      // The key never reaches QEMU's command line.
+      expect(host.calls.launch[0]?.args.join(' ')).not.toContain(String(hellos[0]?.relayKey));
+    } finally {
+      await a.destroy(prov);
+      await a.destroy(plain);
+    }
+  });
+
+  it('runs one phase switch per VM at a time', async () => {
+    poweroffOnShutdown();
+    const a = adapter();
+    const handle = await a.create(provisioning());
+    try {
+      const first = a.endProvisioning(handle);
+      const second = await rejects(a.endProvisioning(handle), BrokerError);
+      expect(second.code).toBe('phase_switch_in_progress');
+      await first;
+      expect(host.calls.launch).toHaveLength(2);
+    } finally {
+      await a.destroy(handle);
+    }
+  });
+
+  it('journals a failed phase switch and leaves the VM to the caller', async () => {
+    poweroffOnShutdown();
+    const j = journal();
+    const a = adapter({ journal: j });
+    const handle = await a.create(provisioning());
+    host.state.guestPhase = 'provisioning'; // the relaunched guest claims the wrong phase
+    try {
+      expect((await rejects(a.endProvisioning(handle), BrokerError)).code).toBe('phase_mismatch');
+      expect(
+        (j.read() as Record<string, unknown>[]).find((e) => e.type === 'vm_phase_change_failed')
+      ).toMatchObject({ stage: 'relaunch', error: 'phase_mismatch' });
+      expect(await a.listByRun('run-1')).toHaveLength(1);
+    } finally {
+      await a.destroy(handle);
+    }
+  });
+
+  it('refuses to end provisioning for a VM that was never in it', async () => {
+    const a = adapter();
+    const handle = await a.create(spec());
+    expect((await rejects(a.endProvisioning(handle), BrokerError)).code).toBe('not_provisioning');
+    expect(host.calls.launch).toHaveLength(1);
+  });
+});
+
 describe('LocalQemuAdapter broker operations', () => {
   it('scales exec timeouts by TIMEOUT_SCALE under TCG', async () => {
     const a = adapter({ tools: tools('tcg') });
     const handle = await a.create(spec());
     const result = await a.exec(handle, { profile: 'node', argv: ['node', '-v'] });
     expect(result).toMatchObject({ exitCode: 0, stdout: 'hi', stderr: '' });
-    expect(host.seen.find((f) => f.op === 'exec')).toMatchObject({ timeoutMs: 4 * 5000, cwd: '' });
+    expect(host.seen.find((f) => f.op === 'exec')).toMatchObject({
+      timeoutMs: TIMEOUT_SCALE.tcg * 5000,
+      cwd: '',
+    });
     await a.exec(handle, { profile: 'python', argv: ['python3'], cwd: 'src', timeoutMs: 2000 });
     expect(host.seen.filter((f) => f.op === 'exec')[1]).toMatchObject({
-      timeoutMs: 8000,
+      timeoutMs: TIMEOUT_SCALE.tcg * 2000,
       cwd: 'src',
       profile: 'python',
     });

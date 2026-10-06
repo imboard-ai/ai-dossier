@@ -6,10 +6,26 @@ import fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { BROKER_PROTOCOL, MAX_FILE_BYTES, MAX_FRAME_BYTES, MAX_STREAM_BYTES } from '../vm/broker';
+import { ENVIRONMENT_ROOT, MAX_REPORT_BYTES, REPORT_DIR, REPORT_FILE } from '../vm/adapter';
+import {
+  BROKER_PROTOCOL,
+  MAX_ENV_NAME_BYTES,
+  MAX_ENV_VALUE_BYTES,
+  MAX_ENV_VARS,
+  MAX_FILE_BYTES,
+  MAX_FRAME_BYTES,
+  MAX_STREAM_BYTES,
+} from '../vm/broker';
 import { bakeUserData } from '../vm/cloud-init';
 import { AGENT_SOURCE_PATH } from '../vm/local-qemu';
-import { BROKER_PORT_NAME, SCOPE_OEM_PREFIX } from '../vm/qemu-args';
+import { RELAY_KEY_BYTES } from '../vm/provision-channel';
+import {
+  BROKER_PORT_NAME,
+  GUEST_RELAY_PORT,
+  PHASE_OEM_PREFIX,
+  SCOPE_OEM_PREFIX,
+  WORKER_RELAY,
+} from '../vm/qemu-args';
 
 const AGENT = fs.readFileSync(AGENT_SOURCE_PATH, 'utf8');
 
@@ -64,6 +80,31 @@ describe('guest agent ↔ host broker contract', () => {
     expect(script).toContain(text('WORKSPACE'));
   });
 
+  it('reads the network phase from the SMBIOS OEM string the controller sets', () => {
+    expect(text('PHASE_OEM')).toBe(PHASE_OEM_PREFIX);
+  });
+
+  it('runs the provisioning relay where the forward and the plans expect it', () => {
+    expect(integer('RELAY_PORT')).toBe(GUEST_RELAY_PORT);
+    expect(text('PROV_GATEWAY')).toBe(WORKER_RELAY.host);
+    expect(integer('RELAY_WORKER_PORT')).toBe(WORKER_RELAY.port);
+    expect(text('PROV_SUBNET')).toBe(`${WORKER_RELAY.host.split('.').slice(0, 3).join('.')}.0/24`);
+    expect(integer('RELAY_KEY_BYTES')).toBe(RELAY_KEY_BYTES);
+  });
+
+  it('mounts the report and environment directories the plans write to', () => {
+    expect(text('REPORT_MOUNT')).toBe(REPORT_DIR);
+    expect(text('REPORT_FILE')).toBe(REPORT_FILE);
+    expect(integer('MAX_REPORT')).toBe(MAX_REPORT_BYTES);
+    expect(text('ENV_MOUNT')).toBe(ENVIRONMENT_ROOT);
+  });
+
+  it('limits the worker environment exactly as the host does', () => {
+    expect(integer('MAX_ENV_VARS')).toBe(MAX_ENV_VARS);
+    expect(integer('MAX_ENV_NAME')).toBe(MAX_ENV_NAME_BYTES);
+    expect(integer('MAX_ENV_VALUE_BYTES')).toBe(MAX_ENV_VALUE_BYTES);
+  });
+
   it('refuses constants it cannot read rather than passing silently', () => {
     expect(() => constant('NO_SUCH_CONSTANT')).toThrow(/no constant/);
     expect(() => integer('PORT')).toThrow(/integer product/);
@@ -84,7 +125,7 @@ describe.skipIf(!PYTHON)('guest agent exec errors', () => {
         'import agent',
         'agent.WORKSPACE = sys.argv[2]',
         'request = {"argv": ["/nonexistent-zt"], "cwd": sys.argv[3], "profile": "node", "timeoutMs": 1000}',
-        'print(json.dumps(agent.op_exec(request, "vm-root", 1)))',
+        'print(json.dumps(agent.op_exec(request, "vm-root", "verification", 1)))',
       ].join('\n');
       const result = spawnSync(
         'python3',

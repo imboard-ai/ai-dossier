@@ -363,6 +363,19 @@ describe('unsupported setups fail closed with a specific reason', () => {
     ['unparseable uv.lock', uv({ 'uv.lock': 'version = ' }), 'lockfile_invalid', 'uv.lock'],
     ['uv.lock without packages', uv({ 'uv.lock': 'version = 1\n' }), 'lockfile_invalid', 'uv.lock'],
     [
+      // Installing the project itself would run its build backend (repository code)
+      // during provisioning.
+      'uv project that installs itself (editable)',
+      uv({
+        'uv.lock': uvLock(
+          '\n[[package]]\nname = "app"\nversion = "1.0"\nsource = { editable = "." }\n' +
+            uvPkg('pytest')
+        ),
+      }),
+      'project_build_required',
+      'uv.lock',
+    ],
+    [
       'uv.lock unknown version',
       uv({ 'uv.lock': uvLock(root + uvPkg('pytest'), 2) }),
       'lockfile_version',

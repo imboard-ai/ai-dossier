@@ -4,18 +4,37 @@
 import type { Duplex } from 'node:stream';
 import { assertNoSecrets } from '../redaction';
 import { isRecord } from '../state';
-import { BrokerError, type ContainerProfile, type ExecResult, type ExecScope } from './adapter';
+import {
+  BrokerError,
+  type ContainerProfile,
+  type ExecNetwork,
+  type ExecResult,
+  type ExecScope,
+  MAX_REPORT_BYTES,
+  type NetworkPhase,
+} from './adapter';
 
 export const BROKER_PROTOCOL = 'zt-broker-v1';
 export const MAX_FILE_BYTES = 1024 * 1024;
 export const MAX_STREAM_BYTES = 1024 * 1024;
-/** Two capped streams in base64 plus envelope. */
+/** Two capped streams and a capped report in base64, plus envelope. */
 export const MAX_FRAME_BYTES = 4 * MAX_STREAM_BYTES;
 const MAX_ARGV = 256;
 const MAX_ARG_BYTES = 8192;
 const MAX_ARGV_BYTES = 64 * 1024;
 const MAX_PATH_BYTES = 512;
 const PROFILES: readonly ContainerProfile[] = ['node', 'python'];
+/** Worker environment limits; `vm-guest/agent.py` enforces the same. */
+export const MAX_ENV_VARS = 32;
+export const MAX_ENV_NAME_BYTES = 64;
+export const MAX_ENV_VALUE_BYTES = 4096;
+const ENV_NAME = new RegExp(`^[A-Za-z_][A-Za-z0-9_]{0,${MAX_ENV_NAME_BYTES - 1}}$`);
+const NETWORKS: readonly ExecNetwork[] = ['none', 'package_proxy'];
+const PHASES: readonly NetworkPhase[] = ['provisioning', 'verification'];
+const isNetworkPhase = (value: unknown): value is NetworkPhase =>
+  PHASES.includes(value as NetworkPhase);
+const isExecNetwork = (value: unknown): value is ExecNetwork =>
+  NETWORKS.includes(value as ExecNetwork);
 const MIN_EXEC_TIMEOUT_MS = 1000;
 const MAX_EXEC_TIMEOUT_MS = 6 * 3600 * 1000;
 
@@ -26,9 +45,38 @@ export type BrokerRequest =
       argv: string[];
       cwd: string;
       timeoutMs: number;
+      network: ExecNetwork;
+      env: Record<string, string>;
+      report: boolean;
     }
   | { op: 'put'; path: string; data: string; executable: boolean }
-  | { op: 'get'; path: string };
+  | { op: 'get'; path: string }
+  /** Sync and power off; the controller then restarts the VM in the next phase. */
+  | { op: 'shutdown' };
+
+/** Worker environment from controller policy: bounded, plain names, no dynamic
+ * loader variables, and no secret-shaped values. */
+export function validateExecEnv(env: unknown): Record<string, string> {
+  if (env === undefined) return {};
+  if (env === null || typeof env !== 'object' || Array.isArray(env))
+    throw new BrokerError('invalid_env');
+  const entries = Object.entries(env as Record<string, unknown>);
+  if (entries.length > MAX_ENV_VARS) throw new BrokerError('invalid_env');
+  const out: Record<string, string> = {};
+  for (const [name, value] of entries) {
+    if (
+      !ENV_NAME.test(name) ||
+      name.startsWith('LD_') ||
+      typeof value !== 'string' ||
+      /[\0\n\r]/.test(value) ||
+      Buffer.byteLength(value) > MAX_ENV_VALUE_BYTES
+    )
+      throw new BrokerError('invalid_env');
+    assertNoSecrets(value);
+    out[name] = value;
+  }
+  return out;
+}
 
 /** Workspace-relative POSIX path; no traversal, absolute, empty or dot segments. */
 export function assertWorkspacePath(value: unknown, allowEmpty = false): string {
@@ -79,7 +127,19 @@ export function validateRequest(request: BrokerRequest): BrokerRequest {
         timeoutMs > MAX_EXEC_TIMEOUT_MS
       )
         throw new BrokerError('invalid_timeout');
-      return { op: 'exec', profile, argv, cwd: assertWorkspacePath(request.cwd, true), timeoutMs };
+      // No network unless one is named: the restrictive value is the default.
+      const network = request.network ?? 'none';
+      if (!isExecNetwork(network)) throw new BrokerError('invalid_network');
+      return {
+        op: 'exec',
+        profile,
+        argv,
+        cwd: assertWorkspacePath(request.cwd, true),
+        timeoutMs,
+        network,
+        env: validateExecEnv(request.env),
+        report: request.report === true,
+      };
     }
     case 'put': {
       decodeBase64Strict(request.data, MAX_FILE_BYTES, 'invalid_data');
@@ -92,6 +152,8 @@ export function validateRequest(request: BrokerRequest): BrokerRequest {
     }
     case 'get':
       return { op: 'get', path: assertWorkspacePath(request.path) };
+    case 'shutdown':
+      return { op: 'shutdown' };
     default:
       throw new BrokerError('invalid_op');
   }
@@ -122,6 +184,7 @@ export class BrokerClient {
   private queue: Promise<unknown> = Promise.resolve();
   private failure: BrokerError | null = null;
   private announcedScope: ExecScope | null = null;
+  private announcedPhase: NetworkPhase | null = null;
 
   /** `onTaint` hears the code once, when the VM is tainted (e.g. to journal it). */
   constructor(
@@ -136,6 +199,11 @@ export class BrokerClient {
   /** The scope the guest announced in its hello; null before it. */
   get scope(): ExecScope | null {
     return this.announcedScope;
+  }
+
+  /** The network phase the guest announced in its hello; null before it. */
+  get phase(): NetworkPhase | null {
+    return this.announcedPhase;
   }
 
   get tainted(): BrokerError | null {
@@ -196,6 +264,7 @@ export class BrokerClient {
         frame.id !== 0 ||
         frame.hello !== BROKER_PROTOCOL ||
         (frame.scope !== 'container' && frame.scope !== 'vm-root') ||
+        !isNetworkPhase(frame.phase) ||
         !this.helloWaiter
       ) {
         this.taint('unexpected_hello');
@@ -203,6 +272,7 @@ export class BrokerClient {
       }
       this.ready = true;
       this.announcedScope = frame.scope;
+      this.announcedPhase = frame.phase;
       this.helloWaiter.resolve();
       this.helloWaiter = null;
       return;
@@ -222,8 +292,9 @@ export class BrokerClient {
   }
 
   /** Sends the protocol hello and resolves with the guest's announced scope.
-   * Data written before the guest opens its port stays queued in the socket. */
-  waitReady(timeoutMs: number): Promise<ExecScope> {
+   * Data written before the guest opens its port stays queued in the socket. In the
+   * provisioning phase the hello also hands the guest its per-boot relay key. */
+  waitReady(timeoutMs: number, relayKey?: Buffer): Promise<ExecScope> {
     if (this.failure) return Promise.reject(this.failure);
     if (this.ready) return Promise.resolve(this.announcedScope as ExecScope);
     if (this.helloWaiter) return Promise.reject(new BrokerError('hello_pending'));
@@ -239,7 +310,8 @@ export class BrokerClient {
           reject(e);
         },
       };
-      this.stream.write(`${JSON.stringify({ v: 1, id: 0, op: 'hello' })}\n`);
+      const hello = relayKey ? { relayKey: relayKey.toString('hex') } : {};
+      this.stream.write(`${JSON.stringify({ v: 1, id: 0, op: 'hello', ...hello })}\n`);
     });
   }
 
@@ -266,10 +338,14 @@ export class BrokerClient {
       argv: readonly string[];
       cwd?: string;
       timeoutMs: number;
+      network?: ExecNetwork;
+      env?: Readonly<Record<string, string>>;
+      report?: boolean;
     },
     graceMs: number
   ): Promise<ExecResult> {
     const started = Date.now();
+    const wantReport = request.report === true;
     const frame = await this.send(
       {
         op: 'exec',
@@ -277,6 +353,9 @@ export class BrokerClient {
         argv: [...request.argv],
         cwd: request.cwd ?? '',
         timeoutMs: request.timeoutMs,
+        network: request.network ?? 'none',
+        env: { ...(request.env ?? {}) },
+        report: wantReport,
       },
       request.timeoutMs + graceMs
     );
@@ -295,9 +374,15 @@ export class BrokerClient {
     }
     let stdout: Buffer;
     let stderr: Buffer;
+    let report: Buffer | null = null;
     try {
       stdout = decodeBase64Strict(frame.stdout, MAX_STREAM_BYTES, 'malformed_response');
       stderr = decodeBase64Strict(frame.stderr, MAX_STREAM_BYTES, 'malformed_response');
+      // A report only when one was asked for; never an unsolicited field.
+      if (wantReport) {
+        if (frame.report !== null)
+          report = decodeBase64Strict(frame.report, MAX_REPORT_BYTES, 'malformed_response');
+      } else if (frame.report !== undefined) throw new BrokerError('malformed_response');
     } catch (error) {
       this.taint('malformed_response');
       throw error;
@@ -309,7 +394,15 @@ export class BrokerClient {
       stdout: stdout.toString('utf8'),
       stderr: stderr.toString('utf8'),
       durationMs: Date.now() - started,
+      ...(wantReport ? { report } : {}),
     };
+  }
+
+  /** Asks the guest to sync and power off. Its answer is not trusted: the
+   * controller still waits for QEMU to exit and kills it if it does not. */
+  async shutdown(timeoutMs: number): Promise<void> {
+    const frame = await this.send({ op: 'shutdown' }, timeoutMs);
+    if (frame.ok !== true) throw new BrokerError(this.errorCode(frame));
   }
 
   async put(
