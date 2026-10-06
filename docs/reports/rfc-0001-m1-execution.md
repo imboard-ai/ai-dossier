@@ -317,7 +317,7 @@ a large fixed floor". Do NOT extrapolate group progress linearly: groups are wil
 ## Root cause of the 11 failures: shared test-pool contention
 `pnpm run test:pool:status` during triage:
 
-    imboard_pool_01  leased  demo-knowledge-graph.test.ts@feature/4096-demo-knowledge-graph-layer-2@hcc
+    imboard_pool_01  leased  demo-knowledge-graph.test.ts@feature/4096-demo-knowledge-graph-layer-2@runner-host
     imboard_pool_02  free    imboard_pool_03  free    imboard_pool_04  free
 
 A DIFFERENT workload on this machine held a pool lease while the batch ran. imboard has

@@ -2,7 +2,7 @@
 
 Gate reports and validation records produced for [RFC-0001](../../rfcs/0001-batch-cycles.md) (Batch Cycles), tracked under epic [#474](https://github.com/imboard-ai/ai-dossier/issues/474).
 
-**Picking the programme back up? Start with [`batch-cycles-checkpoint.md`](./batch-cycles-checkpoint.md)** — the standing checkpoint: why Batch Cycles exists, what has landed, what is still open, the halted state of the scheduler on hcc2, and the resume recipe. The gate reports below are the evidence it summarises.
+**Picking the programme back up? Start with [`batch-cycles-checkpoint.md`](./batch-cycles-checkpoint.md)** — the standing checkpoint: why Batch Cycles exists, what has landed, what is still open, the halted state of the scheduler on the runner host, and the resume recipe. The gate reports below are the evidence it summarises.
 
 | Report | Gate | Verdict | Date |
 |---|---|---|---|
