@@ -8,7 +8,7 @@ const CORE_GROUPS = ['getting-started', 'explanation', 'reference'];
 const SKIP = /^(reports|agent-traps|contributing\/mcp|explanation\/infrastructure-lessons)(\/|$)/;
 
 const rank = (id: string) =>
-  id === 'index' ? -1 : (CORE_GROUPS.indexOf(id.split('/')[0]) + 1 || CORE_GROUPS.length + 1);
+  id === 'index' ? -1 : CORE_GROUPS.indexOf(id.split('/')[0]) + 1 || CORE_GROUPS.length + 1;
 
 export async function llmsDocs() {
   const entries = (await getCollection('docs'))

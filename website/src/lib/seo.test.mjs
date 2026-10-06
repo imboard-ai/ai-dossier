@@ -39,7 +39,10 @@ test('trimTo cuts on a word boundary within the limit', () => {
 });
 
 test('docDescription prefers frontmatter, then paragraph, then title', () => {
-  assert.equal(docDescription({ data: { description: 'From **frontmatter**.' }, body: 'x' }), 'From frontmatter.');
+  assert.equal(
+    docDescription({ data: { description: 'From **frontmatter**.' }, body: 'x' }),
+    'From frontmatter.'
+  );
   const para = 'This paragraph is comfortably longer than forty characters in total.';
   assert.equal(docDescription({ body: `# T\n\n${para}` }), para);
   assert.equal(docDescription({ body: '# T', title: 'T' }), 'T: AI Dossier documentation.');
@@ -73,7 +76,9 @@ test('llms.txt follows llmstxt.org shape', () => {
 
 test('metadata paragraphs are skipped and purpose labels dropped', () => {
   assert.equal(
-    firstParagraph('# T\n\nVersion: 1.0 Status: Stable Last Updated: 2025-01-05 and more words here\n\nPurpose: Experience firsthand why verification matters for dossiers.'),
+    firstParagraph(
+      '# T\n\nVersion: 1.0 Status: Stable Last Updated: 2025-01-05 and more words here\n\nPurpose: Experience firsthand why verification matters for dossiers.'
+    ),
     'Experience firsthand why verification matters for dossiers.'
   );
 });

@@ -7,7 +7,8 @@ export const NPM_URL = 'https://www.npmjs.com/package/@ai-dossier/cli';
 export const VSCODE_URL =
   'https://marketplace.visualstudio.com/items?itemName=imboard-ai.ai-dossier-vscode';
 export const OG_IMAGE_PATH = '/og-image.png';
-export const OG_IMAGE_ALT = 'AI Dossier: signed, versioned agent skills for model-driven orchestration';
+export const OG_IMAGE_ALT =
+  'AI Dossier: signed, versioned agent skills for model-driven orchestration';
 
 // Canonical copy from epic #1030. Do not reword per surface.
 export const CATEGORY_LINE = 'Signed, versioned agent skills for model-driven orchestration';
@@ -153,7 +154,8 @@ const oneLine = (t) => t.replace(/\s+/g, ' ').trim();
  * llmstxt.org document. `core` and `optional` are `{ title, url, description }[]` (absolute urls).
  */
 export function buildLlmsTxt({ site, core, optional, registryUrl }) {
-  const item = (d) => `- [${d.title}](${d.url})${d.description ? `: ${oneLine(d.description)}` : ''}`;
+  const item = (d) =>
+    `- [${d.title}](${d.url})${d.description ? `: ${oneLine(d.description)}` : ''}`;
   const out = [
     `# ${SITE_NAME}`,
     '',
