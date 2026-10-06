@@ -30,7 +30,7 @@ import { ReceiptError } from '../../receipt/schema';
 import type { ReceiptContext } from '../../receipt/verify';
 import { createRun, ReasonCode, transitionRun } from '../../state';
 import { AppCredentials } from '../app-auth';
-import { ForkCredentialBroker } from '../broker';
+import { CredentialBrokerError, ForkCredentialBroker } from '../broker';
 import { ForkRefError, forkTarget, parseForkTarget, readForkBranch } from '../fork-ref';
 import type { HandoffAdmission } from '../handoff-driver';
 import { ForkPushError, ForkPusher, replayPushes, type ShippingAuthorization } from '../push';
@@ -810,6 +810,7 @@ describe('verified CAS push to the fork (#1066)', () => {
       const error = await r.driver.execute(pushOf(SHA1)).catch((e: unknown) => e);
       expect(error).toBeInstanceOf(MutationVoidedError);
       expect((error as MutationVoidedError).reason).toBe('mint:mint_refused');
+      expect((error as Error).cause).toMatchObject({ code: 'mint_refused' });
       await r.driver.resume();
     }
     expect(r.driver.snapshot().blockedReason).toBeUndefined();
@@ -827,6 +828,18 @@ describe('verified CAS push to the fork (#1066)', () => {
     expect(await r.driver.execute(pushOf(SHA1))).toBe(`${TARGET}@${SHA1}`);
     expect(r.driver.snapshot().intents.get(key)).toMatchObject({ attempts: 3, voided: 2 });
     expect(replayIntents(journals[2]?.read() ?? [])).toEqual(r.driver.snapshot());
+  });
+
+  it('a broker invariant failure before hand-out is not voided: it counts', async () => {
+    const r = await rig();
+    r.wrap = () => async () => {
+      throw new CredentialBrokerError('duplicate_mint');
+    };
+    r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
+    const error = await r.driver.execute(pushOf(SHA1)).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(MutationUncertainError);
+    expect((error as Error).cause).toMatchObject({ code: 'duplicate_mint' });
+    expect(r.driver.snapshot().intents.get(idempotencyKey(pushOf(SHA1)))?.voided).toBeUndefined();
   });
 
   it('a voided attempt never accepts its spent receipt again', async () => {

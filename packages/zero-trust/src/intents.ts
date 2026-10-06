@@ -150,8 +150,14 @@ export class MutationDeferredError extends Error {
  * voids the attempt. The retry budget is untouched; the next attempt has a new number and
  * needs fresh authority. `reason` is a short secret-free code. */
 export class MutationVoidedError extends Error {
-  constructor(readonly reason: string) {
-    super(`Zero-trust write voided (${reason}); nothing was written, fresh authority required`);
+  constructor(
+    readonly reason: string,
+    options?: ErrorOptions
+  ) {
+    super(
+      `Zero-trust write voided (${reason}); nothing was written, fresh authority required`,
+      options
+    );
     this.name = 'MutationVoidedError';
   }
 }

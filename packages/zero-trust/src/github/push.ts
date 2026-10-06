@@ -29,7 +29,12 @@ import { authorizeShipping, type ReceiptContext } from '../receipt/verify';
 import { isRecoveryEvent } from '../recovery';
 import { assertNoSecrets } from '../redaction';
 import { isRecord } from '../state';
-import type { ForkCredentialBroker } from './broker';
+import {
+  type BrokerRefusal,
+  CredentialBrokerError,
+  CredentialCleanupError,
+  type ForkCredentialBroker,
+} from './broker';
 import {
   type ForkBranch,
   type ForkRef,
@@ -283,7 +288,8 @@ export class ForkPusher implements WriteAdapter {
       // No credential ever reached git (the mint failed, was refused, or was cancelled), so
       // nothing can have been pushed. The nonce and this attempt's mint slot are spent: void
       // the attempt; the next one needs a fresh receipt but keeps the retry budget.
-      if (!handedOut) throw new MutationVoidedError(voidReason(error));
+      if (!handedOut && voidable(error))
+        throw new MutationVoidedError(voidReason(error), { cause: error });
       throw error;
     }
     if (outcome.remote === sha) return this.verified(intent, at, sha);
@@ -410,6 +416,25 @@ export class ForkPusher implements WriteAdapter {
       });
     return { artifactRef: `${intent.target}@${sha}`, remoteSha: sha };
   }
+}
+
+/** Broker outcomes that leave no credential with git: the mint failed or was refused, or
+ * the lease ended first. Invariant violations (duplicate mint, unjournaled intent) are
+ * not voided; they count like any ambiguous attempt. */
+const VOIDABLE: readonly BrokerRefusal[] = Object.freeze([
+  'mint_refused',
+  'mint_uncertain',
+  'app_credentials_invalid',
+  'overbroad_token',
+  'cancelled',
+  'window_expired',
+  'admission_closed',
+]);
+function voidable(error: unknown): boolean {
+  return (
+    error instanceof CredentialCleanupError ||
+    (error instanceof CredentialBrokerError && VOIDABLE.includes(error.code))
+  );
 }
 
 /** A broker refusal code, or the error's name: secret-free either way. */
