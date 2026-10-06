@@ -15,7 +15,7 @@
         {
           "provider": "claude-code",
           "session": "73ca020f-8e89-40e4-bc85-d6e511f5fc45",
-          "host": "hcc2"
+          "host": "host-c"
         }
       ]
     },
@@ -27,7 +27,7 @@
         {
           "provider": "claude-code",
           "session": "73ca020f-8e89-40e4-bc85-d6e511f5fc45",
-          "host": "hcc2"
+          "host": "host-c"
         }
       ]
     },
@@ -39,19 +39,19 @@
         {
           "provider": "claude-code",
           "session": "4e15a017-3cce-45b9-a19a-558ade4e693a",
-          "host": "hcc2"
+          "host": "host-c"
         }
       ]
     },
     {
       "anchor": "Step 5: Refresh every machine",
-      "rationale": "occ decommissioned 2026-09-09; refresh-fleet.sh is the canonical refresh; cite ai-dossier#749",
+      "rationale": "a retired host was decommissioned 2026-09-09; refresh-fleet.sh is the canonical refresh; cite ai-dossier#749",
       "created_at": "2026-09-16T22:43:53.911Z",
       "evidence": [
         {
           "provider": "claude-code",
           "session": "claude-session-fc749",
-          "host": "hcc2"
+          "host": "host-c"
         }
       ]
     },
@@ -63,7 +63,7 @@
         {
           "provider": "claude-code",
           "session": "4e15a017-3cce-45b9-a19a-558ade4e693a",
-          "host": "hcc2"
+          "host": "host-c"
         }
       ]
     }

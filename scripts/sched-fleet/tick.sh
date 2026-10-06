@@ -23,7 +23,7 @@ LATEST=$(timeout 20 npm view @ai-dossier/cli version 2>/dev/null)
 INSTALLED=$(ai-dossier --version 2>/dev/null)
 if [ -n "$LATEST" ] && [ -n "$INSTALLED" ] && [ "$LATEST" != "$INSTALLED" ]; then
   if [ "$(printf '%s\n%s\n' "$INSTALLED" "$LATEST" | sort -V | head -1)" = "$INSTALLED" ]; then
-    npm i -g "@ai-dossier/cli@$LATEST" >/dev/null 2>&1 && TG "⬆️ hcc2 engine CLI upgraded $INSTALLED → $LATEST (npm latest)"
+    npm i -g "@ai-dossier/cli@$LATEST" >/dev/null 2>&1 && TG "⬆️ fleet-host engine CLI upgraded $INSTALLED → $LATEST (npm latest)"
   fi
 fi
 

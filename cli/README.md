@@ -1851,7 +1851,7 @@ to `~/.dossier/caps.jsonl`. Full spec and the capability id vocabulary:
 ai-dossier usage window [--last 5h] [--until <iso>] [--provider anthropic] [--source claude-code,opencode] [--top 10] [--limit-window 5h] [--json]
 ai-dossier usage --batch <id> | --issue <n> [--since 30d] [--json]
 ai-dossier usage watch [--last 1h] [--interval 30s] [--iterations N]
-ai-dossier usage sync [--hosts hcc,hcc2] [--since <when>] [--no-push|--no-pull] [--json]
+ai-dossier usage sync [--hosts host-b,host-c] [--since <when>] [--no-push|--no-pull] [--json]
 ai-dossier usage export [--all] [--since <when>] [--out <file>] | usage import <file|-> | usage hosts
 # window / --batch / --issue / watch also take: --hosts all|local|a,b   (merged multi-host ledger)
 ```
@@ -1888,7 +1888,7 @@ upserts by key, so everything is idempotent, and later attribution refinements r
 `sync` resumes from the ledger's newest row (minus a 1-day overlap; first run 30d).
 
 Transport is the ssh the fleet already uses — no new secrets or services: `usage sync --hosts
-hcc,hcc2`, run from **wls** (the only host with ssh reach), pulls each host's bundle
+host-b,host-c`, run from the one host with ssh reach, pulls each host's bundle
 (`ssh <h> ai-dossier usage export --all`), merges it, then pushes every other host's rows back
 (`ssh <h> ai-dossier usage import -`), so one run leaves every host with all hosts. Bundles also move
 by hand: `usage export --out f.jsonl` → `usage import f.jsonl`. `scripts/refresh-fleet.sh --usage-sync`

@@ -64,7 +64,7 @@ POST {{baseUrl}}/api/v1/dossiers
 Content-Type: application/json
 
 {
-  "namespace": "yuvaldim/test",
+  "namespace": "acme-user/test",
   "content": "---\nname: my-dossier\ntitle: My Dossier\nversion: 1.0.0\n---\n\n# Hello",
   "changelog": "Initial publish"
 }
@@ -78,7 +78,7 @@ Content-Type: application/json
 # Authorization: Bearer <JWT>
 #
 # {
-#   "namespace": "yuvaldim/test",
+#   "namespace": "acme-user/test",
 #   "content": "---\nname: my-dossier\ntitle: My Dossier\nversion: 1.0.0\n---\n\n# Hello\n\nThis is a test dossier.",
 #   "changelog": "Initial publish"
 # }
@@ -93,8 +93,8 @@ Content-Type: application/json
 # Authorization: Bearer <JWT>
 #
 # {
-#   "namespace": "yuvaldim/test",
+#   "namespace": "acme-user/test",
 #   "content": "---\nname: my-dossier\ntitle: My Dossier\nversion: 1.0.0\nchecksum:\n  algorithm: sha256\n  hash: 0000000000000000000000000000000000000000000000000000000000000000\n---\n\n# Hello\n\nThis is a test dossier.",
 #   "changelog": "Initial publish",
-#   "evidence": "{\"evidence_schema_version\":\"1.0.0\",\"dossier\":\"yuvaldim/test/my-dossier\",\"version\":\"1.0.0\",\"checksum\":{\"algorithm\":\"sha256\",\"hash\":\"0000000000000000000000000000000000000000000000000000000000000000\"},\"entries\":[]}"
+#   "evidence": "{\"evidence_schema_version\":\"1.0.0\",\"dossier\":\"acme-user/test/my-dossier\",\"version\":\"1.0.0\",\"checksum\":{\"algorithm\":\"sha256\",\"hash\":\"0000000000000000000000000000000000000000000000000000000000000000\"},\"entries\":[]}"
 # }

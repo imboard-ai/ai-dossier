@@ -28,7 +28,7 @@ RESPONSE=$(curl -s -X POST "$BASE_URL/api/v1/dossiers" \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $JWT" \
   -d '{
-    "namespace": "yuvaldim/test",
+    "namespace": "acme-user/test",
     "content": "---\nname: test-dossier\ntitle: Test Dossier\nversion: 1.0.0\n---\n\n# Test Dossier\n\nThis is a test dossier published via the API.",
     "changelog": "Initial test publish"
   }')
