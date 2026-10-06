@@ -19,6 +19,9 @@ export enum ReasonCode {
   ResumeRevising = 'resume_revising',
   PublicationObserved = 'publication_observed',
   ContributorHandoff = 'contributor_handoff',
+  ForkMissing = 'fork_missing',
+  InstallationMissing = 'installation_missing',
+  InstallationTooBroad = 'installation_too_broad',
   EngagementObserved = 'engagement_observed',
   ReviewAwaited = 'review_awaited',
   RevisionRequested = 'revision_requested',
@@ -39,8 +42,18 @@ const HANDOFF_ORIGIN: Readonly<Partial<Record<ReasonCode, string>>> = Object.fre
   [ReasonCode.EngagementObserved]: 'gating',
   [ReasonCode.PublicationObserved]: 'shipping',
 });
+/** Manual contributor prerequisites (#1065): a durable wait, re-checked only on explicit resume. */
+const PREREQUISITE_REASONS: readonly ReasonCode[] = Object.freeze([
+  ReasonCode.ForkMissing,
+  ReasonCode.InstallationMissing,
+]);
+const prerequisites = {
+  [ReasonCode.ForkMissing]: 'awaiting_contributor',
+  [ReasonCode.InstallationMissing]: 'awaiting_contributor',
+} as const;
 const failures = {
   [ReasonCode.PolicyBlocked]: 'blocked',
+  [ReasonCode.InstallationTooBroad]: 'blocked',
   [ReasonCode.UnsupportedEnvironment]: 'unsupported',
   [ReasonCode.ExecutionFailed]: 'failed',
   [ReasonCode.UserCancelled]: 'cancelled',
@@ -60,6 +73,7 @@ export const TRANSITIONS = Object.freeze({
     [ReasonCode.GatePassed]: 'planning',
     [ReasonCode.UserPaused]: 'paused_user',
     [ReasonCode.ContributorHandoff]: 'awaiting_contributor',
+    ...prerequisites,
   } as const),
   awaiting_maintainer: Object.freeze({
     ...failures,
@@ -96,12 +110,18 @@ export const TRANSITIONS = Object.freeze({
     [ReasonCode.PublicationObserved]: 'submitted',
     [ReasonCode.UserPaused]: 'paused_user',
     [ReasonCode.ContributorHandoff]: 'awaiting_contributor',
+    ...prerequisites,
   } as const),
-  // Durable hand-off (PRD §5.8): the contributor submits; no compute until resume reconciles.
+  // Durable hand-off (PRD §5.8): the contributor submits, or creates the fork / installs the
+  // App by hand; no compute until an explicit resume reconciles or re-checks.
   awaiting_contributor: Object.freeze({
     ...failures,
     [ReasonCode.EngagementObserved]: 'awaiting_maintainer',
     [ReasonCode.PublicationObserved]: 'submitted',
+    // A re-check may find the other prerequisite missing; the wait continues.
+    ...prerequisites,
+    [ReasonCode.ResumeGating]: 'gating',
+    [ReasonCode.ResumeShipping]: 'shipping',
   } as const),
   submitted: Object.freeze({
     ...failures,
@@ -253,6 +273,22 @@ export function transitionRun(
   return applyTransition(valid, reasonCode, timestamp);
 }
 
+/** The transition that entered the current `awaiting_contributor` wait (self-loops skipped). */
+function waitEntry(run: RunRecord): TransitionRecord {
+  for (let index = run.history.length - 1; index >= 0; index--) {
+    const entry = run.history[index] as TransitionRecord;
+    if (entry.from !== 'awaiting_contributor') return entry;
+  }
+  throw new InvalidRunError();
+}
+
+/** The phase a fork/installation wait returns to on resume; null outside such a wait. */
+export function prerequisiteWaitOrigin(run: RunRecord): RunState | null {
+  if (run.state !== 'awaiting_contributor') return null;
+  const entry = waitEntry(run);
+  return PREREQUISITE_REASONS.includes(entry.reasonCode) ? entry.from : null;
+}
+
 function applyTransition(run: RunRecord, reasonCode: ReasonCode, timestamp: string): RunRecord {
   const to = isReasonCode(reasonCode) ? (TRANSITIONS[run.state] as Edges)[reasonCode] : undefined;
   if (!to) throw new IllegalTransitionError(run.state, reasonCode);
@@ -263,12 +299,15 @@ function applyTransition(run: RunRecord, reasonCode: ReasonCode, timestamp: stri
     to !== run.history.at(-1)?.from
   )
     throw new IllegalTransitionError(run.state, reasonCode);
-  if (
-    run.state === 'awaiting_contributor' &&
-    HANDOFF_ORIGIN[reasonCode] !== undefined &&
-    HANDOFF_ORIGIN[reasonCode] !== run.history.at(-1)?.from
-  )
-    throw new IllegalTransitionError(run.state, reasonCode);
+  if (run.state === 'awaiting_contributor' && !Object.hasOwn(failures, reasonCode)) {
+    // A link hand-off is left only by observing its submission from the phase that issued
+    // it; a prerequisite wait only by a re-check, and a resume returns to its own phase.
+    const entry = waitEntry(run);
+    const legal = PREREQUISITE_REASONS.includes(entry.reasonCode)
+      ? HANDOFF_ORIGIN[reasonCode] === undefined && (to === run.state || to === entry.from)
+      : HANDOFF_ORIGIN[reasonCode] === entry.from;
+    if (!legal) throw new IllegalTransitionError(run.state, reasonCode);
+  }
   if (!isTimestamp(timestamp) || Date.parse(timestamp) < Date.parse(run.updatedAt))
     throw new InvalidRunError();
   return freezeRun({

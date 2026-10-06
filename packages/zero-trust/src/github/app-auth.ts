@@ -5,6 +5,9 @@ import { inspect } from 'node:util';
 import { isRecord } from '../state';
 
 export const GITHUB_API = 'https://api.github.com';
+/** The OAuth token endpoint lives on the web origin, not the API. */
+export const GITHUB_WEB = 'https://github.com';
+export const OAUTH_TOKEN_PATH = '/login/oauth/access_token';
 export const GITHUB_API_VERSION = '2022-11-28';
 /** App JWT: backdated for clock skew, valid under GitHub's 10-minute maximum. */
 const JWT_CLOCK_SKEW_S = 60;
@@ -75,6 +78,10 @@ export class AppCredentials {
   }
   clientAuthorization(): string {
     return `Basic ${Buffer.from(`${this.#clientId}:${this.#clientSecret}`).toString('base64')}`;
+  }
+  /** Token-endpoint form: the client authenticates in the body (user authorization web flow). */
+  oauthForm(grant: Readonly<Record<string, string>>): Record<string, string> {
+    return { ...grant, client_id: this.#clientId, client_secret: this.#clientSecret };
   }
   toJSON(): string {
     return APP_REDACTED;
@@ -147,13 +154,47 @@ export function fetchGitHubHttp(
       // No cause chaining: a transport error may carry request details.
       throw new GitHubTransportError();
     }
-    let json: unknown = null;
+    return { status: response.status, json: parseJson(text) };
+  };
+}
+
+function parseJson(text: string): unknown {
+  try {
+    return text && text.length <= MAX_RESPONSE_BYTES ? JSON.parse(text) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** `POST https://github.com/login/oauth/access_token`; errors arrive as 200 with `error`.
+ * The form carries the client secret and a code or refresh token: never logged. */
+export type OAuthHttp = (form: Readonly<Record<string, string>>) => Promise<GitHubResponse>;
+
+export function fetchOAuthHttp(
+  base = GITHUB_WEB,
+  fetchImpl: typeof fetch = fetch,
+  timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS
+): OAuthHttp {
+  return async (form) => {
+    let response: Response;
+    let text: string;
     try {
-      json = text && text.length <= MAX_RESPONSE_BYTES ? JSON.parse(text) : null;
+      response = await fetchImpl(`${base}${OAUTH_TOKEN_PATH}`, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          'User-Agent': 'ai-dossier-zero-trust-broker',
+        },
+        body: JSON.stringify(form),
+        redirect: 'error',
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      text = await response.text();
     } catch {
-      json = null;
+      throw new GitHubTransportError();
     }
-    return { status: response.status, json };
+    return { status: response.status, json: parseJson(text) };
   };
 }
 

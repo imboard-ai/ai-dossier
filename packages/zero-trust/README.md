@@ -469,8 +469,9 @@ Fixtures with known bugs live in `fixtures/ecosystem/`. CI self-checks them
 
 ## Fork-side GitHub credential broker
 
-`src/github/broker.ts`, `app-auth.ts` and `token-journal.ts` are the only code that
-holds GitHub credentials (the hand-off modules beside them are credential-free). They
+`src/github/broker.ts`, `app-auth.ts`, `token-journal.ts` and `contributor.ts` are the
+only code that holds GitHub credentials (the hand-off and fork modules beside them are
+credential-free). They
 are controller-only: the package index does not export them, and
 `src/github/__tests__/isolation.test.ts` fails if any other module, including the index,
 the hand-off modules and the worker broker, can reach them through an import chain.
@@ -488,7 +489,9 @@ hand-offs. `ForkCredentialBroker` has a typed operation API and no generic token
   native expiry for the operator. It never records that token as revoked. Recovery over a
   journal whose run already ended returns `admitted: false`.
 - `registerUserToken(value, expiresAt)` holds the contributor's unscoped user token
-  (needed for `user_scoped` mints and the kill switch). `rotateUserToken` records a
+  (needed for `user_scoped` mints and the kill switch). `readAsContributor(path)` makes a
+  GET on the contributor's own `/user` and `/user/installations/{id}/repositories` with it,
+  so the value never leaves the broker. `rotateUserToken` records a
   refresh; the old token is marked `rotated` only once observed dead, and its scoped
   children stay journaled as live.
 - `mintForkPush(intent, { repositoryId, via? }, scopeFrom?)` mints one token for one
@@ -548,3 +551,54 @@ an in-memory fake (`__tests__/github-fake.ts`), so CI makes no GitHub calls.
 An installation token whose value was lost in a full process crash cannot be revoked
 through any GitHub API. The run stays in `blocked_cleanup` until `resolveByOperator`
 or, when the mint response was journaled, `settleExpired` after its native expiry.
+
+## Contributor authorization and fork prerequisites
+
+Before anything is pushed, the run establishes who the contributor is and that their fork
+is ready (#1065). Creating the fork and installing the App are one-time manual steps:
+GitHub refuses fork creation through the API (403), so the run waits for them durably.
+
+- `checkForkReadiness` (`src/github/fork.ts`, credential-free, exported) checks every
+  prerequisite once per explicit call and never schedules anything. Discovery reads the
+  contributor's same-name repository, then the upstream's fork listing filtered by owner,
+  with no credential, and binds by repository id: `fork:true`, `parent.id` equal to the
+  upstream id recorded at gating, and owner equal to the run's contributor. A name match
+  alone never counts. A fork of another fork in the upstream network (`fork_wrong_parent`),
+  a repository owned by another account (`fork_wrong_owner`), or a different repository than
+  the one bound earlier (`fork_replaced`) blocks the run.
+- A missing fork moves the run from `gating` or `shipping` to `awaiting_contributor`
+  (`fork_missing`); a missing App installation does the same (`installation_missing`). The
+  outcome's one-line `nextPermittedAction` carries the exact link: the GitHub fork page,
+  or the App's install page with "Only select repositories". A re-check that finds the same
+  wait records nothing; one that finds the next prerequisite missing records the new reason.
+  When everything passes, the run resumes the phase that entered the wait
+  (`resume_gating` / `resume_shipping`). `prerequisiteAction(run, …)` re-derives the status
+  line from a persisted run. The state machine keeps this wait apart from a link hand-off:
+  a resume cannot leave a pending link, and an observed submission cannot leave a
+  prerequisite wait.
+- The installation on the fork must have `repository_selection=selected`, select exactly
+  the fork, and grant no permission beyond the App's declared set. `all`, an extra
+  repository or an extra permission blocks with `installation_too_broad` and a link to the
+  installation's settings. Any installation of the App on the upstream blocks the same way.
+  Selection and permissions are read with the App JWT (`GET /repos/{owner}/{repo}/installation`);
+  the selected repository set needs the contributor's user token. Until the contributor has
+  authorized, the outcome is `authorization_required` and carries the `ForkReady` binding the
+  broker is built with.
+- `ContributorAuthorization` (`src/github/contributor.ts`) runs the GitHub App user
+  authorization web flow. `begin(redirectUri)` accepts only a loopback redirect
+  (`http://127.0.0.1:<port>` or `http://[::1]:<port>`) and creates a CSPRNG `state` and a
+  PKCE S256 verifier in memory. `complete(callback, run)` spends the pending attempt first,
+  compares `state` in constant time, exchanges the code, hands the access token to the
+  broker, and binds the run to `GET /user`. A login or account id other than the run's
+  (scenario 17) blocks the run and ends that authorization through `endRun('cancelled')`.
+  `bindLogin(run, userId)` repeats the check on resume. `listenLoopback()` receives one
+  redirect, answers a fixed page that echoes nothing, and sends no referrer.
+- `refresh()` is single-flight: the broker takes the new access token before the stored
+  refresh token is replaced, so the pair is never half-updated. `bad_refresh_token`
+  answers `reauthorize` and drops the chain; nothing retries. Once the broker has revoked
+  the user token (run end, cancellation, kill switch), its refresh token is dead too:
+  `status()` and `refresh()` answer `reauthorize` without presenting it. A new process
+  holds no refresh token and must authorize again.
+- The authorization code, `state`, access and refresh tokens never appear in an outcome,
+  status, error message or the token journal; the object redacts itself in JSON and
+  `inspect`.
