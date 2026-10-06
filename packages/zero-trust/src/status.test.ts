@@ -71,6 +71,7 @@ describe('status contract', () => {
     String.raw`Authorization:\040token\040x`,
     String.raw`Authorization:\011token\012x`,
     String.raw`Authorization:\x9token\u20x`,
+    JSON.stringify({ command: String.raw`curl -H $'Authorization:\ttoken\tx'` }),
     'sk-ant-',
     'Bearer secret',
     'bEaReR\tsecret',

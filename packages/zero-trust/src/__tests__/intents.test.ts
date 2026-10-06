@@ -103,6 +103,7 @@ describe('durable provider-independent write intents', () => {
     String.raw`Authorization:\040token\040x`,
     String.raw`Authorization:\011token\012x`,
     String.raw`Authorization:\x9token\u20x`,
+    JSON.stringify({ command: String.raw`curl -H $'Authorization:\ttoken\tx'` }),
   ])('rejects credentials before persistence or provider mutation %#', (secret) => {
     const fake = new FakeAdapter();
     const j = journal();
@@ -124,6 +125,7 @@ describe('durable provider-independent write intents', () => {
     String.raw`Authorization:\040token\040x`,
     String.raw`Authorization:\011token\012x`,
     String.raw`Authorization:\x9token\u20x`,
+    JSON.stringify({ command: String.raw`curl -H $'Authorization:\ttoken\tx'` }),
   ])('never persists credentials from mutation or reconciliation evidence %#', async (secret) => {
     const fake = new FakeAdapter();
     const j = journal();

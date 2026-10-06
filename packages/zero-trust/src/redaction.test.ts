@@ -34,6 +34,7 @@ describe('shared credential rejection policy', () => {
     String.raw`Authorization:\x9token\u20x`,
     String.raw`Authorization:\U00000009token\U00000020x`,
     JSON.stringify({ header: 'Authorization:\ttoken\tx' }),
+    JSON.stringify({ command: String.raw`curl -H $'Authorization:\ttoken\tx'` }),
     'Authorization:\\\n token syntheticOpaqueToken',
   ])('rejects synthetic credential %# without echoing input', (credential) => {
     for (const text of [credential, credential.toUpperCase(), `prefix ${credential} suffix`]) {
@@ -70,5 +71,6 @@ describe('shared credential rejection policy', () => {
   it('exports an immutable pattern list and scans long non-matching text', () => {
     expect(Object.isFrozen(SECRET_PATTERNS)).toBe(true);
     expect(() => assertNoSecrets('authorization '.repeat(100000))).not.toThrow();
+    expect(() => assertNoSecrets('\\'.repeat(100000))).not.toThrow();
   });
 });

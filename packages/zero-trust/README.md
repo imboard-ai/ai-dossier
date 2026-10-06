@@ -57,6 +57,7 @@ Literal JSON/shell whitespace escapes (`\t`, `\n`, `\r`, `\v`, `\f`, and
 ASCII whitespace in bounded octal, `\xHH`, `\uHHHH`, and `\UHHHHHHHH`
 forms, including shell short forms) are scanned in a normalized view after
 removing shell backslash-newline continuations;
+the scan conservatively consumes complete backslash runs for nested serialization.
 input is never executed. Rejection raises `SecretRedactionError` containing no
 input. Other malformed facts raise
 `InvalidStatusError`. Pattern detection is a defense-in-depth guard, not proof
