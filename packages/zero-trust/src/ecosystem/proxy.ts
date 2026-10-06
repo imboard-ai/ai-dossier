@@ -393,7 +393,7 @@ export function parseSquidAccessLog(text: string): {
   let malformed = 0;
   for (const line of text.split('\n')) {
     if (!line.trim()) continue;
-    const m = /^\d+\.\d{3} (\S+) (\S+) (\S+) (\d{3}|-) ([A-Z_]+)(?:\/\d+)? (\d+|-)$/.exec(
+    const m = /^\d+\.\d{3} (\S+) (\S+) (\S+) (\d{1,3}|-) ([A-Z_]+)(?:\/\d+)? (\d+|-)$/.exec(
       line.trim()
     );
     if (!m) {

@@ -440,9 +440,11 @@ when upstream policy/template allows it. It rejects credential-pattern strings a
 never prints raw logs. Rendering does not authenticate a signature; its evidence
 claim is limited to the exact candidate and is not proof of patch correctness.
 
-## Ecosystem support and package proxy (gate 2 prep)
+## Ecosystem support and package proxy (gate 2)
 
-`src/ecosystem/` prepares feasibility gate 2 without a VM. Design and open questions:
+`src/ecosystem/` holds the VM-independent parts of feasibility gate 2; the in-VM proof is
+`src/__tests__/vm-proxy.e2e.test.ts` with the host proxy stack in `scripts/zt-proxy.mjs`.
+Design, evidence and verdict:
 [package-proxy decision record](../../docs/features/zero-trust-full-cycle/decisions/package-proxy.md).
 
 - `detectEcosystem(files)` (or `sourceFilesFromManifest(manifest)` first) accepts npm with
@@ -455,8 +457,12 @@ claim is limited to the exact candidate and is not proof of patch correctness.
   profile fields, with the accelerator taken from the VM handle.
 - `buildCommandPlan(manager, proxy, options?)` returns provisioning (`package_proxy`) and
   verification (`none`) commands as argv data. `options` sets test targets (e.g. the
-  regression test), timeouts, the profile's interpreter and an environment directory
-  outside the repository. This package executes nothing.
+  regression test), timeouts, the profile's interpreter, and the environment directory,
+  uv export file and junit report path, all outside the repository. Test commands carry
+  `captureReport`; `parseJunitReport` turns the supervisor-read report into the suite
+  count classification needs. uv provisions from an offline `uv export` of the lock, not
+  `uv sync --frozen` (which fetches the lockfile URLs directly). This package executes
+  nothing; the VM supervisor runs the plans.
 - `classifyOutcome`, `classifyRegression`, `applyProvisioning` and `applyVerification`
   treat timeouts, unreadable reports and zero suites as `inconclusive`, map provisioning
   failures to `unsupported_environment`, and enforce the two-repair cap from run history
@@ -464,7 +470,13 @@ claim is limited to the exact candidate and is not proof of patch correctness.
 - `PROXY_POLICY`, `evaluateRequest`, `evaluateRedirect`, `buildLockIndex` and
   `checkArtifact` define the proxy policy. `renderSquidConfig`, `renderVerdaccioConfig`,
   `verdaccioEnvironment` and `proxpiEnvironment` render it for the OSS components that
-  enforce it. Registry addresses and hash formats live in `registries.ts`.
+  enforce it; `parseSquidAccessLog` reads Squid's evidence log. Registry addresses and
+  hash formats live in `registries.ts`.
+- `scripts/zt-proxy.mjs up|check|down` runs the stack on the controller host (Docker):
+  Verdaccio and proxpi (with `proxy/zt_proxpi.py`, which requests canonical index URLs so
+  no redirect is needed) on an internal network whose only exit is Squid with ssl-bump.
+  `check` sends ordinary requests that the policy must admit or refuse, judged from
+  Squid's own log.
 
 Fixtures with known bugs live in `fixtures/ecosystem/`. CI self-checks them
 (`scripts/zero-trust-fixtures-selfcheck.mjs`); that is the only host-side install/test run.
@@ -479,9 +491,17 @@ QEMU flags, network design, measured overhead and residual risks:
   unsupported OS or architecture, missing QEMU tools, or a forced `kvm` without `/dev/kvm`.
   There is no host-container fallback.
 - `LocalQemuAdapter` implements the provider-neutral `VmAdapter` (create, exec, putFile,
-  getFile, destroy, listByRun) plus the `killAll` incident kill switch. QEMU runs rootless with
-  `restrict=on` user-mode networking, no forwards and no shared folders; the broker
-  (`BrokerClient`, `vm-guest/agent.py`) is the only data path.
+  getFile, endProvisioning, destroy, listByRun) plus the `killAll` incident kill switch. QEMU
+  runs rootless with `restrict=on` user-mode networking, no forwards and no shared folders; the
+  broker (`BrokerClient`, `vm-guest/agent.py`) is the only data path.
+- Network phases (#1010): `create({ phase: 'provisioning', proxyTarget })` adds exactly one
+  `hostfwd` from host loopback to the guest relay; `ProvisionChannel` dials in through it and
+  splices each guest connection to the one mirror. Worker commands reach it with
+  `exec({ network: 'package_proxy' })` (refused outside provisioning, host-side and in the
+  guest). `endProvisioning` powers the guest off and restarts it on the same disk with no
+  forward; the guest announces its phase and a mismatch destroys the VM. `exec` also takes a
+  validated `env` and `report: true` (a fresh report directory outside the workspace, read
+  back by the agent).
 - `teardownVm` caps deletion at three attempts, then moves the run to `blocked_cleanup` and
   hands it to `observeRun`; `assertPublicationPermitted(run, operationKind)` applies the intent
   admission table, which admits no GitHub write in `blocked_cleanup`.
@@ -504,6 +524,10 @@ node scripts/zt-vm.mjs bake  --profile-dir <dir> --cache-dir <dir> [--accel auto
 node scripts/zt-vm.mjs smoke --profile-dir <dir> --state-dir <dir> [--accel ...] [--timings-out f]
 node scripts/zt-vm.mjs kill-all --state-dir <dir> --reason <text>   # exit 2: a VM was left behind
 ZT_VM_E2E=1 ZT_PROFILE_DIR=<abs dir> npx vitest run src/__tests__/vm-gate.e2e.test.ts
+node scripts/zt-proxy.mjs up --state-dir <dir> --out <endpoints.json>   # needs Docker
+ZT_PROXY_E2E=1 ZT_PROFILE_DIR=<abs dir> ZT_PROXY_ENDPOINTS=<endpoints.json> \
+  npx vitest run src/__tests__/vm-proxy.e2e.test.ts
+node scripts/zt-proxy.mjs down --state-dir <dir>
 ```
 
 The kill switch stays engaged until an operator deletes `<state-dir>/KILL_SWITCH`.

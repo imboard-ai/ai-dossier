@@ -117,8 +117,12 @@ root inside the VM:
   map to the host's loopback), the LAN, the metadata addresses (`169.254.169.254`,
   `fd00:ec2::254`) and the internet are dropped. slirp's DNS forwarder (`10.0.2.3`) does not
   answer under `restrict=on`, so DNS cannot be used for exfiltration either.
-- No forwards in build and test phases. The provisioning proxy (#1010) will be the only explicit
-  forward, added by the controller for the dependency phase.
+- No forwards in build and test phases. The provisioning phase (#1010) has exactly one forward:
+  a `hostfwd` from a host loopback port to the guest relay, through which the controller dials in
+  and splices each connection to the package mirror. The guest still opens no connection of its
+  own. The phase ends by powering the guest off and restarting it on the same disk with the
+  forward-free arguments. See the [package-proxy record](package-proxy.md) for why it is a
+  `hostfwd` and not a `guestfwd`.
 - Inside the VM, worker containers have `--network none`: a second, independent layer.
 - The gate exercises both layers: the fixtures run once in the worker container, and once as
   root on the VM's own network stack (scope `vm-root`, assumed container escape). Only categories

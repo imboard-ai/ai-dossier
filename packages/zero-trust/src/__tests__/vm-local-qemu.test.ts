@@ -23,7 +23,12 @@ import {
   systemOps,
 } from '../vm/local-qemu';
 import { PROFILE_PINS, profileDigest } from '../vm/profile';
-import { BROKER_PORT_NAME, PHASE_OEM_PREFIX, SCOPE_OEM_PREFIX } from '../vm/qemu-args';
+import {
+  BROKER_PORT_NAME,
+  PHASE_OEM_PREFIX,
+  SCOPE_OEM_PREFIX,
+  TIMEOUT_SCALE,
+} from '../vm/qemu-args';
 
 const AGENT = 'print("fake guest agent")\n';
 /** A minimal standalone qcow2 v3 header: magic, version 3, no backing file, no
@@ -864,10 +869,13 @@ describe('LocalQemuAdapter broker operations', () => {
     const handle = await a.create(spec());
     const result = await a.exec(handle, { profile: 'node', argv: ['node', '-v'] });
     expect(result).toMatchObject({ exitCode: 0, stdout: 'hi', stderr: '' });
-    expect(host.seen.find((f) => f.op === 'exec')).toMatchObject({ timeoutMs: 4 * 5000, cwd: '' });
+    expect(host.seen.find((f) => f.op === 'exec')).toMatchObject({
+      timeoutMs: TIMEOUT_SCALE.tcg * 5000,
+      cwd: '',
+    });
     await a.exec(handle, { profile: 'python', argv: ['python3'], cwd: 'src', timeoutMs: 2000 });
     expect(host.seen.filter((f) => f.op === 'exec')[1]).toMatchObject({
-      timeoutMs: 8000,
+      timeoutMs: TIMEOUT_SCALE.tcg * 2000,
       cwd: 'src',
       profile: 'python',
     });

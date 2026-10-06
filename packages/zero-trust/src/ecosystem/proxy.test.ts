@@ -294,6 +294,8 @@ describe('Squid runtime settings and access log', () => {
       '1791314084.387 172.31.250.3 GET https://registry.npmjs.org/ms 200 TCP_MISS 93192',
       '1791314088.895 172.31.250.4 GET https://pypi.org/simple/PyTest/ 403 TCP_DENIED_REPLY 3389',
       '1791314075.430 172.31.250.1 - error:transaction-end-before-headers - NONE_NONE -',
+      // A health-check connect that sent nothing: Squid logs status 0.
+      '1791316228.814 172.31.250.1 - error:transaction-end-before-headers 0 NONE_NONE 0',
       'garbage line',
       '',
     ].join('\n');
@@ -303,6 +305,7 @@ describe('Squid runtime settings and access log', () => {
       ['CONNECT', 200, 'NONE_NONE'],
       ['GET', 200, 'TCP_MISS'],
       ['GET', 403, 'TCP_DENIED_REPLY'],
+      ['-', 0, 'NONE_NONE'],
       ['-', 0, 'NONE_NONE'],
     ]);
     expect(entries[1]).toMatchObject({

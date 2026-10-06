@@ -524,7 +524,9 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
               issue: 1010,
               defaultBranch: 'main',
               forkRepositoryId: 2,
-              baseSha: repo.shas.base,
+              // The candidate is the fix commit; its parent (the receipt's base) is the
+              // regression commit the bug was reproduced on.
+              baseSha: repo.shas.regression,
               parentSha: repo.shas.regression,
               candidateSha: repo.shas.fix,
               ...binding,
@@ -765,6 +767,7 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
         denied: denied.map((e) => `${e.method} ${e.url} ${e.result}`),
         redirects: redirects.length,
       };
+      expect(malformed).toBe(0);
       expect(requests.length).toBeGreaterThan(0);
       expect(notAdmitted).toEqual([]);
       expect(denied).toEqual([]);
