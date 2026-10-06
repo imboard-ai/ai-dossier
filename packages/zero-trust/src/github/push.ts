@@ -15,6 +15,7 @@ import {
   idempotencyKey,
   MAX_WRITE_ATTEMPTS,
   type MutationResult,
+  ReconcileDeferredError,
   type ReconcileResult,
   type WriteAdapter,
   WriteRefusedError,
@@ -227,9 +228,13 @@ export class ForkPusher implements WriteAdapter {
     const expected = this.expectedRemoteSha(intent);
     let remote: string | null;
     try {
-      remote = await readForkBranch(this.options.read, at);
+      remote = await this.readRef(at);
     } catch (error) {
-      if (error instanceof ForkRefError) return { kind: 'unknown' };
+      // Rate limit, 5xx, network: nothing is known yet, so nothing is decided.
+      if (error instanceof ForkRefError)
+        throw new ReconcileDeferredError(
+          `${error.code}${error.status === undefined ? '' : `:${error.status}`}`
+        );
       throw error;
     }
     if (remote === sha) return { kind: 'found', ...this.verified(intent, at, sha) };
@@ -253,7 +258,7 @@ export class ForkPusher implements WriteAdapter {
       candidateSha: sha,
       expectedRemoteSha: expected,
     });
-    const before = await readForkBranch(this.options.read, at);
+    const before = await this.readRef(at);
     if (before === sha) return this.verified(intent, at, sha);
     if (before !== expected) throw diverged(expected, before);
     const outcome = await this.options.broker.withForkPush(
@@ -266,6 +271,18 @@ export class ForkPusher implements WriteAdapter {
       throw diverged(expected, outcome.remote);
     // Unknown, or still at the expected value (nothing landed): reconciliation decides.
     throw new ForkPushError('push_uncertain', outcome.git);
+  }
+
+  /** A readable answer naming another repository is positive evidence and blocks; any
+   * other read failure (ForkRefError) leaves the decision to a later read. */
+  private async readRef(at: ForkBranch): Promise<string | null> {
+    try {
+      return await readForkBranch(this.options.read, at);
+    } catch (error) {
+      if (error instanceof ForkRefError && error.code === 'fork_unverified' && error.status === 200)
+        throw new WriteRefusedError('fork_unverified', `${at.fork.owner}/${at.fork.name}`);
+      throw error;
+    }
   }
 
   /** Scenarios 10 and 17: every refusal happens here, before a token is minted. */
@@ -343,7 +360,11 @@ export class ForkPusher implements WriteAdapter {
     }
   }
 
-  /** The fork's push URL; tests substitute a local bare repository. */
+  /** The fork's push URL; tests substitute a local bare repository. The URL names the
+   * fork by owner/name, which the preflight bound to the repository id moments before.
+   * The push itself is pinned to that id by the credential: the broker narrows the token
+   * to exactly that repository, so if the name were renamed or transferred to another
+   * repository in between, GitHub refuses the push (403) and the read-back stays put. */
   protected remote(at: ForkBranch): { url: string; config: readonly string[] } {
     return { url: `https://github.com/${at.fork.owner}/${at.fork.name}.git`, config: [] };
   }

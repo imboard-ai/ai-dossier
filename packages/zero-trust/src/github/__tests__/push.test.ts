@@ -17,6 +17,7 @@ import {
   type IntentInput,
   idempotencyKey,
   MutationUncertainError,
+  ReconcileDeferredError,
   replayIntents,
   WriteBlockedError,
 } from '../../intents';
@@ -694,9 +695,72 @@ describe('verified CAS push to the fork (#1066)', () => {
     r.fork.overrides.push((p) =>
       p === `/repos/${OWNER}/fixture` ? { status: 200, body: { id: FORK_ID + 1 } } : undefined
     );
-    await expect(r.driver.execute(pushOf(SHA1))).rejects.toThrow(MutationUncertainError);
+    await expect(r.driver.execute(pushOf(SHA1))).rejects.toThrow(WriteBlockedError);
+    expect(r.driver.snapshot().blockedReason).toBe('fork_unverified');
     expect(r.mints()).toBe(0);
     expect(r.fork.sha()).toBeNull();
+  });
+
+  it('a rate-limited or failed read never blocks: preflight is ambiguous, resume defers', async () => {
+    const r = await rig();
+    r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
+    let limited = true;
+    r.fork.overrides.push((p) =>
+      limited && p.includes('/git/ref/')
+        ? { status: 403, body: { message: 'rate limit' } }
+        : undefined
+    );
+    const error = await r.driver.execute(pushOf(SHA1)).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(MutationUncertainError);
+    expect((error as Error).cause).toMatchObject({ code: 'ref_unknown', status: 403 });
+    expect(r.mints()).toBe(0);
+    // Resume while still limited: deferred, not blocked, nothing journaled.
+    const before = journals.map((j) => j.read().length);
+    await expect(r.driver.resume()).rejects.toThrow(ReconcileDeferredError);
+    await expect(r.driver.resume()).rejects.toThrow('ref_unknown:403');
+    expect(r.driver.snapshot().blockedReason).toBeUndefined();
+    expect(journals.map((j) => j.read().length)).toEqual(before);
+    // Readable again: the remote is still absent, so the one retry is admitted.
+    limited = false;
+    r.fork.overrides.push((p) => (p === `/repos/${OWNER}/fixture` ? 'throw' : undefined));
+    await expect(r.driver.resume()).rejects.toThrow(ReconcileDeferredError);
+    r.fork.overrides.pop();
+    await r.driver.resume();
+    r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-2' });
+    expect(await r.driver.execute(pushOf(SHA1))).toBe(`${TARGET}@${SHA1}`);
+  });
+
+  it('a second lost response exhausts the single retry and blocks (scenario 18)', async () => {
+    const r = await rig();
+    r.wrap = () => async () => {
+      throw new Error('lost');
+    };
+    r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
+    await expect(r.driver.execute(pushOf(SHA1))).rejects.toThrow(MutationUncertainError);
+    await r.driver.resume();
+    r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-2' });
+    await expect(r.driver.execute(pushOf(SHA1))).rejects.toThrow(MutationUncertainError);
+    await expect(r.driver.resume()).rejects.toThrow(WriteBlockedError);
+    expect(r.driver.snapshot().blockedReason).toBe('retry_exhausted');
+    expect(r.fork.sha()).toBeNull();
+  });
+
+  it('a lost push ledger fails closed: the rewrite expects absent and the remote diverges', async () => {
+    const r = await rig();
+    r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
+    await r.driver.execute(pushOf(SHA1));
+    // A restart with the same fork, intents, tokens and nonces, but the push ledger is gone.
+    r.broker.close();
+    for (const j of journals.splice(0)) j.close();
+    const lost = await new Rig({
+      fork: r.fork,
+      dirs: { ...r.dirs, pushes: temp('zt-pushes-lost-') },
+    } as Rig).start();
+    expect(lost.pusher.expectedRemoteSha(pushOf(SHA2))).toBeNull();
+    lost.grants.push({ candidate: C2, expected: null, nonce: 'nonce-2' });
+    await expect(lost.driver.execute(pushOf(SHA2))).rejects.toThrow(WriteBlockedError);
+    expect(lost.driver.snapshot().blockedReason).toBe('remote_diverged');
+    expect(lost.fork.sha()).toBe(SHA1);
   });
 
   it('provides the hand-off read-back: verified SHA, null when absent, refused otherwise', async () => {

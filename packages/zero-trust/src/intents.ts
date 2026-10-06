@@ -63,7 +63,8 @@ export interface WriteAdapter {
   /** Must enforce authorization and compare-and-swap push semantics independently.
    * Either method may throw `WriteRefusedError` when it proved nothing unintended was
    * written, or that the remote holds content it must not touch: the driver then blocks
-   * with that reason instead of treating the attempt as a retryable absence. */
+   * with that reason instead of treating the attempt as a retryable absence. `reconcile`
+   * throws `ReconcileDeferredError` when the evidence is only temporarily unreadable. */
   mutate(intent: Intent): Promise<MutationResult>;
 }
 export interface IntentState {
@@ -80,6 +81,7 @@ export const WRITE_BLOCK_REASONS = Object.freeze([
   'retry_exhausted',
   'remote_diverged',
   'authorization_refused',
+  'fork_unverified',
 ] as const);
 export type WriteBlockReason = (typeof WRITE_BLOCK_REASONS)[number];
 export class IntentError extends Error {
@@ -104,11 +106,23 @@ export class WriteBlockedError extends Error {
  * the expected and observed SHAs); it is surfaced as the block's cause, never journaled. */
 export class WriteRefusedError extends Error {
   constructor(
-    readonly reason: Extract<WriteBlockReason, 'remote_diverged' | 'authorization_refused'>,
+    readonly reason: Extract<
+      WriteBlockReason,
+      'remote_diverged' | 'authorization_refused' | 'fork_unverified'
+    >,
     readonly detail?: string
   ) {
     super(`Zero-trust write refused: ${reason}${detail ? ` (${detail})` : ''}`);
     this.name = 'WriteRefusedError';
+  }
+}
+/** Thrown by `reconcile` when the evidence is temporarily unreadable (rate limit, network):
+ * nothing is recorded, nothing is admitted, and a later resume reads again. Only positive
+ * evidence blocks. `detail` is secret-free (an error code and HTTP status). */
+export class ReconcileDeferredError extends Error {
+  constructor(readonly detail?: string) {
+    super(`Zero-trust reconciliation deferred${detail ? ` (${detail})` : ''}; resume later`);
+    this.name = 'ReconcileDeferredError';
   }
 }
 export class MutationUncertainError extends Error {
@@ -413,6 +427,7 @@ export class IntentDriver {
             ? { kind, artifactRef: observed.artifactRef, remoteSha: observed.remoteSha }
             : { kind };
       } catch (error) {
+        if (error instanceof ReconcileDeferredError) throw error;
         if (error instanceof WriteRefusedError) this.block(error.reason, error);
         this.block('reconciliation_error');
       }

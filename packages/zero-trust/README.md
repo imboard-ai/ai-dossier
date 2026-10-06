@@ -155,8 +155,11 @@ reason is still journaled. Proven absence after the final attempt is journaled a
 `exhausted`; it cannot enable a retry or repeatedly reconcile on restart.
 `snapshot().blockedReason` on a persisted block preserves the bounded reason
 (`unknown`, `reconciliation_error`, `invalid_evidence`, `unexpected_remote_sha`,
-`retry_exhausted`, `remote_diverged` or `authorization_refused`) without storing provider
-exception text.
+`retry_exhausted`, `remote_diverged`, `authorization_refused` or `fork_unverified`) without
+storing provider exception text. A `reconcile` that throws `ReconcileDeferredError`
+(evidence temporarily unreadable: rate limit, network) records nothing and blocks
+nothing; `resume()`/`execute()` rethrow it and a later resume reads again. Only positive
+evidence blocks.
 Every intent and attempt is fsynced before the adapter runs;
 confirmation is fsynced before success returns. File and ancestor directory entries
 are fsynced on open. Write uncertainty poisons the live driver; recover from disk
@@ -578,11 +581,15 @@ or, when the mint response was journaled, `settleExpired` after its native expir
    ledger, its own `Journal`, scoped to the fork's repository id.
 3. Preflight reads the ref through `readForkBranch`. The candidate already there
    confirms without a token; anything other than the expected value blocks with
-   `remote_diverged` and pushes nothing.
+   `remote_diverged` and pushes nothing. An answer naming another repository id blocks
+   with `fork_unverified`; an unreadable answer leaves the attempt ambiguous, and
+   reconciliation defers (`ReconcileDeferredError`) until the ref is readable.
 4. Inside `broker.withForkPush`, git pushes exactly the candidate from a fresh
    `TrustedGit` repository holding only the candidate pack:
    `--force-with-lease=refs/heads/<branch>:<expected>` (empty: the branch must not
-   exist), an explicit URL and `<sha>:refs/heads/<branch>`. There is no remote, no
+   exist), an explicit URL and `<sha>:refs/heads/<branch>`. The URL names the fork by
+   owner/name; the token is narrowed to its repository id, so a name that moved to
+   another repository after preflight is refused by GitHub. There is no remote, no
    wildcard and no plain force. `ls-remote` then reads the ref back from the git server.
 5. Only a read-back equal to the candidate records `push_verified` and confirms. Another
    SHA blocks with `remote_diverged`; still the expected value, or unknown, is
