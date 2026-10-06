@@ -30,7 +30,7 @@ function validRecord(): EvidenceRecord {
             provider: 'claude-code',
             session: '5a718af0-4e3c-4d6b-a7e1-e73bd3358ab4',
             event: 'toolu_01VrzBkULS3kxqPYzvbcke65',
-            host: 'wls',
+            host: 'host-a',
             extra: { ctx_session: 'abc', ctx_event: 'def' },
           },
         ],

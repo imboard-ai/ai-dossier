@@ -137,10 +137,10 @@ Authorization: Bearer <JWT>
 **Response:**
 ```json
 {
-  "username": "yuvaldim",
+  "username": "acme-user",
   "email": null,
   "orgs": ["imboard-ai"],
-  "can_publish_to": ["yuvaldim/*", "imboard-ai/*"]
+  "can_publish_to": ["acme-user/*", "imboard-ai/*"]
 }
 ```
 

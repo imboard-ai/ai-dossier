@@ -1,7 +1,7 @@
 {
   "name": "ai-dossier",
   "version": "1.0.0",
-  "description": "MCP server for the dossier automation standard — discover, verify, and execute dossiers from Claude Code",
+  "description": "MCP server for signed, versioned agent skills (Dossier) — discover, verify, and run skills for model-driven orchestration from Claude Code",
   "owner": {
     "name": "imboard-ai",
     "email": "yuval.dimnik@gmail.com"
@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "dossier-mcp-server",
-      "description": "MCP server for dossier automation — enables LLMs to discover, verify, and execute dossiers (structured automation recipes)",
+      "description": "MCP server for signed, versioned agent skills — enables LLMs to discover, verify, and run skills (.ds.md) for model-driven orchestration",
       "version": "1.0.4",
       "author": {
         "name": "Yuval Dimnik",
@@ -23,7 +23,17 @@
       "repository": "https://github.com/imboard-ai/ai-dossier",
       "license": "AGPL-3.0-only",
       "category": "automation",
-      "keywords": ["dossier", "automation", "mcp", "verification", "orchestration"],
+      "keywords": [
+        "dossier",
+        "agent-skills",
+        "model-driven-orchestration",
+        "agent-orchestration",
+        "mcp",
+        "signed",
+        "verification",
+        "skill-md",
+        "claude-code"
+      ],
       "mcpServers": {
         "dossier": {
           "command": "npx",

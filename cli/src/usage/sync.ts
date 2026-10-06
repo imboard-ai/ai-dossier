@@ -2,10 +2,10 @@
  * `ai-dossier usage sync` (#782): refresh this host's persisted ledger, then
  * exchange bundles with other hosts over ssh.
  *
- * Transport = the ssh the fleet already relies on (wls is the only host that can
+ * Transport = the ssh the fleet already relies on (one designated host is the only one that can
  * reach the others — see scripts/refresh-fleet.sh), streaming the bundle over
  * stdin/stdout: no new secrets, no shared drop, no service. `sync --hosts a,b`
- * is bidirectional so ONE run from wls leaves every host with every host's rows:
+ * is bidirectional so ONE run from that host leaves every host with every host's rows:
  * pull (`ssh a usage export --all`) → merge locally → push (`ssh a usage import -`).
  * The same bundles move by hand with `usage export` / `usage import <file>`.
  */

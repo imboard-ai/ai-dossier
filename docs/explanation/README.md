@@ -5,6 +5,7 @@ Understanding-oriented documentation that explains how and why Dossier works. A 
 ## Core Concepts
 
 - [Isn't a dossier just a skill?](faq.md#isnt-a-dossier-just-a-skill) - How dossiers relate to skills, and the trigger-skill pattern
+- [Model-driven orchestration for AI agents](model-driven-orchestration.md) - What it is, and how Dossier makes it trustworthy
 - [Security Model](security-model.md) - Understanding Dossier's security approach
 - [FAQ](faq.md) - Frequently asked questions
 

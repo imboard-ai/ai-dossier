@@ -50,7 +50,7 @@ Actions → sign → Run workflow
 2. Configure AWS credentials via OIDC
    - Uses GitHub OIDC to assume AWS IAM role
    - No static AWS credentials stored
-   - Role: github-dossier-oidc (account: 942039714848)
+   - Role: github-dossier-oidc (account: the `AWS_ACCOUNT_ID` repo variable)
    ↓
 3. Create test artifact
    - Generate test file: "hello from github"
@@ -73,7 +73,7 @@ Actions → sign → Run workflow
 
 **Environment Variables:**
 - `AWS_REGION`: `us-east-1` - AWS region for KMS
-- `ROLE_ARN`: `arn:aws:iam::942039714848:role/github-dossier-oidc` - IAM role to assume
+- `ROLE_ARN`: `arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/github-dossier-oidc` - IAM role to assume
 - `KMS_KEY_ALIAS`: `alias/dossier-official-prod` - Production signing key
 
 **Permissions:**

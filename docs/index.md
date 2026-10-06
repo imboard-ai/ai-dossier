@@ -53,6 +53,8 @@ A **trigger skill** bridges the two: a thin `SKILL.md` that invokes a versioned,
 - **MCP Server** - Model Context Protocol integration for AI agents
 - **Core Library** - Shared verification and parsing logic
 
+New to the idea behind it? Read [Model-driven orchestration for AI agents](explanation/model-driven-orchestration.md): what it is, and how Dossier makes it trustworthy.
+
 ## Documentation Structure
 
 This documentation follows the [Diataxis framework](https://diataxis.fr/):

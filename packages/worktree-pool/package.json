@@ -1,7 +1,7 @@
 {
   "name": "@ai-dossier/worktree-pool",
-  "version": "0.7.5",
-  "description": "Pre-warmed Git worktree pool for coding agents and parallel development, with instant issue setup and dependency reuse.",
+  "version": "0.7.6",
+  "description": "Pre-warmed Git worktree pool for agent orchestration: instant, isolated checkouts for coding agents running signed, versioned agent skills in parallel.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
@@ -24,7 +24,12 @@
     "agent-workflows",
     "worktree-pool",
     "developer-productivity",
-    "monorepo"
+    "monorepo",
+    "agent-orchestration",
+    "ai-agents",
+    "agent-skills",
+    "claude-code",
+    "llm"
   ],
   "author": "Yuval Dimnik <yuval.dimnik@gmail.com>",
   "license": "AGPL-3.0-only",

@@ -46,7 +46,7 @@ function ghComment(
   {
     id = 0,
     createdAt = '2026-08-29T10:00:00Z',
-    login = 'yuvaldim',
+    login = 'alice',
     association = 'MEMBER',
   }: { id?: number; createdAt?: string; login?: string; association?: string } = {}
 ) {
@@ -59,7 +59,7 @@ function ghComment(
   };
 }
 
-function ghCommentsJson(bodies: string[], association = 'MEMBER', login = 'yuvaldim'): string {
+function ghCommentsJson(bodies: string[], association = 'MEMBER', login = 'alice'): string {
   return JSON.stringify({
     comments: bodies.map((body, i) => ghComment(body, { id: i, login, association })),
   });
@@ -311,7 +311,7 @@ describe('plan get', () => {
     ]);
     expect(parsed.url).toContain('comment-1');
     expect(parsed.created_at).toBe('2026-08-29T10:00:00Z');
-    expect(parsed.author).toBe('yuvaldim');
+    expect(parsed.author).toBe('alice');
     expect(parsed.new_files).toEqual([]);
   });
 
@@ -667,7 +667,7 @@ describe('plan validate', () => {
 
   it('does not warn for a MEMBER-posted plan', async () => {
     execHandles((file, args) => {
-      if (file === 'gh') return ghCommentsJson([POSTED_ARTIFACT], 'MEMBER', 'yuvaldim');
+      if (file === 'gh') return ghCommentsJson([POSTED_ARTIFACT], 'MEMBER', 'alice');
       if (file === 'git' && args[0] === 'cat-file') return '';
       if (file === 'git' && args[0] === 'rev-list') return '0';
       throw new Error(`unexpected: ${file}`);

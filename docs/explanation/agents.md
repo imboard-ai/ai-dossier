@@ -1,6 +1,8 @@
 > **Deprecated** — This file is outdated and no longer maintained.
 > See the "For AI Agents" sections in each package README instead:
 > [`README.md`](../../README.md) (root) | [`mcp-server/README.md`](../../mcp-server/README.md)
+>
+> For how agents orchestrate multi-step work with Dossier, see [Model-driven orchestration for AI agents](model-driven-orchestration.md).
 
 # AGENTS.md
 
@@ -301,7 +303,7 @@ INVALID          → Failed verification → BLOCK EXECUTION
 
 **Key Workflow**: `sign.yml`
 - Uses GitHub OIDC to authenticate to AWS
-- Accesses AWS KMS key: `alias/dossier-official-prod` (account 942039714848, us-east-1)
+- Accesses AWS KMS key: `alias/dossier-official-prod` (us-east-1)
 - Signs official dossiers with HSM-backed key
 - Demonstrates production signing workflow
 
@@ -593,7 +595,7 @@ const hash = crypto.createHash('sha256').update(content).digest('hex');
 **Official Signatures (AWS KMS)**:
 - Algorithm: ECDSA with SHA256 (P-256 curve)
 - Key Storage: AWS KMS (HSM-backed, FIPS 140-2 Level 2)
-- Key ID: `alias/dossier-official-prod` (account 942039714848)
+- Key ID: `alias/dossier-official-prod`
 - Use Case: Official dossiers from Dossier project
 - Trust Level: VERIFIED
 

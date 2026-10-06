@@ -1,7 +1,7 @@
 # Batch pilot — RFC-0001 Step 3 gate
 
 **Status: BLOCKED — the pilot did not execute. Baseline arm complete, pilot arm empty.**
-**Run:** `r-473-8b0e` · issue #473 · executing host: `hcc2` · 2026-09-01
+**Run:** `r-473-8b0e` · issue #473 · executing host: the runner host · 2026-09-01
 
 ## Recommendation
 
@@ -66,7 +66,7 @@ A hard gate that cannot be evaluated is not a passed gate. Hence NO-GO.
 
 | Item | Value |
 |---|---|
-| Execution host | `hcc2` — the only host reachable from this run (see §4.3) |
+| Execution host | the runner host — the only host reachable from this run (see §4.3) |
 | CLI | `@ai-dossier/cli` 0.19.1 |
 | Scheduler | `ai-dossier sched` (`packages/sched`), project `imboard-ai-ai-dossier`, `max_slots = 3` |
 | Repo under measurement | `imboard-ai/ai-dossier` (this repo) |
@@ -107,7 +107,7 @@ directly.
 | `gh run list --event pull_request` | CI executions per PR | 11/11 |
 | runstate trails on GitHub issues | phases, blocked milestones, tail completeness | 11/11 |
 | `git log origin/main` | reverts/hotfixes | full history |
-| `~/.dossier/runs.jsonl` (hcc2, 1111 rows at read time) | **no token data** — see below | — |
+| `~/.dossier/runs.jsonl` (the runner host, 1111 rows at read time) | **no token data** — see below | — |
 
 **The AC's named token source carries no tokens.** AC3 specifies `~/.dossier/runs.jsonl` as the
 token/duration source. On this host it carries `input_tokens`, `output_tokens` and
@@ -131,7 +131,7 @@ Full per-issue table and every derivation: [`evidence/batch-pilot-baseline.md`](
 
 ### 3.1 Headline
 
-| metric | baseline (full-cycle, `max_slots=3`, hcc2) | n |
+| metric | baseline (full-cycle, `max_slots=3`, the runner host) | n |
 |---|---|---|
 | billable input tokens / issue | **47,105,733** (98.5% cache-read) | 5 |
 | fresh (uncached) input / issue | 690,185 | 5 |
@@ -288,16 +288,16 @@ around. A run that cannot enqueue cannot pilot.
 
 ### 4.3 Multi-host aggregation is unreachable, and points at an empty source anyway
 
-AC3 requires baseline *and* pilot data aggregated across wls, hcc and hcc2.
+AC3 requires baseline *and* pilot data aggregated across the dev machine, the second host and the runner host.
 
-- This host is **`hcc2`** (`hostname` = `hcc2`). The AC's "wls" is a different box.
-- `ssh hcc` → DNS resolution failure. Direct-IP attempts at the two other hosts → *Permission
+- This host is the runner host. The AC's "dev machine" is a different box.
+- `ssh` to the second host → DNS resolution failure. Direct-IP attempts at the two other hosts → *Permission
   denied (publickey)*. No outbound credentials exist here.
-- `sched-parity.md` §2.5 documents the workaround used for the Step-1 gate: a **wls supervisor
+- `sched-parity.md` §2.5 documents the workaround used for the Step-1 gate: a **dev-machine supervisor
   session** read the other hosts and posted the per-host table as an issue comment, pulling the
   data *to* the run rather than giving the run credentials. No such comment exists for this window.
 - **AC3's token half cannot be satisfied on any host** — the source it names carries no token data
-  anywhere (§2.3). Its duration/aggregation half *is* satisfiable, via the same wls-supervisor read
+  anywhere (§2.3). Its duration/aggregation half *is* satisfiable, via the same dev-machine supervisor read
   used for the Step-1 gate; it simply was not performed for this window. `sched-parity.md` §4.4
   marks its equivalent AC met under the identical null-token condition by substituting the agent
   CLIs' own usage records — the same substitution this report makes (§2.2).
@@ -348,7 +348,7 @@ makespan comparison it appeared in.
 
 ## 6. Limitations
 
-- **Single host.** Everything measured here is `hcc2`. Cross-host aggregation was not possible
+- **Single host.** Everything measured here is the runner host. Cross-host aggregation was not possible
   (§4.3).
 - **Arm size is below §H's own method.** §H specifies **≥ 20 issues per arm** for the A/B. This
   baseline is 11 issues, and its token arm is n=5. It is the best available comparison set, not a
@@ -373,7 +373,7 @@ makespan comparison it appeared in.
 |---|---|---|
 | AC1 — ≥ 3 batches executed end-to-end, lowest-risk classes, `max_slots=3`, one at a time | ❌ **UNMET** — 0 batches executed | §4 |
 | AC2 — metrics vs the Step-0 baseline (tokens, CI, wall-clock + makespan, eviction, misclassification, regressions, interventions) | ⚠️ **PARTIAL** — baseline arm delivered for every metric that has a source; pilot arm empty; misclassification has no denominator; regression window 0/7 days; slot occupancy not re-derived | §3, §1.1 |
-| AC3 — token/duration aggregated across wls, hcc, hcc2 `runs.jsonl`, each on CLI ≥ 0.13.0 | ❌ **UNMET** — other hosts unreachable, and the named source carries no token data on any host | §4.3, §2.3 |
+| AC3 — token/duration aggregated across the dev machine, the second host and the runner host `runs.jsonl`, each on CLI ≥ 0.13.0 | ❌ **UNMET** — other hosts unreachable, and the named source carries no token data on any host | §4.3, §2.3 |
 | AC4 — every eviction/dissolve/failure narrated with its recovery path | ⚠️ **PARTIAL** — 0 evictions/dissolves (no batches); all three real failure events narrated, but one (#499's leaked slot) has **no recovery path** to narrate and needs a fix, not a description | §3.7 |
 | AC5 — report committed at `docs/reports/batch-pilot.md` with go/no-go against §H | ✅ **MET** — this document; verdict **NO-GO** | §Recommendation, §1.1 |
 

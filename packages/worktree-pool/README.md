@@ -89,7 +89,7 @@ Claim and return only re-run the warm commands when the project's lockfile chang
 
 ## Process cleanup
 
-A dev server, jest run, or vite server started inside a worktree by a verification step does not stop on its own when the worktree it was started in is recycled or removed. Left unaddressed, these outlive the worktree, the branch and the issue that spawned them — a real sweep on hcc found 13 such processes across four merged worktrees, one holding open connections to a shared test database for 10 days.
+A dev server, jest run, or vite server started inside a worktree by a verification step does not stop on its own when the worktree it was started in is recycled or removed. Left unaddressed, these outlive the worktree, the branch and the issue that spawned them — a real sweep on a dev host found 13 such processes across four merged worktrees, one holding open connections to a shared test database for 10 days.
 
 - **`return` and `gc` kill first.** Before recycling or removing a worktree, both send SIGTERM to every process whose cwd or command line is rooted under that exact worktree path, wait up to 5 seconds, then SIGKILL anything still alive. The kill is scoped to that one worktree — a sibling worktree sharing the same pool directory is never touched — and the killed pids are printed and included in `return --json`'s `killedProcesses` / `gc`'s `killedProcesses` field.
 - **`reap` is the sweep for what got away** — a process from a worktree that was removed by something other than this tool, or that is otherwise no longer `assigned`:
