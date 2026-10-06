@@ -504,7 +504,7 @@ npm run build
 node scripts/zt-vm.mjs bake  --profile-dir <dir> --cache-dir <dir> [--accel auto|kvm|tcg]
 node scripts/zt-vm.mjs smoke --profile-dir <dir> --state-dir <dir> [--accel ...] [--timings-out f]
 node scripts/zt-vm.mjs kill-all --state-dir <dir> --reason <text>   # exit 2: a VM was left behind
-node scripts/zt-vm.mjs reconcile --state-dir <dir> [--destroy]      # orphan VMs and directories
+node scripts/zt-vm.mjs reconcile --state-dir <dir> [--destroy]      # orphans; --destroy after kill-all
 node scripts/zt-vm.mjs release --state-dir <dir> --reason <text>    # lift the kill switch
 ZT_VM_E2E=1 ZT_PROFILE_DIR=<abs dir> npx vitest run src/__tests__/vm-gate.e2e.test.ts
 ```

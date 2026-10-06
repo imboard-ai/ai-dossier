@@ -1,3 +1,4 @@
+import { type ChildProcess, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import * as os from 'node:os';
@@ -423,7 +424,7 @@ describe('bakeProfile', () => {
 
   it('defaults to host preflight and system ops, refusing before anything starts', async () => {
     // Preflight refuses on a host without QEMU; otherwise the failed download does.
-    // Either way no process is launched, since the base image comes first.
+    // Either way no process is launched: the base image precedes any VM.
     await expect(
       bakeProfile({ profileDir, cacheDir, fetchImpl: okFetch(null, 503) })
     ).rejects.toThrow(/Execution profile refused|failed: HTTP 503/);
@@ -470,39 +471,48 @@ describe('bakeProfile', () => {
     expect(fake.runs.map((r) => r.args[0])).not.toContain('convert');
   });
 
-  it('holds the bake lock while baking and removes it afterwards, on success or failure', async () => {
+  it('holds the bake lock while baking and releases it afterwards, on success or failure', async () => {
     seedCache();
     const lock = path.join(profileDir, '.bake.lock');
     const fake = fakeOps(RESULT_LINE);
-    let held: unknown = null;
+    let refused: unknown = null;
     const launch = fake.ops.launch;
     fake.ops.launch = async (...args) => {
-      held = JSON.parse(fs.readFileSync(lock, 'utf8'));
       expect(fs.statSync(lock).mode & 0o777).toBe(0o600);
+      try {
+        fs.closeSync(acquireBakeLock(profileDir));
+      } catch (error) {
+        refused = error;
+      }
       return launch(...args);
     };
     await bakeProfile({ profileDir, cacheDir, tools, ops: fake.ops });
-    expect(held).toEqual({ pid: process.pid, token: `tok-${process.pid}` });
-    expect(fs.existsSync(lock)).toBe(false);
+    expect(String(refused)).toContain(`Another bake holds ${lock}`);
+    // Released, not deleted: the lock file stays for the next bake to lock.
+    expect(fs.existsSync(lock)).toBe(true);
+    fs.closeSync(acquireBakeLock(profileDir));
     const failing = fakeOps(`${BAKE_FAILED_MARKER} line=1\n`);
     await expect(bakeProfile({ profileDir, cacheDir, tools, ops: failing.ops })).rejects.toThrow(
       'Bake script failed'
     );
-    expect(fs.existsSync(lock)).toBe(false);
+    fs.closeSync(acquireBakeLock(profileDir));
   });
 
-  it('refuses to start while another live bake holds the lock', async () => {
-    seedCache();
+  it('refuses a concurrent bake before downloading anything', async () => {
     fs.mkdirSync(profileDir, { recursive: true });
-    const lock = path.join(profileDir, '.bake.lock');
-    fs.writeFileSync(lock, JSON.stringify({ pid: 4321, token: 'tok-4321' }));
-    const fake = fakeOps(RESULT_LINE);
-    await expect(bakeProfile({ profileDir, cacheDir, tools, ops: fake.ops })).rejects.toThrow(
-      `Another bake holds ${lock} (pid 4321); wait for it to finish`
-    );
-    expect(fake.launches).toEqual([]);
-    // The other bake's lock is not ours to remove.
-    expect(fs.existsSync(lock)).toBe(true);
+    const held = acquireBakeLock(profileDir);
+    try {
+      const fake = fakeOps(RESULT_LINE);
+      const fetchImpl = okFetch();
+      await expect(
+        bakeProfile({ profileDir, cacheDir, tools, ops: fake.ops, fetchImpl })
+      ).rejects.toThrow(`Another bake holds ${path.join(profileDir, '.bake.lock')}`);
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(fake.launches).toEqual([]);
+      expect(fs.existsSync(cacheDir)).toBe(false);
+    } finally {
+      fs.closeSync(held);
+    }
   });
 
   it('sweeps the work dir of an interrupted bake, killing its VM, before baking', async () => {
@@ -512,11 +522,19 @@ describe('bakeProfile', () => {
     fs.mkdirSync(stale);
     fs.writeFileSync(path.join(stale, 'disk.qcow2'), 'old');
     const fake = fakeOps(RESULT_LINE);
-    fake.ops.listProcesses = () => [555];
+    fake.ops.listProcesses = () => [555, 556];
     fake.ops.cmdline = (pid) =>
       pid === 555
-        ? ['qemu', '-drive', `file=${stale}/disk.qcow2`, '-pidfile', `${stale}/qemu.pid`]
-        : null;
+        ? [
+            '/usr/bin/qemu-system-x86_64',
+            '-drive',
+            `file=${stale}/disk.qcow2`,
+            '-pidfile',
+            `${stale}/qemu.pid`,
+          ]
+        : pid === 556
+          ? ['tail', '-f', `${stale}/qemu.pid`]
+          : null;
     await bakeProfile({ profileDir, cacheDir, tools, ops: fake.ops });
     expect(fake.kills).toEqual([[555, 'SIGKILL']]);
     expect(fs.existsSync(stale)).toBe(false);
@@ -525,88 +543,97 @@ describe('bakeProfile', () => {
 });
 
 describe('acquireBakeLock', () => {
-  const ops = (startToken: HostOps['startToken']): HostOps =>
-    ({ startToken }) as unknown as HostOps;
   const lockFile = () => path.join(profileDir, '.bake.lock');
-  const holder = (value: unknown) => {
-    fs.mkdirSync(profileDir, { recursive: true });
-    fs.writeFileSync(lockFile(), typeof value === 'string' ? value : JSON.stringify(value));
-  };
-  const mine = () => JSON.parse(fs.readFileSync(lockFile(), 'utf8'));
 
-  it('creates a private lock naming this process', () => {
-    fs.mkdirSync(profileDir);
-    expect(
-      acquireBakeLock(
-        profileDir,
-        ops((pid) => `tok-${pid}`)
-      )
-    ).toBe(lockFile());
-    expect(mine()).toEqual({ pid: process.pid, token: `tok-${process.pid}` });
-    expect(fs.statSync(lockFile()).mode & 0o777).toBe(0o600);
-  });
-
-  it('refuses a live holder, and a holder whose liveness cannot be read', () => {
-    holder({ pid: 4321, token: 'tok-4321' });
-    expect(() =>
-      acquireBakeLock(
-        profileDir,
-        ops((pid) => `tok-${pid}`)
-      )
-    ).toThrow(/Another bake holds .*\(pid 4321\)/);
-    const unreadable = ops((pid) => {
-      if (pid === 4321) throw new Error('EACCES');
-      return 'mine';
+  /** A child process that takes the lock the way bake.ts does, then reports in. */
+  function lockHolder(then: 'exit' | 'wait'): {
+    child: ChildProcess;
+    ready: Promise<void>;
+    exited: Promise<unknown>;
+  } {
+    const script = `
+      const fs = require('node:fs');
+      const { spawnSync } = require('node:child_process');
+      const fd = fs.openSync(process.argv[1], fs.constants.O_CREAT | fs.constants.O_RDWR, 0o600);
+      const r = spawnSync('/usr/bin/flock', ['-x', '-n', '3'], { stdio: ['ignore', 'ignore', 'ignore', fd] });
+      if (r.status !== 0) process.exit(3);
+      process.stdout.write('locked');
+      if (process.argv[2] === 'wait') setInterval(() => {}, 1000);
+    `;
+    const child = spawn(process.execPath, ['-e', script, lockFile(), then], {
+      stdio: ['ignore', 'pipe', 'inherit'],
     });
-    expect(() => acquireBakeLock(profileDir, unreadable)).toThrow(/Another bake holds/);
-    expect(mine()).toEqual({ pid: 4321, token: 'tok-4321' });
-  });
+    const exited = new Promise((resolve) => child.once('exit', resolve));
+    const ready = new Promise<void>((resolve, reject) => {
+      child.stdout?.on('data', (chunk: Buffer) => {
+        if (chunk.toString().includes('locked')) resolve();
+      });
+      child.once('exit', (code) => reject(new Error(`lock holder exited early (${code})`)));
+    });
+    return { child, ready, exited };
+  }
 
-  it.each([
-    ['a holder whose PID was recycled', { pid: 4321, token: 'tok-old' }],
-    ['a holder that is gone', { pid: 4321, token: 'tok-4321', gone: true }],
-    ['pid 1', { pid: 1, token: 'tok-1' }],
-    ['a non-numeric pid', { pid: 'x', token: 'tok-x' }],
-    ['an unreadable lock', '{not json'],
-    ['an empty lock', ''],
-  ])('takes over a stale lock: %s', (_label, value) => {
-    holder(value);
-    const startToken = (pid: number) =>
-      pid === process.pid
-        ? 'mine'
-        : pid === 4321 && typeof value === 'object' && 'gone' in value
-          ? null
-          : `tok-${pid}`;
-    expect(acquireBakeLock(profileDir, ops(startToken))).toBe(lockFile());
-    expect(mine()).toEqual({ pid: process.pid, token: 'mine' });
-  });
-
-  it('rethrows errors other than an existing lock', () => {
-    expect(() =>
-      acquireBakeLock(
-        path.join(root, 'missing'),
-        ops(() => 'x')
-      )
-    ).toThrow(/ENOENT/);
-  });
-
-  it('gives up when the lock keeps reappearing', () => {
-    holder({ pid: 4321, token: 'tok-old' });
-    const rm = fs.rmSync;
-    const spy = vi.spyOn(fs, 'rmSync').mockImplementation(((target: fs.PathLike, options) => {
-      if (String(target) === lockFile()) return; // another bake re-creates it at once
-      rm(target, options);
-    }) as typeof fs.rmSync);
+  it('creates a private lock file and holds it through the returned descriptor', () => {
+    fs.mkdirSync(profileDir);
+    const fd = acquireBakeLock(profileDir);
     try {
-      expect(() =>
-        acquireBakeLock(
-          profileDir,
-          ops((pid) => `tok-${pid}-now`)
-        )
-      ).toThrow(`Could not take the bake lock ${lockFile()}`);
+      expect(typeof fd).toBe('number');
+      expect(fs.statSync(lockFile()).mode & 0o777).toBe(0o600);
     } finally {
-      spy.mockRestore();
+      fs.closeSync(fd);
     }
+  });
+
+  it('refuses a second acquisition while one descriptor holds it', () => {
+    fs.mkdirSync(profileDir);
+    const fd = acquireBakeLock(profileDir);
+    try {
+      expect(() => acquireBakeLock(profileDir)).toThrow(
+        `Another bake holds ${lockFile()}; wait for it to finish`
+      );
+    } finally {
+      fs.closeSync(fd);
+    }
+  });
+
+  it('is released when its descriptor is closed, and the lock file is kept', () => {
+    fs.mkdirSync(profileDir);
+    fs.closeSync(acquireBakeLock(profileDir));
+    expect(fs.existsSync(lockFile())).toBe(true);
+    fs.closeSync(acquireBakeLock(profileDir));
+  });
+
+  it('is released when a holder process exits', async () => {
+    fs.mkdirSync(profileDir);
+    const holder = lockHolder('exit');
+    await holder.ready;
+    await holder.exited;
+    fs.closeSync(acquireBakeLock(profileDir));
+  });
+
+  it('is released when a holder process is killed', async () => {
+    fs.mkdirSync(profileDir);
+    const holder = lockHolder('wait');
+    try {
+      await holder.ready;
+      expect(() => acquireBakeLock(profileDir)).toThrow(/Another bake holds/);
+    } finally {
+      holder.child.kill('SIGKILL');
+      await holder.exited;
+    }
+    fs.closeSync(acquireBakeLock(profileDir));
+  });
+
+  it('never follows a symlinked lock file', () => {
+    fs.mkdirSync(profileDir);
+    const target = path.join(root, 'target');
+    fs.writeFileSync(target, 'x');
+    fs.symlinkSync(target, lockFile());
+    expect(() => acquireBakeLock(profileDir)).toThrow(/ELOOP/);
+  });
+
+  it('rethrows errors opening the lock file', () => {
+    expect(() => acquireBakeLock(path.join(root, 'missing'))).toThrow(/ENOENT/);
   });
 });
 
@@ -648,7 +675,7 @@ describe('sweepStaleBakes', () => {
     expect(fs.readdirSync(profileDir)).toEqual(['manifest.json']);
   });
 
-  it('kills only processes using a stale work dir, then removes every one', () => {
+  it('kills only QEMU processes whose pidfile is in a stale work dir, then removes every one', () => {
     fs.mkdirSync(profileDir);
     const a = path.join(profileDir, '.bake-a');
     const b = path.join(profileDir, '.bake-b');
@@ -658,12 +685,23 @@ describe('sweepStaleBakes', () => {
     }
     fs.writeFileSync(path.join(profileDir, 'image.qcow2'), 'keep');
     const fake = sweepOps({
-      10: ['qemu', '-pidfile', `${a}/qemu.pid`],
-      11: ['qemu', '-pidfile', path.join(root, 'elsewhere', 'qemu.pid')],
+      10: ['qemu-system-x86_64', '-pidfile', `${a}/qemu.pid`],
+      11: ['qemu-system-x86_64', '-pidfile', path.join(root, 'elsewhere', 'qemu.pid')],
       12: new Error('EACCES'),
-      13: ['qemu', `${b}/disk.qcow2`],
+      13: [
+        '/usr/bin/qemu-system-aarch64',
+        '-drive',
+        `${b}/disk.qcow2`,
+        '-pidfile',
+        `${b}/qemu.pid`,
+      ],
       14: null,
-      15: ['qemu', `${a}bc/disk.qcow2`, a],
+      15: ['tail', '-f', `${a}/qemu.pid`],
+      16: ['/usr/bin/vim', `${b}/qemu.pid`],
+      17: ['qemu-system-x86_64', '-drive', `${b}/disk.qcow2`, `${a}/qemu.pid`],
+      18: ['qemu-system-x86_64', '-pidfile', `${a}/nested/qemu.pid`],
+      19: ['qemu-system-x86_64', '-pidfile', `${a}bc/qemu.pid`],
+      20: ['qemu', '-pidfile', `${a}/qemu.pid`],
     });
     expect(sweepStaleBakes(profileDir, fake.ops).sort()).toEqual([a, b]);
     expect(fake.kills).toEqual([

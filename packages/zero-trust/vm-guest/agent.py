@@ -196,13 +196,16 @@ def op_exec(request, scope, exec_id):
         workdir = "/"
         env = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}
     out, err, state = bytearray(), bytearray(), {"truncated": False}
+    if not os.path.isdir(workdir):
+        return {"ok": False, "error": "workdir_missing"}
     try:
         proc = subprocess.Popen(
             command, cwd=workdir, env=env, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
         )
     except FileNotFoundError:
-        # A missing command is not a missing workspace file (op_get's not_found).
+        # The executable is missing (the working directory was checked above);
+        # distinct from op_get's not_found for a missing workspace file.
         return {"ok": False, "error": "command_not_found"}
     readers = [
         threading.Thread(target=drain, args=(proc.stdout, out, state), daemon=True),

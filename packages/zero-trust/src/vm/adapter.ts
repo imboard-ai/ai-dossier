@@ -92,6 +92,7 @@ export type UnsupportedDetail =
   | 'kvm_unavailable'
   | 'profile_image_missing'
   | 'profile_image_mismatch'
+  | 'profile_image_untrusted'
   | 'socket_path_too_long'
   | 'kill_switch_engaged';
 

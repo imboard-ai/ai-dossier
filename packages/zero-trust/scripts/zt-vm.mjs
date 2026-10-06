@@ -28,11 +28,14 @@ function arg(name, fallback) {
 const log = (m) => console.error(`[zt-vm] ${m}`);
 
 // Teardown commands need neither QEMU nor a current profile: only the state dir.
+// Their lifecycle events go to the VM journal under it (not a run's intent journal).
 function teardownAdapter() {
+  const stateDir = arg('state-dir');
   return new zt.LocalQemuAdapter({
     profileDir: arg('profile-dir', '.'),
-    stateDir: arg('state-dir'),
+    stateDir,
     verifyImage: false,
+    journal: new zt.Journal(path.join(stateDir, 'vm-journal')),
   });
 }
 
@@ -105,7 +108,10 @@ try {
     console.log(JSON.stringify(printable(report), null, 2));
     const leftover = destroy
       ? report.failed.length
-      : report.staleDirs.length + report.untrustedDirs.length + report.orphanProcesses.length;
+      : report.staleDirs.length +
+        report.unverifiedDirs.length +
+        report.untrustedDirs.length +
+        report.orphanProcesses.length;
     if (leftover) process.exitCode = 2;
   } else if (command === 'release') {
     const released = teardownAdapter().releaseKillSwitch(arg('reason'));

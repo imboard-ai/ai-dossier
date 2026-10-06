@@ -186,6 +186,34 @@ export const systemOps: HostOps = {
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 };
 
+/** The `-pidfile` operand of a QEMU process, or null for anything else. An
+ * argument that merely mentions the path (an editor or `tail` on the pidfile)
+ * never makes a process QEMU. */
+export function qemuPidFile(argv: readonly string[] | null): string | null {
+  if (!argv?.length || !path.basename(argv[0] as string).startsWith('qemu-system-')) return null;
+  const at = argv.indexOf('-pidfile');
+  return at > 0 && at + 1 < argv.length ? (argv[at + 1] as string) : null;
+}
+
+/** QEMU processes whose `-pidfile` operand satisfies `accept`; unreadable
+ * processes are skipped (they are never signalled from a scan). */
+export function findQemuProcesses(
+  ops: Pick<HostOps, 'listProcesses' | 'cmdline'>,
+  accept: (pidFile: string) => boolean
+): Map<number, string> {
+  const found = new Map<number, string>();
+  for (const pid of ops.listProcesses()) {
+    let pidFile: string | null;
+    try {
+      pidFile = qemuPidFile(ops.cmdline(pid));
+    } catch {
+      continue;
+    }
+    if (pidFile && accept(pidFile)) found.set(pid, pidFile);
+  }
+  return found;
+}
+
 interface VmRecord {
   readonly vmId: string;
   readonly runId: string;
@@ -308,7 +336,7 @@ export class LocalQemuAdapter implements VmAdapter {
     const stat = fs.lstatSync(image);
     if (!stat.isFile() || stat.uid !== os.userInfo().uid || (stat.mode & 0o022) !== 0)
       throw new UnsupportedEnvironmentError(
-        'profile_image_mismatch',
+        'profile_image_untrusted',
         `baked profile image ${image} must be a regular file owned by this user and not writable by group or others`
       );
     this.imageVerified = true;
@@ -355,7 +383,7 @@ export class LocalQemuAdapter implements VmAdapter {
     if (this.killSwitchEngaged())
       throw new UnsupportedEnvironmentError(
         'kill_switch_engaged',
-        `the incident kill switch is engaged (${path.join(this.options.stateDir, KILL_SWITCH_FILE)}); no new VMs are admitted until an operator removes it`
+        `the incident kill switch is engaged (${path.join(this.options.stateDir, KILL_SWITCH_FILE)}); no new VMs are admitted until \`zt-vm.mjs release\` lifts it (after kill-all or reconcile --destroy)`
       );
   }
 
@@ -570,7 +598,8 @@ export class LocalQemuAdapter implements VmAdapter {
     if (leftoverPids.length) leftoverPaths.push(vmDir);
     if (leftoverPids.length || leftoverPaths.length)
       throw new VmCleanupError(leftoverPids, leftoverPaths, handle.vmId);
-    this.journal({ type: 'vm_destroyed', runId: handle.runId, vmId: handle.vmId });
+    // An empty run ID means the VM had no trustworthy record (reconcile).
+    this.journal({ type: 'vm_destroyed', runId: handle.runId || null, vmId: handle.vmId });
   }
 
   /** SIGTERM, then SIGKILL; true when the process is still alive afterwards. */
@@ -629,7 +658,7 @@ export class LocalQemuAdapter implements VmAdapter {
     try {
       const argv = this.ops.cmdline(pid);
       if (argv === null) return 'gone';
-      return argv.includes(this.pidFilePath(vmId)) ? 'owned' : 'gone';
+      return qemuPidFile(argv) === this.pidFilePath(vmId) ? 'owned' : 'gone';
     } catch {
       return 'unknown';
     }
@@ -655,21 +684,13 @@ export class LocalQemuAdapter implements VmAdapter {
 
   /** QEMU processes whose argv names a pidfile in this state dir, by VM ID. */
   private vmProcesses(): Map<number, string> {
+    const vmIdOf = (pidFile: string): string | null => {
+      const vmId = path.basename(path.dirname(pidFile));
+      return VM_ID.test(vmId) && pidFile === this.pidFilePath(vmId) ? vmId : null;
+    };
     const found = new Map<number, string>();
-    const prefix = `${this.vmsDir}${path.sep}`;
-    for (const pid of this.ops.listProcesses()) {
-      let argv: string[] | null;
-      try {
-        argv = this.ops.cmdline(pid);
-      } catch {
-        continue;
-      }
-      const pidFile = argv?.find(
-        (arg) => arg.startsWith(prefix) && arg.endsWith(`${path.sep}qemu.pid`)
-      );
-      const vmId = pidFile?.slice(prefix.length, -`${path.sep}qemu.pid`.length);
-      if (vmId && VM_ID.test(vmId)) found.set(pid, vmId);
-    }
+    for (const [pid, pidFile] of findQemuProcesses(this.ops, (f) => vmIdOf(f) !== null))
+      found.set(pid, vmIdOf(pidFile) as string);
     return found;
   }
 
@@ -749,9 +770,15 @@ export class LocalQemuAdapter implements VmAdapter {
     for (const [pid, vmId] of this.vmProcesses()) {
       if (fs.existsSync(path.join(this.vmsDir, vmId))) continue;
       if (await this.stop(pid)) failed.push(new VmCleanupError([pid], [], vmId));
-      else destroyed.push(vmId);
+      else this.orphanStopped(vmId, destroyed);
     }
     return { destroyed, failed, blockedRuns };
+  }
+
+  /** An orphan QEMU (no directory, so no run) was stopped. */
+  private orphanStopped(vmId: string, destroyed: string[]): void {
+    destroyed.push(vmId);
+    this.journal({ type: 'vm_destroyed', runId: null, vmId, orphan: true });
   }
 
   private blockRun(runId: string, options: KillAllOptions): boolean {
@@ -778,11 +805,31 @@ export class LocalQemuAdapter implements VmAdapter {
       throw new Error(
         `The kill switch stays engaged: ${remaining.length} VM(s) remain (${remaining.join(', ')}); run kill-all or reconcile --destroy first`
       );
-    let engaged: { reason?: unknown; at?: unknown } = {};
+    let seen: Buffer | null = null;
     try {
-      engaged = JSON.parse(readPrivate(file).toString('utf8'));
+      seen = readPrivate(file);
     } catch {
       // an unreadable marker is still released, and the release is still journaled
+    }
+    // Move the marker aside, then make sure it is the one judged above: a kill-all
+    // for a new incident in between must not be released by this call.
+    const aside = `${file}.released-${randomBytes(6).toString('hex')}`;
+    fs.renameSync(file, aside);
+    let moved: Buffer | null = null;
+    try {
+      moved = readPrivate(aside);
+    } catch {
+      // compared below as unreadable
+    }
+    if (seen === null ? moved !== null : moved === null || !moved.equals(seen)) {
+      fs.renameSync(aside, file);
+      throw new Error('The kill switch was re-engaged during release; it stays engaged');
+    }
+    let engaged: { reason?: unknown; at?: unknown } = {};
+    try {
+      engaged = JSON.parse((seen as Buffer).toString('utf8'));
+    } catch {
+      // unreadable marker: released without its original reason
     }
     this.journal({
       type: 'vm_kill_switch_released',
@@ -790,7 +837,11 @@ export class LocalQemuAdapter implements VmAdapter {
       engagedReason: typeof engaged.reason === 'string' ? engaged.reason : null,
       engagedAt: typeof engaged.at === 'string' ? engaged.at : null,
     });
-    fs.rmSync(file);
+    try {
+      fs.rmSync(aside);
+    } catch {
+      // the switch is already released (the marker is gone); a leftover aside file is harmless
+    }
     return true;
   }
 
@@ -798,10 +849,17 @@ export class LocalQemuAdapter implements VmAdapter {
    * directories without a trustworthy record, and QEMU processes of this state
    * dir with no directory. With `destroy`, cleans each one up. */
   async reconcile(options: { destroy?: boolean } = {}): Promise<ReconcileReport> {
+    // A VM still booting has a record but no pidfile yet and would look stale;
+    // only with admissions stopped is every such directory really abandoned.
+    if (options.destroy && !this.killSwitchEngaged())
+      throw new Error(
+        'reconcile --destroy needs the kill switch engaged (run kill-all first), so no VM is booting'
+      );
     const processes = this.vmProcesses();
     const report: ReconcileReport = {
       live: [],
       staleDirs: [],
+      unverifiedDirs: [],
       untrustedDirs: [],
       orphanProcesses: [],
       destroyed: [],
@@ -812,15 +870,18 @@ export class LocalQemuAdapter implements VmAdapter {
       const { pid, ownership } = this.resolveProcess(vmId, record);
       const running = ownership !== 'gone' && pid !== null && this.ops.alive(pid);
       if (!record) report.untrustedDirs.push(vmId);
-      else if (running && ownership === 'owned') report.live.push(vmId);
+      else if (ownership === 'unknown') report.unverifiedDirs.push(vmId);
+      else if (running) report.live.push(vmId);
       else report.staleDirs.push(vmId);
     }
     for (const [pid, vmId] of processes)
       if (!fs.existsSync(path.join(this.vmsDir, vmId))) report.orphanProcesses.push({ pid, vmId });
     if (options.destroy) {
-      for (const vmId of [...report.staleDirs, ...report.untrustedDirs]) {
+      // An unverified directory is attempted too: destroy() never signals it and
+      // reports its PID as left behind.
+      for (const vmId of [...report.staleDirs, ...report.unverifiedDirs, ...report.untrustedDirs]) {
         try {
-          await this.destroy({ vmId, runId: this.readRecord(vmId)?.runId ?? 'reconcile' });
+          await this.destroy({ vmId, runId: this.readRecord(vmId)?.runId ?? '' });
           report.destroyed.push(vmId);
         } catch (error) {
           report.failed.push(
@@ -832,13 +893,14 @@ export class LocalQemuAdapter implements VmAdapter {
       }
       for (const { pid, vmId } of report.orphanProcesses) {
         if (await this.stop(pid)) report.failed.push(new VmCleanupError([pid], [], vmId));
-        else report.destroyed.push(vmId);
+        else this.orphanStopped(vmId, report.destroyed);
       }
     }
     this.journal({
       type: 'vm_reconcile',
       destroy: options.destroy === true,
       staleDirs: report.staleDirs,
+      unverifiedDirs: report.unverifiedDirs,
       untrustedDirs: report.untrustedDirs,
       orphanProcesses: report.orphanProcesses.map((o) => o.vmId),
     });
@@ -858,6 +920,8 @@ export interface ReconcileReport {
   live: string[];
   /** Directories whose QEMU is gone (or never recorded and not running). */
   staleDirs: string[];
+  /** Directories whose QEMU cannot be judged (unreadable /proc); maybe still running. */
+  unverifiedDirs: string[];
   /** Directories without a trustworthy record. */
   untrustedDirs: string[];
   /** QEMU processes of this state dir whose directory is gone. */

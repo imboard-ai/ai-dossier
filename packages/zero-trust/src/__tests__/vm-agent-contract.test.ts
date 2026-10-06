@@ -1,7 +1,10 @@
 /** The guest agent (Python, baked into the image) and the host broker (TypeScript)
  * share a wire contract. Nothing compiles them together, so this test reads the
  * agent's constants and fails the moment either side drifts. */
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { BROKER_PROTOCOL, MAX_FILE_BYTES, MAX_FRAME_BYTES, MAX_STREAM_BYTES } from '../vm/broker';
 import { bakeUserData } from '../vm/cloud-init';
@@ -65,5 +68,41 @@ describe('guest agent ↔ host broker contract', () => {
     expect(() => constant('NO_SUCH_CONSTANT')).toThrow(/no constant/);
     expect(() => integer('PORT')).toThrow(/integer product/);
     expect(() => text('MAX_LINE')).toThrow(/string literal/);
+  });
+});
+
+const PYTHON = spawnSync('python3', ['--version']).status === 0;
+
+describe.skipIf(!PYTHON)('guest agent exec errors', () => {
+  /** op_exec in vm-root scope against a temporary workspace, via python3. */
+  function exec(cwd: string): unknown {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'zt-agent-'));
+    try {
+      const script = [
+        'import json, sys',
+        'sys.path.insert(0, sys.argv[1])',
+        'import agent',
+        'agent.WORKSPACE = sys.argv[2]',
+        'request = {"argv": ["/nonexistent-zt"], "cwd": sys.argv[3], "profile": "node", "timeoutMs": 1000}',
+        'print(json.dumps(agent.op_exec(request, "vm-root", 1)))',
+      ].join('\n');
+      const result = spawnSync(
+        'python3',
+        ['-c', script, path.dirname(AGENT_SOURCE_PATH), workspace, cwd],
+        { encoding: 'utf8', env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' } }
+      );
+      expect(result.stderr).toBe('');
+      return JSON.parse(result.stdout);
+    } finally {
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  }
+
+  it('reports a missing executable as command_not_found', () => {
+    expect(exec('')).toEqual({ ok: false, error: 'command_not_found' });
+  });
+
+  it('reports a missing working directory as workdir_missing, not a missing command', () => {
+    expect(exec('missing')).toEqual({ ok: false, error: 'workdir_missing' });
   });
 });
