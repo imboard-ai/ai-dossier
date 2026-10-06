@@ -97,9 +97,10 @@ involved in a bake.
   of the download cache.
 - Bake (`src/vm/cloud-init.ts`, `src/vm/bake.ts`): no users, no passwords, SSH disabled and
   masked, apt timers masked, root locked, snapd and unattended upgrades purged, cloud-init disabled after the bake.
-  Node and Python container images derive from
-  `mcr.microsoft.com/devcontainers/base:ubuntu24.04` pinned by digest; sudo is purged and every
-  setuid/setgid bit is stripped at build time. The flattened image is hashed into a manifest
+  Node and Python container images derive from the `profiles.json` profile images
+  (`node-22`, `python-3.13`, devcontainer images pinned by digest; uv added from its own
+  digest-pinned image since #1010); sudo is purged and every setuid/setgid bit is stripped at
+  build time. The flattened image is hashed into a manifest
   together with the profile digest (pins, recipe version, guest agent source). The adapter
   re-hashes the image before its first VM and refuses a qcow2 whose header names a backing file
   or an external data file (QEMU would open either with the controller's privileges).
@@ -145,7 +146,8 @@ other credentials.
 
 KVM is used when `/dev/kvm` is read-write for the controller's user; otherwise TCG. A forced `kvm`
 request without KVM is refused, never downgraded. TCG is the same image and the same isolation;
-only clocks change: command and broker request timeouts ×4, and boot timeout 20 min (KVM: 3 min).
+only clocks change: command and broker request timeouts ×16 (×4 until #1010 re-measured it), and
+boot timeout 20 min (KVM: 3 min).
 The accelerator is recorded in the `vm_created` journal event and bound into the receipt
 (`profile.accelerator`).
 
@@ -169,9 +171,10 @@ a cached profile. The probe time is dominated by its own 3–4 s connection and 
 
 On a development machine without `/dev/kvm`, a TCG bake ran for over an hour without finishing
 (the earlier sketch measured about 330 s for the unbaked image's first boot alone), so bakes belong
-on a KVM host or in CI. Container start-up costs more under TCG than the ×4 command-timeout scale
-assumes for short commands (8.8–15×); the 20-minute base timeout leaves headroom for build and
-test commands, but the scale should be re-measured with real repositories in #1010.
+on a KVM host or in CI. Container start-up costs more under TCG than the original ×4
+command-timeout scale assumed for short commands (8.8–15×). #1010 re-measured it with the gate 2
+fixtures (installs, rebuilds and tests 11–15×, boot and phase switch 10–13×) and raised the scale
+to ×16; see the [package-proxy record](package-proxy.md#timings-and-the-tcg-timeout-scale).
 
 ## Attack categories (scenario 4)
 
