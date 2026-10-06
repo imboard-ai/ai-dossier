@@ -1,9 +1,10 @@
 # @ai-dossier/zero-trust
 
 Private, provider-independent foundation for [PRD-ZTFC-001](../../docs/features/zero-trust-full-cycle/prd.md)
-§5.1, §5.5 and §5.6 (gate 2), §5.7, §5.8 and §5.9. The core modules make no model or
-GitHub calls; the VM adapter and the proxy scripts are described below. Receipts use core's
-Ed25519 signer abstraction and Ajv schema validation.
+§5.1, §5.5 and §5.6 (gate 2), §5.7, §5.8 and §5.9. No model calls; the only
+GitHub calls are the controller-only broker/push modules and credential-free reads in
+`src/github/`, and the VM adapter and proxy scripts are described below. Receipts use
+core's Ed25519 signer abstraction and Ajv schema validation.
 This provides lifecycle/status, durable intent/budget, canonical Git and receipt primitives,
 plus ecosystem detection, runtime profiles, command plans and package-proxy policy
 (see the gate 2 section below).
@@ -41,7 +42,7 @@ resume events must return to the interrupted phase and represent trusted
 controller decisions; that controller must bind
 the checkpoint, candidate, receipts, policy and budget before emitting them.
 Publication observations must be reconciled before pause/cancel if an API response
-was lost; this package performs no GitHub writes or resource teardown.
+was lost; the lifecycle API performs no GitHub writes or resource teardown.
 
 `StatusRecord` has all PRD status facts. `activeTimeMs` excludes waits. Money
 estimates contain nonnegative finite `amount` and a matching three-letter
@@ -123,8 +124,10 @@ controller transition, including cancellation and cleanup failure. This takes ef
 even while reconciliation is awaiting an adapter response. Already-issued mutations
 cannot be recalled; their outcomes are still journaled and reconciled.
 
-Admission is checked after reconciliation: engagement comments require `gating` or
-`awaiting_maintainer`; fork/push/PR creation require `shipping`; PR updates require
+`execute` refuses `CONTRIBUTOR_CONFIRMED_OPERATIONS` (`engagement_comment`, `pr_create`)
+with `IntentError('contributor_confirmed')` before anything is journaled: those are
+contributor hand-offs (below). Journals that already hold such intents stay replayable.
+Admission is checked after reconciliation: fork/push require `shipping`; PR updates require
 `shipping` or `revising`. Explicit withdrawal (`pr_close`) is permitted in `shipping`,
 `submitted`, `awaiting_review`, `revising` or `accepted`, before recording `declined`.
 Terminal states, `blocked_cleanup` and `paused_user` deny every mutation with
@@ -137,9 +140,13 @@ The adapter must authenticate artifact ownership/target, enforce current permiss
 and receipt checks, and implement compare-and-swap branch writes. For push results,
 `found`/mutation success must include `remoteSha` equal to `candidateSha`. A different
 or missing SHA blocks the run. A truly absent branch is `absent`; inability to prove
-absence is `unknown`. No adapter exception text is persisted. Engagement adapters
-must include `engagementMarker(contributionId)` in comments and reconcile the unique
-matching marker via `parseEngagementMarker`, with contributor/target checks.
+absence is `unknown`. No adapter exception text is persisted. An adapter throws
+`WriteRefusedError` when it proved nothing unintended was written
+(`authorization_refused`) or the remote holds content it must not touch
+(`remote_diverged`): the driver blocks with that reason instead of retrying, and the
+refusal (with its secret-free `detail`) is the `WriteBlockedError`'s `cause`.
+`engagementMarker`/`parseEngagementMarker` are kept only to read legacy journals;
+contributor hand-offs use `handoffMarker`/`findHandoffMarkers`.
 
 Only one retry is available after proven absence, including across restarts.
 Unknown reconciliation denies all further writes and persists a `PolicyBlocked`
@@ -149,7 +156,20 @@ reason is still journaled. Proven absence after the final attempt is journaled a
 `exhausted`; it cannot enable a retry or repeatedly reconcile on restart.
 `snapshot().blockedReason` on a persisted block preserves the bounded reason
 (`unknown`, `reconciliation_error`, `invalid_evidence`, `unexpected_remote_sha`,
-or `retry_exhausted`) without storing provider exception text.
+`retry_exhausted`, `remote_diverged`, `authorization_refused` or `fork_unverified`) without
+storing provider exception text. A `reconcile` that throws `ReconcileDeferredError`
+(evidence temporarily unreadable: rate limit, network) records nothing and blocks
+nothing; `resume()`/`execute()` rethrow it and a later resume reads again. Only positive
+evidence blocks. Likewise a `mutate` that throws `MutationDeferredError` (it proved nothing
+was sent and no single-use authority was consumed, e.g. a rate-limited preflight or a
+busy nonce-store lock) gets its attempt withdrawn (`withdrawn` event), so transient
+failures never spend the one retry. A `mutate` that proved nothing was written but whose single-use authority
+for the attempt is spent (a consumed receipt nonce, a journaled token mint) throws
+`MutationVoidedError`: the driver journals `voided` with its reason. The attempt number is
+used up, so the next attempt needs a fresh receipt, but the retry budget is untouched. At
+most `MAX_VOIDED_ATTEMPTS` (3) attempts are voided; past that a void counts like any
+ambiguous attempt, so attempt numbers stay within `MAX_ATTEMPT_SEQUENCE` (5), which the
+receipt and nonce store accept.
 Every intent and attempt is fsynced before the adapter runs;
 confirmation is fsynced before success returns. File and ancestor directory entries
 are fsynced on open. Write uncertainty poisons the live driver; recover from disk
@@ -200,7 +220,7 @@ run prepares the exact content, issues a link, waits durably in
   only after the same admission as a brokered write: fresh policy, verified
   contributor, and for a PR also the verified fork binding, the receipt rendered in
   the body valid for the candidate (`receiptValid(sha, receiptDigest)`), and a remote branch SHA equal to the candidate (`HandoffAdmission`; the
-  read-back comes from the verified push, #1066). No link is issued while any PR
+  read-back is `ForkPusher.handoffReadBack(target)` from the verified push, #1066). No link is issued while any PR
   exists on the head/base, or while GitHub cannot be read. `resume()` reconciles
   before anything else. An observed PR moves the run to `submitted`. The journal keeps
   its URL, number, head SHA and state (`open`, `closed` or `merged`; a closed PR is
@@ -366,7 +386,11 @@ under a fresh `/tmp` directory (inherited `TMPDIR` is ignored),
 no templates/system/global config, disabled hooks/credential helpers/attributes,
 no replacements and `protocol.allow=never`. Subprocesses have a 60-second timeout
 and 128 MiB output cap; supervise controller resources independently for large or
-hostile compressed object packs. No protocol exceptions are needed by this API.
+hostile compressed object packs. The canonical API needs no protocol exception. Only
+the fork push adds one: `exec`/`execAsync` accept the broker credential's
+`GIT_CONFIG_*` set (which allows HTTPS) and nothing else that could change the
+hardening, and the push runs asynchronously with a 120-second timeout so an aborted
+lease kills it.
 
 Author fields/timestamps and the message are fixed once; UTC timestamps require
 whole seconds. The disclosed fixed committer is `CANONICAL_COMMITTER`. Raw commit
@@ -408,7 +432,10 @@ invent counts or omit required checks to obtain authorization.
 Use `authorizeShipping` inside the trusted `WriteAdapter.mutate` after `IntentDriver`
 has persisted its attempted intent. Pass the exact expected remote SHA (`null` for
 PR operations) and a `ReceiptNonceStore` in a **separate, controller-owned local
-directory**. Grants bind the existing `idempotencyKey`, operation kind/target,
+directory**. The context must carry the run's `boundaryEvidence` (from
+`evaluateBoundary` with that run's ID): anything but that run's clean held verdict is
+refused (`boundary_not_held`, `boundary_evidence_missing`, `boundary_wrong_run`) before a
+nonce is consumed. Grants bind the existing `idempotencyKey`, operation kind/target,
 expected remote SHA and a unique controller-generated nonce. Receipts expire exactly
 15 minutes after issuance. Each grant is consumed and fsynced before authorization
 returns. The returned grant permits only that one mutation, not repeated calls.
@@ -494,7 +521,8 @@ QEMU flags, network design, measured overhead and residual risks:
   unsupported OS or architecture, missing QEMU tools, or a forced `kvm` without `/dev/kvm`.
   There is no host-container fallback.
 - `LocalQemuAdapter` implements the provider-neutral `VmAdapter` (create, exec, putFile,
-  getFile, endProvisioning, destroy, listByRun) plus the `killAll` incident kill switch. QEMU
+  getFile, endProvisioning, destroy, listByRun) plus the `killAll` incident kill switch,
+  `reconcile` and `releaseKillSwitch`. QEMU
   runs rootless with `restrict=on` user-mode networking, no forwards outside the provisioning
   phase and no shared folders; the
   broker (`BrokerClient`, `vm-guest/agent.py`) is the only data path.
@@ -531,6 +559,8 @@ npm run build
 node scripts/zt-vm.mjs bake  --profile-dir <dir> --cache-dir <dir> [--accel auto|kvm|tcg]
 node scripts/zt-vm.mjs smoke --profile-dir <dir> --state-dir <dir> [--accel ...] [--timings-out f]
 node scripts/zt-vm.mjs kill-all --state-dir <dir> --reason <text>   # exit 2: a VM was left behind
+node scripts/zt-vm.mjs reconcile --state-dir <dir> [--destroy]      # orphans; --destroy after kill-all
+node scripts/zt-vm.mjs release --state-dir <dir> --reason <text>    # lift the kill switch
 ZT_VM_E2E=1 ZT_PROFILE_DIR=<abs dir> npx vitest run src/__tests__/vm-gate.e2e.test.ts
 node scripts/zt-proxy.mjs up --state-dir <dir> --out <endpoints.json>   # needs Docker
 ZT_PROXY_E2E=1 ZT_PROFILE_DIR=<abs dir> ZT_PROXY_ENDPOINTS=<endpoints.json> \
@@ -538,16 +568,16 @@ ZT_PROXY_E2E=1 ZT_PROFILE_DIR=<abs dir> ZT_PROXY_ENDPOINTS=<endpoints.json> \
 node scripts/zt-proxy.mjs down --state-dir <dir>
 ```
 
-The kill switch stays engaged until an operator deletes `<state-dir>/KILL_SWITCH`.
+The kill switch stays engaged until `release` lifts it, which is refused while any VM remains.
 
 The hostile fixtures live in `fixtures/hostile/`; `.github/workflows/zero-trust-vm.yml` runs
 the gate under KVM, plus a TCG smoke test, on every PR touching this package.
 
 ## Fork-side GitHub credential broker
 
-`src/github/broker.ts`, `app-auth.ts`, `token-journal.ts` and `contributor.ts` are the
-only code that holds GitHub credentials (the hand-off and fork modules beside them are
-credential-free). They
+`src/github/broker.ts`, `app-auth.ts`, `token-journal.ts`, `contributor.ts` and `push.ts`
+(which hands the broker's push credential to git) are the only code that holds or handles
+GitHub credentials (the hand-off and fork modules beside them are credential-free). They
 are controller-only: the package index does not export them, and
 `src/github/__tests__/isolation.test.ts` fails if any other module, including the index,
 the hand-off modules and the worker broker, can reach them through an import chain.
@@ -628,6 +658,52 @@ an in-memory fake (`__tests__/github-fake.ts`), so CI makes no GitHub calls.
 An installation token whose value was lost in a full process crash cannot be revoked
 through any GitHub API. The run stays in `blocked_cleanup` until `resolveByOperator`
 or, when the mint response was journaled, `settleExpired` after its native expiry.
+
+## Verified fork push (#1066)
+
+`ForkPusher` (`src/github/push.ts`, controller-only, import by path) is the
+`WriteAdapter` for `push_branch` (PRD §5.7, §5.9 "Push candidate"; decision record rows
+4/4b; scenarios 10, 17, 18). Each attempt, in order:
+
+1. Preflight reads the ref through `readForkBranch`. The candidate already there
+   confirms without a token or receipt; anything other than the expected value blocks
+   with `remote_diverged` and pushes nothing. An answer naming another repository id
+   blocks with `fork_unverified`; an unreadable answer withdraws the attempt
+   (`MutationDeferredError`).
+2. `authorize(intent)` supplies the receipt, fresh controller context and the
+   reconstructed candidate. The candidate must be the intent's SHA on the context's
+   parent, and `authorizeShipping` verifies the receipt and burns its single-use nonce.
+   A refusal (wrong parent, contributor, fork or SHA, replay, unverified candidate,
+   policy) blocks with `authorization_refused` before any token is minted. A failed
+   `authorize` callback or a nonce-store refusal raised before the store appends
+   withdraws the attempt; a failed append leaves it ambiguous. A retry needs a fresh
+   receipt. If the broker never hands the credential to git (the mint failed, was refused
+   or was cancelled), nothing can have been pushed: the attempt is voided, not counted.
+3. `push_intended` (branch, candidate, expected remote SHA) is appended to the push
+   ledger, its own `Journal`, scoped to the fork's repository id.
+4. Inside `broker.withForkPush`, git pushes exactly the candidate from a fresh
+   `TrustedGit` repository holding only the candidate pack:
+   `--force-with-lease=refs/heads/<branch>:<expected>` (empty: the branch must not
+   exist), an explicit URL and `<sha>:refs/heads/<branch>`. The URL names the fork by
+   owner/name; the token is narrowed to its repository id, so a name that moved to
+   another repository after preflight is refused by GitHub. There is no remote, no
+   wildcard and no plain force. `ls-remote` then reads the ref back from the git server.
+5. Only a read-back equal to the candidate records `push_verified` and confirms. Another
+   SHA blocks with `remote_diverged`; still the expected value, or unknown, is
+   `push_uncertain`, which reconciliation settles: candidate → done, expected → one
+   retry, anything else → `remote_diverged`.
+
+The expected remote SHA is absent, or the last SHA a verified push left on the branch
+(`expectedRemoteSha(intent)`, which the controller puts in the receipt grant). A
+revision after a rebase therefore uses the same CAS against the previously verified SHA
+and needs a receipt that binds it. `handoffReadBack(target)` is the
+`HandoffAdmission.remoteBranchSha` for the PR hand-off: the branch SHA read back without
+credentials, null when absent, refused when no verified push left it there.
+
+`src/github/fork-ref.ts` (exported, credential-free) names push targets by fork
+repository id, `fork:<repositoryId>:branch:<name>` (`forkTarget`/`parseForkTarget`).
+`readForkBranch` answers a SHA, or null on 404, only after `GET /repos/{owner}/{repo}`
+confirms the id; anything else throws `ForkRefError` with the HTTP status.
 
 ## Contributor authorization and fork prerequisites
 

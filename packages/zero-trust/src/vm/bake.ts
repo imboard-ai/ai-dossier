@@ -1,5 +1,6 @@
 /** Trusted profile bake: pinned cloud image + controller cloud-init → a flattened,
  * hash-pinned profile image. No repository or model input is involved. */
+import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -7,7 +8,7 @@ import { privateDir, replacePrivate } from '../durable-fs';
 import type { AcceleratorRequest } from './adapter';
 import { BAKE_FAILED_MARKER, BAKE_RESULT_MARKER, bakeMetaData, bakeUserData } from './cloud-init';
 import { type HostTools, preflightHost } from './host';
-import { AGENT_SOURCE_PATH, type HostOps, systemOps } from './local-qemu';
+import { AGENT_SOURCE_PATH, findQemuProcesses, type HostOps, systemOps } from './local-qemu';
 import {
   BAKED_DISK_GIB,
   DOCKER_ID,
@@ -92,6 +93,9 @@ export async function ensureBaseImage(
     throw error;
   } finally {
     clearTimeout(idle);
+    // Destroying a stream with a write still queued emits ERR_STREAM_DESTROYED; the
+    // download already failed or finished, so that late error carries nothing.
+    out?.on('error', () => undefined);
     out?.destroy();
     fs.rmSync(part, { force: true });
   }
@@ -123,8 +127,76 @@ export async function bakeProfile(options: BakeOptions): Promise<VmProfileManife
   const tools = options.tools ?? preflightHost(options.accelerator ?? 'auto');
   const agentSource = fs.readFileSync(AGENT_SOURCE_PATH, 'utf8');
   const digest = profileDigest(agentSource);
-  const base = await ensureBaseImage(options.cacheDir, options.fetchImpl, log);
   privateDir(options.profileDir);
+  // Locked before the download, so a second bake fails fast instead of after it.
+  const lock = acquireBakeLock(options.profileDir);
+  try {
+    sweepStaleBakes(options.profileDir, ops);
+    const base = await ensureBaseImage(options.cacheDir, options.fetchImpl, log);
+    return await bakeLocked(options, { log, ops, tools, agentSource, digest, base });
+  } finally {
+    fs.closeSync(lock);
+  }
+}
+
+const BAKE_LOCK = '.bake.lock';
+
+/** One bake per profile directory: an exclusive flock(2) on `.bake.lock`, held
+ * through the returned descriptor. The kernel drops it when the holder exits,
+ * so a crashed bake never leaves a lock to judge or take over. */
+export function acquireBakeLock(profileDir: string): number {
+  const lock = path.join(profileDir, BAKE_LOCK);
+  const fd = fs.openSync(
+    lock,
+    fs.constants.O_CREAT | fs.constants.O_RDWR | fs.constants.O_NOFOLLOW,
+    0o600
+  );
+  const result = spawnSync('/usr/bin/flock', ['-x', '-n', '3'], {
+    stdio: ['ignore', 'ignore', 'ignore', fd],
+  });
+  if (result.error || result.status !== 0) {
+    fs.closeSync(fd);
+    throw new Error(
+      result.error
+        ? `Could not run /usr/bin/flock to lock ${lock}: ${result.error.message}`
+        : `Another bake holds ${lock}; wait for it to finish`
+    );
+  }
+  return fd;
+}
+
+/** Work dirs of interrupted bakes: stop any bake VM still using one (its
+ * `-pidfile` lives there), then remove them. Only called with the bake lock
+ * held, so no running bake owns them. */
+export function sweepStaleBakes(profileDir: string, ops: HostOps): string[] {
+  const stale = fs
+    .readdirSync(profileDir)
+    .filter((name) => name.startsWith('.bake-'))
+    .map((name) => path.join(profileDir, name));
+  if (!stale.length) return [];
+  const inStale = (pidFile: string) => stale.includes(path.dirname(pidFile));
+  for (const pid of findQemuProcesses(ops, inStale).keys())
+    try {
+      ops.kill(pid, 'SIGKILL');
+    } catch {
+      // already gone
+    }
+  for (const dir of stale) fs.rmSync(dir, { recursive: true, force: true });
+  return stale;
+}
+
+async function bakeLocked(
+  options: BakeOptions,
+  ctx: {
+    log: (message: string) => void;
+    ops: HostOps;
+    tools: HostTools;
+    agentSource: string;
+    digest: string;
+    base: string;
+  }
+): Promise<VmProfileManifest> {
+  const { log, ops, tools, agentSource, digest, base } = ctx;
   const work = fs.mkdtempSync(path.join(options.profileDir, '.bake-'));
   let launchedPid: number | null = null;
   // The bake VM is detached; an interrupted controller must not leave it running.

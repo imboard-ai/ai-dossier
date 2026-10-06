@@ -186,7 +186,11 @@ export class BrokerClient {
   private announcedScope: ExecScope | null = null;
   private announcedPhase: NetworkPhase | null = null;
 
-  constructor(private readonly stream: Duplex) {
+  /** `onTaint` hears the code once, when the VM is tainted (e.g. to journal it). */
+  constructor(
+    private readonly stream: Duplex,
+    private readonly onTaint?: (code: string) => void
+  ) {
     stream.on('data', (chunk: Buffer) => this.onData(chunk));
     stream.on('error', () => this.taint('stream_error'));
     stream.on('close', () => this.taint('stream_closed'));
@@ -209,6 +213,11 @@ export class BrokerClient {
   taint(code: string): void {
     if (this.failure) return;
     this.failure = new BrokerError(code);
+    try {
+      this.onTaint?.(code);
+    } catch {
+      // reporting a taint must never keep the VM usable
+    }
     this.helloWaiter?.reject(this.failure);
     this.helloWaiter = null;
     if (this.pending) {

@@ -10,10 +10,15 @@ const SRC = path.resolve(__dirname, '../..');
 const GITHUB = path.join(SRC, 'github');
 /** The only modules that hold or handle GitHub credentials. `contributor.ts` (#1065) joins
  * them: it runs the user authorization, holds the refresh token and hands the access token
- * to the broker. Its credential-free half, `fork.ts`, stays outside and is scanned. */
-const CREDENTIAL = ['broker.ts', 'app-auth.ts', 'token-journal.ts', 'contributor.ts'].map((name) =>
-  path.join(GITHUB, name)
-);
+ * to the broker. Its credential-free half, `fork.ts`, stays outside and is scanned.
+ * `push.ts` (#1066) passes the broker's push credential to git, so it is controller-only too. */
+const CREDENTIAL = [
+  'broker.ts',
+  'app-auth.ts',
+  'token-journal.ts',
+  'contributor.ts',
+  'push.ts',
+].map((name) => path.join(GITHUB, name));
 const isCredential = (file: string) => CREDENTIAL.includes(file);
 
 function sources(dir: string): string[] {

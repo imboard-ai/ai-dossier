@@ -5,6 +5,7 @@ export * from './canonical/export';
 export * from './canonical/reconstruct';
 export * from './ecosystem';
 export * from './github/fork';
+export * from './github/fork-ref';
 export * from './github/handoff';
 export * from './github/handoff-driver';
 export * from './github/pr-body';

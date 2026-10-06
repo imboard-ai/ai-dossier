@@ -49,12 +49,14 @@ export async function teardownVm(
       last =
         error instanceof VmCleanupError
           ? error
-          : new VmCleanupError([], [`unknown:${handle.vmId}`]);
+          : new VmCleanupError([], [`unknown:${handle.vmId}`], handle.vmId);
       appendVmEvent(options.journal, options.now(), {
         type: 'vm_cleanup_attempt_failed',
         runId: handle.runId,
         vmId: handle.vmId,
         attempt,
+        // The error class only: messages can carry paths or guest text.
+        cause: error instanceof Error ? error.name : typeof error,
         leftoverPids: last.leftoverPids,
         leftoverPaths: last.leftoverPaths,
       });

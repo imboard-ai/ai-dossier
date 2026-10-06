@@ -54,6 +54,7 @@ host Docker, and the container runtime is never probed on the host.
 | `kvm` requested but `/dev/kvm` is not read-write for this user | `kvm_unavailable` (never downgraded) |
 | No baked profile, or a manifest that is not private (mode 0600, this user) | `profile_image_missing` |
 | A manifest that does not match the current pins, recipe or guest agent, an image digest mismatch, or a qcow2 that names a backing or data file | `profile_image_mismatch` |
+| A baked image that is not a regular file owned by this user, or is writable by group or others | `profile_image_untrusted` |
 | Broker socket path over 107 bytes | `socket_path_too_long` |
 | Incident kill switch engaged | `kill_switch_engaged` |
 
@@ -103,7 +104,11 @@ involved in a bake.
   build time. The flattened image is hashed into a manifest
   together with the profile digest (pins, recipe version, guest agent source). The adapter
   re-hashes the image before its first VM and refuses a qcow2 whose header names a backing file
-  or an external data file (QEMU would open either with the controller's privileges).
+  or an external data file (QEMU would open either with the controller's privileges), or an
+  image that is not owned by the controller's user or is writable by group or others. One bake
+  runs per profile directory at a time (an exclusive `flock` on `.bake.lock`, which the kernel
+  drops when its holder exits), and work directories left by an interrupted bake are removed,
+  with any bake VM still using them stopped.
 - Worker container (`vm-guest/agent.py`): `--network none --cap-drop ALL --security-opt
   no-new-privileges=true --read-only --tmpfs /tmp --pids-limit 1024 --memory/--memory-swap
   --cpus --user 1000:1000`, only the workspace bind-mounted.
@@ -235,7 +240,16 @@ Report fields are validated before use (known categories, short plain-text attem
 anything else counts as a malformed report.
 
 `assertBoundaryHeld` throws `BoundaryBreachError` on any violation; the gate suite calls it.
-Making it a precondition of shipping authorization for a run is follow-up work (S2–S5).
+In production the run's evidence is part of the controller's `ReceiptContext`
+(`boundaryEvidence`, gathered with the run's ID), and `authorizeShipping` refuses before any
+nonce is consumed unless it is that run's own clean verdict (`isCleanHeldVerdict`: held, no
+violations, at least one attempt). Any violation (breach, malformed report, canary leak,
+missing coverage) or a verdict with no attempts is `boundary_not_held`, absent evidence is
+`boundary_evidence_missing`, and a verdict gathered for another run, or for no run, is
+`boundary_wrong_run`. The evidence is checked on its own snapshot first, so guest text in a
+breach verdict always classifies as `boundary_not_held`. Its production caller,
+`ForkPusher.admit`, turns either into `WriteRefusedError('authorization_refused', …)` before a
+token is minted, so the fork ref is never touched.
 
 ## Teardown and kill switch (scenario 20)
 
@@ -247,10 +261,26 @@ with leftover PIDs and disk paths journaled, and the blocked run is handed to `o
 delegates to the intent admission table, which admits no GitHub write in `blocked_cleanup`, and
 `blocked_cleanup` has no edge back to execution or shipping. A failed create still journals what
 its cleanup left behind. The incident kill switch writes an admission-blocking marker first, then
-destroys every VM; it needs only the state directory (no QEMU, no current profile), reports VM
-directories without a trustworthy record as failures, and `create` re-checks the marker after
-QEMU starts and after the guest answers, so a VM booting during an incident is also stopped.
-QEMU's own stderr for each VM is kept under `<stateDir>/diagnostics/`.
+attempts every VM whatever fails on the way; it needs only the state directory (no QEMU, no
+current profile). A run whose VM is not confirmed dead moves to `blocked_cleanup` through
+`observeRun` when the caller passes its run store. VM directories without a trustworthy record
+are reported as failures and left for `reconcile`, but their QEMU is still stopped when its own
+argv proves it is theirs; QEMU processes of the state directory whose directory is gone are
+stopped too. `create` re-checks the marker after QEMU starts and after the guest answers, so a
+VM booting during an incident is also stopped. QEMU's own stderr for each VM is kept under
+`<stateDir>/diagnostics/`, and a broker taint is journaled as `vm_broker_tainted`.
+
+A process belongs to a VM only when it is a `qemu-system-*` binary whose `-pidfile` operand is
+that VM's pidfile (`<stateDir>/vms/<vmId>/qemu.pid`, which QEMU writes itself); a process that
+merely mentions the path (an editor or `tail` on it) never qualifies. That is how a VM is still
+found when the controller crashed between starting QEMU and recording its PID. `reconcile`
+reports directories whose QEMU is gone, directories whose QEMU cannot be judged, directories
+without a trustworthy record and QEMU processes without a directory. `reconcile --destroy`
+cleans them up through the normal teardown path and requires the kill switch to be engaged, so
+no VM is mid-boot (a booting VM has no pidfile yet and would look abandoned). `release` lifts the
+kill switch, journaled with its reason, and is refused while any VM directory or QEMU process of
+the state directory remains; a kill-all that re-engages the switch during a release wins. The
+`zt-vm.mjs` teardown commands journal to `<stateDir>/vm-journal/`.
 
 ## Authority boundary (scenario 5)
 
@@ -299,7 +329,8 @@ retargeted intent fails `authorizeShipping`.
   (`socket_path_too_long`) rather than being truncated.
 - **`-daemonize` with seccomp.** `-daemonize` cannot be combined with `-sandbox spawn=deny`, so
   the controller detaches QEMU itself (own session, recorded spawn PID, start-token check). A controller crash
-  leaves QEMU running until the kill switch or the next teardown reconciles it.
+  leaves QEMU running until the kill switch, `reconcile --destroy` or the next teardown stops it;
+  QEMU's own pidfile and argv identify it even when the crash came before the PID was recorded.
 - **Bake supply chain.** Distro packages, the container images and uv come from the Ubuntu
   archive, the Microsoft registry and ghcr.io (apt signatures, image digests); the resulting image is hash-pinned, but
   the bake itself trusts those sources. In CI the baked image is shared through the Actions cache
@@ -314,8 +345,8 @@ retargeted intent fails `authorizeShipping`.
 - **Diagnostic boot in CI.** When the KVM job fails, `zt-vm.mjs diagnose` boots the baked image
   once more with the run-VM arguments plus a serial log, so a boot failure is visible. No fixture
   code runs in that boot.
-- **Kill switch release.** Nothing lifts the kill switch; an operator deletes
-  `<stateDir>/KILL_SWITCH` after the incident. The refusal names that file.
+- **Kill switch release.** `zt-vm.mjs release` lifts it, journaled, only once no VM remains.
+  Anyone who can write the state directory can still delete the marker by hand.
 - **Receipt schema.** Adding the required `profile.accelerator` moved receipts to
   `ztfc-receipt-v2`; v1 receipts no longer verify (the package is private and receipts expire
   after 15 minutes).

@@ -31,8 +31,8 @@ jobs:
     timeout-minutes: 120
     permissions:
       contents: read
-    # One definition of the baked-profile cache key; the other jobs restore by it.
     outputs:
+      # The one definition of the profile cache key; the other jobs restore by it.
       profile-key: ${{ steps.profile-cache.outputs.cache-primary-key }}
     steps:
       - name: Checkout code
