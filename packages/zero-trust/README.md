@@ -204,6 +204,9 @@ evidence still block admission (`lock_timeout`). Reclamation is fsynced into
 long basenames use `.zt-budget-recovery-<SHA-256-of-basename>/events.jsonl` in the
 same directory. Reserved controller metadata paths are rejected so a second ledger
 cannot replace another store's permanent guard or journal.
+When `.lock.guard` would exceed the filename-component limit, both owner lock and
+permanent guard use `.zt-budget-lock-<SHA-256-of-basename>.lock[.guard]` instead.
+Mappings for existing shorter filenames are preserved.
 Opening an existing ledger captures all pending reservation IDs as a resume barrier,
 even if the old controller released its mutation lock before crashing. Dead-lock
 recovery adds all pending IDs to that barrier and its durable audit. All new

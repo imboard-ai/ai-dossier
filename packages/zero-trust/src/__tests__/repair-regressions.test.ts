@@ -49,6 +49,11 @@ describe('authorized second-cycle crash repairs', () => {
     'x'.repeat(239),
     'y'.repeat(244),
     '账'.repeat(81),
+    'z'.repeat(245),
+    'q'.repeat(250),
+    'r'.repeat(251),
+    's'.repeat(255),
+    '账'.repeat(85),
   ])('long basename initializes and recovers real dead owner: %s', async (name) => {
     const dir = directory();
     const file = path.join(dir, name);
@@ -62,8 +67,12 @@ describe('authorized second-cycle crash repairs', () => {
       timeLimitMs: 100,
     });
     const module = compiledFixture(dir, 'budget');
+    const lock =
+      Buffer.byteLength(`${name}.lock.guard`) <= 255
+        ? `${file}.lock`
+        : path.join(dir, `.zt-budget-lock-${createHash('sha256').update(name).digest('hex')}.lock`);
     await crash(
-      `const fs=require('node:fs'),rename=fs.renameSync;fs.renameSync=(a,b)=>{rename(a,b);if(b===${JSON.stringify(`${file}.lock`)})process.kill(process.pid,'SIGKILL');};new (require(${JSON.stringify(module)}).BudgetLedger)(${JSON.stringify(file)},'c',100).reserve('s',${JSON.stringify(estimate)});`
+      `const fs=require('node:fs'),rename=fs.renameSync;fs.renameSync=(a,b)=>{rename(a,b);if(b===${JSON.stringify(lock)})process.kill(process.pid,'SIGKILL');};new (require(${JSON.stringify(module)}).BudgetLedger)(${JSON.stringify(file)},'c',100).reserve('s',${JSON.stringify(estimate)});`
     );
     new BudgetLedger(file, 'c', 100).reserve('s', estimate);
     const legacy = `${name}.recovery-journal`;
@@ -72,7 +81,7 @@ describe('authorized second-cycle crash repairs', () => {
         ? `${file}.recovery-journal`
         : path.join(dir, `.zt-budget-recovery-${createHash('sha256').update(name).digest('hex')}`);
     expect(events(recovery)).toHaveLength(1);
-    expect(fs.existsSync(`${file}.lock`)).toBe(false);
+    expect(fs.existsSync(lock)).toBe(false);
   });
   it('pre-opened survivor fences a later lock-free crashed reservation with zero ledger writes', async () => {
     const dir = directory();
@@ -272,10 +281,12 @@ describe('authorized second-cycle crash repairs', () => {
     const ledger = budget(dir);
     const guard = `${ledger.file}.lock.guard`;
     const inode = fs.statSync(guard).ino;
+    if (suffix.includes('/'))
+      fs.mkdirSync(path.dirname(`${ledger.file}${suffix}`), { mode: 0o700 });
     const writes = vi.spyOn(fs, 'renameSync');
     expect(() =>
       new BudgetLedger(`${ledger.file}${suffix}`, 'other', 100).initialize(['model'], [rate])
-    ).toThrow();
+    ).toThrow('reserved for controller metadata');
     expect(writes).not.toHaveBeenCalled();
     expect(fs.statSync(guard).ino).toBe(inode);
   });

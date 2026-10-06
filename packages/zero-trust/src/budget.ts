@@ -292,6 +292,8 @@ export class BudgetLedger {
   private readonly resumePending = new Set<string>();
   private readonly acknowledged = new Set<string>();
   private readonly recoveryDirectory: string;
+  // biome-ignore lint/correctness/noUnusedPrivateClassMembers: Assigned in constructor and read by locked() for every transaction.
+  private readonly lockFile: string;
   constructor(
     file: string,
     readonly contributionId: string,
@@ -324,6 +326,12 @@ export class BudgetLedger {
         ? legacy
         : `.zt-budget-recovery-${createHash('sha256').update(path.basename(this.file)).digest('hex')}`;
     this.recoveryDirectory = path.join(path.dirname(this.file), name);
+    const legacyLock = `${path.basename(this.file)}.lock`;
+    const lockName =
+      Buffer.byteLength(`${legacyLock}.guard`) <= 255
+        ? legacyLock
+        : `.zt-budget-lock-${createHash('sha256').update(path.basename(this.file)).digest('hex')}.lock`;
+    this.lockFile = path.join(path.dirname(this.file), lockName);
     // Opening an existing ledger is a resume boundary, independent of whether
     // the dead controller held its short mutation lock when it crashed. Capture
     // ALL old unknown outcomes; a null observation never reconciles them.
@@ -509,7 +517,7 @@ export class BudgetLedger {
         'persistence_uncertain',
         'Fence and reconcile ledger before reopening after write uncertainty'
       );
-    const lock = `${this.file}.lock`;
+    const lock = this.lockFile;
     try {
       return withStoreLock(
         lock,
