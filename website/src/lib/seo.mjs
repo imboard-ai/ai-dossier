@@ -22,14 +22,25 @@ const MAX_DESCRIPTION = 155;
 
 /** Strip inline markdown down to plain text. */
 function plain(text) {
-  return text
+  // Code spans are unwrapped first and parked behind placeholders so an identifier such as
+  // GITHUB_ISSUES_PROPOSAL.md survives the emphasis pass.
+  const code = [];
+  const out = text
+    .replace(/`+([^`]+)`+/g, (_, c) => `\u0000${code.push(c) - 1}\u0000`)
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
     .replace(/\[([^\]]+)\]\[[^\]]*\]/g, '$1')
+    .replace(/<((?:https?:\/\/|mailto:)[^>\s]+)>/g, '$1')
     .replace(/<[^>]+>/g, '')
-    .replace(/[`*_~]/g, '')
+    // Paired emphasis only: a lone `_` or `*` inside a word is content, not markup.
+    .replace(/(\*\*|__)(?=\S)(.+?)(?<=\S)\1/g, '$2')
+    .replace(/(?<![\w*])\*(?=\S)([^*]+?)(?<=\S)\*(?![\w*])/g, '$1')
+    .replace(/(?<![\w_])_(?=\S)([^_]+?)(?<=\S)_(?![\w_])/g, '$1')
+    .replace(/~~(?=\S)(.+?)(?<=\S)~~/g, '$1')
+    .replace(/\u0000(\d+)\u0000/g, (_, i) => code[Number(i)])
     .replace(/\s+/g, ' ')
     .trim();
+  return out;
 }
 
 /** Trim to `max` chars on a word boundary, adding an ellipsis when cut. */
@@ -42,12 +53,16 @@ export function trimTo(text, max = MAX_DESCRIPTION) {
 
 // Metadata lines ("Version: 1.0 Status: Stable ...") are not summary material; a leading
 // "Purpose:" style label is dropped and the sentence after it kept.
-const META = /^(version|status|last updated|date|audience|time|prerequisites|difficulty)\b/i;
+const META =
+  /^(version|status|last updated|date|audience|time|prerequisites|difficulty)\s*:/i;
 function clean(raw) {
   const text = plain(raw);
   if (META.test(text)) return '';
   return text.replace(/^(purpose|goal|summary|overview)\s*:\s*/i, '');
 }
+
+// A paragraph that ends with ":" only introduces the list or code block after it.
+const isSummary = (text) => text.length >= 40 && !text.endsWith(':');
 
 /** First prose paragraph of a markdown body (skips headings, lists, tables, code, quotes). */
 export function firstParagraph(body = '') {
@@ -67,7 +82,7 @@ export function firstParagraph(body = '') {
     const t = line.trim();
     if (t === '') {
       const text = clean(para.join(' '));
-      if (text.length >= 40) return text;
+      if (isSummary(text)) return text;
       para = [];
       continue;
     }
@@ -79,7 +94,7 @@ export function firstParagraph(body = '') {
     para.push(t);
   }
   const text = clean(para.join(' '));
-  return text.length >= 40 ? text : '';
+  return isSummary(text) ? text : '';
 }
 
 /** Meta description for a docs page: frontmatter `description`, else the first paragraph, else the title. */
@@ -113,6 +128,8 @@ export function websiteSchema(site) {
   };
 }
 
+const ORG_REF = (site) => ({ '@id': `${site}#organization` });
+
 export function softwareApplicationSchema(site, description = SHORT_DESCRIPTION) {
   return {
     '@type': 'SoftwareApplication',
@@ -123,6 +140,9 @@ export function softwareApplicationSchema(site, description = SHORT_DESCRIPTION)
     applicationCategory: 'DeveloperApplication',
     operatingSystem: 'Cross-platform',
     offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+    downloadUrl: NPM_URL,
+    author: ORG_REF(site),
+    publisher: ORG_REF(site),
     license: 'https://www.gnu.org/licenses/agpl-3.0.html',
     sameAs: [REPO_URL, NPM_URL, VSCODE_URL],
   };
@@ -136,8 +156,10 @@ export function techArticleSchema({ url, headline, description, site, dateModifi
     url,
     mainEntityOfPage: url,
     ...(dateModified ? { dateModified } : {}),
+    image: new URL(OG_IMAGE_PATH, site).href,
     isPartOf: { '@id': `${site}#website` },
-    publisher: { '@id': `${site}#organization` },
+    author: ORG_REF(site),
+    publisher: ORG_REF(site),
     inLanguage: 'en',
   };
 }
