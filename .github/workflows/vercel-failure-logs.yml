@@ -37,9 +37,8 @@ name: Surface Vercel Build Failures
 # comment — it never checks out or executes repository content.
 #
 # Setup:
-#   1. Store the token:  chamber write dossier vercel_token "<token>"
-#      (equivalently: aws ssm put-parameter --name /dossier/vercel_token \
-#         --type SecureString --value "<token>")
+#   1. Store the token:  aws ssm put-parameter --name /dossier/vercel_token \
+#         --type SecureString --value "<token>"
 #   2. Grant the OIDC role ssm:GetParameter on arn:aws:ssm:us-east-1:942039714848:
 #      parameter/dossier/vercel_token, plus kms:Decrypt on the key encrypting it.
 #

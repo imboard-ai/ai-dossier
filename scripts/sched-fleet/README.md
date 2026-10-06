@@ -4,11 +4,11 @@ The autonomous pipeline that drives an `ai-dossier sched` fleet unattended: tick
 scheduler on a cron, reports progress to Telegram, watches tracked issues for closure,
 and self-upgrades the CLI. This is the exact deployment that drove the RFC-0001 /
 batch-pilot rollout ([epic #474](https://github.com/imboard-ai/ai-dossier/issues/474))
-on the `hcc2` host, versioned here so a host reset or disk loss doesn't lose the only
+on the reference host, versioned here so a host reset or disk loss doesn't lose the only
 copy.
 
 **These scripts are a reference install, not a generic product.** `bootstrap.sh` in
-particular retains the hcc2-specific hardcoded issue numbers and sched defaults;
+particular retains the reference-install-specific hardcoded issue numbers and sched defaults;
 dispatch profiles are the deliberate shared addition for this change. Treat it as a
 worked example to copy and edit per deployment, not something to run as-is against
 your own issues.
@@ -21,7 +21,7 @@ your own issues.
 - `flock` available to serialize cron read/modify/write operations
 - `at` available for the independent retry fallback when a crontab read is temporarily unavailable
 - Node on `PATH`. The scripts hardcode an nvm path entry
-  (`$HOME/.nvm/versions/node/v24.20.0/bin`) that matched the hcc2 install at the time —
+  (`$HOME/.nvm/versions/node/v24.20.0/bin`) that matched the reference install at the time —
   **adjust this in your copy** to wherever your Node lives (or drop it if Node is
   already on the system `PATH`).
 
@@ -30,13 +30,13 @@ your own issues.
 | File | Role |
 |---|---|
 | `tick.sh` | Cron job, every 2 min: ticks every project in `projects.txt` once, Telegram-reports new scheduler events, watches `issues.txt` for closures, arms the 7-day report hook, self-upgrades the CLI when idle, self-removes its own cron line once every tracked issue is closed |
-| `bootstrap.sh` | Fires at the configured annual reset, writes a sched `config.json`, enqueues a fixed dependency chain of issues, arms `tick.sh`'s cron line, and records completion for safe retries. Failures re-arm a 5-minute retry cron. **hcc2-specific — edit before reuse.** |
+| `bootstrap.sh` | Fires at the configured annual reset, writes a sched `config.json`, enqueues a fixed dependency chain of issues, arms `tick.sh`'s cron line, and records completion for safe retries. Failures re-arm a 5-minute retry cron. **reference-install-specific — edit before reuse.** |
 | `cron-lib.sh` | Shared guarded cron read/modify/write helpers; retries transient reads and uses an independent `at` retry when a crontab remains unreadable |
 | `dispatch-profiles.json` | Provider-family dispatch profiles installed into host-level `~/.dossier/config.json` by `refresh-fleet.sh`; projects may override individual profile names |
 | `probe-effort.mjs` | Dry-run-by-default provider probe; compares same-model lower/max effort or variant settings and reports provider-reported measured-token deltas when run with `--run` (OpenCode includes reasoning tokens) |
 | `enqueue-report.sh` | Dated one-shot, installed by `tick.sh`: fires once 7 days after a tracked issue closes, enqueues the follow-up report issue, then removes its own cron line; enqueue failures re-arm a 5-minute retry |
-| `fmt_events.py` | Reads scheduler `events.jsonl` lines from stdin, filters to the reportable event types, formats up to 8 lines for a Telegram message. Invoked as `python3 fmt_events.py` (no shebang, not directly executable — matches the hcc2 source file exactly) |
-| `allow-sched.py` | One-off fixer for `~/.claude/settings.json` — normalizes malformed `Bash(ai-dossier sched ...)` permission rules. Run it as `python3 allow-sched.py` (no shebang, not directly executable — matches the hcc2 source file exactly) |
+| `fmt_events.py` | Reads scheduler `events.jsonl` lines from stdin, filters to the reportable event types, formats up to 8 lines for a Telegram message. Invoked as `python3 fmt_events.py` (no shebang, not directly executable — matches the reference source file exactly) |
+| `allow-sched.py` | One-off fixer for `~/.claude/settings.json` — normalizes malformed `Bash(ai-dossier sched ...)` permission rules. Run it as `python3 allow-sched.py` (no shebang, not directly executable — matches the reference source file exactly) |
 | `scorecard-weekly.sh` | Weekly cron ([#566](https://github.com/imboard-ai/ai-dossier/issues/566)): regenerates `docs/reports/model-scorecard.md` + its JSON sidecar in a dedicated worktree, opens/refreshes a PR with the snapshot, and Telegram-reports the 6-line digest. Never merges — this repo has no auto-merge watcher |
 | `projects.txt.example` | Template: one sched project slug per line, no comments (see Known Limitations — the real `tick.sh` loop is not comment-tolerant) |
 | `issues.txt.example` | Template: one `owner/repo#N` issue ref per line, no comments (see Known Limitations) |
@@ -45,7 +45,7 @@ your own issues.
 ## Setup
 
 ```bash
-# From wherever you want the fleet to live — the hcc2 reference install uses
+# From wherever you want the fleet to live — the reference install uses
 # ~/.dossier/reset-fleet/; pick a path without whitespace or `%`, e.g. ~/.dossier/sched-fleet/
 cp scripts/sched-fleet/{tick.sh,bootstrap.sh,enqueue-report.sh,cron-lib.sh,scorecard-weekly.sh,dispatch-profiles.json,probe-effort.mjs,fmt_events.py,allow-sched.py} .
 cp scripts/sched-fleet/projects.txt.example projects.txt      # edit to your projects
@@ -104,14 +104,14 @@ post-merge report tail uses the default dispatch and journals the missing profil
 
 ## Cron install
 
-The hcc2 reference install runs:
+The reference install runs:
 
 ```cron
 0 4 1 9 *  /path/to/bootstrap.sh >> /path/to/bootstrap.log 2>&1
 ```
 
 `0 4 1 9 *` is standard 5-field cron (`minute hour day-of-month month day-of-week`) —
-this fires once a year, at 04:00 on September 1, not weekly. It's timed to hcc2's
+this fires once a year, at 04:00 on September 1, not weekly. It's timed to the reference install's
 specific annual Claude-usage reset date; adjust both the date and cadence to your own
 reset schedule (a genuinely weekly reset would use something like `0 4 * * 1`).
 `bootstrap.sh` then arms `tick.sh`'s own cron line (`*/2 * * * * .../tick.sh`) itself;
@@ -169,7 +169,7 @@ running. Cron install (weekly, Monday 05:00):
 ```
 
 It resolves the checkout it regenerates from as `SCORECARD_REPO` (default
-`$HOME/projects/ai-dossier/main`, the hcc2 path) — set it if your checkout lives elsewhere;
+`$HOME/projects/ai-dossier/main`, the reference-install path) — set it if your checkout lives elsewhere;
 the script exits with a Telegram error if the path is missing. It takes a `flock` on
 `<D>/.scorecard-weekly.lock`, so a run that hangs past the next Monday is skipped rather
 than run concurrently against the same worktree.
@@ -229,10 +229,10 @@ background (see Known Limitations).
 
 ## Known Limitations
 
-These scripts retain the live hcc2 deployment's behavior for its hardcoded workflow and
+These scripts retain the live reference deployment's behavior for its hardcoded workflow and
 are still a reference install, not a generic product. The profile source and merge path
 are the deliberate behavior added by this change; the items below are real, pre-existing
-behaviors of the running hcc2 pipeline, disclosed here rather than fixed in the
+behaviors of the running reference pipeline, disclosed here rather than fixed in the
 committed copy. Fix them in a follow-up change if/when this is promoted beyond a
 single-operator reference install.
 
@@ -257,7 +257,7 @@ single-operator reference install.
   (auth/network) are indistinguishable from "issue still open"; `enqueue-report.sh`
   still reports Telegram "success" regardless of whether its underlying command succeeded;
   `bootstrap.sh` now checks its upgrade, enqueue, cron, and completion-marker steps. None of these have been
-  hit in the hcc2 pilot's actual run history, but they are real gaps in a script meant to
+  hit in the reference pilot's actual run history, but they are real gaps in a script meant to
   run unattended for weeks.
 
 ## `package.json`'s `fleet:tick` script
@@ -272,9 +272,9 @@ value of `1` and the script reaches its "pipeline complete" branch, which then t
 `crontab` — do not run `npm run fleet:tick` against a real crontab you care about
 without configuring a real deployment directory first.
 
-## No behaviour change for hcc2
+## No behaviour change for the reference install
 
-These repository changes do not mutate the running hcc2 deployment automatically.
+These repository changes do not mutate the running reference deployment automatically.
 It keeps using its own copy at `~/.dossier/reset-fleet/` until someone deliberately
 runs the refresh or reinstalls from here — nothing in this checkout touches that
 host's crontab, `$HOME`, or credentials by itself.

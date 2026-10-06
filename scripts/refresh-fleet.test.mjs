@@ -75,10 +75,11 @@ exit 0
 }
 
 function runRefreshRaw(box, args = [], extraEnv = {}) {
-  const res = spawnSync('bash', [SCRIPT_PATH, '--hosts', 'wls', ...args], {
+  const res = spawnSync('bash', [SCRIPT_PATH, '--hosts', 'host-a', ...args], {
     env: {
       ...process.env,
       HOME: box.home,
+      REFRESH_FLEET_LOCAL_HOST: 'host-a',
       PATH: `${box.bin}:${process.env.PATH}`,
       SCHED_PROFILE_FLEET_HOME: box.fleet,
       SCHED_PROFILE_FILE: PROFILE_PATH,
@@ -152,6 +153,25 @@ describe('refresh-fleet.sh', () => {
     expect(res.status).toBe(0);
     expect(calls(box)).toContain('pull imboard-ai/git/ship-issue --force');
     expect(calls(box)).toContain('pull imboard-ai/git/full-cycle-issue --force');
+  });
+
+  it('exits non-zero with guidance when no hosts are configured', () => {
+    const box = fixture(undefined);
+    const env = { ...process.env, HOME: box.home, PATH: `${box.bin}:${process.env.PATH}` };
+    delete env.REFRESH_FLEET_HOSTS;
+    const res = spawnSync('bash', [SCRIPT_PATH], { env, encoding: 'utf8' });
+    expect(res.status).toBe(2);
+    expect(res.stderr).toContain('set REFRESH_FLEET_HOSTS');
+    expect(calls(box)).toEqual([]);
+  });
+
+  it('refreshes only this machine with --local-only', () => {
+    const box = fixture(undefined);
+    const env = { ...process.env, HOME: box.home, PATH: `${box.bin}:${process.env.PATH}` };
+    delete env.REFRESH_FLEET_HOSTS;
+    const res = spawnSync('bash', [SCRIPT_PATH, '--local-only'], { env, encoding: 'utf8' });
+    expect(res.stdout).toContain('hosts=localhost');
+    expect(res.stdout).not.toContain('unreachable over ssh');
   });
 
   it('fails the host clearly when its CLI is older than 0.82.0, without calling install-skill', () => {
@@ -334,11 +354,11 @@ describe('refresh-fleet.sh', () => {
 
   it('--usage-sync runs `usage sync` from the driving host against the remote hosts only (#782)', () => {
     const box = fixture(undefined);
-    // Every ssh succeeds; hcc2's stub reports no CLI version, so the run may exit non-zero —
+    // Every ssh succeeds; host-c's stub reports no CLI version, so the run may exit non-zero —
     // only the usage-sync step matters here.
     executable(join(box.bin, 'ssh'), '#!/bin/sh\nexit 0\n');
-    const res = runRefreshRaw(box, ['--hosts', 'wls,hcc2', '--usage-sync']);
+    const res = runRefreshRaw(box, ['--hosts', 'host-a,host-c', '--usage-sync']);
     expect(res.out).toContain('== usage sync ==');
-    expect(calls(box).some((c) => c.startsWith('usage sync --hosts hcc2'))).toBe(true);
+    expect(calls(box).some((c) => c.startsWith('usage sync --hosts host-c'))).toBe(true);
   });
 });

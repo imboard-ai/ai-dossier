@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
 # refresh-fleet.sh — push the latest CLI, dossiers and every imboard-ai skill to every machine.
 #
-# Run this from **wls**, which is the only host with ssh reach to the others.
+# Run this from the one host that has ssh reach to the others (the "local" host).
+#
+# Config (env): REFRESH_FLEET_HOSTS = default comma-separated ssh host list (required unless --hosts or --local-only is given);
+#               REFRESH_FLEET_LOCAL_HOST = the name that denotes this machine in that list (default: localhost).
 #
 #   bash scripts/refresh-fleet.sh                    # CLI + dispatch profiles + default dossiers + every imboard-ai registry skill
 #   bash scripts/refresh-fleet.sh --cli-only         # just bump the CLI everywhere
-#   bash scripts/refresh-fleet.sh --hosts wls,hcc    # subset of machines
+#   bash scripts/refresh-fleet.sh --local-only       # just this machine
+#   bash scripts/refresh-fleet.sh --hosts host-a,host-b    # subset of machines
 #   bash scripts/refresh-fleet.sh --profiles-file path # use a different profile source
 #   bash scripts/refresh-fleet.sh --profile-projects a,b # also sync per-project scheduler profile maps
 #   bash scripts/refresh-fleet.sh --usage-sync       # afterwards merge the per-host token ledgers (#782)
@@ -48,7 +52,8 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HOSTS_DEFAULT="wls,hcc,hcc2"
+LOCAL_HOST="${REFRESH_FLEET_LOCAL_HOST:-localhost}"
+HOSTS_DEFAULT="${REFRESH_FLEET_HOSTS:-}"
 HOSTS="$HOSTS_DEFAULT"
 CLI_ONLY=0
 USAGE_SYNC=0
@@ -78,6 +83,7 @@ DOSSIERS=(
 while [ $# -gt 0 ]; do
   case "$1" in
     --cli-only) CLI_ONLY=1 ;;
+    --local-only) HOSTS="$LOCAL_HOST" ;;
     --usage-sync) USAGE_SYNC=1 ;;
     --hosts) HOSTS="${2:?--hosts needs a comma-separated list}"; shift ;;
     --hosts=*) HOSTS="${1#*=}" ;;
@@ -98,6 +104,10 @@ for target in "${EXTRA_TARGETS[@]}"; do
     exit 2
   fi
 done
+if [ -z "$HOSTS" ]; then
+  echo "refresh-fleet: no hosts to refresh — set REFRESH_FLEET_HOSTS (comma-separated ssh aliases), or pass --hosts / --local-only" >&2
+  exit 2
+fi
 if [[ ! "$HOSTS" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}(,[A-Za-z0-9][A-Za-z0-9._-]{0,62})*$ ]]; then
   echo "invalid --hosts value: $HOSTS (expected comma-separated SSH host names)" >&2
   exit 2
@@ -382,10 +392,10 @@ fi
 # print_tail <text>: last 4 lines, indented, control characters stripped (remote-controlled).
 print_tail() { printf '%s\n' "$1" | tail -4 | LC_ALL=C tr -d '\000-\010\013-\037\177' | sed 's/^/         /'; }
 
-# host_exec <host> <command>: run on the host (local shell for wls), set OUT and RC.
+# host_exec <host> <command>: run on the host (local shell for the local host), set OUT and RC.
 host_exec() {
   local host="$1" cmd="$2"
-  if [ "$host" = "wls" ] || [ "$host" = "$(hostname)" ]; then
+  if [ "$host" = "$LOCAL_HOST" ] || [ "$host" = "$(hostname)" ]; then
     OUT=$(bash -lc "$REMOTE_PRELUDE
 $cmd" 2>&1); RC=$?
   else
@@ -508,7 +518,7 @@ for host in "${HOST_LIST[@]}"; do
   HOST_STATUS[$host]="${HOST_STATUS[$host]:-ok}"
 
   # Prove the host answers before attributing later failures to content.
-  if [ "$host" != "wls" ] && [ "$host" != "$(hostname)" ]; then
+  if [ "$host" != "$LOCAL_HOST" ] && [ "$host" != "$(hostname)" ]; then
     if ! ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" true 2>/dev/null; then
       echo "    FAIL unreachable over ssh — skipping"
       HOST_STATUS[$host]="unreachable"; FAILED=1; echo; continue
@@ -564,7 +574,7 @@ if [ "$USAGE_SYNC" -eq 1 ]; then
   echo "== usage sync =="
   OTHERS=()
   for host in "${HOST_LIST[@]}"; do
-    { [ "$host" = "wls" ] || [ "$host" = "$(hostname)" ]; } || OTHERS+=("$host")
+    { [ "$host" = "$LOCAL_HOST" ] || [ "$host" = "$(hostname)" ]; } || OTHERS+=("$host")
   done
   if [ "${#OTHERS[@]}" -eq 0 ]; then
     echo "    skip no remote hosts selected"

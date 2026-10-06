@@ -24,7 +24,7 @@ import { createTempRepo, type TempRepo } from './helpers/setup';
  * by a verification step outlived the worktree, the branch, and the issue —
  * `return`/`gc` recycled or removed the checkout without looking at what was
  * still running out of it. 13 such processes were found across four merged
- * worktrees on hcc, one holding Atlas test-cluster connections for 10 days.
+ * worktrees on a dev host, one holding Atlas test-cluster connections for 10 days.
  */
 describe.sequential('worktree-pool process cleanup (#760)', () => {
   let repo: TempRepo;
