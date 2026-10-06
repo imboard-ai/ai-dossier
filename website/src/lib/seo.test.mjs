@@ -6,6 +6,7 @@ import {
   firstParagraph,
   jsonLd,
   softwareApplicationSchema,
+  techArticleSchema,
   trimTo,
 } from './seo.mjs';
 
@@ -81,4 +82,55 @@ test('metadata paragraphs are skipped and purpose labels dropped', () => {
     ),
     'Experience firsthand why verification matters for dossiers.'
   );
+});
+
+test('code spans keep underscores and paired emphasis is unwrapped', () => {
+  assert.equal(
+    docDescription({
+      body: '# T\n\nSee `GITHUB_ISSUES_PROPOSAL.md` for the **bold** and _quiet_ and snake_case_name details.',
+    }),
+    'See GITHUB_ISSUES_PROPOSAL.md for the bold and quiet and snake_case_name details.'
+  );
+});
+
+test('paragraphs that only introduce a list are skipped', () => {
+  assert.equal(
+    firstParagraph(
+      '# T\n\nYou can use either approach, and most teams use both:\n\n- one\n- two\n\nThis is the real summary paragraph, long enough to qualify.'
+    ),
+    'This is the real summary paragraph, long enough to qualify.'
+  );
+});
+
+test('autolinks become plain urls', () => {
+  assert.equal(
+    firstParagraph(
+      '# T\n\nDownload the installer from <https://example.com/install> to get going.'
+    ),
+    'Download the installer from https://example.com/install to get going.'
+  );
+});
+
+test('only label: metadata lines are dropped, prose starting with Time or Date is kept', () => {
+  const prose = 'Time to first verified run is under a minute on a clean machine.';
+  assert.equal(firstParagraph(`# T\n\n${prose}`), prose);
+  const prose2 = 'Dates in the registry are always UTC and never localised for readers.';
+  assert.equal(firstParagraph(`# T\n\n${prose2}`), prose2);
+  assert.equal(
+    firstParagraph('# T\n\nTime: 10 minutes Difficulty: easy and some more filler words here'),
+    ''
+  );
+});
+
+test('JSON-LD references the organization and carries the og image', () => {
+  const site = 'https://x.dev/';
+  const s = softwareApplicationSchema(site, 'd');
+  assert.deepEqual(s.author, { '@id': `${site}#organization` });
+  assert.deepEqual(s.publisher, { '@id': `${site}#organization` });
+  assert.match(s.downloadUrl, /npmjs\.com/);
+  const a = techArticleSchema({ url: `${site}docs/a/`, headline: 'h', description: 'd', site });
+  assert.deepEqual(a.author, { '@id': `${site}#organization` });
+  assert.equal(a.image, `${site}og-image.png`);
+  assert.equal('datePublished' in a, false);
+  assert.equal('dateModified' in a, false);
 });
