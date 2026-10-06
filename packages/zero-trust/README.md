@@ -161,6 +161,57 @@ Recovery metadata is strictly validated on replay and grants no authorization. T
 storage/supervisor boundary is required: this mechanism cannot defend against an
 actor who can rewrite the controller's journal or run a second controller process.
 
+## Contributor hand-off (upstream writes)
+
+Upstream writes (engagement comment, PR creation) are contributor hand-offs, not
+brokered writes (owner decision A in the [GitHub credentials decision
+record](../../docs/features/zero-trust-full-cycle/decisions/github-credentials.md)).
+A person reviews and submits every public submission under their own account. The
+run prepares the exact content, issues a link, waits durably in
+`awaiting_contributor`, and reconciles what was submitted.
+
+- `buildPrContent` (`src/github/pr-body.ts`) renders the title and body: issue
+  reference, cause, scope, LLM disclosure, the receipt's actual commands and
+  statuses, regression evidence, permitted baseline failures, limitations, the
+  optional receipt block, and the hidden run marker. Model and repository text is
+  bounded, cannot forge a marker, and cannot make a blanket success claim. "All
+  tests passed" is written only when every command passed. Star requests and
+  advertising are rejected.
+- `compareLink` / `issueCommentLink` (`src/github/handoff.ts`) take owner, repository,
+  base and head only from the controller binding (`prBinding`, `issueBinding`).
+  Prefilled fields are URL-encoded. A body that would push the URL past
+  `MAX_PREFILL_URL_LENGTH` falls back to a short title-only compare URL plus a
+  copy-paste body file. GitHub has no prefill parameter for issue comments, so the
+  engagement hand-off always uses the issue link plus a body file. The marker
+  `<!-- ai-dossier:ztfc contribution=… intent=… op=… -->` is mandatory in both cases.
+- `reconcilePr` / `reconcileComment` (`src/github/reconcile.ts`) are credential-free
+  reads (`anonymousReader`). PRs are listed by head + base + `state=all` and matched
+  by marker and author. One match is found. Zero keeps waiting. Several matches, a
+  match without the marker, one by another author, or a marked PR whose fork no
+  longer resolves (found by a base-only scan back to the issue time) is `ambiguous`.
+  A PR at a head SHA other than the candidate is `head_mismatch`. A truncated or failed listing is
+  `unknown`. GitHub's duplicate-PR 422 is never relied on, because it only holds
+  while the first PR is open.
+- `HandoffDriver` (`src/github/handoff-driver.ts`) journals `link_issued` and
+  `handoff_observed` in its own controller-owned journal directory. Issuing a link is
+  never a write, and `IntentDriver` admits no write in `awaiting_contributor`.
+  `issuePr` renders the PR content itself from `PrContentInput`. A link is issued
+  only after the same admission as a brokered write: fresh policy, verified
+  contributor, and for a PR also the verified fork binding, the receipt rendered in
+  the body valid for the candidate (`receiptValid(sha, receiptDigest)`), and a remote branch SHA equal to the candidate (`HandoffAdmission`; the
+  read-back comes from the verified push, #1066). No link is issued while any PR
+  exists on the head/base, or while GitHub cannot be read. `resume()` reconciles
+  before anything else. An observed PR moves the run to `submitted`. The journal keeps
+  its URL, number, head SHA and state (`open`, `closed` or `merged`; a closed PR is
+  surfaced, not hidden), and CI is reported `pending` or `unknown`, never green. An
+  observed engagement comment moves it to `awaiting_maintainer`. An ambiguous match
+  is a hand-off: the run stays in `awaiting_contributor`, issues no link, tells the
+  contributor what to resolve, and reconciles again on resume. A moved head SHA
+  blocks the run. Replay re-derives every issued link from its binding, title and
+  body, and only the driver's own events may record an observation. `status()`
+  shows the link, what it submits, and that the contributor is the author. Nothing
+  is scheduled: no reminders, and no compute until an explicit resume.
+
 ## Budget admission ledger
 
 `BudgetLedger` is a separate controller-owned local-file admission primitive. Create
@@ -459,3 +510,85 @@ The kill switch stays engaged until an operator deletes `<state-dir>/KILL_SWITCH
 
 The hostile fixtures live in `fixtures/hostile/`; `.github/workflows/zero-trust-vm.yml` runs
 the gate under KVM, plus a TCG smoke test, on every PR touching this package.
+
+## Fork-side GitHub credential broker
+
+`src/github/broker.ts`, `app-auth.ts` and `token-journal.ts` are the only code that
+holds GitHub credentials (the hand-off modules beside them are credential-free). They
+are controller-only: the package index does not export them, and
+`src/github/__tests__/isolation.test.ts` fails if any other module, including the index,
+the hand-off modules and the worker broker, can reach them through an import chain.
+Import them by path from trusted controller code.
+
+Under the hybrid hand-off ([decision record](../../docs/features/zero-trust-full-cycle/decisions/github-credentials.md))
+the broker performs fork pushes only. Upstream comments and PRs are contributor
+hand-offs. `ForkCredentialBroker` has a typed operation API and no generic token call:
+
+- `recover()` must run first. It revokes every journaled token without a recorded
+  revocation before any admission. Values held in process memory (`TokenVault`) are
+  revoked one by one. User-chain tokens whose values were lost are ended by deleting
+  the grant with a live user token. An installation token whose value was lost cannot be
+  revoked through any API, so the broker enters `blocked_cleanup` and reports its id and
+  native expiry for the operator. It never records that token as revoked. Recovery over a
+  journal whose run already ended returns `admitted: false`.
+- `registerUserToken(value, expiresAt)` holds the contributor's unscoped user token
+  (needed for `user_scoped` mints and the kill switch). `rotateUserToken` records a
+  refresh; the old token is marked `rotated` only once observed dead, and its scoped
+  children stay journaled as live.
+- `mintForkPush(intent, { repositoryId, via? }, scopeFrom?)` mints one token for one
+  journaled `push_branch` intent attempt and returns a `ForkPushLease`. The token is
+  narrowed to the verified fork's repository id with `contents:write`: an installation
+  token (the default `via`) or a scoped user token minted from the unscoped user token
+  (`scopeFrom`, default the newest held one). The journaled intent's target must name the
+  same fork (`fork:<repositoryId>:branch:<name>`). A different repository, an unjournaled or
+  non-push intent, a second mint for the same attempt, or scoping from a scoped token is
+  refused before any network call. A token GitHub does not confirm as repository-selected
+  with exactly that permission is revoked and refused.
+- `take(lease)` hands out the lease's `GitPushCredential` once, inside the window;
+  `revoke(lease)` ends it. `revoke` refuses the unscoped user token
+  (`user_token_run_scoped`): only `endRun`, cancellation or `killAll` revoke it. `withForkPush(intent, target, operation, cancel?)` does all
+  three and is the preferred entry point. It revokes on success, failure, throw and
+  cancellation (including a cancel that arrives during the mint). A timer also revokes
+  the token 15 minutes after the mint request, even mid-operation. GitHub's 1 h / 8 h
+  lifetimes are recorded but never relied on.
+- `GitPushCredential` is a git environment that redacts itself in JSON, `inspect` and
+  `String()`. The token goes in an `http.extraheader` supplied via `GIT_CONFIG_*`, with
+  the credential helper and global/system config off. The same overrides disable hooks,
+  fsmonitor, proxies, redirects and non-HTTPS protocols, and force TLS verification. Run
+  the push from a controller-owned clone the worker never had write access to.
+- A revocation counts only when a liveness read after the DELETE returns 401. Each
+  failed attempt is journaled with its stage and HTTP status, and the next attempt
+  waits (1 s, then 4 s). After three failures the broker closes admission and calls
+  `onCleanupBlocked`, so the controller moves the run to `blocked_cleanup`.
+  `CredentialCleanupError.report` lists what is still outstanding.
+- `endRun(reason?)` (run end or cancellation, journaled as `completed` or `cancelled`) revokes installation tokens and scoped children
+  individually, deletes the grant if a child will not die, and revokes the unscoped user
+  token last. Revoking the user token ends its refresh chain, so the journal records that
+  the next run needs a new contributor authorization. Revoking or rotating a parent
+  never counts as revoking a child.
+- `killAll()` closes admission, waits for in-flight mints, and deletes the contributor's
+  grant with an unexpired, unrevoked user-chain token *before* revoking anything else.
+  It then revokes installation tokens. A 404 from the grant endpoint means "not
+  deleted". If no held token can delete the grant (none held, or every attempt
+  refused), `grant.deleted` is false and the report asks for a contributor
+  re-authorization or a manual revoke. Every tracked scoped child, then the user token,
+  is revoked one by one, and `complete` is false: a token of the grant the broker does
+  not hold may still be live.
+- `resolveByOperator(tokenId)` journals that the owner confirmed by hand that a token is
+  dead. `settleExpired()` settles unresolved tokens whose *journaled* native `expiresAt`
+  has passed; a token with no recorded expiry is never settled by time. Both return
+  what is still unresolved, so the controller can complete cleanup.
+- `onJournalFailed` reports a journal write failure (disk, permissions) separately from
+  GitHub cleanup failures; `status()` then shows `journal_failed`.
+- `status()` is safe to log: ids, kinds, states, times and failure counts only.
+  `close()` stops an instance's timers and writes before a successor in the same process
+  takes over the journal and vault.
+
+The token journal (`token-journal.ts`) uses a `Journal` in its own controller
+directory. Each event is replay-validated and scanned with `assertNoSecrets`, and token
+values are never written. Tests replay the gate-3 probe's recorded status codes through
+an in-memory fake (`__tests__/github-fake.ts`), so CI makes no GitHub calls.
+
+An installation token whose value was lost in a full process crash cannot be revoked
+through any GitHub API. The run stays in `blocked_cleanup` until `resolveByOperator`
+or, when the mint response was journaled, `settleExpired` after its native expiry.

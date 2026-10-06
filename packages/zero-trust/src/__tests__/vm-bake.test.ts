@@ -149,8 +149,14 @@ describe('ensureBaseImage', () => {
         });
         return new Response(body);
       }) as unknown as typeof fetch;
-      const result = ensureBaseImage(cacheDir, fetchImpl).catch((e: unknown) => e);
-      await vi.advanceTimersByTimeAsync(120_000);
+      let settled = false;
+      const result = ensureBaseImage(cacheDir, fetchImpl).catch((e: unknown) => {
+        settled = true;
+        return e;
+      });
+      // Chunks arrive through real file I/O, so the idle timer may be re-armed after
+      // an advance; keep advancing until the stalled download gives up.
+      for (let i = 0; i < 20 && !settled; i++) await vi.advanceTimersByTimeAsync(120_000);
       const error = (await result) as Error;
       expect(error.message).toMatch(/stalled for 120 s$/);
       expect(fs.readdirSync(cacheDir)).toEqual([]);
