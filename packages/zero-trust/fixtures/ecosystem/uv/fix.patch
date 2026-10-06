@@ -1,0 +1,11 @@
+diff --git a/chunks.py b/chunks.py
+index 8110781..1062fab 100644
+--- a/chunks.py
++++ b/chunks.py
+@@ -5,5 +5,4 @@ def chunk(items: list, size: int) -> list[list]:
+     """Return consecutive chunks of at most `size` items, keeping a short last chunk."""
+     if size < 1:
+         raise ValueError("size must be positive")
+-    # Known bug: the range stops early, so a trailing partial chunk is dropped.
+-    return [items[i : i + size] for i in range(0, len(items) - size + 1, size)]
++    return [items[i : i + size] for i in range(0, len(items), size)]

@@ -1,0 +1,17 @@
+{
+  "name": "ztfc-fixture-npm",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Zero-trust gate 2 fixture: npm with package-lock.json",
+  "main": "src/duration.js",
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "ms": "2.1.3"
+  },
+  "license": "MIT"
+}

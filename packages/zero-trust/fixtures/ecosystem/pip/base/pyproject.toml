@@ -1,0 +1,9 @@
+[project]
+name = "ztfc-fixture-pip"
+version = "1.0.0"
+description = "Zero-trust gate 2 fixture: pip with a fully hash-pinned requirements.txt"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

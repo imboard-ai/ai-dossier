@@ -1,0 +1,11 @@
+diff --git a/tests/test_regression.py b/tests/test_regression.py
+new file mode 100644
+index 0000000..42504a2
+--- /dev/null
++++ b/tests/test_regression.py
+@@ -0,0 +1,5 @@
++from slugify import slugify
++
++
++def test_collapses_runs_of_separators():
++    assert slugify("Hello,  World!") == "hello-world"

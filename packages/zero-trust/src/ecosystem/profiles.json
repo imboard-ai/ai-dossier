@@ -1,0 +1,46 @@
+{
+  "schemaVersion": "ztfc-profiles-v1",
+  "manifestVersion": "2026.10.0",
+  "profiles": [
+    {
+      "id": "node-20",
+      "ecosystem": "node",
+      "runtimeVersion": "20.19.2",
+      "image": "mcr.microsoft.com/devcontainers/javascript-node",
+      "imageDigest": "sha256:428d4ed6264774619bc353fc7dc98e41b4c01b603a638db9a549e66ed86edd15",
+      "managers": ["npm"]
+    },
+    {
+      "id": "node-22",
+      "ecosystem": "node",
+      "runtimeVersion": "22.16.0",
+      "image": "mcr.microsoft.com/devcontainers/javascript-node",
+      "imageDigest": "sha256:0d29e5fdc64f8397cd502223e0c4679f1e60877ca0fd2db4f2e2e0028e4271af",
+      "managers": ["npm"]
+    },
+    {
+      "id": "python-3.11",
+      "ecosystem": "python",
+      "runtimeVersion": "3.11.13",
+      "image": "mcr.microsoft.com/devcontainers/python",
+      "imageDigest": "sha256:b726eb94f42fcddb10056835f2c474c9f9e12e717ba2b2d2f9a8b1d78feeb68b",
+      "managers": ["pip", "uv"]
+    },
+    {
+      "id": "python-3.12",
+      "ecosystem": "python",
+      "runtimeVersion": "3.12.11",
+      "image": "mcr.microsoft.com/devcontainers/python",
+      "imageDigest": "sha256:7876580dc67fd460fd962f004cbeb480027e9bbc0657096f1087db11f9eaff39",
+      "managers": ["pip", "uv"]
+    },
+    {
+      "id": "python-3.13",
+      "ecosystem": "python",
+      "runtimeVersion": "3.13.5",
+      "image": "mcr.microsoft.com/devcontainers/python",
+      "imageDigest": "sha256:0aa711e570b306c02946cdda67587ce8c65978dbb65691341cbcfd4854dfcfff",
+      "managers": ["pip", "uv"]
+    }
+  ]
+}

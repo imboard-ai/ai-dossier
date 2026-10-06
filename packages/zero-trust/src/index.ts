@@ -3,6 +3,7 @@ export * from './budget';
 export * from './budget-types';
 export * from './canonical/export';
 export * from './canonical/reconstruct';
+export * from './ecosystem';
 export * from './intents';
 export * from './journal';
 export * from './receipt/issue';
