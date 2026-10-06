@@ -19,12 +19,22 @@ import {
   WriteBlockedError,
 } from '../intents';
 import { Journal, JournalError } from '../journal';
-import { createRun, ReasonCode, transitionRun } from '../state';
+import { createRun, ReasonCode, RUN_STATES, type RunRecord, transitionRun } from '../state';
 
 const timestamp = '2026-10-05T00:00:00.000Z';
-const run = createRun(
+const gating = createRun(
   { runId: 'run-1', contributor: 'alice', upstreamIssue: 'https://github.com/o/r/issues/1' },
   timestamp
+);
+function advance(initial: RunRecord, ...reasons: ReasonCode[]): RunRecord {
+  return reasons.reduce((current, reason) => transitionRun(current, reason, timestamp), initial);
+}
+const run = advance(
+  gating,
+  ReasonCode.GatePassed,
+  ReasonCode.PlanApproved,
+  ReasonCode.CandidateReady,
+  ReasonCode.VerificationPassed
 );
 const sha = 'a'.repeat(40);
 const input: IntentInput = {
@@ -45,8 +55,8 @@ function journal(dir = directory()): Journal {
   journals.push(j);
   return j;
 }
-function driver(j: Journal, adapter: WriteAdapter): IntentDriver {
-  return new IntentDriver(j, adapter, { run, contributionId: 'c-1' }, () => timestamp);
+function driver(j: Journal, adapter: WriteAdapter, current = run): IntentDriver {
+  return new IntentDriver(j, adapter, { run: current, contributionId: 'c-1' }, () => timestamp);
 }
 class FakeAdapter implements WriteAdapter {
   readonly artifacts = new Map<string, { artifactRef: string; remoteSha?: string }>();
@@ -161,17 +171,15 @@ describe('durable provider-independent write intents', () => {
     await expect(other.resume()).rejects.toThrow(WriteBlockedError);
     expect(other.snapshot().run.state).toBe('blocked');
   });
-  it('rejects terminal lifecycle records before admitting any writes', () => {
+  it('rejects terminal lifecycle writes even with a fresh journal', async () => {
     const terminal = transitionRun(run, ReasonCode.UserCancelled, timestamp);
-    expect(
-      () =>
-        new IntentDriver(
-          journal(),
-          new FakeAdapter(),
-          { run: terminal, contributionId: 'c-1' },
-          () => timestamp
-        )
-    ).toThrow(IntentError);
+    const d = new IntentDriver(
+      journal(),
+      new FakeAdapter(),
+      { run: terminal, contributionId: 'c-1' },
+      () => timestamp
+    );
+    await expect(d.execute(input)).rejects.toThrow(WriteBlockedError);
   });
   it('denies further admission even when the blocked transition clock fails', async () => {
     const fake = new FakeAdapter();
@@ -222,7 +230,7 @@ describe('durable provider-independent write intents', () => {
       ]);
       return { artifactRef: 'existing', remoteSha: sha };
     });
-    const d = driver(j, fake);
+    const d = driver(j, fake, operationKind === 'engagement_comment' ? gating : run);
     const op = { ...input, operationKind };
     expect(await d.execute(op)).toBe('existing');
     expect(await d.execute(op)).toBe('existing');
@@ -238,7 +246,8 @@ describe('durable provider-independent write intents', () => {
     const fake = new FakeAdapter();
     fake.mode = 'lost';
     const j = journal(dir);
-    const d = driver(j, fake);
+    const current = operationKind === 'engagement_comment' ? gating : run;
+    const d = driver(j, fake, current);
     const op = {
       ...input,
       operationKind,
@@ -246,7 +255,7 @@ describe('durable provider-independent write intents', () => {
     };
     await expect(d.execute(op)).rejects.toBeInstanceOf(MutationUncertainError);
     j.close();
-    const restored = driver(journal(dir), fake);
+    const restored = driver(journal(dir), fake, current);
     await restored.resume();
     expect(await restored.execute(op)).toBe('artifact-1');
     expect(fake.writes).toBe(1);
@@ -266,7 +275,7 @@ describe('durable provider-independent write intents', () => {
           : { kind: 'absent' };
       },
     };
-    const d = driver(journal(), adapter);
+    const d = driver(journal(), adapter, gating);
     const op = { ...input, operationKind: 'engagement_comment' as const, candidateSha: null };
     await expect(d.execute(op)).rejects.toThrow(MutationUncertainError);
     expect(await d.execute(op)).toBe('comment/1');
@@ -292,8 +301,9 @@ describe('durable provider-independent write intents', () => {
     expect(d.snapshot().run.state).toBe('blocked');
     expect(d.snapshot().blockedReason).toBe('retry_exhausted');
     expect(fake.writes).toBe(2);
+    const blockedRun = d.snapshot().run;
     j.close();
-    d = driver(journal(dir), fake);
+    d = driver(journal(dir), fake, blockedRun);
     await expect(d.execute({ ...input, target: 'new' })).rejects.toThrow(WriteBlockedError);
     expect(fake.writes).toBe(2);
   });
@@ -393,9 +403,8 @@ describe('durable provider-independent write intents', () => {
       const d = driver(j, fake);
       for (let index = 0; index < 25; index++) {
         random = (Math.imul(random, 1664525) + 1013904223) >>> 0;
-        const operationKind = OPERATION_KINDS[
-          random % OPERATION_KINDS.length
-        ] as IntentInput['operationKind'];
+        const kinds = OPERATION_KINDS.filter((kind) => kind !== 'engagement_comment');
+        const operationKind = kinds[random % kinds.length] as IntentInput['operationKind'];
         const op = { ...input, target: `target-${index}`, operationKind };
         fake.mode = random % 3 === 0 ? 'lost' : 'success';
         try {
@@ -496,6 +505,350 @@ describe('durable provider-independent write intents', () => {
     ).toBeNull();
     for (const id of ['', 'x -->', 'a'.repeat(129)])
       expect(() => engagementMarker(id)).toThrow(IntentError);
+  });
+});
+
+const lifecycleRuns = [
+  gating,
+  advance(gating, ReasonCode.PermissionRequired),
+  advance(gating, ReasonCode.GatePassed),
+  advance(gating, ReasonCode.GatePassed, ReasonCode.PlanApproved),
+  advance(gating, ReasonCode.GatePassed, ReasonCode.PlanApproved, ReasonCode.CandidateReady),
+  advance(run, ReasonCode.UserPaused),
+  run,
+  advance(run, ReasonCode.PublicationObserved),
+  advance(run, ReasonCode.PublicationObserved, ReasonCode.ReviewAwaited),
+  advance(run, ReasonCode.PublicationObserved, ReasonCode.RevisionRequested),
+  advance(run, ReasonCode.PublicationObserved, ReasonCode.UpstreamAccepted),
+  advance(run, ReasonCode.PublicationObserved, ReasonCode.ObservedUpstreamMerge),
+  advance(run, ReasonCode.PublicationObserved, ReasonCode.UpstreamDeclined),
+  advance(run, ReasonCode.PolicyBlocked),
+  advance(run, ReasonCode.UnsupportedEnvironment),
+  advance(run, ReasonCode.ExecutionFailed),
+  advance(run, ReasonCode.UserCancelled),
+  advance(run, ReasonCode.CleanupFailed),
+];
+const deniedRuns = lifecycleRuns.filter((r) =>
+  [
+    'cancelled',
+    'failed',
+    'declined',
+    'merged',
+    'blocked',
+    'unsupported',
+    'blocked_cleanup',
+    'paused_user',
+  ].includes(r.state)
+);
+
+describe('current controller lifecycle admission', () => {
+  it('recovery from the durable exhaustion prefix fences same and different keys even when the block clock failed', async () => {
+    const dir = directory();
+    const j = journal(dir);
+    const fake = new FakeAdapter();
+    fake.mode = 'fail';
+    const d = new IntentDriver(j, fake, { run, contributionId: 'c-1' }, () => {
+      throw new Error('clock unavailable');
+    });
+    await expect(d.execute(input)).rejects.toThrow(MutationUncertainError);
+    await expect(d.execute(input)).rejects.toThrow(MutationUncertainError);
+    await expect(d.resume()).rejects.toThrow('clock unavailable');
+    expect((j.read().at(-1) as { type: string }).type).toBe('exhausted');
+    expect(d.snapshot().run.state).toBe('shipping');
+    j.close();
+    const recovered = journal(dir);
+    const restored = driver(recovered, fake);
+    const reads = fake.reads;
+    await restored.resume();
+    for (const target of [input.target, 'other'])
+      await expect(restored.execute({ ...input, target })).rejects.toThrow(WriteBlockedError);
+    expect(fake.writes).toBe(2);
+    expect(fake.reads).toBe(reads);
+    expect(restored.snapshot().blockedReason).toBe('retry_exhausted');
+    expect(() =>
+      replayIntents([
+        ...recovered.read(),
+        { v: 1, type: 'intended', input: { ...input, target: 'other' } },
+      ])
+    ).toThrow(IntentError);
+  });
+  it('pending resume rejects when observation fsync fails during a retry-ready reconciliation', async () => {
+    const j = journal();
+    const fake = new FakeAdapter();
+    fake.mode = 'fail';
+    const d = driver(j, fake);
+    await expect(d.execute(input)).rejects.toThrow(MutationUncertainError);
+    await d.resume();
+    let finish!: (result: ReconcileResult) => void;
+    let started!: () => void;
+    const reading = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    vi.spyOn(fake, 'reconcile').mockImplementation(() => {
+      started();
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    });
+    const pending = d.resume();
+    await reading;
+    vi.spyOn(fs, 'fsyncSync').mockImplementationOnce(() => {
+      throw new Error('disk');
+    });
+    expect(() => d.observeRun(advance(run, ReasonCode.UserCancelled))).toThrow(JournalError);
+    finish({ kind: 'absent' });
+    await expect(pending).rejects.toThrow(WriteBlockedError);
+    await expect(d.execute({ ...input, target: 'other' })).rejects.toThrow(WriteBlockedError);
+    expect(fake.writes).toBe(1);
+  });
+  it('reconciles legacy paused-run journal effects under a current cancellation without new writes', async () => {
+    const paused = advance(run, ReasonCode.UserPaused);
+    const cancelled = advance(paused, ReasonCode.UserCancelled);
+    const j = journal();
+    for (const event of [
+      { v: 1, type: 'run', run: paused, contributionId: 'c-1' },
+      { v: 1, type: 'intended', input },
+      { v: 1, type: 'attempted', key: idempotencyKey(input) },
+      { v: 1, type: 'ambiguous', key: idempotencyKey(input) },
+    ])
+      j.append(event);
+    const fake = new FakeAdapter();
+    fake.observation = { kind: 'found', artifactRef: 'legacy-effect' };
+    const d = driver(j, fake, cancelled);
+    await d.resume();
+    await expect(d.execute(input)).rejects.toThrow(WriteBlockedError);
+    expect(fake.writes).toBe(0);
+    expect(fake.reads).toBe(1);
+    expect(d.snapshot().intents.get(idempotencyKey(input))?.artifactRef).toBe('legacy-effect');
+    expect(replayIntents(j.read())).toEqual(d.snapshot());
+  });
+  it.each([
+    'success',
+    'lost',
+  ] as const)('preserves an already-issued %s mutation outcome after cancellation', async (mode) => {
+    const j = journal();
+    const fake = new FakeAdapter();
+    let finish!: () => void;
+    let started!: () => void;
+    const issued = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    vi.spyOn(fake, 'mutate').mockImplementation(async () => {
+      fake.writes++;
+      started();
+      await new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+      if (mode === 'lost') throw new Error('lost response');
+      return { artifactRef: 'issued-effect' };
+    });
+    const d = driver(j, fake);
+    const pending = d.execute(input);
+    await issued;
+    const current = advance(run, ReasonCode.UserCancelled);
+    d.observeRun(current);
+    finish();
+    if (mode === 'lost') await expect(pending).rejects.toThrow(MutationUncertainError);
+    else await expect(pending).resolves.toBe('issued-effect');
+    expect(d.snapshot().run).toEqual(current);
+    expect(d.snapshot().intents.get(idempotencyKey(input))?.status).toBe(
+      mode === 'lost' ? 'ambiguous' : 'confirmed'
+    );
+    await expect(d.execute({ ...input, target: 'other' })).rejects.toThrow(WriteBlockedError);
+    expect(fake.writes).toBe(1);
+    expect(replayIntents(j.read())).toEqual(d.snapshot());
+  });
+  it.each([
+    ReasonCode.UserCancelled,
+    ReasonCode.CleanupFailed,
+  ])('durably records exhausted absence after %s without renewing retries', async (reason) => {
+    const dir = directory();
+    let j = journal(dir);
+    const fake = new FakeAdapter();
+    fake.mode = 'fail';
+    const d = driver(j, fake);
+    await expect(d.execute(input)).rejects.toThrow(MutationUncertainError);
+    await expect(d.execute(input)).rejects.toThrow(MutationUncertainError);
+    const current = advance(run, reason);
+    d.observeRun(current);
+    await expect(d.resume()).rejects.toThrow(WriteBlockedError);
+    expect(d.snapshot().blockedReason).toBe('retry_exhausted');
+    expect(d.snapshot().run).toEqual(current);
+    expect(d.snapshot().intents.get(idempotencyKey(input))).toMatchObject({
+      attempts: 2,
+      retryReady: false,
+      exhaustedAbsent: true,
+    });
+    expect(j.read()).toContainEqual({ v: 1, type: 'exhausted', key: idempotencyKey(input) });
+    j.close();
+    j = journal(dir);
+    const restored = driver(j, fake, current);
+    const events = j.read().length;
+    const reads = fake.reads;
+    await restored.resume();
+    await expect(restored.execute(input)).rejects.toThrow(WriteBlockedError);
+    expect(fake.writes).toBe(2);
+    expect(fake.reads).toBe(reads);
+    expect(j.read()).toHaveLength(events);
+    expect(restored.snapshot().blockedReason).toBe('retry_exhausted');
+    expect(replayIntents(j.read())).toEqual(restored.snapshot());
+    expect(() =>
+      replayIntents([...j.read(), { v: 1, type: 'attempted', key: idempotencyKey(input) }])
+    ).toThrow(IntentError);
+  });
+  it('covers every lifecycle state', () => {
+    expect(new Set(lifecycleRuns.map((r) => r.state))).toEqual(new Set(RUN_STATES));
+  });
+  it.each(lifecycleRuns)('enforces operation scope in $state', async (current) => {
+    const allowed =
+      current.state === 'shipping'
+        ? ['fork_ensure', 'push_branch', 'pr_create', 'pr_update', 'pr_close']
+        : current.state === 'revising'
+          ? ['pr_update', 'pr_close']
+          : ['gating', 'awaiting_maintainer'].includes(current.state)
+            ? ['engagement_comment']
+            : ['submitted', 'awaiting_review', 'accepted'].includes(current.state)
+              ? ['pr_close']
+              : [];
+    for (const operationKind of OPERATION_KINDS) {
+      const fake = new FakeAdapter();
+      const d = driver(journal(), fake, current);
+      const result = d.execute({ ...input, operationKind });
+      if (allowed.includes(operationKind)) await expect(result).resolves.toBe('artifact-1');
+      else await expect(result).rejects.toThrow(WriteBlockedError);
+      expect(fake.writes).toBe(allowed.includes(operationKind) ? 1 : 0);
+    }
+  });
+  it.each(
+    deniedRuns
+  )('resumes $state and journals reconciliation without new writes', async (current) => {
+    for (const status of ['attempted', 'ambiguous'] as const) {
+      for (const kind of ['found', 'absent'] as const) {
+        const dir = directory();
+        const j = journal(dir);
+        j.append({ v: 1, type: 'run', run, contributionId: 'c-1' });
+        j.append({ v: 1, type: 'intended', input });
+        j.append({ v: 1, type: 'attempted', key: idempotencyKey(input) });
+        if (status === 'ambiguous')
+          j.append({ v: 1, type: 'ambiguous', key: idempotencyKey(input) });
+        j.close();
+        const fake = new FakeAdapter();
+        fake.observation = kind === 'found' ? { kind, artifactRef: 'existing' } : { kind };
+        const restored = journal(dir);
+        const d = driver(restored, fake, current);
+        await d.resume();
+        expect(fake.reads).toBe(1);
+        expect(d.snapshot().run).toEqual(current);
+        expect(restored.read()).toContainEqual({ v: 1, type: 'run_update', run: current });
+        expect((restored.read().at(-1) as { type: string }).type).toBe(
+          kind === 'found' ? 'confirmed' : 'absent'
+        );
+        for (const operationKind of OPERATION_KINDS)
+          await expect(d.execute({ ...input, operationKind })).rejects.toThrow(WriteBlockedError);
+        expect(fake.writes).toBe(0);
+        expect(replayIntents(restored.read())).toEqual(d.snapshot());
+      }
+    }
+  });
+  it('rejects rollback, divergent history, changed creation time and forged replay updates', () => {
+    const dir = directory();
+    const j = journal(dir);
+    driver(j, new FakeAdapter());
+    j.close();
+    const resumed = journal(dir);
+    const divergence = advance(
+      gating,
+      ReasonCode.UserPaused,
+      ReasonCode.ResumeGating,
+      ReasonCode.GatePassed,
+      ReasonCode.PlanApproved,
+      ReasonCode.CandidateReady,
+      ReasonCode.VerificationPassed
+    );
+    const changedCreation = createRun(gating, '2026-10-04T00:00:00.000Z');
+    for (const invalid of [gating, divergence, changedCreation]) {
+      expect(() => driver(resumed, new FakeAdapter(), invalid)).toThrow(IntentError);
+      expect(() =>
+        replayIntents([...resumed.read(), { v: 1, type: 'run_update', run: invalid }])
+      ).toThrow(IntentError);
+    }
+    const d = driver(resumed, new FakeAdapter());
+    const length = resumed.read().length;
+    d.observeRun(run);
+    expect(resumed.read()).toHaveLength(length);
+    expect(() => d.observeRun(divergence)).toThrow(IntentError);
+  });
+  it.each([
+    ReasonCode.CleanupFailed,
+    ReasonCode.UserCancelled,
+  ])('live %s revokes queued writes and persists across restart', async (reason) => {
+    const dir = directory();
+    const j = journal(dir);
+    const fake = new FakeAdapter();
+    const d = driver(j, fake);
+    const pending = d.execute(input);
+    const current = advance(run, reason);
+    d.observeRun(current);
+    await expect(pending).rejects.toThrow(WriteBlockedError);
+    await expect(d.execute(input)).rejects.toThrow(WriteBlockedError);
+    j.close();
+    await expect(driver(journal(dir), fake, current).execute(input)).rejects.toThrow(
+      WriteBlockedError
+    );
+    expect(fake.writes).toBe(0);
+  });
+  it('observes cancellation during asynchronous reconciliation before admitting a mutation', async () => {
+    const fake = new FakeAdapter();
+    fake.mode = 'lost';
+    const d = driver(journal(), fake);
+    await expect(d.execute(input)).rejects.toThrow(MutationUncertainError);
+    let finish!: (result: ReconcileResult) => void;
+    let started!: () => void;
+    const reading = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    vi.spyOn(fake, 'reconcile').mockImplementation(() => {
+      started();
+      return new Promise((resolve) => {
+        finish = resolve;
+      });
+    });
+    const pending = d.execute({ ...input, target: 'other' });
+    await reading;
+    d.observeRun(advance(run, ReasonCode.UserCancelled));
+    finish({ kind: 'found', artifactRef: 'existing' });
+    await expect(pending).rejects.toThrow(WriteBlockedError);
+    expect(fake.writes).toBe(1);
+    expect(d.snapshot().intents.get(idempotencyKey(input))?.status).toBe('confirmed');
+  });
+  it('computes a write block from the latest controller lifecycle', async () => {
+    const fake = new FakeAdapter();
+    fake.mode = 'lost';
+    const j = journal();
+    const d = driver(j, fake);
+    await expect(d.execute(input)).rejects.toThrow(MutationUncertainError);
+    const current = advance(run, ReasonCode.PublicationObserved, ReasonCode.RevisionRequested);
+    d.observeRun(current);
+    fake.observation = { kind: 'unknown' };
+    await expect(d.resume()).rejects.toThrow(WriteBlockedError);
+    expect(d.snapshot().run).toEqual(advance(current, ReasonCode.PolicyBlocked));
+    expect(d.snapshot().run.history.at(-1)?.from).toBe('revising');
+    expect(replayIntents(j.read())).toEqual(d.snapshot());
+  });
+  it.each(
+    deniedRuns
+  )('uncertain reconciliation in $state cannot invent a lifecycle transition', async (current) => {
+    const fake = new FakeAdapter();
+    fake.mode = 'lost';
+    const d = driver(journal(), fake);
+    await expect(d.execute(input)).rejects.toThrow(MutationUncertainError);
+    d.observeRun(current);
+    fake.observation = { kind: 'unknown' };
+    await expect(d.resume()).rejects.toThrow(WriteBlockedError);
+    expect(d.snapshot().run.state).toBe(
+      current.state === 'paused_user' ? 'blocked' : current.state
+    );
+    expect(fake.writes).toBe(1);
   });
 });
 
@@ -693,12 +1046,12 @@ describe('fail-closed journal durability', () => {
     const dir = directory();
     const artifact = path.join(dir, 'remote-artifact');
     const modulePath = path.resolve(__dirname, '../../dist/index.js');
-    const code = `const fs=require('node:fs'); const {Journal,IntentDriver,createRun}=require(${JSON.stringify(modulePath)});
+    const code = `const fs=require('node:fs'); const {Journal,IntentDriver}=require(${JSON.stringify(modulePath)});
       const j=new Journal(${JSON.stringify(path.join(dir, 'journal'))});
       const d=new IntentDriver(j,{reconcile:async()=>({kind:'unknown'}),mutate:async()=>{
         const fd=fs.openSync(${JSON.stringify(artifact)},'w',0o600);fs.writeSync(fd,'pr/1');fs.fsyncSync(fd);fs.closeSync(fd);
         process.stdout.write('effect\\n'); await new Promise(()=>{});
-      }},{run:createRun(${JSON.stringify({ runId: run.runId, contributor: run.contributor, upstreamIssue: run.upstreamIssue })},${JSON.stringify(timestamp)}),contributionId:'c-1'},()=>${JSON.stringify(timestamp)});
+      }},{run:${JSON.stringify(run)},contributionId:'c-1'},()=>${JSON.stringify(timestamp)});
       d.execute(${JSON.stringify(input)}); setInterval(()=>{},1000);`;
     const child = spawn(process.execPath, ['-e', code], { stdio: ['ignore', 'pipe', 'pipe'] });
     let stderr = '';
