@@ -3,11 +3,12 @@
 #
 # Run this from the one host that has ssh reach to the others (the "local" host).
 #
-# Config (env): REFRESH_FLEET_HOSTS = default comma-separated host list (default: localhost);
+# Config (env): REFRESH_FLEET_HOSTS = default comma-separated ssh host list (required unless --hosts or --local-only is given);
 #               REFRESH_FLEET_LOCAL_HOST = the name that denotes this machine in that list (default: localhost).
 #
 #   bash scripts/refresh-fleet.sh                    # CLI + dispatch profiles + default dossiers + every imboard-ai registry skill
 #   bash scripts/refresh-fleet.sh --cli-only         # just bump the CLI everywhere
+#   bash scripts/refresh-fleet.sh --local-only       # just this machine
 #   bash scripts/refresh-fleet.sh --hosts host-a,host-b    # subset of machines
 #   bash scripts/refresh-fleet.sh --profiles-file path # use a different profile source
 #   bash scripts/refresh-fleet.sh --profile-projects a,b # also sync per-project scheduler profile maps
@@ -52,7 +53,7 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOCAL_HOST="${REFRESH_FLEET_LOCAL_HOST:-localhost}"
-HOSTS_DEFAULT="${REFRESH_FLEET_HOSTS:-localhost}"
+HOSTS_DEFAULT="${REFRESH_FLEET_HOSTS:-}"
 HOSTS="$HOSTS_DEFAULT"
 CLI_ONLY=0
 USAGE_SYNC=0
@@ -82,6 +83,7 @@ DOSSIERS=(
 while [ $# -gt 0 ]; do
   case "$1" in
     --cli-only) CLI_ONLY=1 ;;
+    --local-only) HOSTS="$LOCAL_HOST" ;;
     --usage-sync) USAGE_SYNC=1 ;;
     --hosts) HOSTS="${2:?--hosts needs a comma-separated list}"; shift ;;
     --hosts=*) HOSTS="${1#*=}" ;;
@@ -102,6 +104,10 @@ for target in "${EXTRA_TARGETS[@]}"; do
     exit 2
   fi
 done
+if [ -z "$HOSTS" ]; then
+  echo "refresh-fleet: no hosts to refresh — set REFRESH_FLEET_HOSTS (comma-separated ssh aliases), or pass --hosts / --local-only" >&2
+  exit 2
+fi
 if [[ ! "$HOSTS" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,62}(,[A-Za-z0-9][A-Za-z0-9._-]{0,62})*$ ]]; then
   echo "invalid --hosts value: $HOSTS (expected comma-separated SSH host names)" >&2
   exit 2

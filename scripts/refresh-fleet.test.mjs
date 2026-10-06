@@ -155,6 +155,25 @@ describe('refresh-fleet.sh', () => {
     expect(calls(box)).toContain('pull imboard-ai/git/full-cycle-issue --force');
   });
 
+  it('exits non-zero with guidance when no hosts are configured', () => {
+    const box = fixture(undefined);
+    const env = { ...process.env, HOME: box.home, PATH: `${box.bin}:${process.env.PATH}` };
+    delete env.REFRESH_FLEET_HOSTS;
+    const res = spawnSync('bash', [SCRIPT_PATH], { env, encoding: 'utf8' });
+    expect(res.status).toBe(2);
+    expect(res.stderr).toContain('set REFRESH_FLEET_HOSTS');
+    expect(calls(box)).toEqual([]);
+  });
+
+  it('refreshes only this machine with --local-only', () => {
+    const box = fixture(undefined);
+    const env = { ...process.env, HOME: box.home, PATH: `${box.bin}:${process.env.PATH}` };
+    delete env.REFRESH_FLEET_HOSTS;
+    const res = spawnSync('bash', [SCRIPT_PATH, '--local-only'], { env, encoding: 'utf8' });
+    expect(res.stdout).toContain('hosts=localhost');
+    expect(res.stdout).not.toContain('unreachable over ssh');
+  });
+
   it('fails the host clearly when its CLI is older than 0.82.0, without calling install-skill', () => {
     const box = fixture(undefined);
     const res = runRefreshRaw(box, [], { STUB_VERSION: '0.81.0', STUB_LATEST: '0.81.0' });
