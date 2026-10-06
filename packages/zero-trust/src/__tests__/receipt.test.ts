@@ -18,6 +18,7 @@ import { renderReceipt } from '../receipt/render';
 import { canonicalJson, parseReceipt, RECEIPT_TTL_MS } from '../receipt/schema';
 import { authorizeShipping, type ReceiptContext, verifyReceipt } from '../receipt/verify';
 import { createRun, ReasonCode, transitionRun } from '../state';
+import { compiledFixture } from './compiled-fixture';
 
 const SHA = 'a'.repeat(40);
 const CANDIDATE = 'b'.repeat(40);
@@ -546,18 +547,27 @@ describe('controller nonce durability — concurrent processes and crash boundar
     fs.symlinkSync(path.join(directory, 'nonces'), alias);
     expect(() => new ReceiptNonceStore(alias)).toThrow('unsafe_store');
   });
-  it('missing, corrupt or torn history never resets the consumed set', () => {
+  it('missing history fails closed and torn history recovers with an audit event', () => {
     const file = path.join(directory, 'nonces/events.jsonl');
     fs.unlinkSync(file);
     expect(() => store.consume(row)).toThrow('missing_store');
     fs.writeFileSync(file, '{"v":1,"type":"receipt-nonces"}\n{"nonce":');
-    expect(() => store.consume(row)).toThrow();
+    store.consume(row);
+    expect(() => store.consume(row)).toThrow('replayed_nonce');
   });
   it('fsync failure returns no authorization and fences even a reopened controller', () => {
     const original = fs.fsyncSync;
-    let calls = 0;
+    const write = fs.writeSync;
+    let appended = false;
+    vi.spyOn(fs, 'writeSync').mockImplementation(((...args: Parameters<typeof fs.writeSync>) => {
+      if (
+        fs.readlinkSync(`/proc/self/fd/${args[0]}`) === path.join(directory, 'nonces/events.jsonl')
+      )
+        appended = true;
+      return Reflect.apply(write, fs, args);
+    }) as typeof fs.writeSync);
     vi.spyOn(fs, 'fsyncSync').mockImplementation((fd) => {
-      if (++calls === 2) throw new Error('disk failure');
+      if (appended) throw new Error('disk failure');
       original(fd);
     });
     expect(() => store.consume(row)).toThrow();
@@ -568,7 +578,7 @@ describe('controller nonce durability — concurrent processes and crash boundar
     );
   });
   it('retains a durable consumed record after real controller SIGKILL following authorization', async () => {
-    const code = `const {ReceiptNonceStore}=require(${JSON.stringify(path.resolve(__dirname, '../../dist/receipt/nonces.js'))});new ReceiptNonceStore(process.argv[1]).consume(${JSON.stringify(row)});process.send('consumed');setInterval(()=>{},1000)`;
+    const code = `const {ReceiptNonceStore}=require(${JSON.stringify(compiledFixture(directory, 'receipt/nonces'))});new ReceiptNonceStore(process.argv[1]).consume(${JSON.stringify(row)});process.send('consumed');setInterval(()=>{},1000)`;
     const child = spawn(process.execPath, ['-e', code, path.join(directory, 'nonces')], {
       stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
     });
@@ -589,7 +599,7 @@ describe('controller nonce durability — concurrent processes and crash boundar
     expect(() => store.consume(row)).toThrow('replayed_nonce');
   });
   it('admits at most one of separate processes racing the same nonce', async () => {
-    const code = `const {ReceiptNonceStore}=require(${JSON.stringify(path.resolve(__dirname, '../../dist/receipt/nonces.js'))});try{new ReceiptNonceStore(process.argv[1]).consume(${JSON.stringify(row)});process.exit(0)}catch{process.exit(2)}`;
+    const code = `const {ReceiptNonceStore}=require(${JSON.stringify(compiledFixture(directory, 'receipt/nonces'))});try{new ReceiptNonceStore(process.argv[1]).consume(${JSON.stringify(row)});process.exit(0)}catch{process.exit(2)}`;
     const results = await Promise.all(
       Array.from(
         { length: 8 },

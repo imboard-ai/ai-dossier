@@ -2,7 +2,6 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import * as ts from 'typescript';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BudgetLedger, budgetTotals, estimateBudget, requireBudgetRates } from '../budget';
 import {
@@ -11,6 +10,7 @@ import {
   type BudgetRate,
   type BudgetSession,
 } from '../budget-types';
+import { compiledFixture } from './compiled-fixture';
 
 const price = (resource = 'model', unit: BudgetRate['unit'] = 'token', cost = 1): BudgetRate => ({
   resource,
@@ -109,7 +109,7 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
     ledger.settle(r.id, null);
     const resumed = new BudgetLedger(file, 'contribution-1');
     expect(resumed.snapshot().reservations[0].status).toBe('reserved');
-    code(() => resumed.reserve('initial', estimate(21)), 'ceiling_exceeded');
+    code(() => resumed.reserve('initial', estimate(21)), 'persistence_uncertain');
     code(() => resumed.release(r.id, ''), 'invalid_budget');
     resumed.release(r.id, 'provider confirmed never started');
     resumed.reserve('initial', estimate(90));
@@ -167,7 +167,7 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
       source: 'work overrun',
     });
     const resumed = new BudgetLedger(file, 'contribution-1');
-    code(() => resumed.reserve('initial', estimate(5), 'teardown'), 'ceiling_exceeded');
+    code(() => resumed.reserve('initial', estimate(5), 'teardown'), 'persistence_uncertain');
     resumed.release(held.id, 'provider confirms cleanup never started');
     resumed.reserve('initial', estimate(6), 'teardown');
     expect(budgetTotals(resumed.snapshot(), 'initial')).toEqual({
@@ -227,8 +227,26 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
       timeMs: 100,
       source: 'invoice',
     });
-    ledger.reserve('initial', estimate(4), 'teardown');
-    new BudgetLedger(file, 'contribution-1').reserve('initial', estimate(6), 'teardown');
+    const localCleanup = ledger.reserve('initial', estimate(4), 'teardown');
+    ledger.settle(localCleanup.id, {
+      money: { currency: 'USD', minor: 4 },
+      tokens: 10,
+      timeMs: 100,
+      source: 'reconciled cleanup invoice',
+    });
+    const foreignCleanup = new BudgetLedger(file, 'contribution-1').reserve(
+      'initial',
+      estimate(6),
+      'teardown'
+    );
+    code(() => ledger.reserve('initial', estimate(1), 'teardown'), 'persistence_uncertain');
+    code(() => ledger.reserve('initial', estimate(0)), 'persistence_uncertain');
+    ledger.settle(foreignCleanup.id, {
+      money: { currency: 'USD', minor: 6 },
+      tokens: 10,
+      timeMs: 100,
+      source: 'reconciled cleanup invoice',
+    });
     code(() => ledger.reserve('initial', estimate(1), 'teardown'), 'ceiling_exceeded');
     code(() => ledger.reserve('initial', estimate(0)), 'ceiling_exceeded');
     // Public numeric totals continue to reject unrepresentable sums, never cap them.
@@ -383,22 +401,7 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
   });
 
   function compiledModule(): string {
-    // Compile the current source, never a possibly stale pool dist/. No build prerequisite.
-    const sourceDir = path.resolve(__dirname, '..');
-    for (const name of ['budget', 'budget-types']) {
-      const source = fs.readFileSync(path.join(sourceDir, `${name}.ts`), 'utf8');
-      fs.writeFileSync(
-        path.join(dir, `${name}.js`),
-        ts.transpileModule(source, {
-          compilerOptions: {
-            module: ts.ModuleKind.CommonJS,
-            target: ts.ScriptTarget.ES2022,
-            esModuleInterop: true,
-          },
-        }).outputText
-      );
-    }
-    return path.join(dir, 'budget.js');
+    return compiledFixture(dir, 'budget');
   }
 
   async function runRacers(script: string): Promise<(number | null)[]> {
@@ -418,7 +421,7 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
 
   it('races real processes sharing one persisted file', async () => {
     const module = compiledModule();
-    const script = `const {BudgetLedger}=require(${JSON.stringify(module)}); try {new BudgetLedger(${JSON.stringify(file)},'contribution-1').reserve('initial',${JSON.stringify(estimate(60))});process.exitCode=0;}catch(e){process.exitCode=e.code==='ceiling_exceeded'?2:3;}`;
+    const script = `const {BudgetLedger}=require(${JSON.stringify(module)}); try {new BudgetLedger(${JSON.stringify(file)},'contribution-1').reserve('initial',${JSON.stringify(estimate(60))});process.exitCode=0;}catch(e){process.exitCode=['ceiling_exceeded','persistence_uncertain'].includes(e.code)?2:3;}`;
     const exits = await runRacers(script);
     expect(exits.filter((c) => c === 0)).toHaveLength(1);
     expect(exits.filter((c) => c === 2)).toHaveLength(7);
@@ -434,13 +437,23 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
       source: 'interrupted stream',
     });
     const module = compiledModule();
-    const script = `const {BudgetLedger}=require(${JSON.stringify(module)});try{new BudgetLedger(${JSON.stringify(file)},'contribution-1').reserve('initial',${JSON.stringify(estimate(6))},'teardown');process.exitCode=0;}catch(e){process.exitCode=e.code==='ceiling_exceeded'?2:3;}`;
+    const script = `const {BudgetLedger}=require(${JSON.stringify(module)});try{new BudgetLedger(${JSON.stringify(file)},'contribution-1').reserve('initial',${JSON.stringify(estimate(6))},'teardown');process.exitCode=0;}catch(e){process.exitCode=['ceiling_exceeded','persistence_uncertain'].includes(e.code)?2:3;}`;
     const exits = await runRacers(script);
     expect(exits.filter((c) => c === 0)).toHaveLength(1);
     expect(exits.filter((c) => c === 2)).toHaveLength(7);
     const resumed = new BudgetLedger(file, 'contribution-1');
+    const heldCleanup = resumed.snapshot().reservations.find((row) => row.status === 'reserved');
+    expect(heldCleanup).toBeDefined();
+    code(() => resumed.reserve('initial', estimate(4), 'teardown'), 'persistence_uncertain');
+    resumed.settle(heldCleanup?.id as string, {
+      money: { currency: 'USD', minor: 6 },
+      tokens: 10,
+      timeMs: 100,
+      source: 'reconciled cleanup invoice',
+    });
     resumed.reserve('initial', estimate(4), 'teardown');
-    expect(budgetTotals(resumed.snapshot(), 'initial').reserved).toBe(10);
+    expect(budgetTotals(resumed.snapshot(), 'initial').reserved).toBe(4);
+    expect(budgetTotals(resumed.snapshot(), 'initial').spent).toBe(156);
     code(() => resumed.reserve('initial', estimate(1), 'teardown'), 'ceiling_exceeded');
   });
 
@@ -449,10 +462,22 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
     'after-rename',
   ] as const)('fails closed on fsync failure %s and recovers only committed state', (when) => {
     const original = fs.fsyncSync;
-    let calls = 0;
+    const rename = fs.renameSync;
+    const write = fs.writeFileSync;
+    let ledgerFd: number | undefined;
+    vi.spyOn(fs, 'writeFileSync').mockImplementation((target, data, options) => {
+      if (typeof target === 'number' && String(data).includes('"schemaVersion":1'))
+        ledgerFd = target;
+      write(target, data, options);
+    });
+    let renamed = false;
+    vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      rename(from, to);
+      if (to === file) renamed = true;
+    });
     vi.spyOn(fs, 'fsyncSync').mockImplementation((fd) => {
-      calls += 1;
-      if (calls === (when === 'before-rename' ? 1 : 2)) throw new Error('injected disk failure');
+      if ((when === 'before-rename' && fd === ledgerFd) || (when === 'after-rename' && renamed))
+        throw new Error('injected disk failure');
       original(fd);
     });
     expect(() => ledger.reserve('initial', estimate(90))).toThrow('injected disk failure');
@@ -460,11 +485,11 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
     code(() => ledger.reserve('initial', estimate(1)), 'persistence_uncertain');
     const recovered = new BudgetLedger(file, 'contribution-1');
     expect(recovered.snapshot().reservations).toHaveLength(when === 'before-rename' ? 0 : 1);
-    expect(fs.existsSync(`${file}.lock`)).toBe(false);
-    expect(fs.readdirSync(dir).filter((name) => name.includes('.tmp-'))).toHaveLength(0);
-    if (when === 'after-rename')
-      code(() => recovered.reserve('initial', estimate(1)), 'ceiling_exceeded');
-    else recovered.reserve('initial', estimate(90));
+    expect(fs.existsSync(`${file}.lock`)).toBe(true);
+    expect(fs.readdirSync(dir).filter((name) => name.startsWith('.zt-write-'))).toHaveLength(0);
+    code(() => recovered.reserve('initial', estimate(1)), 'lock_timeout');
+    // Fault injection did not kill this live process. A new controller must not
+    // steal its retained uncertain lock; real SIGKILL recovery is tested below.
   });
 
   it('normalizes directory aliases into one lock and refuses symlink ledger files', () => {
@@ -497,7 +522,7 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
     await exited;
     const resumed = new BudgetLedger(file, 'contribution-1');
     expect(resumed.snapshot().reservations[0].id).toBe(id);
-    code(() => resumed.reserve('initial', estimate(1)), 'ceiling_exceeded');
+    code(() => resumed.reserve('initial', estimate(1)), 'persistence_uncertain');
     expect(fs.existsSync(`${file}.lock`)).toBe(false);
     resumed.settle(id, {
       money: { currency: 'USD', minor: 90 },
@@ -511,9 +536,9 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
   it.each([
     'before',
     'after',
-  ] as const)('recovers a real writer killed %s atomic rename without stealing its lock', async (when) => {
+  ] as const)('recovers a real writer killed %s atomic rename with audited dead-owner reclaim', async (when) => {
     const module = compiledModule();
-    const script = `const fs=require('node:fs');const {BudgetLedger}=require(${JSON.stringify(module)});const rename=fs.renameSync;fs.renameSync=(...args)=>{if(${JSON.stringify(when)}==='after')rename(...args);process.send('at-rename');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,60000);};new BudgetLedger(${JSON.stringify(file)},'contribution-1').reserve('initial',${JSON.stringify(estimate(90))});`;
+    const script = `const fs=require('node:fs');const {BudgetLedger}=require(${JSON.stringify(module)});const rename=fs.renameSync;fs.renameSync=(...args)=>{if(args[1]!==${JSON.stringify(file)})return rename(...args);if(${JSON.stringify(when)}==='after')rename(...args);process.send('at-rename');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,60000);};new BudgetLedger(${JSON.stringify(file)},'contribution-1').reserve('initial',${JSON.stringify(estimate(90))});`;
     const child = spawn(process.execPath, ['-e', script], {
       stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
     });
@@ -530,10 +555,16 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
     }
     const resumed = new BudgetLedger(file, 'contribution-1', 20);
     expect(resumed.snapshot().reservations).toHaveLength(when === 'before' ? 0 : 1);
-    code(() => resumed.reserve('initial', estimate(1)), 'lock_timeout');
-    expect(fs.existsSync(`${file}.lock`)).toBe(true);
-    // Fixture supervisor has joined the killed writer; reconciliation is now explicit.
-    fs.unlinkSync(`${file}.lock`);
+    if (when === 'after') {
+      code(() => resumed.reserve('initial', estimate(1)), 'persistence_uncertain');
+      resumed.settle(resumed.snapshot().reservations[0].id, {
+        money: { currency: 'USD', minor: 90 },
+        tokens: 10,
+        timeMs: 100,
+        source: 'reconciled invoice',
+      });
+    }
+    expect(fs.existsSync(`${file}.lock`)).toBe(when === 'before');
     if (when === 'after') code(() => resumed.reserve('initial', estimate(1)), 'ceiling_exceeded');
     else resumed.reserve('initial', estimate(90));
   });

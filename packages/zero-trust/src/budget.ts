@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import * as path from 'node:path';
 import {
@@ -12,6 +12,14 @@ import {
   type EstimateRequest,
   type Money,
 } from './budget-types';
+import { replacePrivate } from './durable-fs';
+import {
+  lockRecoveries,
+  recordLockReclaim,
+  StoreLockedError,
+  StorePersistenceError,
+  withStoreLock,
+} from './lock';
 
 function integer(n: number, label: string, positive = false): void {
   if (!Number.isSafeInteger(n) || n < (positive ? 1 : 0)) {
@@ -281,6 +289,11 @@ export function budgetTotals(state: BudgetState, sessionId: string): BudgetTotal
 export class BudgetLedger {
   readonly file: string;
   private writeUncertain = false;
+  private readonly resumePending = new Set<string>();
+  private readonly acknowledged = new Set<string>();
+  private readonly recoveryDirectory: string;
+  // biome-ignore lint/correctness/noUnusedPrivateClassMembers: Assigned in constructor and read by locked() for every transaction.
+  private readonly lockFile: string;
   constructor(
     file: string,
     readonly contributionId: string,
@@ -291,6 +304,42 @@ export class BudgetLedger {
     // Normalize directory aliases so two callers cannot lock the same ledger
     // through different symlinked directory names. The supervisor provisions it.
     this.file = path.join(fs.realpathSync(path.dirname(path.resolve(file))), path.basename(file));
+    // Data paths must never alias another store's permanent guard or evidence.
+    // Parent metadata directories are reserved too, preventing nested aliases.
+    for (
+      let current = this.file;
+      current !== path.dirname(current);
+      current = path.dirname(current)
+    ) {
+      const name = path.basename(current);
+      if (
+        name.startsWith('.zt-') ||
+        /\.(lock|guard|recovery|recovery-journal)$/.test(name) ||
+        ['events.jsonl', 'nonce-initializing', 'lock-recovery'].includes(name) ||
+        name.includes('.quarantine-')
+      )
+        throw new BudgetError('invalid_budget', 'Ledger path is reserved for controller metadata');
+    }
+    const legacy = `${path.basename(this.file)}.recovery-journal`;
+    const name =
+      Buffer.byteLength(legacy) <= 255
+        ? legacy
+        : `.zt-budget-recovery-${createHash('sha256').update(path.basename(this.file)).digest('hex')}`;
+    this.recoveryDirectory = path.join(path.dirname(this.file), name);
+    const legacyLock = `${path.basename(this.file)}.lock`;
+    const lockName =
+      Buffer.byteLength(`${legacyLock}.guard`) <= 255
+        ? legacyLock
+        : `.zt-budget-lock-${createHash('sha256').update(path.basename(this.file)).digest('hex')}.lock`;
+    this.lockFile = path.join(path.dirname(this.file), lockName);
+    // Opening an existing ledger is a resume boundary, independent of whether
+    // the dead controller held its short mutation lock when it crashed. Capture
+    // ALL old unknown outcomes; a null observation never reconciles them.
+    if (fs.existsSync(this.file)) {
+      for (const row of this.snapshot().reservations) {
+        if (row.status === 'reserved') this.resumePending.add(row.id);
+      }
+    }
   }
 
   /** Explicit first creation only: cannot overwrite an existing contribution. */
@@ -353,7 +402,24 @@ export class BudgetLedger {
     const e = structuredClone(estimateMax);
     if (purpose !== 'work' && purpose !== 'teardown')
       throw new BudgetError('invalid_budget', 'Invalid reservation purpose');
-    return this.mutate((state) => {
+    const reservation = this.mutate((state) => {
+      const pending = new Set(this.resumePending);
+      if (fs.existsSync(this.recoveryDirectory)) {
+        for (const id of lockRecoveries(this.recoveryDirectory).flatMap(
+          (event) => event.pendingReservations
+        ))
+          pending.add(id);
+      }
+      if (
+        state.reservations.some(
+          (row) =>
+            row.status === 'reserved' && (pending.has(row.id) || !this.acknowledged.has(row.id))
+        )
+      )
+        throw new BudgetError(
+          'persistence_uncertain',
+          'Reconcile recovered reservations before new work'
+        );
       const s = state.sessions.find((entry) => entry.id === sessionId);
       if (!s) throw new BudgetError('unknown_session', 'Unknown budget session');
       estimate(e, s.ceiling.currency);
@@ -388,6 +454,10 @@ export class BudgetLedger {
       state.reservations.push(r);
       return structuredClone(r);
     });
+    // Only the complete transaction, INCLUDING lock finalization, acknowledges
+    // this hold. A failed return or another handle's hold must be reconciled.
+    this.acknowledged.add(reservation.id);
+    return reservation;
   }
 
   /** null means outcome unknown: retain the entire reservation, including limits. */
@@ -431,29 +501,13 @@ export class BudgetLedger {
   }
 
   private save(state: BudgetState): void {
-    const tmp = `${this.file}.tmp-${randomUUID()}`;
     try {
-      const fd = fs.openSync(tmp, 'wx', 0o600);
-      try {
-        fs.writeFileSync(fd, `${JSON.stringify(state)}\n`, 'utf8');
-        fs.fsyncSync(fd);
-      } finally {
-        fs.closeSync(fd);
-      }
-      fs.renameSync(tmp, this.file);
-      const dirFd = fs.openSync(path.dirname(this.file), 'r');
-      try {
-        fs.fsyncSync(dirFd);
-      } finally {
-        fs.closeSync(dirFd);
-      }
+      replacePrivate(this.file, Buffer.from(`${JSON.stringify(state)}\n`));
     } catch (error) {
       // A failed fsync may occur AFTER rename. Never retry from this instance
       // assuming that a failed call means nothing committed.
       this.writeUncertain = true;
       throw error;
-    } finally {
-      fs.rmSync(tmp, { force: true });
     }
   }
 
@@ -463,29 +517,28 @@ export class BudgetLedger {
         'persistence_uncertain',
         'Fence and reconcile ledger before reopening after write uncertainty'
       );
-    const lock = `${this.file}.lock`;
-    const start = Date.now();
-    let fd: number;
-    for (;;) {
-      try {
-        fd = fs.openSync(lock, 'wx', 0o600);
-        break;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
-        if (Date.now() - start >= this.lockTimeoutMs)
-          throw new BudgetError(
-            'lock_timeout',
-            'Ledger lock held; reconcile owner before retrying'
-          );
-        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
-      }
-    }
+    const lock = this.lockFile;
     try {
-      fs.writeFileSync(fd, JSON.stringify({ pid: process.pid, id: randomUUID() }));
-      return fn();
-    } finally {
-      fs.closeSync(fd);
-      fs.unlinkSync(lock);
+      return withStoreLock(
+        lock,
+        this.lockTimeoutMs,
+        (owner) => {
+          const pending = fs.existsSync(this.file)
+            ? this.snapshot()
+                .reservations.filter((row) => row.status === 'reserved')
+                .map((row) => row.id)
+            : [];
+          for (const id of pending) this.resumePending.add(id);
+          recordLockReclaim(this.recoveryDirectory, lock, owner, pending);
+        },
+        fn,
+        () => this.writeUncertain
+      );
+    } catch (error) {
+      if (error instanceof StorePersistenceError) this.writeUncertain = true;
+      if (error instanceof StoreLockedError || error instanceof SyntaxError)
+        throw new BudgetError('lock_timeout', 'Ledger lock held; reconcile owner before retrying');
+      throw error;
     }
   }
 }

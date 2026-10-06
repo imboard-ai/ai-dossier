@@ -1,7 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { publishPrivate, readPrivate, syncDirectory } from '../durable-fs';
 import { Journal } from '../journal';
+import { recordLockReclaim, StoreLockedError, withStoreLock } from '../lock';
+import { isTailRecovery } from '../recovery';
 import { canonicalJson, ReceiptError, snapshotJson } from './schema';
+
+const HEADER = Buffer.from('{"v":1,"type":"receipt-nonces"}\n');
 
 export interface NonceConsumption {
   nonce: string;
@@ -11,7 +16,7 @@ export interface NonceConsumption {
 }
 /** LOCAL trusted filesystem only. All users of this directory take the same
  * exclusive lock, open the journal only under it, reread, append and fsync.
- * A crashed lock is never stolen: the supervisor must reconcile its owner first.
+ * Dead owners are reclaimed only with process identity proof and durable audit.
  * This must not share a directory with IntentDriver's separate journal. */
 export class ReceiptNonceStore {
   private readonly directory: string;
@@ -24,30 +29,82 @@ export class ReceiptNonceStore {
   }
   initialize(): void {
     this.locked(() => {
-      if (fs.existsSync(path.join(this.directory, 'events.jsonl')))
-        throw new ReceiptError('store_exists');
-      const journal = new Journal(this.directory);
-      try {
-        journal.append({ v: 1, type: 'receipt-nonces' });
-      } finally {
+      const file = path.join(this.directory, 'events.jsonl');
+      const marker = path.join(this.directory, 'nonce-initializing');
+      if (!fs.existsSync(file)) {
+        // A write-ahead creation intent distinguishes interrupted initialization
+        // from missing established history. The header itself publishes whole.
+        publishPrivate(marker, HEADER);
+        publishPrivate(file, HEADER);
+      } else if (!fs.existsSync(marker)) {
+        const { journal, recoveredInitialization } = this.openJournal();
         journal.close();
+        if (!recoveredInitialization) throw new ReceiptError('store_exists');
+        return;
       }
+      const { journal } = this.openJournal();
+      journal.close();
     });
+  }
+
+  private openJournal(): { journal: Journal; recoveredInitialization: boolean } {
+    const file = path.join(this.directory, 'events.jsonl');
+    const marker = path.join(this.directory, 'nonce-initializing');
+    const initializing = fs.existsSync(marker);
+    if (initializing && !readPrivate(marker).equals(HEADER))
+      throw new ReceiptError('corrupt_store');
+    if (!fs.existsSync(file)) {
+      if (!initializing) throw new ReceiptError('missing_store');
+      publishPrivate(file, HEADER);
+    }
+    const journal = new Journal(this.directory);
+    try {
+      const events = journal.read();
+      const domain = events.filter((event) => !isTailRecovery(event));
+      let recoveredInitialization = initializing;
+      if (!domain.length) {
+        // Legacy torn first headers have no creation marker. No authorization
+        // could have returned without the complete header. Recover ONLY a byte
+        // prefix of that fixed header, backed by offset-zero quarantine evidence.
+        const initial = events.find((event) => isTailRecovery(event) && event.offset === 0);
+        const tail = isTailRecovery(initial)
+          ? readPrivate(path.join(this.directory, initial.quarantine))
+          : undefined;
+        if (
+          !initializing &&
+          (!tail || tail.length >= HEADER.length || !HEADER.subarray(0, tail.length).equals(tail))
+        )
+          throw new ReceiptError('corrupt_store');
+        journal.append({ v: 1, type: 'receipt-nonces' });
+        recoveredInitialization = true;
+      } else if (canonicalJson(domain[0]) !== '{"type":"receipt-nonces","v":1}') {
+        throw new ReceiptError('corrupt_store');
+      }
+      if (initializing) {
+        // No row is authorized until initialization finalization is durable.
+        if (domain.length > 1) throw new ReceiptError('corrupt_store');
+        fs.unlinkSync(marker);
+        syncDirectory(this.directory);
+      }
+      return { journal, recoveredInitialization };
+    } catch (error) {
+      journal.close();
+      throw error;
+    }
   }
   consume(input: NonceConsumption): void {
     const row = snapshotJson(input);
     validateRow(row);
     this.locked(() => {
-      if (!fs.existsSync(path.join(this.directory, 'events.jsonl')))
-        throw new ReceiptError('missing_store');
-      const journal = new Journal(this.directory);
+      const { journal } = this.openJournal();
       try {
-        const events = journal.read();
+        const events = journal.read().filter((event) => !isTailRecovery(event));
         if (canonicalJson(events[0]) !== '{"type":"receipt-nonces","v":1}')
           throw new ReceiptError('corrupt_store');
         const nonces = new Set<string>();
         const attempts = new Map<string, number>();
         for (const event of events.slice(1)) {
+          if (isTailRecovery(event)) continue;
           validateRow(event);
           const prior = event as NonceConsumption;
           if (nonces.has(prior.nonce)) throw new ReceiptError('corrupt_store');
@@ -69,28 +126,23 @@ export class ReceiptNonceStore {
   private locked<T>(work: () => T): T {
     if (this.poisoned) throw new ReceiptError('persistence_uncertain');
     const lock = path.join(this.directory, 'receipt.lock');
-    let fd: number;
     try {
-      fd = fs.openSync(lock, 'wx', 0o600);
-    } catch {
-      throw new ReceiptError('store_locked');
-    }
-    let completed = false;
-    try {
-      fs.writeFileSync(fd, `${process.pid}\n`);
-      fs.fsyncSync(fd);
-      const result = work();
-      completed = true;
-      return result;
+      return withStoreLock(
+        lock,
+        0,
+        (owner) => {
+          recordLockReclaim(path.join(this.directory, 'lock-recovery'), lock, owner, []);
+        },
+        work,
+        (error) => !(error instanceof ReceiptError)
+      );
     } catch (error) {
-      // Retain the lock on every uncertain error. Validation/replay failures are
-      // known not to have written, and may release it safely.
-      if (error instanceof ReceiptError) completed = true;
-      else this.poisoned = true;
+      // Validation/replay failures append no new consumption, though recovery
+      // evidence may already be durable. Uncertain persistence retains ownership.
+      if (error instanceof StoreLockedError || error instanceof SyntaxError)
+        throw new ReceiptError('store_locked');
+      if (!(error instanceof ReceiptError)) this.poisoned = true;
       throw error;
-    } finally {
-      fs.closeSync(fd);
-      if (completed) fs.unlinkSync(lock);
     }
   }
 }

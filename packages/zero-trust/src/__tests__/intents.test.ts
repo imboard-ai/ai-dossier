@@ -21,6 +21,7 @@ import {
 import { Journal, JournalError } from '../journal';
 import { SecretRedactionError } from '../redaction';
 import { createRun, ReasonCode, RUN_STATES, type RunRecord, transitionRun } from '../state';
+import { compiledFixture } from './compiled-fixture';
 
 const timestamp = '2026-10-05T00:00:00.000Z';
 const gating = createRun(
@@ -913,6 +914,57 @@ describe('current controller lifecycle admission', () => {
 });
 
 describe('fail-closed journal durability', () => {
+  it('recovers a torn first run append and initializes once beside recovery evidence', async () => {
+    const dir = directory();
+    fs.writeFileSync(path.join(dir, 'events.jsonl'), '{"v":1,"type":"run","run":', { mode: 0o600 });
+    let j = journal(dir);
+    const fake = new FakeAdapter();
+    let d = driver(j, fake);
+    await d.resume();
+    expect(await d.execute(input)).toBe('artifact-1');
+    j.close();
+    j = journal(dir);
+    d = driver(j, fake);
+    await d.resume();
+    expect(await d.execute(input)).toBe('artifact-1');
+    expect(fake.writes).toBe(1);
+    expect(j.read().filter((event) => (event as { type: string }).type === 'run')).toHaveLength(1);
+    expect(
+      j.read().filter((event) => (event as { type: string }).type === 'journal_tail_recovered')
+    ).toHaveLength(1);
+  });
+  it('torn confirmation resumes all outstanding intents before admitting new writes', async () => {
+    const dir = directory();
+    const j = journal(dir);
+    const fake = new FakeAdapter();
+    fake.mode = 'lost';
+    await expect(driver(j, fake).execute(input)).rejects.toThrow(MutationUncertainError);
+    j.close();
+    fs.appendFileSync(j.filePath, '{"v":1,"type":"confirmed","key":');
+    const recovered = journal(dir);
+    const order: string[] = [];
+    vi.spyOn(fake, 'reconcile').mockImplementation(async () => {
+      order.push('reconcile-old');
+      return { kind: 'found', artifactRef: 'artifact-1' };
+    });
+    vi.spyOn(fake, 'mutate').mockImplementation(async () => {
+      order.push('mutate-new');
+      return { artifactRef: 'artifact-2' };
+    });
+    const d = driver(recovered, fake);
+    await d.execute({ ...input, target: 'new' });
+    expect(order).toEqual(['reconcile-old', 'mutate-new']);
+    expect(await d.execute(input)).toBe('artifact-1');
+    const length = recovered.read().length;
+    await d.resume();
+    await d.resume();
+    expect(recovered.read()).toHaveLength(length);
+    expect(
+      recovered
+        .read()
+        .filter((event) => (event as { type: string }).type === 'journal_tail_recovered')
+    ).toHaveLength(1);
+  });
   it('fails initialization closed on file or directory fsync failure', () => {
     const dir = directory();
     vi.spyOn(fs, 'fsyncSync').mockImplementationOnce(() => {
@@ -1052,7 +1104,7 @@ describe('fail-closed journal durability', () => {
     expect(await restored.execute(input)).toBe('artifact-1');
     expect(fake.writes).toBe(1);
   });
-  it('a torn append aborts mutation and cannot be silently skipped on restart', async () => {
+  it('a torn append aborts mutation and restart records recovery before admission', async () => {
     const dir = directory();
     const j = journal(dir);
     const fake = new FakeAdapter();
@@ -1073,9 +1125,13 @@ describe('fail-closed journal durability', () => {
     expect(fake.writes).toBe(0);
     vi.restoreAllMocks();
     j.close();
-    expect(() => journal(dir)).toThrow(JournalError);
+    const recovered = journal(dir);
+    expect(recovered.read().at(-1)).toMatchObject({ type: 'journal_tail_recovered' });
+    const resumed = driver(recovered, fake);
+    expect(await resumed.execute(input)).toBe('artifact-1');
+    expect(fake.writes).toBe(1);
   });
-  it.each(['{"broken":', '{oops}\n', '\n'])('refuses truncated/corrupt JSONL %s', (text) => {
+  it.each(['{oops}\n', '\n'])('refuses complete corrupt JSONL %s', (text) => {
     const dir = directory();
     fs.writeFileSync(path.join(dir, 'events.jsonl'), text, { mode: 0o600 });
     expect(() => journal(dir)).toThrow(JournalError);
@@ -1102,10 +1158,10 @@ describe('fail-closed journal durability', () => {
     expect(() => other.read()).toThrow(JournalError);
   });
   it('survives real process death after durable attempt and external effect', async () => {
-    // The package build precedes this test; the child uses the exact compiled public API.
+    // Compile current source; pool dist may describe an older controller.
     const dir = directory();
     const artifact = path.join(dir, 'remote-artifact');
-    const modulePath = path.resolve(__dirname, '../../dist/index.js');
+    const modulePath = compiledFixture(dir, 'index');
     const code = `const fs=require('node:fs'); const {Journal,IntentDriver}=require(${JSON.stringify(modulePath)});
       const j=new Journal(${JSON.stringify(path.join(dir, 'journal'))});
       const d=new IntentDriver(j,{reconcile:async()=>({kind:'unknown'}),mutate:async()=>{
