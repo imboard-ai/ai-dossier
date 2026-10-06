@@ -107,16 +107,27 @@ jobs:
         if: failure()
         run: |
           img=$(node -e 'const m=require(process.argv[1]);console.log(m.imageFile)' "$RUNNER_TEMP/zt-profile/manifest.json")
-          qemu-img create -q -f qcow2 -F qcow2 -b "$RUNNER_TEMP/zt-profile/$img" "$RUNNER_TEMP/diag.qcow2" 10G
-          timeout 240 qemu-system-x86_64 -machine q35,accel=kvm -cpu host -smp 2 -m 4096 \
+          qemu-img create -q -f qcow2 -F qcow2 -b "$RUNNER_TEMP/zt-profile/$img" "$RUNNER_TEMP/diag.qcow2" 16G
+          qemu-system-x86_64 -machine q35,accel=kvm -cpu host -smp 2 -m 4096 \
             -nodefaults -no-user-config -display none -no-reboot \
             -serial "file:$RUNNER_TEMP/diag-console.log" \
             -drive "file=$RUNNER_TEMP/diag.qcow2,if=virtio,format=qcow2" \
             -netdev user,id=net0,restrict=on -device virtio-net-pci,netdev=net0 \
             -device virtio-serial-pci -chardev "socket,id=broker,path=$RUNNER_TEMP/diag.sock,server=on,wait=off" \
             -device virtserialport,chardev=broker,name=org.ai-dossier.zt.broker \
-            -fw_cfg name=opt/org.ai-dossier.zt/scope,string=container || true
-          tail -n 150 "$RUNNER_TEMP/diag-console.log" || true
+            -fw_cfg name=opt/org.ai-dossier.zt/scope,string=vm-root &
+          qemu=$!
+          sleep 5
+          # The scope the guest announces for a controller-set vm-root flag.
+          node -e '
+            const s = require("net").connect(process.argv[1]);
+            s.on("data", (d) => { console.log("hello reply:", d.toString().trim()); process.exit(0); });
+            s.write(JSON.stringify({ v: 1, id: 0, op: "hello" }) + "\n");
+            setTimeout(() => { console.log("no hello reply"); process.exit(0); }, 120000);
+          ' "$RUNNER_TEMP/diag.sock" || true
+          kill "$qemu" || true
+          grep -n -i -E 'fw_cfg|modules-load|zt-agent|docker' "$RUNNER_TEMP/diag-console.log" | tail -n 40 || true
+          tail -n 60 "$RUNNER_TEMP/diag-console.log" || true
 
       - name: Summarize evidence
         if: always()
