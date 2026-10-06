@@ -180,8 +180,8 @@ export class BoundaryBreachError extends Error {
   }
 }
 
-/** Throws on any violation (scenario 4). Callers must treat a breach as blocking
- * shipping authorization for the run; today the gate suite is the caller. */
+/** Throws on any violation (scenario 4). In production, `authorizeShipping`
+ * refuses a context whose `boundaryEvidence` is not a clean held verdict. */
 export function assertBoundaryHeld(evidence: BoundaryEvidence): void {
   if (!evidence.held) throw new BoundaryBreachError(evidence.violations);
 }

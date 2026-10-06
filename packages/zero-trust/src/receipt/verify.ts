@@ -1,5 +1,6 @@
 import { Ed25519Verifier, isSupportedPublicKey, publicKeysMatch } from '@ai-dossier/core';
 import { type Intent, idempotencyKey } from '../intents';
+import type { BoundaryEvidence } from '../vm/evidence';
 import { receiptDigest, type SignedReceipt } from './issue';
 import type { ReceiptNonceStore } from './nonces';
 import {
@@ -33,6 +34,26 @@ export interface ReceiptContext {
   policyPermitsShipping: boolean;
   /** Fresh controller allowlist with authenticated target routing. */
   allowedShippingOperations: Pick<ShippingGrant, 'kind' | 'target' | 'expectedRemoteSha'>[];
+  /** The run's host-side isolation evidence (`evaluateBoundary`). Shipping is refused
+   * unless it shows the boundary held; missing evidence is refused too. */
+  boundaryEvidence: BoundaryEvidence;
+}
+
+/** A run whose isolation was breached, or whose evidence is missing or not a clean
+ * verdict, may never ship (scenario 4). Only an explicit held verdict with no
+ * violations passes; anything else fails closed. */
+function assertBoundaryHeldForShipping(evidence: unknown): void {
+  if (typeof evidence !== 'object' || evidence === null)
+    throw new ReceiptError('boundary_evidence_missing');
+  const e = evidence as Partial<BoundaryEvidence>;
+  if (
+    e.held !== true ||
+    !Array.isArray(e.violations) ||
+    e.violations.length !== 0 ||
+    !Number.isSafeInteger(e.attempts) ||
+    (e.attempts as number) < 1
+  )
+    throw new ReceiptError('boundary_not_held');
 }
 const BINDINGS = [
   'contributionId',
@@ -124,6 +145,7 @@ export async function authorizeShipping(
   const intent = snapshotJson(attemptedIntent);
   const expected = snapshotJson(context);
   const receipt = await verifyReceipt(envelope, trustedControllerKey, expected, now);
+  assertBoundaryHeldForShipping(expected.boundaryEvidence);
   const key = idempotencyKey(intent);
   if (
     intent.status !== 'attempted' ||

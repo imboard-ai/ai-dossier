@@ -222,7 +222,12 @@ Report fields are validated before use (known categories, short plain-text attem
 anything else counts as a malformed report.
 
 `assertBoundaryHeld` throws `BoundaryBreachError` on any violation; the gate suite calls it.
-Making it a precondition of shipping authorization for a run is follow-up work (S2–S5).
+In production the run's evidence is part of the controller's `ReceiptContext`
+(`boundaryEvidence`), and `authorizeShipping` refuses before any nonce is consumed unless it is
+an explicit held verdict with no violations: a breach, a malformed report or a canary leak is
+`boundary_not_held`, absent evidence is `boundary_evidence_missing`. Its production caller,
+`ForkPusher.admit`, turns either into `WriteRefusedError('authorization_refused', …)` before a
+token is minted, so the fork ref is never touched.
 
 ## Teardown and kill switch (scenario 20)
 

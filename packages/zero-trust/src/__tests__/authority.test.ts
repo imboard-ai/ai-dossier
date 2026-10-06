@@ -17,6 +17,7 @@ import { SHIPPING_KINDS } from '../receipt/schema';
 import { authorizeShipping, type ReceiptContext } from '../receipt/verify';
 import { assertNoSecrets } from '../redaction';
 import { MAX_FILE_BYTES } from '../vm/broker';
+import { evaluateBoundary } from '../vm/evidence';
 
 const SHA = 'a'.repeat(40);
 const CANDIDATE = 'b'.repeat(40);
@@ -385,6 +386,15 @@ describe('end to end: a retargeted intent cannot be authorized for shipping', ()
     context = {
       ...bindings,
       requiredCommands: [{ id: 'regression', command: 'npm test' }],
+      boundaryEvidence: evaluateBoundary({
+        reports: [],
+        guestOutputs: [],
+        canaries: [],
+        listenerConnections: 0,
+        brokerChecks: [{ attempt: 'op-outside-set', rejected: true }],
+        malformedReports: 0,
+        requiredCategories: ['broker-abuse'],
+      }),
       policyPermitsShipping: true,
       allowedShippingOperations: [
         {
