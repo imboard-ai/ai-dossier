@@ -27,28 +27,27 @@ The practical answer in most teams is a mix, which is where the hybrid comes in.
 Dossier's hybrid is **model-driven inside each skill, deterministic around it.** Four layers, from the inside out:
 
 1. **The model drives inside each `.ds.md` skill.** A dossier is an agent skill with a version and a signature. Its Markdown body tells the model what to achieve; the model decides the steps, tool calls, retries and validation. There is no code-defined workflow engine inside a skill.
-2. **Skills are signed and version-pinned.** Each dossier carries a SHA-256 checksum and an Ed25519 or KMS signature in its frontmatter, and you can pin an exact version (`ai-dossier pull org/my-dossier@1.2.0`). The instructions the model follows are the instructions that were published.
-3. **Multi-skill journeys run through MCP.** A dossier declares `relationships` (such as `preceded_by`). The MCP server's `resolve_graph` tool turns them into an ordered plan, `verify_graph` batch-verifies every dossier in it, and `start_journey` / `step_complete` hand the model one verified step at a time. Cycle detection, ordering and verification are ordinary code. The full tool reference is in [ORCHESTRATION.md](../../ORCHESTRATION.md).
+2. **Skills are signed and version-pinned.** Each dossier carries a SHA-256 checksum, and a signed dossier carries an Ed25519 or KMS signature, in its frontmatter, and you can pin an exact version (`ai-dossier pull org/my-dossier@1.2.0`). The instructions the model follows are the instructions that were published.
+3. **Multi-skill journeys run through MCP.** A dossier declares `relationships` (such as `preceded_by`). The MCP server's `resolve_graph` tool turns them into an ordered plan, `verify_graph` batch-verifies every dossier in it, and `start_journey` / `step_complete` hand the model one step at a time. Cycle detection, ordering and verification are ordinary code. The MCP server provides the verification tools; the model is expected to call `verify_graph` and heed a `WARN` or `BLOCK` before starting a journey, whereas `ai-dossier run` enforces verification itself. The full tool reference is in [ORCHESTRATION.md](../../ORCHESTRATION.md).
 4. **Batch runs go through a deterministic scheduler.** [`@ai-dossier/sched`](../../packages/sched/README.md) queues work, manages worker slots, verifies completion against ground truth, watches pull requests and recovers stalled runs. By its own description it "never invokes an LLM": it spawns the agent process you configured and reconciles what that run left behind.
 
 ```mermaid
 flowchart TB
   subgraph shell["Deterministic shell (no LLM)"]
-    S["@ai-dossier/sched: queue, slots, verify, PR watch"]
-    G["MCP resolve_graph / verify_graph: order and verify"]
+    S["@ai-dossier/sched: queue, slots, verify completion, PR watch"]
     V["Checksum + signature + pinned version"]
+    G["MCP resolve_graph / verify_graph: order and verify"]
   end
-  subgraph skill["Model-driven core"]
+  subgraph skill["Model-driven core: one agent run"]
     M["LLM reads the .ds.md skill and decides steps, tools, retries"]
   end
-  S -->|"spawns one run per unit of work"| G
-  G -->|"one verified step at a time"| V
-  V -->|"instructions verified before the model sees them"| M
-  M -->|"step_complete / run record"| G
-  G -->|"completion evidence"| S
+  S -->|"starts the configured agent process"| M
+  V -->|"ai-dossier run verifies before the model reads"| M
+  M -->|"multi-skill journey: resolve, verify, step"| G
+  M -->|"milestones, pushed commits, PRs"| S
 ```
 
-The model never decides which skill is trusted, which version runs, how many agents are alive, or whether a unit of work really finished. Code decides those. The model decides how to do the work.
+In the batch path the model does not decide how many agents are alive or whether a unit of work really finished: the scheduler checks that against milestones, pushed commits and pull requests. Version pins and `ai-dossier run` verification are likewise code, not model judgment. The model decides how to do the work.
 
 ## Why model-driven orchestration needs trust
 
@@ -56,12 +55,12 @@ In a code-driven system the program is code you reviewed and deployed. In a mode
 
 That makes skills a supply-chain surface. Red Hat's [Agent Skills: Explore security threats and controls](https://developers.redhat.com/articles/2026/03/10/agent-skills-explore-security-threats-and-controls) (Florencio Cano Gabarda, March 10, 2026) notes that skills "may contain executable scripts in different languages, such as Python or Bash", that "these scripts may contain malware", and that if an automatic upgrade mechanism exists, "an upgrade can include malicious code or vulnerabilities, especially if they come from untrusted sources." It adds: "There is no widely known initiative to sign Agent Skills, but this is something that users and customers should require if they consider it a relevant security control."
 
-Dossier's controls map onto that threat directly:
+Dossier's controls address the tampering, silent-upgrade and signing-gap parts of that threat:
 
 - **Checksums** detect any change to a skill after it was published. A tampered file fails verification before the model reads it.
 - **Signatures** bind a skill to a key, so you can tell who wrote it. Keys you trust are managed with `ai-dossier keys`.
 - **Version pinning** means a skill cannot silently change underneath a running pipeline. You upgrade on purpose.
-- **Verification before execution**: the CLI and the MCP server verify before a dossier runs, and `verify_graph` does it for every step of a journey. The [security demonstration](security-model.md) shows what happens without that layer: a dossier that looks legitimate to a reader, and to the model, still exfiltrates secrets.
+- **Verification before execution**: `ai-dossier run` verifies before a dossier runs, and the MCP server exposes `verify_graph` to do it for every step of a journey. The [security demonstration](security-model.md) shows what happens without that layer: a dossier that looks legitimate to a reader, and to the model, still collects secrets.
 
 **The caveat, stated plainly.** Verification proves integrity and origin: the file is the one the signer published, and unchanged. It does not prevent prompt injection and it does not make a skill safe to run. A correctly signed skill can still be a bad skill. Read what you are about to run, trust signers deliberately, and treat the risk level and [security model](security-model.md) as inputs to your judgment, not a substitute for it.
 
@@ -85,7 +84,7 @@ The hello-world file carries an Ed25519 signature from a test key, `test-key-202
 ai-dossier verify examples/test/hello-world.ds.md
 ```
 
-The output reports the checksum as valid ("content has not been tampered with") and the signature as valid, but with a warning that the signing key is not in your trusted list, along with the command to add it. That distinction is the useful part: integrity (the checksum) and origin (a key you chose to trust) are separate questions.
+The output reports the checksum as valid ("content has not been tampered with") and the signature as valid, but with a warning that the signing key is not in your trusted list, along with the command to add it. Because that key is untrusted, the overall recommendation can read `BLOCK` and the risk level `MEDIUM`; that is verification working as designed on a test key, not a failure. That distinction is the useful part: integrity (the checksum) and origin (a key you chose to trust) are separate questions.
 
 **4. Publish and pin.** `ai-dossier publish` puts the skill in a registry, and consumers pin it: `ai-dossier pull org/my-skill@1.0.0`.
 
