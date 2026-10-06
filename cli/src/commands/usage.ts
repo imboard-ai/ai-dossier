@@ -18,7 +18,6 @@
  */
 
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import type { Command } from 'commander';
 import { formatCost } from '../cost-format';
 import { fail } from '../helpers';
@@ -266,7 +265,7 @@ export function buildWindowReport(opts: WindowOptions, deps: WindowDeps = {}): W
   return {
     since: new Date(sinceMs).toISOString(),
     until: new Date(untilMs).toISOString(),
-    host: deps.host ?? os.hostname(),
+    host: deps.host ?? localHostId(),
     hosts: ledger.hosts,
     by_host: groupRows(rows, (r) => r.host).sort(HOST_SORT),
     collectors: ledger.collectors,

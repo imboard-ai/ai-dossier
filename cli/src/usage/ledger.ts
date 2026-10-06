@@ -23,6 +23,7 @@ import {
   type OpenCodeOpenResult,
   openOpenCodeDb,
 } from './collect-opencode';
+import { localHostId } from './store';
 import type { CollectorStatus, Ledger, LimitEvent, UsageRow } from './types';
 
 /** Where each store lives — defaults resolve from the environment; tests point them at fixtures. */
@@ -53,7 +54,7 @@ export interface CollectOptions {
 
 /** Run every collector for `[sinceMs, untilMs)` and join attribution. Read-only; never throws for a missing store. */
 export function collectLedger(opts: CollectOptions): Ledger {
-  const host = opts.host ?? os.hostname();
+  const host = opts.host ?? localHostId();
   const collectors: CollectorStatus[] = [];
   const rows: UsageRow[] = [];
   const limits: LimitEvent[] = [];
