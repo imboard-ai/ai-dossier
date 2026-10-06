@@ -1,0 +1,58 @@
+name: Zero-trust fixtures
+
+# Self-check for the gate 2 fixtures (#1059): base passes, regression fails on base,
+# fix passes. These host-side installs/tests run ONLY here, on our own pinned fixtures;
+# the isolated proof is the in-VM run (#1010).
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'packages/zero-trust/**'
+      - 'scripts/zero-trust-fixtures-selfcheck.mjs'
+      - '.github/workflows/zero-trust-fixtures.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'packages/zero-trust/**'
+      - 'scripts/zero-trust-fixtures-selfcheck.mjs'
+      - '.github/workflows/zero-trust-fixtures.yml'
+
+concurrency:
+  group: zero-trust-fixtures-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  selfcheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build zero-trust
+        run: make build-zero-trust
+
+      - name: Fixture self-check (base-fail / fix-pass)
+        run: node scripts/zero-trust-fixtures-selfcheck.mjs

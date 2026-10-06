@@ -13,7 +13,18 @@ export function compiledFixture(directory: string, entry: string): string {
   const compile = (relative: string): void => {
     if (seen.has(relative)) return;
     seen.add(relative);
-    const source = fs.readFileSync(path.join(__dirname, '..', `${relative}.ts`), 'utf8');
+    const absolute = path.join(__dirname, '..', relative);
+    if (relative.endsWith('.json')) {
+      fs.mkdirSync(path.dirname(path.join(root, relative)), { recursive: true });
+      fs.copyFileSync(absolute, path.join(root, relative));
+      return;
+    }
+    // A directory import resolves to its index module.
+    if (fs.existsSync(absolute) && fs.statSync(absolute).isDirectory()) {
+      compile(path.join(relative, 'index'));
+      return;
+    }
+    const source = fs.readFileSync(`${absolute}.ts`, 'utf8');
     for (const imported of ts.preProcessFile(source).importedFiles) {
       if (imported.fileName.startsWith('.'))
         compile(path.join(path.dirname(relative), imported.fileName));

@@ -385,3 +385,26 @@ no worker access or administrative deletion of the consumed history; not NFS.
 when upstream policy/template allows it. It rejects credential-pattern strings and
 never prints raw logs. Rendering does not authenticate a signature; its evidence
 claim is limited to the exact candidate and is not proof of patch correctness.
+
+## Ecosystem support and package proxy (gate 2 prep)
+
+`src/ecosystem/` prepares feasibility gate 2 without a VM. Design and open questions:
+[package-proxy decision record](../../docs/features/zero-trust-full-cycle/decisions/package-proxy.md).
+
+- `detectEcosystem(files)` (or `sourceFilesFromManifest(manifest)` first) accepts npm with
+  `package-lock.json`, pip with a fully hash-pinned `requirements.txt`, and uv with
+  `uv.lock`. Everything else returns `unsupported_environment` with a specific reason.
+- `selectProfile(detection)` picks a runtime from the versioned `profiles.json` that
+  satisfies every project declaration and never substitutes a version.
+  `recordProfileSelection` / `loadProfileRecord` store the choice once per run and
+  re-verify it before execution. `profileReceiptBinding` gives the receipt's profile fields.
+- `buildCommandPlan(manager, proxy)` returns provisioning (`package_proxy`) and
+  verification (`none`) commands as argv data. This package executes nothing.
+- `classifyOutcome`, `classifyRegression` and `applyVerification` treat timeouts and
+  unreadable reports as `inconclusive` and enforce the two-repair cap from run history.
+- `PROXY_POLICY`, `evaluateRequest`, `evaluateRedirect`, `buildLockIndex` and
+  `checkArtifact` define the proxy policy. `renderSquidConfig`, `renderVerdaccioConfig`
+  and `proxpiEnvironment` render it for the OSS components that enforce it.
+
+Fixtures with known bugs live in `fixtures/ecosystem/`. CI self-checks them
+(`scripts/zero-trust-fixtures-selfcheck.mjs`); that is the only host-side install/test run.
