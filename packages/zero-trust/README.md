@@ -415,3 +415,33 @@ claim is limited to the exact candidate and is not proof of patch correctness.
 
 Fixtures with known bugs live in `fixtures/ecosystem/`. CI self-checks them
 (`scripts/zero-trust-fixtures-selfcheck.mjs`); that is the only host-side install/test run.
+
+## Local VM execution profile (gate 1)
+
+`src/vm/` runs untrusted code in a disposable local QEMU VM; Linux x86_64 hosts only. Design,
+QEMU flags, network design, measured overhead and residual risks:
+[execution-profile decision record](../../docs/features/zero-trust-full-cycle/decisions/execution-profile.md).
+
+- `preflightHost(request)` refuses closed (`unsupported_environment` + detail) on an
+  unsupported OS or architecture, missing QEMU tools, or a forced `kvm` without `/dev/kvm`.
+  There is no host-container fallback.
+- `LocalQemuAdapter` implements the provider-neutral `VmAdapter` (create, exec, putFile,
+  getFile, destroy, listByRun) plus the `killAll` incident kill switch. QEMU runs rootless with
+  `restrict=on` user-mode networking, no forwards and no shared folders; the broker
+  (`BrokerClient`, `vm-guest/agent.py`) is the only data path.
+- `teardownVm` caps deletion at three attempts, then moves the run to `blocked_cleanup`;
+  `assertPublicationPermitted` denies publication outside `shipping`.
+- `admitModelAction` (`src/authority.ts`) admits only a closed set of model actions bound to
+  controller targets.
+- `evaluateBoundary` / `assertBoundaryHeld` (`src/vm/evidence.ts`) judge hostile-fixture runs
+  from host-side measurements; fixture reports are untrusted.
+
+```bash
+npm run build
+node scripts/zt-vm.mjs bake  --profile-dir <dir> --cache-dir <dir> [--accel auto|kvm|tcg]
+node scripts/zt-vm.mjs smoke --profile-dir <dir> --state-dir <dir> [--accel ...] [--timings-out f]
+ZT_VM_E2E=1 ZT_PROFILE_DIR=<abs dir> npx vitest run src/__tests__/vm-gate.e2e.test.ts
+```
+
+The hostile fixtures live in `fixtures/hostile/`; `.github/workflows/zero-trust-vm.yml` runs
+the gate under KVM, plus a TCG smoke test, on every PR touching this package.

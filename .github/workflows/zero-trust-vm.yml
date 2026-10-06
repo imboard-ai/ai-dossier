@@ -101,6 +101,23 @@ jobs:
           export ZT_EVIDENCE_OUT="$RUNNER_TEMP/gate-evidence-kvm.json"
           npx vitest run src/__tests__/vm-gate.e2e.test.ts
 
+      # Run VMs have no console by design. When boot fails, boot the same image
+      # once more with a serial log (no fixture code runs) so the cause is visible.
+      - name: Diagnose run-VM boot
+        if: failure()
+        run: |
+          img=$(node -e 'const m=require(process.argv[1]);console.log(m.imageFile)' "$RUNNER_TEMP/zt-profile/manifest.json")
+          qemu-img create -q -f qcow2 -F qcow2 -b "$RUNNER_TEMP/zt-profile/$img" "$RUNNER_TEMP/diag.qcow2" 10G
+          timeout 240 qemu-system-x86_64 -machine q35,accel=kvm -cpu host -smp 2 -m 4096 \
+            -nodefaults -no-user-config -display none -no-reboot \
+            -serial "file:$RUNNER_TEMP/diag-console.log" \
+            -drive "file=$RUNNER_TEMP/diag.qcow2,if=virtio,format=qcow2" \
+            -netdev user,id=net0,restrict=on -device virtio-net-pci,netdev=net0 \
+            -device virtio-serial-pci -chardev "socket,id=broker,path=$RUNNER_TEMP/diag.sock,server=on,wait=off" \
+            -device virtserialport,chardev=broker,name=org.ai-dossier.zt.broker \
+            -fw_cfg name=opt/org.ai-dossier.zt/scope,string=container || true
+          tail -n 150 "$RUNNER_TEMP/diag-console.log" || true
+
       - name: Summarize evidence
         if: always()
         run: |
@@ -132,6 +149,7 @@ jobs:
             ${{ runner.temp }}/gate-evidence-kvm.json
             ${{ runner.temp }}/zt-timings.env
             ${{ runner.temp }}/zt-profile/last-bake-console.log
+            ${{ runner.temp }}/diag-console.log
           if-no-files-found: warn
 
   tcg-smoke:
