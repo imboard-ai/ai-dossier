@@ -20,7 +20,19 @@ export const OPERATION_KINDS = Object.freeze([
   'pr_close',
 ] as const);
 export type OperationKind = (typeof OPERATION_KINDS)[number];
-const MAX_WRITE_ATTEMPTS = 2; // Initial attempt plus one retry after proven absence.
+/** Hybrid hand-off (PRD §5.7, §5.9): the contributor submits these from their own account
+ * through `HandoffDriver`, so `execute` refuses them. Journals that already hold them still
+ * replay; a pending one is reconciled by whatever adapter the controller supplies. The
+ * PRD matrix also makes fork creation, withdrawal and PR title/body edits contributor
+ * actions; they stay admissible here until their hand-offs exist. */
+export const CONTRIBUTOR_CONFIRMED_OPERATIONS = Object.freeze([
+  'engagement_comment',
+  'pr_create',
+] as const);
+const isContributorConfirmed = (kind: OperationKind) =>
+  (CONTRIBUTOR_CONFIRMED_OPERATIONS as readonly OperationKind[]).includes(kind);
+/** Initial attempt plus one retry after proven absence. */
+export const MAX_WRITE_ATTEMPTS = 2;
 export interface IntentInput {
   readonly contributionId: string;
   readonly target: string;
@@ -48,7 +60,12 @@ export interface MutationResult {
 export interface WriteAdapter {
   /** Must establish contributor/target identity, not merely find a similar artifact. */
   reconcile(intent: Intent): Promise<ReconcileResult>;
-  /** Must enforce authorization and compare-and-swap push semantics independently. */
+  /** Must enforce authorization and compare-and-swap push semantics independently.
+   * Either method may throw `WriteRefusedError` when it proved nothing unintended was
+   * written, or that the remote holds content it must not touch: the driver then blocks
+   * with that reason instead of treating the attempt as a retryable absence. `reconcile`
+   * throws `ReconcileDeferredError` when the evidence is only temporarily unreadable;
+   * `mutate` throws `MutationDeferredError` when it proved nothing was sent. */
   mutate(intent: Intent): Promise<MutationResult>;
 }
 export interface IntentState {
@@ -63,23 +80,65 @@ export const WRITE_BLOCK_REASONS = Object.freeze([
   'invalid_evidence',
   'unexpected_remote_sha',
   'retry_exhausted',
+  'remote_diverged',
+  'authorization_refused',
+  'fork_unverified',
 ] as const);
 export type WriteBlockReason = (typeof WRITE_BLOCK_REASONS)[number];
 export class IntentError extends Error {
-  constructor() {
-    super('Invalid zero-trust write intent or journal event');
+  /** Set for a refusal a caller may act on, e.g. `contributor_confirmed`. */
+  constructor(readonly code?: 'contributor_confirmed') {
+    super(
+      code === 'contributor_confirmed'
+        ? 'Contributor-confirmed operation: issue a hand-off, not a brokered write'
+        : 'Invalid zero-trust write intent or journal event'
+    );
     this.name = 'IntentError';
   }
 }
 export class WriteBlockedError extends Error {
-  constructor() {
-    super('Zero-trust writes blocked; reconciliation requires hand-off');
+  /** `cause` is the adapter's WriteRefusedError when one caused the block. */
+  constructor(options?: ErrorOptions) {
+    super('Zero-trust writes blocked; reconciliation requires hand-off', options);
     this.name = 'WriteBlockedError';
   }
 }
+/** See `WriteAdapter`. `detail` is a closed, secret-free diagnostic (a refusal code, or
+ * the expected and observed SHAs); it is surfaced as the block's cause, never journaled. */
+export class WriteRefusedError extends Error {
+  constructor(
+    readonly reason: Extract<
+      WriteBlockReason,
+      'remote_diverged' | 'authorization_refused' | 'fork_unverified'
+    >,
+    readonly detail?: string
+  ) {
+    super(`Zero-trust write refused: ${reason}${detail ? ` (${detail})` : ''}`);
+    this.name = 'WriteRefusedError';
+  }
+}
+/** Thrown by `reconcile` when the evidence is temporarily unreadable (rate limit, network):
+ * nothing is recorded, nothing is admitted, and a later resume reads again. Only positive
+ * evidence blocks. `detail` is secret-free (an error code and HTTP status). */
+export class ReconcileDeferredError extends Error {
+  constructor(readonly detail?: string) {
+    super(`Zero-trust reconciliation deferred${detail ? ` (${detail})` : ''}; resume later`);
+    this.name = 'ReconcileDeferredError';
+  }
+}
+/** Thrown by `mutate` when it proved that nothing was sent and no single-use authority
+ * was consumed (a transient read or lock failure before the write): the driver withdraws
+ * the attempt instead of spending the retry budget on it. */
+export class MutationDeferredError extends Error {
+  constructor(readonly detail?: string) {
+    super(`Zero-trust write deferred${detail ? ` (${detail})` : ''}; nothing was sent`);
+    this.name = 'MutationDeferredError';
+  }
+}
 export class MutationUncertainError extends Error {
-  constructor() {
-    super('Mutation outcome uncertain; reconcile before retry');
+  /** `cause` is the adapter's own error, for diagnostics. */
+  constructor(options?: ErrorOptions) {
+    super('Mutation outcome uncertain; reconcile before retry', options);
     this.name = 'MutationUncertainError';
   }
 }
@@ -122,11 +181,14 @@ export function idempotencyKey(input: IntentInput): string {
     valid.candidateSha,
   ]);
 }
+/** @deprecated Kept to read journals from before the hybrid hand-off; contributor
+ * hand-offs use `handoffMarker`/`findHandoffMarkers` (src/github/handoff.ts). */
 export function engagementMarker(contributionId: string): string {
   if (!/^[A-Za-z0-9_-]{1,128}$/u.test(contributionId)) throw new IntentError();
   assertNoSecrets(contributionId);
   return `<!-- ai-dossier:ztfc contribution=${contributionId} op=engagement -->`;
 }
+/** @deprecated See `engagementMarker`. */
 export function parseEngagementMarker(text: string): string | null {
   const matches = [
     ...text.matchAll(
@@ -140,7 +202,7 @@ type Event =
   | { v: 1; type: 'run'; run: RunRecord; contributionId: string }
   | { v: 1; type: 'run_update'; run: RunRecord }
   | { v: 1; type: 'intended'; input: IntentInput }
-  | { v: 1; type: 'attempted' | 'ambiguous' | 'absent' | 'exhausted'; key: string }
+  | { v: 1; type: 'attempted' | 'ambiguous' | 'absent' | 'exhausted' | 'withdrawn'; key: string }
   | { v: 1; type: 'confirmed'; key: string; artifactRef: string; remoteSha?: string }
   | { v: 1; type: 'blocked'; run: RunRecord; reason: WriteBlockReason };
 
@@ -161,6 +223,8 @@ function continuation(previous: RunRecord, value: unknown): RunRecord {
 }
 
 const ADMISSION: Readonly<Record<OperationKind, readonly RunState[]>> = Object.freeze({
+  // engagement_comment and pr_create are unreachable through execute() (contributor
+  // confirmed); their rows stay as an inert fallback.
   engagement_comment: ['gating', 'awaiting_maintainer'],
   fork_ensure: ['shipping'],
   push_branch: ['shipping'],
@@ -244,6 +308,14 @@ function reduce(state: IntentState | undefined, raw: unknown): IntentState {
       case 'ambiguous':
         if (intent.status !== 'attempted') throw new IntentError();
         next = { ...intent, status: 'ambiguous' };
+        break;
+      case 'withdrawn':
+        // Undo the attempt exactly: back to `intended`, or to the admitted retry.
+        if (intent.status !== 'attempted' || intent.attempts < 1) throw new IntentError();
+        next =
+          intent.attempts === 1
+            ? { ...intent, status: 'intended', attempts: 0, retryReady: false }
+            : { ...intent, status: 'ambiguous', attempts: intent.attempts - 1, retryReady: true };
         break;
       case 'absent':
         if (
@@ -343,14 +415,14 @@ export class IntentDriver {
     this.tail = pending.catch(() => undefined);
     return pending;
   }
-  private block(reason: WriteBlockReason = 'unknown'): never {
+  private block(reason: WriteBlockReason = 'unknown', cause?: WriteRefusedError): never {
     // Latch before clock/transition/persistence: even a failed hand-off blocks admission.
     this.failed = true;
     const run = permittedTransitions(this.state.run.state)[ReasonCode.PolicyBlocked]
       ? transitionRun(this.state.run, ReasonCode.PolicyBlocked, this.now())
       : this.state.run;
     this.persist({ v: 1, type: 'blocked', run, reason });
-    throw new WriteBlockedError();
+    throw new WriteBlockedError(cause ? { cause } : undefined);
   }
   private confirm(intent: Intent, result: MutationResult): void {
     // Snapshot once; adapter values do not get re-read after validation.
@@ -377,7 +449,9 @@ export class IntentDriver {
           kind === 'found'
             ? { kind, artifactRef: observed.artifactRef, remoteSha: observed.remoteSha }
             : { kind };
-      } catch {
+      } catch (error) {
+        if (error instanceof ReconcileDeferredError) throw error;
+        if (error instanceof WriteRefusedError) this.block(error.reason, error);
         this.block('reconciliation_error');
       }
       if (this.failed) throw new WriteBlockedError();
@@ -407,6 +481,8 @@ export class IntentDriver {
   }
   execute(input: IntentInput): Promise<string> {
     const valid = inputOf(input);
+    // Refused before anything is journaled: these are contributor hand-offs, not writes.
+    if (isContributorConfirmed(valid.operationKind)) throw new IntentError('contributor_confirmed');
     const key = idempotencyKey(valid);
     return this.serial(async () => {
       if (valid.contributionId !== this.state.contributionId) throw new IntentError();
@@ -424,9 +500,14 @@ export class IntentDriver {
       this.admit(valid.operationKind);
       try {
         result = await this.adapter.mutate(intent);
-      } catch {
+      } catch (error) {
+        if (error instanceof WriteRefusedError) this.block(error.reason, error);
+        if (error instanceof MutationDeferredError) {
+          this.persist({ v: 1, type: 'withdrawn', key });
+          throw error;
+        }
         this.persist({ v: 1, type: 'ambiguous', key });
-        throw new MutationUncertainError();
+        throw new MutationUncertainError({ cause: error });
       }
       try {
         this.confirm(intent, result);
