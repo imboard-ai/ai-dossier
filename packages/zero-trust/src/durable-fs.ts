@@ -43,7 +43,13 @@ export function publishPrivate(file: string, bytes: Buffer): void {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }
-  const tmp = `${file}.tmp-${randomUUID()}`;
+  replacePrivate(file, bytes);
+}
+
+/** Atomic replacement under the caller's guard. Temporary basenames are fixed
+ * length, independent of the final filename's component length. */
+export function replacePrivate(file: string, bytes: Buffer): void {
+  const tmp = path.join(path.dirname(file), `.zt-write-${randomUUID()}`);
   const fd = fs.openSync(tmp, 'wx', 0o600);
   try {
     fs.writeFileSync(fd, bytes);

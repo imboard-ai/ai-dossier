@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { syncDirectory } from './durable-fs';
+import { replacePrivate, syncDirectory } from './durable-fs';
 import { Journal } from './journal';
 import {
   isLockOwner,
@@ -94,7 +94,9 @@ export function recordLockReclaim(
   }
   // A first audit is published as a COMPLETE directory. Crash debris stays in
   // an unpublished unique staging directory, never masquerading as lost history.
-  const staging = exists ? directory : `${directory}.staging-${randomUUID()}`;
+  const staging = exists
+    ? directory
+    : path.join(path.dirname(directory), `.zt-audit-${randomUUID()}`);
   const journal = new Journal(staging);
   try {
     const event: LockRecovery = {
@@ -126,17 +128,7 @@ function pidNamespace(): string {
 }
 
 function publishOwner(file: string, owner: LockOwner): void {
-  const tmp = `${file}.owner-${randomUUID()}`;
-  const fd = fs.openSync(tmp, 'wx', 0o600);
-  try {
-    fs.writeFileSync(fd, `${JSON.stringify(owner)}\n`);
-    fs.fsyncSync(fd);
-    fs.renameSync(tmp, file);
-  } finally {
-    fs.closeSync(fd);
-    fs.rmSync(tmp, { force: true });
-  }
-  syncDirectory(path.dirname(file));
+  replacePrivate(file, Buffer.from(`${JSON.stringify(owner)}\n`));
 }
 
 /** The permanent guard must NEVER be unlinked. Kernel flock protects the entire

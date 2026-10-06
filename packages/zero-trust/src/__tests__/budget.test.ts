@@ -446,17 +446,20 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
   ] as const)('fails closed on fsync failure %s and recovers only committed state', (when) => {
     const original = fs.fsyncSync;
     const rename = fs.renameSync;
+    const write = fs.writeFileSync;
+    let ledgerFd: number | undefined;
+    vi.spyOn(fs, 'writeFileSync').mockImplementation((target, data, options) => {
+      if (typeof target === 'number' && String(data).includes('"schemaVersion":1'))
+        ledgerFd = target;
+      write(target, data, options);
+    });
     let renamed = false;
     vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
       rename(from, to);
       if (to === file) renamed = true;
     });
     vi.spyOn(fs, 'fsyncSync').mockImplementation((fd) => {
-      const named = fs.readlinkSync(`/proc/self/fd/${fd}`);
-      if (
-        (when === 'before-rename' && named.startsWith(`${file}.tmp-`)) ||
-        (when === 'after-rename' && renamed)
-      )
+      if ((when === 'before-rename' && fd === ledgerFd) || (when === 'after-rename' && renamed))
         throw new Error('injected disk failure');
       original(fd);
     });
@@ -466,7 +469,7 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
     const recovered = new BudgetLedger(file, 'contribution-1');
     expect(recovered.snapshot().reservations).toHaveLength(when === 'before-rename' ? 0 : 1);
     expect(fs.existsSync(`${file}.lock`)).toBe(true);
-    expect(fs.readdirSync(dir).filter((name) => name.includes('.tmp-'))).toHaveLength(0);
+    expect(fs.readdirSync(dir).filter((name) => name.startsWith('.zt-write-'))).toHaveLength(0);
     code(() => recovered.reserve('initial', estimate(1)), 'lock_timeout');
     // Fault injection did not kill this live process. A new controller must not
     // steal its retained uncertain lock; real SIGKILL recovery is tested below.

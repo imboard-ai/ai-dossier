@@ -12,7 +12,7 @@ import {
   type EstimateRequest,
   type Money,
 } from './budget-types';
-import { syncDirectory } from './durable-fs';
+import { replacePrivate } from './durable-fs';
 import {
   lockRecoveries,
   recordLockReclaim,
@@ -471,24 +471,13 @@ export class BudgetLedger {
   }
 
   private save(state: BudgetState): void {
-    const tmp = `${this.file}.tmp-${randomUUID()}`;
     try {
-      const fd = fs.openSync(tmp, 'wx', 0o600);
-      try {
-        fs.writeFileSync(fd, `${JSON.stringify(state)}\n`, 'utf8');
-        fs.fsyncSync(fd);
-      } finally {
-        fs.closeSync(fd);
-      }
-      fs.renameSync(tmp, this.file);
-      syncDirectory(path.dirname(this.file));
+      replacePrivate(this.file, Buffer.from(`${JSON.stringify(state)}\n`));
     } catch (error) {
       // A failed fsync may occur AFTER rename. Never retry from this instance
       // assuming that a failed call means nothing committed.
       this.writeUncertain = true;
       throw error;
-    } finally {
-      fs.rmSync(tmp, { force: true });
     }
   }
 

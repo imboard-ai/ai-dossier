@@ -560,7 +560,10 @@ describe('controller nonce durability — concurrent processes and crash boundar
     const write = fs.writeSync;
     let appended = false;
     vi.spyOn(fs, 'writeSync').mockImplementation(((...args: Parameters<typeof fs.writeSync>) => {
-      appended = true;
+      if (
+        fs.readlinkSync(`/proc/self/fd/${args[0]}`) === path.join(directory, 'nonces/events.jsonl')
+      )
+        appended = true;
       return Reflect.apply(write, fs, args);
     }) as typeof fs.writeSync);
     vi.spyOn(fs, 'fsyncSync').mockImplementation((fd) => {

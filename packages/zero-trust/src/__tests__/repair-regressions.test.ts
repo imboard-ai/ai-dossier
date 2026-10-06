@@ -8,6 +8,7 @@ import type { BudgetEstimate, BudgetRate } from '../budget-types';
 import { Journal } from '../journal';
 import { ReceiptNonceStore } from '../receipt/nonces';
 import { compiledFixture } from './compiled-fixture';
+import { budgetFixture, crashProcess as crash, readJournal as events } from './recovery-fixture';
 
 const dirs: string[] = [];
 function directory(): string {
@@ -36,49 +37,34 @@ const estimate: BudgetEstimate = {
 };
 const row = { nonce: 'n', operationKey: 'op', receiptDigest: 'a'.repeat(64), attempt: 1 };
 function budget(dir: string): BudgetLedger {
-  const ledger = new BudgetLedger(path.join(dir, 'ledger.json'), 'c', 100);
-  ledger.initialize(['model'], [rate]);
-  ledger.startSession({
-    id: 's',
-    ceiling: { currency: 'USD', minor: 100 },
-    cleanupAllowance: 10,
-    tokenLimit: 100,
-    timeLimitMs: 100,
-  });
-  return ledger;
-}
-async function crash(script: string): Promise<void> {
-  const child = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'ignore', 'pipe'] });
-  let stderr = '';
-  child.stderr?.on('data', (bytes) => {
-    stderr += bytes;
-  });
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      reject(new Error('crash boundary not reached'));
-    }, 10000);
-    child.once('error', (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-    child.once('exit', (_code, signal) => {
-      clearTimeout(timer);
-      if (signal === 'SIGKILL') resolve();
-      else reject(new Error(`did not crash: ${stderr}`));
-    });
-  });
-}
-function events(dir: string): unknown[] {
-  const journal = new Journal(dir);
-  try {
-    return journal.read();
-  } finally {
-    journal.close();
-  }
+  return budgetFixture(dir, rate);
 }
 
 describe('authorized second-cycle crash repairs', () => {
+  it.each([
+    'a'.repeat(200),
+    'b'.repeat(208),
+    '账'.repeat(69),
+  ])('long basename initializes and recovers real dead owner: %s', async (name) => {
+    const dir = directory();
+    const file = path.join(dir, name);
+    const ledger = new BudgetLedger(file, 'c', 100);
+    ledger.initialize(['model'], [rate]);
+    ledger.startSession({
+      id: 's',
+      ceiling: { currency: 'USD', minor: 100 },
+      cleanupAllowance: 10,
+      tokenLimit: 100,
+      timeLimitMs: 100,
+    });
+    const module = compiledFixture(dir, 'budget');
+    await crash(
+      `const fs=require('node:fs'),rename=fs.renameSync;fs.renameSync=(a,b)=>{rename(a,b);if(b===${JSON.stringify(`${file}.lock`)})process.kill(process.pid,'SIGKILL');};new (require(${JSON.stringify(module)}).BudgetLedger)(${JSON.stringify(file)},'c',100).reserve('s',${JSON.stringify(estimate)});`
+    );
+    new BudgetLedger(file, 'c', 100).reserve('s', estimate);
+    expect(events(`${file}.recovery-journal`)).toHaveLength(1);
+    expect(fs.existsSync(`${file}.lock`)).toBe(false);
+  });
   it('pre-opened survivor fences a later lock-free crashed reservation with zero ledger writes', async () => {
     const dir = directory();
     const original = budget(dir);
@@ -164,7 +150,7 @@ describe('authorized second-cycle crash repairs', () => {
     );
     const owner = fs.readFileSync(lock);
     await crash(
-      `const fs=require('node:fs'),mkdir=fs.mkdirSync;fs.mkdirSync=(p,...a)=>{const result=mkdir(p,...a);if(String(p)===${JSON.stringify(audit)}||String(p).startsWith(${JSON.stringify(`${audit}.staging-`)}))process.kill(process.pid,'SIGKILL');return result;};const M=require(${JSON.stringify(module)});${action};`
+      `const fs=require('node:fs'),mkdir=fs.mkdirSync;fs.mkdirSync=(p,...a)=>{const result=mkdir(p,...a);if(String(p)===${JSON.stringify(audit)}||String(p).startsWith(${JSON.stringify(path.join(dir, '.zt-audit-'))}))process.kill(process.pid,'SIGKILL');return result;};const M=require(${JSON.stringify(module)});${action};`
     );
     expect(fs.readFileSync(lock)).toEqual(owner);
     if (ledger) new BudgetLedger(ledger.file, 'c', 100).reserve('s', estimate);
@@ -184,7 +170,7 @@ describe('authorized second-cycle crash repairs', () => {
     const file = path.join(dir, 'events.jsonl');
     const marker = path.join(dir, 'nonce-initializing');
     await crash(
-      `const fs=require('node:fs'),stage=${JSON.stringify(stage)},file=${JSON.stringify(file)},marker=${JSON.stringify(marker)},write=fs.writeSync,writeFile=fs.writeFileSync,rename=fs.renameSync;const die=()=>process.kill(process.pid,'SIGKILL');const named=fd=>fs.readlinkSync('/proc/self/fd/'+fd);fs.writeSync=(fd,b,o,l,...a)=>{if(stage==='partial-header'&&named(fd)===file){write(fd,b,o,7);die();}return write(fd,b,o,l,...a);};fs.writeFileSync=(fd,b,...a)=>{if(stage==='partial-header'&&typeof fd==='number'&&named(fd).startsWith(file+'.tmp-')){write(fd,b,0,7);die();}return writeFile(fd,b,...a);};fs.renameSync=(a,b)=>{rename(a,b);if((stage==='marker-published'&&b===marker)||(stage==='header-published'&&b===file))die();};new (require(${JSON.stringify(module)}).ReceiptNonceStore)(${JSON.stringify(dir)}).initialize();`
+      `const fs=require('node:fs'),stage=${JSON.stringify(stage)},file=${JSON.stringify(file)},marker=${JSON.stringify(marker)},write=fs.writeSync,writeFile=fs.writeFileSync,rename=fs.renameSync;let markerPublished=false;const die=()=>process.kill(process.pid,'SIGKILL');const named=fd=>fs.readlinkSync('/proc/self/fd/'+fd);fs.writeSync=(fd,b,o,l,...a)=>{if(stage==='partial-header'&&named(fd)===file){write(fd,b,o,7);die();}return write(fd,b,o,l,...a);};fs.writeFileSync=(fd,b,...a)=>{if(stage==='partial-header'&&markerPublished&&typeof fd==='number'&&String(b).includes('receipt-nonces')){write(fd,b,0,7);die();}return writeFile(fd,b,...a);};fs.renameSync=(a,b)=>{rename(a,b);if(b===marker)markerPublished=true;if((stage==='marker-published'&&b===marker)||(stage==='header-published'&&b===file))die();};new (require(${JSON.stringify(module)}).ReceiptNonceStore)(${JSON.stringify(dir)}).initialize();`
     );
     const recovered = new ReceiptNonceStore(dir);
     recovered.consume(row);

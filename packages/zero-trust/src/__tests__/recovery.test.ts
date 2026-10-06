@@ -9,6 +9,7 @@ import type { BudgetEstimate, BudgetRate } from '../budget-types';
 import { Journal, JournalError } from '../journal';
 import { ReceiptNonceStore } from '../receipt/nonces';
 import { compiledFixture } from './compiled-fixture';
+import { readJournal as audit, budgetFixture, crashProcess as killed } from './recovery-fixture';
 
 const dirs: string[] = [];
 function directory(): string {
@@ -55,52 +56,13 @@ const estimate: BudgetEstimate = {
   rates: [rate],
 };
 function budget(dir: string): BudgetLedger {
-  const ledger = new BudgetLedger(path.join(dir, 'ledger.json'), 'c', 100);
-  ledger.initialize(['model'], [rate]);
-  ledger.startSession({
-    id: 's',
-    ceiling: { currency: 'USD', minor: 100 },
-    cleanupAllowance: 10,
-    tokenLimit: 100,
-    timeLimitMs: 100,
-  });
-  return ledger;
+  return budgetFixture(dir, rate);
 }
 const row = { nonce: 'n', operationKey: 'op', receiptDigest: 'a'.repeat(64), attempt: 1 };
 function nonces(dir: string): ReceiptNonceStore {
   const store = new ReceiptNonceStore(dir);
   store.initialize();
   return store;
-}
-function audit(dir: string): unknown[] {
-  const journal = new Journal(dir);
-  try {
-    return journal.read();
-  } finally {
-    journal.close();
-  }
-}
-async function killed(script: string): Promise<void> {
-  const child = spawn(process.execPath, ['-e', script], { stdio: ['ignore', 'ignore', 'pipe'] });
-  let stderr = '';
-  child.stderr?.on('data', (bytes) => {
-    stderr += bytes;
-  });
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      reject(new Error('crash boundary not reached'));
-    }, 4000);
-    child.once('error', (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-    child.once('exit', (_code, signal) => {
-      clearTimeout(timer);
-      if (signal === 'SIGKILL') resolve();
-      else reject(new Error(`writer did not crash: ${stderr}`));
-    });
-  });
 }
 
 describe('crash-safe final-tail recovery', () => {
@@ -193,8 +155,9 @@ describe('crash-safe final-tail recovery', () => {
       offset: number,
       length: number
     ) => {
-      written = true;
-      if (stage === 'event-write') {
+      const journalWrite = fs.readlinkSync(`/proc/self/fd/${fd}`) === file;
+      if (journalWrite) written = true;
+      if (stage === 'event-write' && journalWrite) {
         write(fd, bytes, offset, 7);
         return fail();
       }

@@ -137,8 +137,8 @@ export class ReceiptNonceStore {
         (error) => !(error instanceof ReceiptError)
       );
     } catch (error) {
-      // Retain the lock on every uncertain error. Validation/replay failures are
-      // known not to have written, and may release it safely.
+      // Validation/replay failures append no new consumption, though recovery
+      // evidence may already be durable. Uncertain persistence retains ownership.
       if (error instanceof StoreLockedError || error instanceof SyntaxError)
         throw new ReceiptError('store_locked');
       if (!(error instanceof ReceiptError)) this.poisoned = true;
