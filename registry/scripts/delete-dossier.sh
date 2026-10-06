@@ -13,10 +13,10 @@
 #   ./scripts/delete-dossier.sh <dossier-name>
 #
 # Arguments:
-#   dossier-name  Full dossier path (e.g., "yuvaldim/test/my-dossier")
+#   dossier-name  Full dossier path (e.g., "acme-user/test/my-dossier")
 #
 # Examples:
-#   ./scripts/delete-dossier.sh yuvaldim/test/test-dossier
+#   ./scripts/delete-dossier.sh acme-user/test/test-dossier
 #   ./scripts/delete-dossier.sh imboard-ai/development/old-dossier
 #
 # What it does:
@@ -30,7 +30,7 @@ set -e
 
 if [ -z "$1" ]; then
   echo "Usage: ./scripts/delete-dossier.sh <dossier-name>"
-  echo "Example: ./scripts/delete-dossier.sh yuvaldim/test/test-dossier"
+  echo "Example: ./scripts/delete-dossier.sh acme-user/test/test-dossier"
   exit 1
 fi
 

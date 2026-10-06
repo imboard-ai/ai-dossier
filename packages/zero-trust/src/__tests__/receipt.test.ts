@@ -17,7 +17,7 @@ import { ReceiptNonceStore } from '../receipt/nonces';
 import { renderReceipt } from '../receipt/render';
 import { canonicalJson, parseReceipt, RECEIPT_TTL_MS } from '../receipt/schema';
 import { authorizeShipping, type ReceiptContext, verifyReceipt } from '../receipt/verify';
-import { createRun } from '../state';
+import { createRun, ReasonCode, transitionRun } from '../state';
 
 const SHA = 'a'.repeat(40);
 const CANDIDATE = 'b'.repeat(40);
@@ -139,13 +139,21 @@ describe('controller receipt — scenarios 10/17, contributor integrity, S3/S4',
         },
       },
       {
-        run: createRun(
-          {
-            runId: 'run-1',
-            contributor: 'alice',
-            upstreamIssue: 'https://github.com/o/r/issues/8',
-          },
-          new Date(AT).toISOString()
+        run: [
+          ReasonCode.GatePassed,
+          ReasonCode.PlanApproved,
+          ReasonCode.CandidateReady,
+          ReasonCode.VerificationPassed,
+        ].reduce(
+          (run, reason) => transitionRun(run, reason, new Date(AT).toISOString()),
+          createRun(
+            {
+              runId: 'run-1',
+              contributor: 'alice',
+              upstreamIssue: 'https://github.com/o/r/issues/8',
+            },
+            new Date(AT).toISOString()
+          )
         ),
         contributionId: input.contributionId,
       },
@@ -443,15 +451,40 @@ describe('controller receipt — scenarios 10/17, contributor integrity, S3/S4',
     'ghp_secret',
     'github_pat_secret',
     'ghs_secret',
+    'ghu_syntheticUserToken',
+    'GHO_SYNTHETIC',
+    'ghr_synthetic',
+    'sk-proj-syntheticKey',
+    'Authorization: token x',
+    'Authorization:\\\n token syntheticOpaqueToken',
+    '_sk-proj-syntheticKey_',
+    'credential_sk-12345678',
+    String.raw`\nsk-proj-syntheticKey`,
+    String.raw`Authorization:\ttoken\tx`,
+    String.raw`Authorization:\x09token\x20x`,
+    String.raw`Authorization:\u0009token\u0020x`,
+    String.raw`Authorization:\040token\040x`,
+    String.raw`Authorization:\011token\012x`,
+    String.raw`Authorization:\x9token\u20x`,
+    JSON.stringify({ command: String.raw`curl -H $'Authorization:\ttoken\tx'` }),
+    String.raw`Authorization:\ token\ syntheticOpaqueToken`,
+    String.raw`Authorization:\0040token\0040syntheticOpaqueToken`,
+    String.raw`Authorization:\040token\0400syntheticOpaqueToken`,
+    JSON.stringify({ header: String.raw`Authorization:\011token\0111syntheticOpaqueToken` }),
+    JSON.stringify({ command: 'Authoriza\\\ntion: token syntheticOpaqueToken' }),
     'sk-ant-secret',
     'Bearer\tsecret',
     'Bearer\nsecret',
   ])('rejects secrets without echoing them: %s', async (secret) => {
     input.commands[0].command = `npm test ${secret}`;
+    const sign = vi.spyOn(signer, 'sign');
     await expect(issue()).rejects.not.toThrow(secret);
     await expect(issue()).rejects.toThrow('prohibited credential');
+    expect(sign).not.toHaveBeenCalled();
   });
   it('escapes hostile HTML/Markdown and reports actual counts/log digests', async () => {
+    input.commands[0].command = 'npm run task-validation';
+    expect(renderReceipt((await issue()).receipt)).toContain('npm run task-validation');
     input.commands[0].command = 'npm test </code><script>alert(1)</script> `\n';
     const text = renderReceipt((await issue()).receipt);
     expect(text).not.toContain('<script>');

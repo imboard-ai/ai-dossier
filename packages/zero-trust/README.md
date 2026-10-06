@@ -44,9 +44,24 @@ was lost; this package performs no GitHub writes or resource teardown.
 estimates contain nonnegative finite `amount` and a matching three-letter
 `currency`; these are estimates, not invoices. `candidateSha` is omitted if absent.
 `renderJson` and `renderHuman` render identical whitelisted facts; human values
-use JSON quoting to neutralize line injection. Both reject credential prefixes
-(`ghp_`, `github_pat_`, `ghs_`, `sk-ant-`, case-insensitive `Bearer` plus whitespace)
-with `SecretRedactionError` containing no input. Other malformed facts raise
+use JSON quoting to neutralize line injection. Both use the exported, immutable
+`SECRET_PATTERNS` policy shared with intent and receipt validation. Case-insensitive
+rejection covers GitHub `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` and `github_pat_`,
+`sk-ant-`/`sk-proj-`, word-boundary or underscore-delimited `sk-` prefixes,
+and embedded generic `sk-` keys with at least 32 alphanumeric/underscore/hyphen
+payload characters. Prefix-only detection is intentionally conservative;
+ordinary `task-validation`/`risk-assessment` text is allowed. `Bearer` followed
+by whitespace and `Authorization: token` followed
+by whitespace are rejected (spaces/tabs before the colon, whitespace after it).
+Literal JSON/shell whitespace escapes (`\t`, `\n`, `\r`, `\v`, `\f`, and
+ASCII whitespace in bounded octal, `\xHH`, `\uHHHH`, and `\UHHHHHHHH`
+forms, including shell short forms) are scanned in a normalized view after
+removing shell backslash-newline continuations;
+the scan conservatively consumes complete backslash runs for nested serialization.
+Escaped literal whitespace, printf's leading-zero octal forms and serialized
+shell continuations are covered by detection-only normalized/collapsed views.
+input is never executed. Rejection raises `SecretRedactionError` containing no
+input. Other malformed facts raise
 `InvalidStatusError`. Pattern detection is a defense-in-depth guard, not proof
 that arbitrary input contains no secrets; the controller must supply sanitized
 facts and never raw environment dumps.
@@ -97,7 +112,23 @@ contribution ID, injected trusted `WriteAdapter`, and an ISO timestamp clock.
 `resume()` reconciles pending writes; `execute(input)` also applies that barrier
 before admitting any mutation. `snapshot()` returns the durable run and intents.
 Close the journal before recovery. Recover with the same run/contribution/target
-identity; the journal, not the supplied initial state, controls progress.
+identity and the controller's current lifecycle record. Its immutable identity and
+creation time must match, and its history must extend the journal's history exactly;
+rollback and divergent histories are rejected. Newer lifecycle snapshots are fsynced
+as `run_update` events. Call synchronous `observeRun(currentRun)` on every live
+controller transition, including cancellation and cleanup failure. This takes effect
+even while reconciliation is awaiting an adapter response. Already-issued mutations
+cannot be recalled; their outcomes are still journaled and reconciled.
+
+Admission is checked after reconciliation: engagement comments require `gating` or
+`awaiting_maintainer`; fork/push/PR creation require `shipping`; PR updates require
+`shipping` or `revising`. Explicit withdrawal (`pr_close`) is permitted in `shipping`,
+`submitted`, `awaiting_review`, `revising` or `accepted`, before recording `declined`.
+Terminal states, `blocked_cleanup` and `paused_user` deny every mutation with
+`WriteBlockedError`, including retries and calls for already-confirmed intents.
+`resume()` may still reconcile attempted/ambiguous intents in these states, persisting
+found/absent evidence without writing externally. Legacy journals remain replayable;
+historical attempts are evidence, never current admission authority.
 
 The adapter must authenticate artifact ownership/target, enforce current permission
 and receipt checks, and implement compare-and-swap branch writes. For push results,
@@ -108,8 +139,12 @@ must include `engagementMarker(contributionId)` in comments and reconcile the un
 matching marker via `parseEngagementMarker`, with contributor/target checks.
 
 Only one retry is available after proven absence, including across restarts.
-Unknown reconciliation persists a `PolicyBlocked` lifecycle transition and denies
-all further writes. `snapshot().blockedReason` preserves the bounded reason
+Unknown reconciliation denies all further writes and persists a `PolicyBlocked`
+transition from the current run when that edge is legal. Terminal/cleanup states
+remain unchanged rather than inventing an illegal transition, but the bounded
+reason is still journaled. Proven absence after the final attempt is journaled as
+`exhausted`; it cannot enable a retry or repeatedly reconcile on restart.
+`snapshot().blockedReason` on a persisted block preserves the bounded reason
 (`unknown`, `reconciliation_error`, `invalid_evidence`, `unexpected_remote_sha`,
 or `retry_exhausted`) without storing provider exception text.
 Every intent and attempt is fsynced before the adapter runs;
@@ -146,7 +181,13 @@ occurred. Repeated reconciliation fails closed; retain and use the reservation I
 `snapshot()` exposes the contribution's entire history; `budgetTotals(state, id)`
 returns spent/reserved/usage per session. Do not add different currencies together.
 Only controller-authorized `teardown` reservations can access the cleanup allowance;
-they still respect the full ceiling and resource limits.
+their commitments plus the new estimate may not exceed
+`cleanupAllowance + max(0, ceiling − cleanupAllowance − work commitments)`.
+Commitments include pending estimates and settled `max(estimate, observed)` charges,
+excluding released reservations. Work overruns may put aggregate spending above the
+session ceiling, but cannot consume the remaining cleanup allowance. Teardown still
+respects cumulative token/time limits. Admission uses exact bigint totals; public
+numeric `budgetTotals` rejects unrepresentable sums rather than capping them.
 
 Mutations re-read and validate every row under an exclusive file lock and persist
 via unique temp file + fsync + same-directory rename + directory fsync. Unknown

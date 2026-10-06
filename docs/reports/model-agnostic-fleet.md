@@ -5,9 +5,9 @@
 | part | run | date | what it did |
 |---|---|---|---|
 | Part I (§1–§7) | `r-528-655b` (gen 1) | 2026-09-01 | fixed the `model=` bucketing defect; wrote the retrospective and the §5 protocol; escalated the live-run decision |
-| [Part II](#part-ii--run-r-528-8ccf-2026-09-02-hcc2) (§8–§12) | `r-528-8ccf` (gen 0, slot 1) | 2026-09-02 | built AC3's missing `model × class` axis and AC2's two guardrail metrics; re-read the corpus through them; **re-escalated AC1 — option C's premise did not survive** |
+| [Part II](#part-ii--run-r-528-8ccf-2026-09-02-the-runner-host) (§8–§12) | `r-528-8ccf` (gen 0, slot 1) | 2026-09-02 | built AC3's missing `model × class` axis and AC2's two guardrail metrics; re-read the corpus through them; **re-escalated AC1 — option C's premise did not survive** |
 
-Executing host for both: `hcc2`. Issue: [#528](https://github.com/imboard-ai/ai-dossier/issues/528).
+Executing host for both: the runner host. Issue: [#528](https://github.com/imboard-ai/ai-dossier/issues/528).
 
 > **Part I's §1–§7 are left as generation 1 wrote them.** Where Part II supersedes a figure or a
 > verdict it says so and cites the row; nothing in Part I is edited after the fact, so the two runs
@@ -96,7 +96,7 @@ This document reports three things, in order of how firmly they are established:
 
 | Item | Value |
 |---|---|
-| Execution host | `hcc2` (16 vCPU, 30 GB RAM) — **this run executed on the target host itself** |
+| Execution host | the runner host (16 vCPU, 30 GB RAM) — **this run executed on the target host itself** |
 | CLI | `@ai-dossier/cli` 0.24.0 → 0.25.0 (this PR) |
 | Scheduler | `ai-dossier sched` (`packages/sched` 0.12.0): `max_slots=3`, dispatch `claude -p --output-format json --model {model}`, `tier_models` = haiku/sonnet/opus |
 | Per-tier dispatch | `DispatchConfig.tiers` ([#527](https://github.com/imboard-ai/ai-dossier/issues/527)/[#533](https://github.com/imboard-ai/ai-dossier/issues/533)) present — a tier can point at a different agent CLI, which is what the open-weights arm needs |
@@ -104,9 +104,9 @@ This document reports three things, in order of how firmly they are established:
 | Data sources | runstate trails on GitHub (both repos); `~/.dossier/runs.jsonl` via `ai-dossier sched stats` ([#524](https://github.com/imboard-ai/ai-dossier/issues/524)) |
 
 **Host-access correction.** Generation 0 of this run blocked at `plan` with
-`reason=requires-hcc2-execution-access`, on the claim that the session had no SSH access to
-`hcc2`. That claim was **wrong and is retracted**: it came from `ssh hcc` failing to resolve, but
-`hcc` is a different host (Hetzner). `hostname` on this session is `hcc2`. The host, the
+`reason=requires-runner-host-execution-access`, on the claim that the session had no SSH access to
+the runner host. That claim was **wrong and is retracted**: it came from `ssh` to the second host failing to resolve, but
+The second host is a different machine, and this session is on the runner host. The host, the
 scheduler, the open-weights CLI, and its credentials were all present the whole time.
 
 ### 2.2 Arm definition (retrospective)
@@ -267,7 +267,7 @@ Specified here so whoever authorizes it executes rather than re-derives:
 | item | value |
 |---|---|
 | Mode | **full-cycle**, not batch (§2.4) |
-| Scheduler | `ai-dossier sched enqueue --issues … --mode full --tier mid` then `ai-dossier sched start`, on `hcc2` |
+| Scheduler | `ai-dossier sched enqueue --issues … --mode full --tier mid` then `ai-dossier sched start`, on the runner host |
 | Claude arm | `tier_models` = `{mid: sonnet, strong: opus}` (current default config — no change needed) |
 | Open-weights arm | `dispatch.tiers` = `{mid: {command: [opencode CLI…], model: z-ai/glm-latest}, strong: {…, model: moonshotai/kimi-latest}, rescue: claude opus}` — the `tiers` spec from #527/#533 |
 | Cohort | ≥ 8 lowest-risk classifier-routed issues **per arm**, same repo, same class mix, dispatched concurrently |
@@ -333,14 +333,14 @@ instrument fix in this PR is the prerequisite, and it lands either way.
 - Per-model tables: `ai-dossier runstate stats --issues 460..538` and
   `--repo imboard-ai/imboard-monorepo --issues 3891,3862,3810,3886,3890,3889,3756,3500,3433,3414,3408,3824`
   (reproduce with `@ai-dossier/cli` ≥ 0.25.0 — earlier versions split the buckets).
-- Cost: `ai-dossier sched stats` on `hcc2` (`~/.dossier/runs.jsonl`).
+- Cost: `ai-dossier sched stats` on the runner host (`~/.dossier/runs.jsonl`).
 - Prior reports: `docs/reports/sched-parity.md` (#471), `docs/reports/batch-pilot-2-execution.md` (#526).
 - Trails cited: #460 (`reason=publish-e404-new-scope-package`), #472 (`tier=full`, `escalated=1`,
   `ac_met=6/6`), imboard-monorepo #3414 (`plan`, `decision-pending`).
 
 ---
 
-# Part II — run `r-528-8ccf` (2026-09-02, hcc2)
+# Part II — run `r-528-8ccf` (2026-09-02, the runner host)
 
 Dispatched by the scheduler as a strong-tier `full` unit on `imboard-ai-ai-dossier` slot 1 at
 14:30:12Z, four minutes after its dependency #526 closed — and, as §9 records, seven minutes
@@ -354,7 +354,7 @@ supposed to unblock AC1 did not survive contact with what #526 actually delivere
 
 | | |
 |---|---|
-| host | `hcc2` (16 vCPU / 30 GB) |
+| host | the runner host (16 vCPU / 30 GB) |
 | `@ai-dossier/cli` | 0.32.0 at dispatch → 0.33.0 in this PR |
 | base | `7cccbb5` (`docs(reports): batch pilot attempt 3 — execution record (#584)`) |
 | slot | `imboard-ai-ai-dossier` slot 1, pid 1637242, `claude -p --model opus` |
@@ -379,7 +379,7 @@ specific to #526's re-enqueue, and the gate rail should be brought in line with 
 Part I §5.1 escalated one decision. The owner answered it on 2026-09-02T04:42Z:
 
 > **option C — defer the live two-arm run until #526's batch path is proven**, so one experiment
-> answers both mode and model. Re-enqueued on hcc2 behind #526 (tier strong). Spend ceiling when it
+> answers both mode and model. Re-enqueued on the runner host behind #526 (tier strong). Spend ceiling when it
 > runs: the run's own recommended **~$600**, stop-at-ceiling; owner may adjust before dispatch.
 
 Option C's stated pay-off was that AC1's mode conditional would then resolve to **batch**. It does

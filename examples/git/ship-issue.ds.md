@@ -3,7 +3,7 @@
   "dossier_schema_version": "1.0.0",
   "name": "ship-issue",
   "title": "Ship Issue — Commit, PR, Merge, Deploy, Teardown",
-  "version": "1.18.1",
+  "version": "1.18.2",
   "protocol_version": "1.0",
   "status": "Stable",
   "objective": "Commit changes, push, create a PR, then either drive it to a confirmed merge and deploy (attached) or park it on auto-merge and stop (detached); in batch mode (batch_id set): ship the batch PR from the batch branch — per-member PR sections, Closes #N per member, rebase-merged so one commit per member issue lands on the base branch",
@@ -109,16 +109,16 @@
       "name": "Yuval Dimnik"
     }
   ],
-  "last_updated": "2026-09-29",
+  "last_updated": "2026-10-06",
   "checksum": {
     "algorithm": "sha256",
-    "hash": "ebf168454b59d8247604dd7117b7d43a24dc1874dbc807ab9d234a5da215b9e4"
+    "hash": "0ac62926d6716f117a9a9c6a2b73026051f14a987d5dec068e350b51126659f0"
   },
   "signature": {
     "algorithm": "ed25519",
-    "signature": "6L5z9GO62pmS0X+KzC1ejx+9F6KtM2AlMAlMr77ySq7H/1svXAn3AdYXy/JXlaMB0+qoDbUd18M+/5WkkapnCQ==",
+    "signature": "repZuSAGeczZTGX1t5GqAnLmNd+Qu3WZhOg7yeTbMKAHAIUqDmqJEcznRKAB7w1g0Sumd7m7eNUjvfym8X6GAg==",
     "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-29T15:23:09.461Z",
+    "signed_at": "2026-10-06T06:16:41.591Z",
     "covers": "frontmatter+body",
     "key_id": "imboard-ai",
     "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
@@ -461,7 +461,7 @@ The gate is defined once here and runs before **every** merge authorization — 
 2. **Determine freshness — tree equality or patch-id, never an empty id, sha equality as the documented fallback.** What must stay unchanged is the diff a conformance verdict actually covered, not its sha: ship's own Step 1 commit, Step 2.5's CI-enable empty commit, and Step 5's CI-fix pushes all move the sha even when they leave the reviewed content untouched, which is exactly why a sha test re-runs Agent 7 on nearly every ship. Both content checks below are invariant under an empty commit and under a squash/rebase-only rewrap (same tree, new sha), and both change the instant any reviewed line changes — including a whitespace-only edit that changes program semantics in an indentation-significant language (Python, YAML, Makefiles):
 
    - **`verdict_check=tree`** — the two heads share a merge-base with `origin/<base_branch>` (the common case: ship's own commits sit on the reviewed head without a rebase). Same base + same tree is a byte-identical diff, so `git rev-parse <head>^{tree}` equality is exact, whitespace included, and needs no particular git version. Tried first whenever the bases match.
-   - **`verdict_check=patch-id`** — the bases differ (the branch was rebased after review), so the trees legitimately differ and only a base-independent diff fingerprint can compare them: `git patch-id --verbatim` over the diff from each head's own merge-base. `--verbatim` needs **git ≥ 2.39**; older git (2.34 on wls, ai-dossier#851) rejects the flag with exit 129, prints usage to stderr, and yields an EMPTY id — so support is probed first (`git patch-id --verbatim </dev/null`, exit 0 only where supported). `--stable`/`--unstable` are deliberately NOT a fallback: both strip whitespace before hashing and would read a line dedented out of its guard as unchanged (verified: that dedent produces the same `--stable` patch-id as the guarded original, but a different `--verbatim` one).
+   - **`verdict_check=patch-id`** — the bases differ (the branch was rebased after review), so the trees legitimately differ and only a base-independent diff fingerprint can compare them: `git patch-id --verbatim` over the diff from each head's own merge-base. `--verbatim` needs **git ≥ 2.39**; older git (e.g. 2.34 on Ubuntu 22.04, ai-dossier#851) rejects the flag with exit 129, prints usage to stderr, and yields an EMPTY id — so support is probed first (`git patch-id --verbatim </dev/null`, exit 0 only where supported). `--stable`/`--unstable` are deliberately NOT a fallback: both strip whitespace before hashing and would read a line dedented out of its guard as unchanged (verified: that dedent produces the same `--stable` patch-id as the guarded original, but a different `--verbatim` one).
    - **`verdict_check=inconclusive`** — the comparison could not run: an unresolvable merge-base, an empty patch-id on EITHER side, an unreadable tree, or git < 2.39 on a rebased head. It is recorded as such and lands on `FRESH=false` — two empty ids are never compared, because `"" = ""` is true and would wave a stale verdict through. Stale here only means Agent 7 re-runs (item 3); it never blocks by itself.
 
    ```bash
@@ -873,7 +873,7 @@ Never emit an idle notification, end your turn, or proceed to Teardown (Step 7) 
    echo "procs_killed=$PROCS_KILLED"
    ```
 
-   On a host without `/proc` (Linux hosts — WSL2, Fly, hcc/hcc2 — all have it; this is the non-Linux fallback), use `lsof`/`ps` as shown, and `ppid_of` falls back to `ps -o ppid=` the same way. Carry `PROCS_KILLED` to Step 8's `procs_killed=`; `0` is a valid, expected value on a clean run.
+   On a host without `/proc` (Linux hosts — WSL2, Fly, cloud VMs — all have it; this is the non-Linux fallback), use `lsof`/`ps` as shown, and `ppid_of` falls back to `ps -o ppid=` the same way. Carry `PROCS_KILLED` to Step 8's `procs_killed=`; `0` is a valid, expected value on a clean run.
 4. Remove the worktree and clean up the branches (deleting the remote branch also drops the run's WIP history — intended; the squash-merge commit on the base branch is the durable artifact):
    ```bash
    git worktree remove <worktree_path>

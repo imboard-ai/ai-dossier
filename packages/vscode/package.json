@@ -1,7 +1,7 @@
 {
   "name": "ai-dossier-vscode",
   "displayName": "AI Dossier",
-  "description": "Diagnostics, completion, hover docs, verify and dry-run preview for AI Dossier (*.ds.md) files: versioned, signed agent skills.",
+  "description": "Diagnostics, completion, hover docs, verify and dry-run preview for AI Dossier (*.ds.md) files: signed, versioned agent skills for model-driven orchestration.",
   "version": "0.1.0",
   "private": true,
   "publisher": "imboard-ai",
@@ -21,6 +21,7 @@
     "node": ">=20.0.0"
   },
   "categories": [
+    "AI",
     "Linters",
     "Snippets",
     "Other"
@@ -30,7 +31,12 @@
     "ai-dossier",
     "agent",
     "skill",
-    "frontmatter"
+    "frontmatter",
+    "agent-skills",
+    "llm",
+    "claude",
+    "mcp",
+    "signing"
   ],
   "main": "./dist/extension.js",
   "activationEvents": [

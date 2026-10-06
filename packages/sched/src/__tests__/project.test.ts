@@ -16,7 +16,7 @@ describe('resolveProjectSlug (fleet-cycle convention)', () => {
     const exec: ExecFn = (file, args) => {
       if (file === 'gh') return null;
       if (file === 'git' && args.includes('--show-toplevel')) {
-        return '/home/yuvaldim/projects/ai-dossier';
+        return '/home/user/projects/ai-dossier';
       }
       return null;
     };

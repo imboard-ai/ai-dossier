@@ -177,3 +177,8 @@ jobs:
         if: steps.changes.outputs.run == 'true'
         working-directory: website
         run: npm run check:canonical
+
+      - name: Check internal docs stay out of llms.txt and the sitemap
+        if: steps.changes.outputs.run == 'true'
+        working-directory: website
+        run: npm run check:discovery

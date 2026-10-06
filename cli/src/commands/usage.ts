@@ -11,7 +11,7 @@
  * ~/.dossier/usage and exchanges them with other hosts over ssh; the views take
  * `--hosts all|<a,b>` to read the merged ledger.
  *
- *   ai-dossier usage sync [--hosts hcc,hcc2]     refresh + exchange with hosts
+ *   ai-dossier usage sync [--hosts host-b,host-c]     refresh + exchange with hosts
  *   ai-dossier usage export [--all] [--out f]    this host's bundle (JSONL)
  *   ai-dossier usage import <file|->             merge another host's bundle
  *   ai-dossier usage hosts                       what the merged ledger holds
@@ -629,7 +629,7 @@ function registerLedgerCommands(cmd: Command): void {
     .description(
       "Refresh this host's persisted ledger (~/.dossier/usage); with --hosts, exchange it with those hosts over ssh (pull + push, idempotent)"
     )
-    .option('--hosts <list>', 'Other hosts to exchange with over ssh (e.g. hcc,hcc2)')
+    .option('--hosts <list>', 'Other hosts to exchange with over ssh (e.g. host-b,host-c)')
     .option(
       '--since <when>',
       'Re-collect / exchange from here (default: incremental cursor, first run 30d)'

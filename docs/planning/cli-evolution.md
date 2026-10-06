@@ -831,7 +831,7 @@ Body:
     "signature": "minisign:..."
   },
   "metadata": {
-    "author": "yuvaldim",
+    "author": "operator",
     "tags": ["devops", "aws", "deployment"],
     "visibility": "public"
   }
@@ -988,7 +988,7 @@ Body:
     "risk_level": "medium"
   },
   "execution": {
-    "user": "yuvaldim@localhost",
+    "user": "user@localhost",
     "llm": "claude-code",
     "action": "run",
     "status": "started"

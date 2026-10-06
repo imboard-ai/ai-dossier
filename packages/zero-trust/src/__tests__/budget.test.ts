@@ -117,6 +117,124 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
     code(() => resumed.settle(r.id, null), 'already_reconciled');
   });
 
+  it.each([1000, 1200])('protects cleanup after work settles at %s minor units', (observed) => {
+    ledger.startSession({ ...session('overrun', 1000), cleanupAllowance: 200 });
+    const work = ledger.reserve('overrun', estimate(800));
+    ledger.settle(work.id, {
+      money: { currency: 'USD', minor: observed },
+      tokens: 10,
+      timeMs: 100,
+      source: 'interrupted stream invoice',
+    });
+    const resumed = new BudgetLedger(file, 'contribution-1');
+    code(() => resumed.reserve('overrun', estimate(0)), 'ceiling_exceeded');
+    code(() => resumed.reserve('overrun', estimate(1)), 'ceiling_exceeded');
+    const before = fs.readFileSync(file, 'utf8');
+    code(() => resumed.reserve('overrun', estimate(201), 'teardown'), 'ceiling_exceeded');
+    expect(fs.readFileSync(file, 'utf8')).toBe(before);
+    const cleanup = resumed.reserve('overrun', estimate(200), 'teardown');
+    expect(budgetTotals(resumed.snapshot(), 'overrun')).toEqual({
+      spent: observed,
+      reserved: 200,
+      tokens: 20,
+      timeMs: 200,
+    });
+    resumed.settle(cleanup.id, {
+      money: { currency: 'USD', minor: 200 },
+      tokens: 10,
+      timeMs: 100,
+      source: 'cleanup invoice',
+    });
+    expect(budgetTotals(resumed.snapshot(), 'overrun').spent).toBe(observed + 200);
+    code(() => resumed.reserve('overrun', estimate(1), 'teardown'), 'ceiling_exceeded');
+    ledger.reserve('initial', estimate(90)); // Another session's allowance is independent.
+  });
+
+  it('deducts settled and pending cleanup from the protected bucket after work overruns', () => {
+    const settled = ledger.reserve('initial', estimate(3), 'teardown');
+    ledger.settle(settled.id, {
+      money: { currency: 'USD', minor: 4 },
+      tokens: 10,
+      timeMs: 100,
+      source: 'cleanup overrun',
+    });
+    const held = ledger.reserve('initial', estimate(2), 'teardown');
+    const work = ledger.reserve('initial', estimate(84));
+    ledger.settle(work.id, {
+      money: { currency: 'USD', minor: 150 },
+      tokens: 10,
+      timeMs: 100,
+      source: 'work overrun',
+    });
+    const resumed = new BudgetLedger(file, 'contribution-1');
+    code(() => resumed.reserve('initial', estimate(5), 'teardown'), 'ceiling_exceeded');
+    resumed.release(held.id, 'provider confirms cleanup never started');
+    resumed.reserve('initial', estimate(6), 'teardown');
+    expect(budgetTotals(resumed.snapshot(), 'initial')).toEqual({
+      spent: 154,
+      reserved: 6,
+      tokens: 30,
+      timeMs: 300,
+    });
+    code(() => resumed.reserve('initial', estimate(1), 'teardown'), 'ceiling_exceeded');
+  });
+
+  it('allows cleanup to borrow only unreserved work funds without double spending', () => {
+    const work = ledger.reserve('initial', estimate(40));
+    const cleanup = ledger.reserve('initial', estimate(20), 'teardown');
+    ledger.settle(cleanup.id, {
+      money: { currency: 'USD', minor: 15 },
+      tokens: 10,
+      timeMs: 100,
+      source: 'cleanup invoice',
+    });
+    // Work budget is 90; held work is 40; cleanup capacity is 10 + 50 - 20 = 40.
+    code(() => ledger.reserve('initial', estimate(41), 'teardown'), 'ceiling_exceeded');
+    ledger.reserve('initial', estimate(40), 'teardown');
+    code(() => ledger.reserve('initial', estimate(1)), 'ceiling_exceeded');
+    ledger.release(work.id, 'provider confirms work never started');
+    ledger.reserve('initial', estimate(40), 'teardown');
+    code(() => ledger.reserve('initial', estimate(1), 'teardown'), 'ceiling_exceeded');
+    expect(budgetTotals(ledger.snapshot(), 'initial').reserved).toBe(80);
+    expect(budgetTotals(ledger.snapshot(), 'initial').spent).toBe(20);
+  });
+
+  it.each([0, 100])('protects only the configured allowance %s after an overrun', (allowance) => {
+    ledger.startSession({ ...session('edge'), cleanupAllowance: allowance });
+    const work = ledger.reserve('edge', estimate(0));
+    ledger.settle(work.id, {
+      money: { currency: 'USD', minor: 101 },
+      tokens: 10,
+      timeMs: 100,
+      source: 'work invoice',
+    });
+    ledger.reserve('edge', estimate(allowance), 'teardown');
+    code(() => ledger.reserve('edge', estimate(1), 'teardown'), 'ceiling_exceeded');
+  });
+
+  it('uses exact admission arithmetic even when total observed spend exceeds a safe integer', () => {
+    const work = ledger.reserve('initial', estimate(0));
+    const second = ledger.reserve('initial', estimate(0));
+    ledger.settle(second.id, {
+      money: { currency: 'USD', minor: 2 },
+      tokens: 10,
+      timeMs: 100,
+      source: 'invoice',
+    });
+    ledger.settle(work.id, {
+      money: { currency: 'USD', minor: Number.MAX_SAFE_INTEGER - 1 },
+      tokens: 10,
+      timeMs: 100,
+      source: 'invoice',
+    });
+    ledger.reserve('initial', estimate(4), 'teardown');
+    new BudgetLedger(file, 'contribution-1').reserve('initial', estimate(6), 'teardown');
+    code(() => ledger.reserve('initial', estimate(1), 'teardown'), 'ceiling_exceeded');
+    code(() => ledger.reserve('initial', estimate(0)), 'ceiling_exceeded');
+    // Public numeric totals continue to reject unrepresentable sums, never cap them.
+    code(() => budgetTotals(ledger.snapshot(), 'initial'), 'invalid_budget');
+  });
+
   it('preserves estimated and reported charges separately and blocks on overruns', () => {
     const r = ledger.reserve('initial', estimate(40));
     ledger.settle(r.id, {
@@ -283,13 +401,11 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
     return path.join(dir, 'budget.js');
   }
 
-  it('races real processes sharing one persisted file', async () => {
-    const module = compiledModule();
-    const script = `const {BudgetLedger}=require(${JSON.stringify(module)}); try {new BudgetLedger(${JSON.stringify(file)},'contribution-1').reserve('initial',${JSON.stringify(estimate(60))});process.exitCode=0;}catch(e){process.exitCode=e.code==='ceiling_exceeded'?2:3;}`;
+  async function runRacers(script: string): Promise<(number | null)[]> {
     const racers = Array.from({ length: 8 }, () =>
       spawn(process.execPath, ['-e', script], { stdio: 'ignore' })
     );
-    const exits = await Promise.all(
+    return Promise.all(
       racers.map(
         (child) =>
           new Promise<number | null>((resolve, reject) => {
@@ -298,9 +414,34 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
           })
       )
     );
+  }
+
+  it('races real processes sharing one persisted file', async () => {
+    const module = compiledModule();
+    const script = `const {BudgetLedger}=require(${JSON.stringify(module)}); try {new BudgetLedger(${JSON.stringify(file)},'contribution-1').reserve('initial',${JSON.stringify(estimate(60))});process.exitCode=0;}catch(e){process.exitCode=e.code==='ceiling_exceeded'?2:3;}`;
+    const exits = await runRacers(script);
     expect(exits.filter((c) => c === 0)).toHaveLength(1);
     expect(exits.filter((c) => c === 2)).toHaveLength(7);
     expect(budgetTotals(ledger.snapshot(), 'initial').reserved).toBe(60);
+  });
+
+  it('races real cleanup reservers for the remaining allowance after a work overrun', async () => {
+    const work = ledger.reserve('initial', estimate(90));
+    ledger.settle(work.id, {
+      money: { currency: 'USD', minor: 150 },
+      tokens: 10,
+      timeMs: 100,
+      source: 'interrupted stream',
+    });
+    const module = compiledModule();
+    const script = `const {BudgetLedger}=require(${JSON.stringify(module)});try{new BudgetLedger(${JSON.stringify(file)},'contribution-1').reserve('initial',${JSON.stringify(estimate(6))},'teardown');process.exitCode=0;}catch(e){process.exitCode=e.code==='ceiling_exceeded'?2:3;}`;
+    const exits = await runRacers(script);
+    expect(exits.filter((c) => c === 0)).toHaveLength(1);
+    expect(exits.filter((c) => c === 2)).toHaveLength(7);
+    const resumed = new BudgetLedger(file, 'contribution-1');
+    resumed.reserve('initial', estimate(4), 'teardown');
+    expect(budgetTotals(resumed.snapshot(), 'initial').reserved).toBe(10);
+    code(() => resumed.reserve('initial', estimate(1), 'teardown'), 'ceiling_exceeded');
   });
 
   it.each([

@@ -4,7 +4,7 @@ Supporting data for [`../batch-pilot.md`](../batch-pilot.md). Every number quote
 derived here, from the sources named in §2.3 of it. Nothing in this file is estimated.
 
 - **Cohort**: 11 full-cycle issues — #495, #496, #497, #499, #500, #501, #502, #503, #505, #506,
-  #507 — dispatched by `ai-dossier sched` on host `hcc2`. (#504 was assigned on the same engine at
+  #507 — dispatched by `ai-dossier sched` on the runner host. (#504 was assigned on the same engine at
   14:22:04Z but was still in flight at snapshot time and is excluded; #498 is a PR number, not an
   issue.)
 - **Window**: 2026-09-01 04:02:01Z (first `assigned`) → 14:16:23Z (last merge, PR #520)

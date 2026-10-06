@@ -1,6 +1,6 @@
-# Dossier — Versioned, Signed Agent Skills
+# Dossier — Signed, Versioned Agent Skills for Model-Driven Orchestration
 
-**An open standard for versioned, signed agent skills. Host them anywhere — a GitHub repo, your own server, or the Dossier registry — and everyone installs the same version and can verify who wrote it and that it wasn't changed.** [Website](https://ai-dossier.dev)
+**An open standard for signed, versioned agent skills, built for model-driven orchestration: the model reads the skill and decides the steps, and Dossier makes that safe to share and repeat with signed agent skills. Host skills anywhere — a GitHub repo, your own server, or the Dossier registry — and everyone installs the same version and can verify who wrote it and that it wasn't changed.** [Website](https://ai-dossier.dev)
 
 [![CI](https://github.com/imboard-ai/ai-dossier/actions/workflows/ci.yml/badge.svg)](https://github.com/imboard-ai/ai-dossier/actions/workflows/ci.yml)
 [![Examples](https://github.com/imboard-ai/ai-dossier/actions/workflows/test-examples.yml/badge.svg)](https://github.com/imboard-ai/ai-dossier/actions/workflows/test-examples.yml)
@@ -59,10 +59,28 @@ flowchart LR
 **Why**: A plain skill lives in one tool and anyone can tamper with it; a dossier is that same skill made verifiable, version-pinned
 **Integrity**: Built-in checksums, cryptographic signatures, and CLI verification tools
 **Works with**: Claude, ChatGPT, Cursor, any LLM — no vendor lock-in
+**Works with Agent Skills / `SKILL.md`**: Dossier is a layer on top of Agent Skills, not a rival format. It adds signing and versioning, and you move skills in and out with `ai-dossier install-skill` and `ai-dossier skill-export`.
 
 **Status**: Protocol v1.0 (stable spec) | CLI v0.14.0 | 15+ example skills | Active development
 
 > **File conventions**: Dossiers use `.ds.md` (immutable instructions) and `.dsw.md` (mutable working files). Frontmatter uses `---dossier` (JSON) instead of `---` (YAML) to avoid parser conflicts. [Learn more](docs/explanation/faq.md#what-do-the-dsmd-and-dswmd-file-extensions-mean)
+
+---
+
+## How it works: model-driven orchestration
+
+In *model-driven orchestration* the model decides the steps, the tool calls, the retries and when the work is done. A hand-coded DAG doesn't. Dossier makes that safe to share and repeat. Every skill is signed and version-pinned. Multi-step runs sit inside a deterministic scheduler that never calls an LLM.
+
+The *model-driven approach* was popularised by [AWS Strands Agents](https://aws.amazon.com/blogs/opensource/strands-agents-and-the-model-driven-approach/). Dossier builds on it and adds signing, versioning and a deterministic shell.
+
+|  | Code-driven orchestration | Model-driven orchestration | Dossier: hybrid model-driven orchestration |
+|--|---------------------------|---------------------------|--------------------------------------------|
+| **Who decides the steps** | Your code: a DAG or state machine | The model, from instructions and tools | The model, inside each skill |
+| **What wraps it** | The workflow engine | Usually nothing deterministic | A deterministic scheduler ([`@ai-dossier/sched`](packages/sched/)) that never calls an LLM |
+| **Trust in the instructions** | Code review | Whatever prompt was loaded | Skills are signed and version-pinned, verified before they run |
+| **Example** | A hand-built DAG of LLM calls | AWS Strands Agents | `ai-dossier run` on a signed `.ds.md` skill |
+
+Dossier calls this **hybrid model-driven orchestration**: model-driven inside each skill, deterministic around it. Read the full explanation in [Model-driven orchestration](docs/explanation/model-driven-orchestration.md).
 
 ---
 
@@ -373,8 +391,28 @@ Dossiers take the agent skill and add what copying files lacks: a pinnable versi
 
 ---
 
-**Dossier: Portable, Verifiable Skills for Any LLM**
+**Dossier: Signed, Versioned Agent Skills for Model-Driven Orchestration**
 *Skills you can trust.*
+
+---
+
+## FAQ
+
+### What is model-driven orchestration?
+
+It is orchestration where the model decides the steps, tool calls, retries and when the work is done, instead of a hand-coded DAG or state machine. The term was popularised by AWS Strands Agents. Dossier adds signed, version-pinned skills and a deterministic scheduler around the model. See [How it works](#how-it-works-model-driven-orchestration).
+
+### How do I sign an agent skill?
+
+Signed agent skills start as a `.ds.md` file. Sign it with the CLI to add a checksum and an Ed25519 signature, and anyone can then verify it before running. See the [5-min Quick Start](docs/getting-started/quick-start.md) and [Create your own dossier](#3-create-your-own-dossier).
+
+### How is Dossier different from SKILL.md?
+
+It is a layer on top, not a replacement. A `SKILL.md` is an Agent Skills file; a dossier is a skill that also carries a pinned version, a signature and registry distribution. `ai-dossier install-skill` and `ai-dossier skill-export` move skills between the two. See [Why Use Dossier?](#why-use-dossier).
+
+### Does verification make a skill safe?
+
+No. Verification proves integrity (the skill was not changed) and origin (who signed it). It does not prevent prompt injection or make a skill safe to run. Read a skill, and trust its author, before you run it. See [Security & Verification](#security--verification).
 
 ---
 

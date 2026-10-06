@@ -15,8 +15,8 @@ name: Neon Branch Cleanup
 # is logged and left alone. Run it with workflow_dispatch + dry_run first.
 #
 # Setup:
-#   1. chamber write dossier neon_api_key    "<neon api key>"
-#      chamber write dossier neon_project_id "<neon project id>"
+#   1. aws ssm put-parameter --name /dossier/neon_api_key    --type SecureString --value "<neon api key>"
+#      aws ssm put-parameter --name /dossier/neon_project_id --type SecureString --value "<neon project id>"
 #   2. An IAM role github-dossier-neon-cleanup trusting the OIDC subject
 #        repo:imboard-ai/ai-dossier:pull_request
 #      with ssm:GetParameter on parameter/dossier/neon_*
@@ -56,7 +56,7 @@ permissions:
 
 env:
   AWS_REGION: us-east-1
-  ROLE_ARN: arn:aws:iam::942039714848:role/github-dossier-neon-cleanup
+  ROLE_ARN: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/github-dossier-neon-cleanup
   SSM_API_KEY: /dossier/neon_api_key
   SSM_PROJECT_ID: /dossier/neon_project_id
 
@@ -80,7 +80,7 @@ jobs:
           set +e
           KEY=$(aws ssm get-parameter --name "$SSM_API_KEY" --with-decryption \
                   --query 'Parameter.Value' --output text 2>/dev/null)
-          # chamber stores every value as a SecureString, so this needs decryption too.
+          # Both parameters are SecureStrings, so this needs decryption too.
           # Without it SSM returns the KMS ciphertext, which sails through the empty
           # check and only fails much later as a confusing 404 from the Neon API.
           PROJ=$(aws ssm get-parameter --name "$SSM_PROJECT_ID" --with-decryption \
