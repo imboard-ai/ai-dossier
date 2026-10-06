@@ -42,8 +42,9 @@ import type { GitHubRead } from './reconcile';
 import type { TokenStore } from './token-journal';
 
 const PUSH_TIMEOUT_MS = 120_000;
-/** Nonce-store failures say nothing about the receipt. A lock that was never taken defers;
- * the others may have consumed the nonce, so the attempt stays ambiguous. */
+/** Nonce-store refusals that say nothing about the receipt. Every one is raised before the
+ * store appends (lock busy, unreadable or poisoned store), so no nonce was consumed and
+ * the attempt is withdrawn. A failed append itself surfaces as a plain error: ambiguous. */
 const STORE_FAILURES = Object.freeze([
   'store_locked',
   'persistence_uncertain',
@@ -324,11 +325,10 @@ export class ForkPusher implements WriteAdapter {
       );
       return candidate;
     } catch (error) {
-      // The lock was never taken, so the nonce was not consumed.
-      if (error instanceof ReceiptError && error.code === 'store_locked')
-        throw new MutationDeferredError(error.code);
-      if (error instanceof ReceiptError && !STORE_FAILURES.includes(error.code))
-        throw new WriteRefusedError('authorization_refused', error.code);
+      if (error instanceof ReceiptError)
+        throw STORE_FAILURES.includes(error.code)
+          ? new MutationDeferredError(error.code)
+          : new WriteRefusedError('authorization_refused', error.code);
       if (error instanceof ForkPushError)
         throw new WriteRefusedError('authorization_refused', error.code);
       throw error;

@@ -725,15 +725,31 @@ describe('verified CAS push to the fork (#1066)', () => {
     expect(r.driver.snapshot().intents.get(key)?.attempts).toBe(1);
   });
 
-  it('a store failure that may have consumed the nonce stays ambiguous, never refused', async () => {
+  it('a failing nonce store never exhausts the retry: a failed append is ambiguous once, then defers', async () => {
     const r = await rig();
+    const key = idempotencyKey(pushOf(SHA1));
+    // The append itself fails (the nonce may be consumed): one counted, ambiguous attempt.
+    const consume = vi.spyOn(ReceiptNonceStore.prototype, 'consume').mockImplementationOnce(() => {
+      throw new Error('EIO');
+    });
     r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
-    vi.spyOn(ReceiptNonceStore.prototype, 'consume').mockImplementation(() => {
+    await expect(r.driver.execute(pushOf(SHA1))).rejects.toThrow(MutationUncertainError);
+    await r.driver.resume();
+    // The store stays poisoned: every later attempt is refused before any append.
+    consume.mockImplementation(() => {
       throw new ReceiptError('persistence_uncertain');
     });
-    await expect(r.driver.execute(pushOf(SHA1))).rejects.toThrow(MutationUncertainError);
+    for (let i = 0; i < 3; i++) {
+      r.grants.push({ candidate: C1, expected: null, nonce: `nonce-${i + 2}` });
+      await expect(r.driver.execute(pushOf(SHA1))).rejects.toThrow(MutationDeferredError);
+      await r.driver.resume();
+    }
+    expect(r.driver.snapshot().intents.get(key)).toMatchObject({ attempts: 1, retryReady: true });
     expect(r.driver.snapshot().blockedReason).toBeUndefined();
     expect(r.mints()).toBe(0);
+    consume.mockRestore();
+    r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-9' });
+    expect(await r.driver.execute(pushOf(SHA1))).toBe(`${TARGET}@${SHA1}`);
   });
 
   it('never pushes to a repository whose id is not the bound fork', async () => {
