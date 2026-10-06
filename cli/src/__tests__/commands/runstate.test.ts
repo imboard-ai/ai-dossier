@@ -2617,7 +2617,7 @@ describe('runstate portable paths (#1085)', () => {
       const parsed = JSON.parse(logged()[0]);
       expect(parsed.resume_from).toBe('plan');
       expect(parsed.local_worktree).toBe('present');
-      expect(parsed.local_paths.worktree).toBe(path.join(base, 'worktrees', 'feature-440'));
+      expect(parsed.resolved_paths.worktree).toBe(path.join(base, 'worktrees', 'feature-440'));
     });
 
     it('finds a <local>/<name> worktree through the local worktree list', async () => {
@@ -2625,7 +2625,25 @@ describe('runstate portable paths (#1085)', () => {
       await run(['runstate', 'verify', '--issue', '440', '--json']);
       const parsed = JSON.parse(logged()[0]);
       expect(parsed.local_worktree).toBe('present');
-      expect(parsed.local_paths.worktree).toBe(path.join(base, 'worktrees', 'feature-440'));
+      expect(parsed.resolved_paths.worktree).toBe(path.join(base, 'worktrees', 'feature-440'));
+    });
+
+    it('prints resolved_<key>= in text mode, distinct from local_worktree=', async () => {
+      verifyStub('<repo>/../worktrees/feature-440');
+      await run(['runstate', 'verify', '--issue', '440']);
+      const lines = logged();
+      expect(lines).toContain('local_worktree=present');
+      expect(lines).toContain(`resolved_worktree=${path.join(base, 'worktrees', 'feature-440')}`);
+      expect(lines.filter((l) => l.startsWith('local_worktree='))).toHaveLength(1);
+    });
+
+    it('still resolves a legacy absolute worktree= that exists here', async () => {
+      const wt = path.join(base, 'worktrees', 'feature-440');
+      verifyStub(wt);
+      await run(['runstate', 'verify', '--issue', '440', '--json']);
+      const parsed = JSON.parse(logged()[0]);
+      expect(parsed.local_worktree).toBe('present');
+      expect(parsed.resolved_paths.worktree).toBe(wt);
     });
 
     it('reports absent, not an error, when the worktree is not on this machine', async () => {
@@ -2634,7 +2652,7 @@ describe('runstate portable paths (#1085)', () => {
       const parsed = JSON.parse(logged()[0]);
       expect(parsed.resume_from).toBe('plan');
       expect(parsed.local_worktree).toBe('absent');
-      expect(parsed.local_paths).toBeUndefined();
+      expect(parsed.resolved_paths).toBeUndefined();
     });
   });
 });

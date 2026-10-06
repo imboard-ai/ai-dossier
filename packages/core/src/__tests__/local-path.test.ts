@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  anchorFromCommonDir,
   containsHomePath,
   isPortablePath,
+  parseWorktreePorcelain,
   redactHomePaths,
   resolvePortablePath,
   toPortablePath,
@@ -25,6 +27,12 @@ describe('toPortablePath', () => {
         homes: HOMES,
       })
     ).toBe('<repo>/../worktrees/bug-1-x/PLANNING-1-x.md');
+  });
+
+  it('keeps only the sibling worktrees/ directory: any other neighbour folder name stays private', () => {
+    expect(
+      toPortablePath('/home/alice/projects/acme/client-x/secret', { anchor: ANCHOR, homes: HOMES })
+    ).toBe('<local>/secret');
   });
 
   it('redacts a path outside the repository to <local>/<basename>', () => {
@@ -124,6 +132,30 @@ describe('redactHomePaths', () => {
     ).toBe('edit <repo>/cli/src/gh.ts now');
   });
 
+  it('redacts WSL, git-bash, ostree and UNC spellings', () => {
+    const text = [
+      '/mnt/c/Users/erin/a/one.txt',
+      '/c/Users/erin/b/two.txt',
+      '/var/home/erin/c/three.txt',
+      '\\\\wsl.localhost\\Ubuntu\\home\\erin\\d\\four.txt',
+    ].join(' ');
+    const out = redactHomePaths(text, { homes: [] });
+    expect(out).not.toContain('erin');
+    expect(out).toBe('<local>/one.txt <local>/two.txt <local>/three.txt <local>/four.txt');
+  });
+
+  it('redacts a dash-encoded per-project directory name that carries the home path', () => {
+    const out = redactHomePaths('/tmp/agent-1000/-home-erin-projects-acme/tasks/x.output', {
+      homes: [],
+    });
+    expect(out).toBe('/tmp/agent-1000/<local>/tasks/x.output');
+    expect(redactHomePaths('a re-home-plan', { homes: [] })).toBe('a re-home-plan');
+  });
+
+  it('does not re-redact a portable value under a repo folder named home/', () => {
+    expect(redactHomePaths('<repo>/home/a/b', { homes: HOMES })).toBe('<repo>/home/a/b');
+  });
+
   it("redacts the running user's own home even outside /home and /Users", () => {
     const out = redactHomePaths('state in /var/lib/svc/.dossier/x.json', {
       homes: ['/var/lib/svc'],
@@ -136,5 +168,21 @@ describe('redactHomePaths', () => {
     expect(redactHomePaths(text, { homes: HOMES })).toBe(text);
     const once = redactHomePaths('/home/alice/a/b', { homes: HOMES });
     expect(redactHomePaths(once, { homes: HOMES })).toBe(once);
+  });
+});
+
+describe('git output parsers', () => {
+  it('anchorFromCommonDir: parent of .git, the dir itself when bare, null otherwise', () => {
+    expect(anchorFromCommonDir('/r/acme/main/.git\n')).toBe('/r/acme/main');
+    expect(anchorFromCommonDir('/r/acme.git')).toBe('/r/acme.git');
+    expect(anchorFromCommonDir('.git')).toBeNull();
+    expect(anchorFromCommonDir(null)).toBeNull();
+  });
+
+  it('parseWorktreePorcelain lists worktree paths only', () => {
+    expect(
+      parseWorktreePorcelain('worktree /a\nHEAD 123\nbranch refs/heads/x\n\nworktree /b\n')
+    ).toEqual(['/a', '/b']);
+    expect(parseWorktreePorcelain(null)).toEqual([]);
   });
 });

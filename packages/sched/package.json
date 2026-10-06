@@ -1,6 +1,6 @@
 {
   "name": "@ai-dossier/sched",
-  "version": "0.68.5",
+  "version": "0.69.0",
   "description": "The deterministic shell for hybrid model-driven orchestration of signed, versioned agent skills; never invokes an LLM.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

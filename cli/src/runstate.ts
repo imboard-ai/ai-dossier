@@ -73,9 +73,16 @@ export type Status = (typeof STATUSES)[number];
  * before posting (#1085) — `<repo>/<relative>` inside the repository, `<local>/<basename>`
  * elsewhere — because a milestone is a public comment and an absolute path leaks the
  * operator's home directory. Readers resolve the portable form against their own machine.
- * A bare relative value is refused: it is ambiguous once read from another directory.
+ * Validation accepts the portable form and a legacy absolute path (`post` never emits one;
+ * older trails carry them); a bare relative value is refused, since it is ambiguous once
+ * read from another directory — `post` resolves one against its cwd before validating.
  */
 export const PATH_KEYS = ['worktree', 'planning'] as const;
+
+/** Whether `key` is one of the {@link PATH_KEYS}. */
+export function isPathKey(key: string): boolean {
+  return (PATH_KEYS as readonly string[]).includes(key);
+}
 
 /**
  * Per-phase specification, transcribed from full-cycle-issue@3.8.0.
@@ -562,11 +569,7 @@ function firstKeyProblem(key: string, value: string): string | null {
   if (/\s/.test(value) && !isAcKey(key)) {
     return `Key '${key}' contains whitespace — values must not contain spaces (use '-' or ','); only ac* keys are exempt`;
   }
-  if (
-    (PATH_KEYS as readonly string[]).includes(key) &&
-    !value.startsWith('/') &&
-    !isPortablePath(value)
-  ) {
+  if (isPathKey(key) && !value.startsWith('/') && !isPortablePath(value)) {
     return `Key '${key}' must be a ${REPO_PATH_TOKEN}/… or ${LOCAL_PATH_TOKEN}/… path (runstate post rewrites absolute and cwd-relative paths into that form), got '${value}'`;
   }
   return null;

@@ -1402,6 +1402,7 @@ import {
   type AttachPrResult,   // { outcome: 'attached', pr, mergedAt, clearedAmbiguousTicks } |
                          //   { outcome: 'already-attached', pr }
   parseSetupInfo,        // gh issue view --json comments → teardown inputs
+  resolveSetupWorktree,  // portable worktree= (<repo>/…, <local>/…, #1085) → local path
   runTeardown,           // #468 script teardown for a merged unit (pool return / worktree remove)
   isSafeWorktree,        // worktree-path containment check (CWE-22)
   TEARDOWN_TIMEOUT_MS,   // teardown subprocess timeout (120 s)

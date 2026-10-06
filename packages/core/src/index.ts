@@ -86,9 +86,11 @@ export {
 // Portable local paths — keep home directories out of posted comments (#1085)
 export type { LocalPathOptions } from './local-path';
 export {
+  anchorFromCommonDir,
   containsHomePath,
   isPortablePath,
   LOCAL_PATH_TOKEN,
+  parseWorktreePorcelain,
   REPO_PATH_TOKEN,
   redactHomePaths,
   resolvePortablePath,

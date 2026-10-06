@@ -353,6 +353,8 @@ ai-dossier evidence init my-dossier.ds.md
 # Append an entry — --session defaults on its own: AI_DOSSIER_SESSION_ID, else (for
 # provider claude-code) the newest transcript under ~/.claude/projects/. It must be a
 # real session UUID for claude-code; a placeholder-looking value is rejected, not recorded.
+# The sidecar is published, so a home-directory path in any recorded text field is
+# rewritten to <repo>/… or <local>/<basename> with a stderr note (#1085).
 ai-dossier evidence add my-dossier.ds.md \
   --anchor "Guiding Principle" --rationale "Autonomous runs must never block on a reply"
 
@@ -513,7 +515,7 @@ status=done
 run=r-440-ab56
 at=2026-08-24T07:59:32Z
 branch=feature/440-runstate
-worktree=/repo/worktrees/feature-440-runstate
+worktree=<repo>/../worktrees/feature-440-runstate
 pool_claimed=false
 base_branch=main
 next=plan
@@ -545,7 +547,8 @@ $ ai-dossier runstate post --issue 440 --phase setup --status done --run r-440-a
 ❌ Phase 'setup' with status 'done' requires worktree= pool_claimed= base_branch= — add with --kv worktree=<value> --kv pool_claimed=<value> --kv base_branch=<value>
 ```
 
-A valid `--dry-run` prints the exact body that would be posted:
+A valid `--dry-run` prints the exact body that would be posted (here run from a checkout
+at `/repo/main`, so the worktree path is rewritten — see the path rule below):
 
 ```
 $ ai-dossier runstate post --issue 440 --phase setup --status done --run r-440-ab56 \
@@ -554,7 +557,7 @@ $ ai-dossier runstate post --issue 440 --phase setup --status done --run r-440-a
 <!-- runstate:v1 -->
 phase=setup status=done run=r-440-ab56 at=2026-08-24T07:59:32Z
 branch=feature/440-runstate
-worktree=/repo/worktrees/feature-440-runstate
+worktree=<repo>/../worktrees/feature-440-runstate
 pool_claimed=false
 base_branch=main
 next=plan
@@ -746,8 +749,19 @@ Every `--kv` pair is checked before anything is posted:
 - A value is at most 4000 characters and the whole comment at most 60000 (GitHub rejects
   a longer issue comment with an opaque 422). A milestone is an index, not a report:
   replace a long value with a count or a path to the full text.
-- `worktree=` and `planning=` must be absolute paths, so a resume from a different
-  working directory can still find them.
+- `worktree=` and `planning=` are never posted as local absolute paths (#1085) — a
+  milestone is a public comment, and an absolute path publishes the operator's home
+  directory. `post` rewrites an absolute or cwd-relative path into a portable form:
+  `<repo>/<relative>` inside the repository's main checkout (the parent of
+  `git rev-parse --git-common-dir`), `<repo>/../worktrees/<x>` in the `worktrees/`
+  directory beside it, and `<local>/<basename>` anywhere else. Readers (`verify`, sched
+  teardown) resolve the token against their own machine — `<local>/<name>` by matching a
+  local worktree's directory name — and still accept a legacy absolute value. A bare
+  relative value in a hand-built milestone is refused.
+- Every body the CLI posts or prints with `--dry-run` (runstate, `plan post`) passes a
+  home-directory guard: any `/home/<user>/…`, `/Users/<user>/…`, `C:\Users\<user>\…`
+  (and WSL/UNC spellings) left in any value is rewritten the same way, with a
+  `⚠️  Redacted local home-directory path(s)…` note on stderr.
 - The classify/slot-mode keys carry a value grammar, checked wherever the key appears
   (#461):
 
@@ -821,7 +835,7 @@ run_id=r-440-ab56
 generation=0
 verified=branch,head
 local_worktree=absent
-resume_context={"branch":"feature/440-runstate","worktree":"/repo/worktrees/feature-440-runstate",...}
+resume_context={"branch":"feature/440-runstate","worktree":"<repo>/../worktrees/feature-440-runstate",...}
 ```
 
 `resume_from` is a phase name, or one of:
@@ -854,6 +868,11 @@ resumes at its own phase.
 all. It is informational only — it never changes `resume_from`, which is decided purely
 from the remote-first checks above.
 
+`resume_context` keeps the posted (portable) values. When a recorded `worktree=` or
+`planning=` resolves to a path that exists on this machine, `verify` also prints it as
+`resolved_worktree=` / `resolved_planning=` (`resolved_paths` in `--json`) — that is the
+path a resuming agent `cd`s into or reads.
+
 `resume_context` is merged across the run's milestones (later ones winning), so a resume
 at `plan` still sees `branch`/`worktree` from the `setup` milestone. (The dossier's own
 table carries only the last milestone's keys; merging is what makes a mid-run resume
@@ -874,12 +893,12 @@ check could not run*. Warnings go to stderr so stdout stays parseable:
 
 Anyone who can comment on the issue can post a `<!-- runstate:v1 -->` body, so the values
 `verify` reads back are untrusted input. Nothing is run through a shell, and a value that
-would be read as a flag (leading `-`) or that is not the absolute path the protocol
-requires is refused rather than passed to `git`/`gh` — it becomes one of the warnings
+would be read as a flag (leading `-`), or a path that is neither absolute nor a portable
+`<repo>/…`/`<local>/…` value resolving on this machine, is refused rather than passed to `git`/`gh` — it becomes one of the warnings
 above.
 
 `--json` returns the same fields as an object (`resume_from`, `run_id`, `generation`,
-`verified`, `resume_context`, `local_worktree`, plus `slot_trail`, `hard_block`, `note`,
+`verified`, `resume_context`, `local_worktree`, plus `resolved_paths`, `slot_trail`, `hard_block`, `note`,
 `prior_run`, `dispatched_at`, and `warnings` when they apply).
 
 **`--dispatched-at <iso>`** — the time THIS run was dispatched. A `report/done`

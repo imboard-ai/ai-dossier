@@ -7,8 +7,9 @@
  * rewrites a local path into a PORTABLE form before posting, and every reader resolves that
  * form back against the machine it runs on — never against the posted string:
  *
- * - `<repo>/<relative>` — inside the repository's main checkout, or one level beside it (the
- *   `<project>/main` + `<project>/worktrees/<x>` layout gives `<repo>/../worktrees/<x>`);
+ * - `<repo>/<relative>` — inside the repository's main checkout, or in the `worktrees/`
+ *   directory beside it (the `<project>/main` + `<project>/worktrees/<x>` layout gives
+ *   `<repo>/../worktrees/<x>`);
  * - `<local>/<basename>` — anywhere else; resolvable only by matching a local worktree.
  *
  * {@link redactHomePaths} is the generic backstop: whatever a caller forgot to rewrite, a
@@ -32,13 +33,28 @@ const PATH_CHAR = String.raw`[^\s'"\x60<>()\[\]{}|,;]`;
 const SEGMENT = String.raw`[^\s'"\x60<>()\[\]{}|,;/\\]`;
 
 /**
- * Home-directory roots matched on any machine: `/home/<user>`, `/Users/<user>` and
- * `C:\Users\<user>` (either slash). The group captures the rest of the path after the user.
+ * Home-directory paths matched on any machine. Each pattern captures (group 1, when it has
+ * one) the rest of the path after the user name:
+ * - `/home/<user>`, `/Users/<user>`, plus the WSL / git-bash / ostree spellings
+ *   `/mnt/c/Users/<user>`, `/c/Users/<user>`, `/var/home/<user>`;
+ * - `C:\Users\<user>` (either slash);
+ * - a UNC path whose share contains `home\<user>` or `Users\<user>` (`\\wsl.localhost\…`);
+ * - a dash-encoded directory name carrying the path, `-home-<user>-…` (agent tools name
+ *   per-project directories that way). It has no group: the whole name becomes `<local>`,
+ *   since where the user name ends inside it is unknowable.
+ *
+ * The lookbehinds keep a URL (`example.com/home/x`) and an already-portable value
+ * (`<repo>/home/x`) from matching, which is what makes redaction idempotent.
  */
 const HOME_PATTERNS: readonly string[] = [
-  String.raw`(?<![\w.~-])/(?:home|Users)/${SEGMENT}+((?:/${PATH_CHAR}*)?)`,
+  String.raw`(?<![\w.~>-])(?:/mnt/[A-Za-z]|/[A-Za-z]|/var)?/(?:home|Users)/${SEGMENT}+((?:/${PATH_CHAR}*)?)`,
   String.raw`(?<![\w])[A-Za-z]:[\\/]+[Uu]sers[\\/]+${SEGMENT}+((?:[\\/]${PATH_CHAR}*)?)`,
+  String.raw`(?<![\w])\\\\[^\\\s'"]+\\(?:[^\\\s'"]+\\)*?(?:home|[Uu]sers)\\${SEGMENT}+((?:\\${PATH_CHAR}*)?)`,
+  String.raw`(?<![\w.])-(?:home|Users)-${SEGMENT}+`,
 ];
+
+/** The directory beside the main checkout that holds its worktrees (`<project>/worktrees`). */
+const SIBLING_WORKTREES_DIR = 'worktrees';
 
 /** Directories whose children are user names. */
 const HOME_ROOTS: ReadonlySet<string> = new Set(['/home', '/Users']);
@@ -137,14 +153,11 @@ export function toPortablePath(
       const rel = path.relative(anchor, abs);
       candidate = rel === '' ? REPO_PATH_TOKEN : `${REPO_PATH_TOKEN}/${toPosix(rel)}`;
     } else {
-      const container = path.dirname(anchor);
-      if (
-        container !== path.dirname(container) &&
-        !HOME_ROOTS.has(container) &&
-        !homes.includes(container) &&
-        isWithin(container, abs)
-      ) {
-        candidate = `${REPO_PATH_TOKEN}/../${toPosix(path.relative(container, abs))}`;
+      // Only the sibling `worktrees/` directory (the layout `isSafeWorktree` in sched also
+      // accepts): any other neighbour of the checkout would publish that folder's name.
+      const siblings = path.join(path.dirname(anchor), SIBLING_WORKTREES_DIR);
+      if (isWithin(siblings, abs)) {
+        candidate = `${REPO_PATH_TOKEN}/../${toPosix(path.relative(path.dirname(anchor), abs))}`;
       }
     }
     if (candidate !== null && !containsHomePath(candidate, { homes })) return candidate;
@@ -164,8 +177,8 @@ export function toPortablePath(
  * `<repo>/…` resolves against `anchor`; `<local>/<name>` matches the one local worktree
  * whose basename is `<name>` (none or several → `null`); a legacy absolute path is returned
  * normalized; any other relative value resolves against `anchor`. A `<repo>/…` value that
- * climbs above the anchor's parent directory is refused (`null`) — the recorded string
- * comes from an issue comment and must not steer a caller anywhere on disk.
+ * lands outside the checkout and its sibling `worktrees/` directory is refused (`null`) —
+ * the recorded string comes from an issue comment and must not steer a caller anywhere.
  */
 export function resolvePortablePath(
   value: string,
@@ -188,8 +201,8 @@ export function resolvePortablePath(
         ? value.slice(REPO_PATH_TOKEN.length + 1)
         : value;
   const resolved = path.resolve(anchor, rel);
-  const container = path.dirname(anchor);
-  return isWithin(container === anchor ? anchor : container, resolved) ? resolved : null;
+  const siblings = path.join(path.dirname(anchor), SIBLING_WORKTREES_DIR);
+  return isWithin(anchor, resolved) || isWithin(siblings, resolved) ? resolved : null;
 }
 
 /**
@@ -202,6 +215,8 @@ export function redactHomePaths(text: string, opts: LocalPathOptions = {}): stri
   return text.replace(homeRegex(homes), (match: string, ...groups: unknown[]) => {
     const trail = /[.:!?]+$/.exec(match)?.[0] ?? '';
     const core = trail ? match.slice(0, -trail.length) : match;
+    // `groups` is the capture groups, then the offset and the whole input (no named groups
+    // are used). At most one alternative matched, so the first string group is its rest.
     const rest = groups.slice(0, -2).find((g): g is string => typeof g === 'string') ?? '';
     const restCore = trail && rest.endsWith(trail) ? rest.slice(0, -trail.length) : rest;
     if (core.startsWith('/') && opts.anchor) {
@@ -209,4 +224,23 @@ export function redactHomePaths(text: string, opts: LocalPathOptions = {}): stri
     }
     return localToken(restCore) + trail;
   });
+}
+
+/**
+ * The `<repo>` anchor from `git rev-parse --path-format=absolute --git-common-dir` output:
+ * the common dir's parent for an ordinary repository, the common dir itself for a bare one.
+ * `null` for a failed or non-absolute answer.
+ */
+export function anchorFromCommonDir(stdout: string | null | undefined): string | null {
+  const common = stdout?.trim() ?? '';
+  if (!path.isAbsolute(common)) return null;
+  return path.basename(common) === '.git' ? path.dirname(common) : common;
+}
+
+/** Worktree paths listed by `git worktree list --porcelain` output (`[]` for none/failure). */
+export function parseWorktreePorcelain(stdout: string | null | undefined): string[] {
+  return (stdout ?? '')
+    .split('\n')
+    .filter((line) => line.startsWith('worktree '))
+    .map((line) => line.slice('worktree '.length));
 }

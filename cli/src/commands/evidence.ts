@@ -13,11 +13,11 @@ import {
   type EvidenceRef,
   parseDossierContent,
   parseEvidence,
-  redactHomePaths,
   validateEvidence,
 } from '@ai-dossier/core';
 import { type Command, Option } from 'commander';
 import { loadCredentials } from '../credentials';
+import { publishableText } from '../gh';
 import { printRegistryErrors, siblingEvidencePath } from '../helpers';
 import { multiRegistryGetEvidence } from '../multi-registry';
 import { parseNameVersion } from '../registry-client';
@@ -320,21 +320,13 @@ function parseExtra(pairs: string[] | undefined): Record<string, string> | undef
       console.error(`\n❌ Invalid --extra '${pair}' — expected k=v\n`);
       process.exit(1);
     }
-    extra[pair.slice(0, idx)] = publishableText(pair.slice(idx + 1), '--extra');
+    // The sidecar is published next to the dossier: no home-directory path in it (#1085).
+    extra[publishableText(pair.slice(0, idx), '--extra')] = publishableText(
+      pair.slice(idx + 1),
+      '--extra'
+    );
   }
   return extra;
-}
-
-/**
- * The sidecar is published next to the dossier, so free text recorded into it must not
- * carry a home-directory path (#1085) — rewrite it and say so.
- */
-function publishableText(text: string, flag: string): string {
-  const safe = redactHomePaths(text);
-  if (safe !== text) {
-    console.error(`⚠️  ${flag}: redacted a local home-directory path — the sidecar is published`);
-  }
-  return safe;
 }
 
 /** Read + parse an existing sidecar file, exiting with a clean message on a corrupt one. */
@@ -504,10 +496,11 @@ function registerAddSubcommand(cmd: Command): void {
       warnIfImperativeRationale(options.rationale);
 
       const extra = parseExtra(options.extra);
+      // The sidecar is published next to the dossier: no home-directory path in it (#1085).
       const ref: EvidenceRef = {
         provider: options.provider,
-        session,
-        ...(options.event ? { event: options.event } : {}),
+        session: publishableText(session, '--session'),
+        ...(options.event ? { event: publishableText(options.event, '--event') } : {}),
         ...(options.host ? { host: options.host } : {}),
         ...(extra ? { extra } : {}),
       };
@@ -517,7 +510,7 @@ function registerAddSubcommand(cmd: Command): void {
         entries: [
           ...record.entries,
           {
-            anchor: options.anchor,
+            anchor: publishableText(options.anchor, '--anchor'),
             rationale: publishableText(options.rationale, '--rationale'),
             created_at: new Date().toISOString(),
             evidence: [ref],

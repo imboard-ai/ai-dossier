@@ -60,6 +60,7 @@ import {
   fenceGeneration,
   generationOf,
   isKnownPhase,
+  isPathKey,
   MAX_BODY_LENGTH,
   MAX_GENERATION,
   mintRunId,
@@ -256,15 +257,17 @@ function parseKvPairs(raw: string[]): { pairs: Array<[string, string]>; errors: 
  * anchor only when there is a path to rewrite.
  */
 function portablePathPairs(pairs: Array<[string, string]>): Array<[string, string]> {
-  const needsAnchor = pairs.some(
-    ([k, v]) => (PATH_KEYS as readonly string[]).includes(k) && v !== '' && !isPortablePath(v)
-  );
-  if (!needsAnchor) return pairs;
+  const rewrite = ([k, v]: [string, string]) =>
+    isPathKey(k) && v !== '' && !isPortablePath(v) && !/[\r\n]/.test(v);
+  if (!pairs.some(rewrite)) return pairs;
   const anchor = localRepoAnchor();
-  return pairs.map(([k, v]) =>
-    (PATH_KEYS as readonly string[]).includes(k) && v !== '' && !/[\r\n]/.test(v)
-      ? [k, toPortablePath(v, { anchor, cwd: process.cwd() })]
-      : [k, v]
+  if (anchor === null) {
+    console.error(
+      "⚠️  Could not find this repository's main checkout (git rev-parse --git-common-dir failed) — path keys are posted as <local>/<basename>, which a resume can match only by worktree name."
+    );
+  }
+  return pairs.map((pair) =>
+    rewrite(pair) ? [pair[0], toPortablePath(pair[1], { anchor, cwd: process.cwd() })] : pair
   );
 }
 
@@ -1178,7 +1181,7 @@ function registerVerifySubcommand(cmd: Command): void {
               verified: result.verified,
               resume_context: result.resume_context,
               local_worktree: result.local_worktree,
-              ...(Object.keys(localPaths).length > 0 ? { local_paths: localPaths } : {}),
+              ...(Object.keys(localPaths).length > 0 ? { resolved_paths: localPaths } : {}),
               ...(result.slot_trail ? { slot_trail: true } : {}),
               ...(result.hard_block ? { hard_block: result.hard_block } : {}),
               ...(result.note ? { note: result.note } : {}),
@@ -1197,7 +1200,7 @@ function registerVerifySubcommand(cmd: Command): void {
         console.log(`verified=${result.verified.length > 0 ? result.verified.join(',') : 'none'}`);
         console.log(`local_worktree=${result.local_worktree}`);
         for (const [key, value] of Object.entries(localPaths)) {
-          console.log(`local_${key}=${value}`);
+          console.log(`resolved_${key}=${value}`);
         }
         if (result.slot_trail) console.log('slot_trail=present');
         if (result.hard_block) console.log(`hard_block=${result.hard_block}`);

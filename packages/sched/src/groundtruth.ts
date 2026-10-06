@@ -11,11 +11,12 @@
  * and any consumer — supply fake ground truth and no subprocess runs.
  */
 
-import * as path from 'node:path';
 import {
+  anchorFromCommonDir,
   isPortablePath,
   isTrustedAuthorAssociation,
   LOCAL_PATH_TOKEN,
+  parseWorktreePorcelain,
   resolvePortablePath,
 } from '@ai-dossier/core';
 import { unwrapList } from './json';
@@ -1203,21 +1204,12 @@ export function resolveSetupWorktree(
   info: SetupInfo
 ): SetupInfo {
   if (!isPortablePath(info.worktree)) return info;
-  const common = exec('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], repoDir);
-  const anchor =
-    common !== null && path.isAbsolute(common.trim())
-      ? path.basename(common.trim()) === '.git'
-        ? path.dirname(common.trim())
-        : common.trim()
-      : null;
-  let worktrees: string[] = [];
-  if (info.worktree.startsWith(`${LOCAL_PATH_TOKEN}/`)) {
-    const list = exec('git', ['worktree', 'list', '--porcelain'], repoDir);
-    worktrees = (list ?? '')
-      .split('\n')
-      .filter((line) => line.startsWith('worktree '))
-      .map((line) => line.slice('worktree '.length));
-  }
+  const anchor = anchorFromCommonDir(
+    exec('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], repoDir)
+  );
+  const worktrees = info.worktree.startsWith(`${LOCAL_PATH_TOKEN}/`)
+    ? parseWorktreePorcelain(exec('git', ['worktree', 'list', '--porcelain'], repoDir))
+    : [];
   const resolved = resolvePortablePath(info.worktree, { anchor, worktrees });
   return resolved === null ? info : { ...info, worktree: resolved };
 }

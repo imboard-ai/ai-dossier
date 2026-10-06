@@ -16,7 +16,12 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { containsHomePath, redactHomePaths } from '@ai-dossier/core';
+import {
+  anchorFromCommonDir,
+  containsHomePath,
+  parseWorktreePorcelain,
+  redactHomePaths,
+} from '@ai-dossier/core';
 
 /**
  * Fail on stderr and exit 1, so a calling dossier can detect it.
@@ -293,9 +298,9 @@ export function isSafeArg(value: string): boolean {
 
 /**
  * Paths are only ever passed in value position (`git -C <path>`) or to `fs.statSync`, so
- * they cannot be mistaken for a flag — but the protocol requires them absolute, and a
- * relative path from a forged comment would resolve against whatever directory the agent
- * happens to be in.
+ * they cannot be mistaken for a flag — but a path must be absolute once resolved (a
+ * portable `<repo>/…` / `<local>/…` value is resolved first, #1085), and a relative path
+ * from a forged comment would resolve against whatever directory the agent happens to be in.
  */
 export function isSafePath(value: string): boolean {
   return value.startsWith('/') && !hasControlChar(value);
@@ -495,31 +500,27 @@ export function tryFetchIssueState(issue: string, repo?: string): IssueStateResu
  */
 export function localRepoAnchor(): string | null {
   const res = exec('git', ['rev-parse', '--path-format=absolute', '--git-common-dir']);
-  if (!res.ok || !path.isAbsolute(res.stdout)) return null;
-  return path.basename(res.stdout) === '.git' ? path.dirname(res.stdout) : res.stdout;
+  return res.ok ? anchorFromCommonDir(res.stdout) : null;
 }
 
 /** Absolute paths of this repository's local worktrees (`git worktree list`), or `[]`. */
 export function localWorktrees(): string[] {
   const res = exec('git', ['worktree', 'list', '--porcelain']);
-  if (!res.ok) return [];
-  return res.stdout
-    .split('\n')
-    .filter((line) => line.startsWith('worktree '))
-    .map((line) => line.slice('worktree '.length));
+  return res.ok ? parseWorktreePorcelain(res.stdout) : [];
 }
 
 /**
- * The publishable form of a comment body: every home-directory path rewritten to
- * `<repo>/…` or `<local>/<basename>` (#1085). The last guard before anything reaches
- * GitHub — runstate already writes portable paths, this catches whatever slipped past.
+ * The publishable form of text bound for a public place (a comment body, an evidence
+ * sidecar): every home-directory path rewritten to `<repo>/…` or `<local>/<basename>`
+ * (#1085), with a stderr note when anything changed. The last guard before anything is
+ * published — runstate already writes portable paths, this catches whatever slipped past.
  */
-export function publishableBody(body: string): string {
-  if (!containsHomePath(body)) return body;
-  const safe = redactHomePaths(body, { anchor: localRepoAnchor() });
-  if (safe !== body) {
+export function publishableText(text: string, what = 'the comment body'): string {
+  if (!containsHomePath(text)) return text;
+  const safe = redactHomePaths(text, { anchor: localRepoAnchor() });
+  if (safe !== text) {
     console.error(
-      '⚠️  Redacted local home-directory path(s) from the comment body before posting — pass repo-relative paths instead.'
+      `⚠️  Redacted local home-directory path(s) from ${what} before publishing — pass repo-relative paths instead.`
     );
   }
   return safe;
@@ -532,7 +533,7 @@ export function printDryRun(
   extra?: Record<string, unknown>
 ): void {
   // The dry run shows exactly what a real post would publish.
-  const body = publishableBody(rawBody);
+  const body = publishableText(rawBody);
   if (json) {
     console.log(JSON.stringify({ posted: false, dryRun: true, ...extra, body }, null, 2));
   } else {
@@ -576,7 +577,7 @@ export function postIssueComment(options: {
   jsonExtras?: Record<string, unknown>;
   successLine: (url: string) => string;
 }): void {
-  const body = publishableBody(options.body);
+  const body = publishableText(options.body);
   const res = exec('gh', [
     'issue',
     'comment',
