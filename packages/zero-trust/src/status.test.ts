@@ -53,6 +53,30 @@ describe('status contract', () => {
     'ghp_',
     'github_pat_',
     'ghs_',
+    'gho_',
+    'ghu_syntheticUserToken',
+    'ghr_',
+    'GHU_SYNTHETICUSERTOKEN',
+    'sk-',
+    'sk-proj-syntheticKey',
+    'Authorization: token x',
+    'AUTHORIZATION:\tTOKEN x',
+    'Authorization:\\\n token syntheticOpaqueToken',
+    '_sk-proj-syntheticKey_',
+    'credential_sk-12345678',
+    String.raw`\nsk-proj-syntheticKey`,
+    String.raw`Authorization:\ttoken\tx`,
+    String.raw`Authorization:\x09token\x20x`,
+    String.raw`Authorization:\u0009token\u0020x`,
+    String.raw`Authorization:\040token\040x`,
+    String.raw`Authorization:\011token\012x`,
+    String.raw`Authorization:\x9token\u20x`,
+    JSON.stringify({ command: String.raw`curl -H $'Authorization:\ttoken\tx'` }),
+    String.raw`Authorization:\ token\ syntheticOpaqueToken`,
+    String.raw`Authorization:\0040token\0040syntheticOpaqueToken`,
+    String.raw`Authorization:\040token\0400syntheticOpaqueToken`,
+    JSON.stringify({ header: String.raw`Authorization:\011token\0111syntheticOpaqueToken` }),
+    JSON.stringify({ command: 'Authoriza\\\ntion: token syntheticOpaqueToken' }),
     'sk-ant-',
     'Bearer secret',
     'bEaReR\tsecret',
@@ -123,6 +147,10 @@ describe('status contract', () => {
     };
     expect(JSON.parse(renderJson(value))).toEqual(value);
     expect(() => assertNoSecrets('public facts only')).not.toThrow();
+    for (const render of [renderHuman, renderJson])
+      expect(render({ ...status, nextPermittedAction: 'risk-assessment' })).toContain(
+        'risk-assessment'
+      );
   });
 
   it('snapshots getter-backed facts once before validation and secret detection', () => {

@@ -44,9 +44,24 @@ was lost; this package performs no GitHub writes or resource teardown.
 estimates contain nonnegative finite `amount` and a matching three-letter
 `currency`; these are estimates, not invoices. `candidateSha` is omitted if absent.
 `renderJson` and `renderHuman` render identical whitelisted facts; human values
-use JSON quoting to neutralize line injection. Both reject credential prefixes
-(`ghp_`, `github_pat_`, `ghs_`, `sk-ant-`, case-insensitive `Bearer` plus whitespace)
-with `SecretRedactionError` containing no input. Other malformed facts raise
+use JSON quoting to neutralize line injection. Both use the exported, immutable
+`SECRET_PATTERNS` policy shared with intent and receipt validation. Case-insensitive
+rejection covers GitHub `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` and `github_pat_`,
+`sk-ant-`/`sk-proj-`, word-boundary or underscore-delimited `sk-` prefixes,
+and embedded generic `sk-` keys with at least 32 alphanumeric/underscore/hyphen
+payload characters. Prefix-only detection is intentionally conservative;
+ordinary `task-validation`/`risk-assessment` text is allowed. `Bearer` followed
+by whitespace and `Authorization: token` followed
+by whitespace are rejected (spaces/tabs before the colon, whitespace after it).
+Literal JSON/shell whitespace escapes (`\t`, `\n`, `\r`, `\v`, `\f`, and
+ASCII whitespace in bounded octal, `\xHH`, `\uHHHH`, and `\UHHHHHHHH`
+forms, including shell short forms) are scanned in a normalized view after
+removing shell backslash-newline continuations;
+the scan conservatively consumes complete backslash runs for nested serialization.
+Escaped literal whitespace, printf's leading-zero octal forms and serialized
+shell continuations are covered by detection-only normalized/collapsed views.
+input is never executed. Rejection raises `SecretRedactionError` containing no
+input. Other malformed facts raise
 `InvalidStatusError`. Pattern detection is a defense-in-depth guard, not proof
 that arbitrary input contains no secrets; the controller must supply sanitized
 facts and never raw environment dumps.
