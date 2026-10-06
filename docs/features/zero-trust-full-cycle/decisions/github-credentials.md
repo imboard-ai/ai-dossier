@@ -10,10 +10,11 @@
 > [!WARNING]
 > **Broker design impact: scoped tokens outlive their parent.** A token minted with
 > `POST /applications/{client_id}/token/scoped` lives for 8 h *independently* of the token it
-> was scoped from (observed). Rotating the parent (refresh) or revoking it
+> was scoped from (observed). A scoped token cannot itself be scoped again. Rotating the parent (refresh) or revoking it
 > (`DELETE /applications/{client_id}/token`) does **not** invalidate scoped children. A broker
 > that narrows per operation must therefore journal every scoped token it mints and revoke each
-> one on its own, or delete the whole grant. Revoking "the" user token is not enough, and a crash
+> one on its own, or delete the whole grant (`DELETE /applications/{client_id}/grant` with any
+> live token from the grant, which observed revokes the children too). Revoking "the" user token is not enough, and a crash
 > between mint and revoke leaves a live token until it expires.
 
 ## Setup
@@ -38,7 +39,7 @@ Credential labels used below:
 Notes on the evidence file:
 
 - The `scoped` phase appears twice. The first pass aimed its fork-write test at a branch that did not exist (404), so the phase was fixed and run again. The token results are the same in both passes.
-- The first `revocation` pass ran an earlier ordering of the phase, which is what exposed the scoped-child behaviour. The probe script has the corrected ordering, which ends in a grant deletion made with a live token.
+- The first `revocation` pass ran an earlier ordering of the phase, which is what exposed the scoped-child behaviour. The probe script has the corrected ordering, which ends in a grant deletion made with a live token. That corrected ordering was run after a second contributor authorization (the second `token response shape` and `revocation` block).
 
 ## Operation matrix (PRD §5.9)
 
@@ -84,7 +85,9 @@ Scenario 11 note: the 422 safety net only holds while a PR is **open**. After a 
 - `DELETE /applications/{client_id}/token` on a ghu returns **204**. Afterwards the token gets 401 "Bad credentials", **and its refresh token is dead too** (`bad_refresh_token`). Revoking the current access token therefore ends the authorization chain, and the next run needs a new user authorization.
 - A refresh returns a new ghu/ghr pair. The old access token then gets **401**, and the old refresh token gets `bad_refresh_token` on reuse. Reusing an old refresh token does **not** poison the chain: the current access token stays valid and the current refresh token still rotates.
 - **Scoped tokens are independent of their parent.** A scoped child stayed valid (200) after its parent was rotated away, and also after its parent was revoked with `DELETE /token`. Each scoped token has to be revoked on its own (`DELETE /token` on it → 204, then 401 on reuse), or through the grant.
-- `DELETE /applications/{client_id}/grant` needs a *live* user token from the grant: called with an already-revoked one, it returns 404. GRANT-RESULT-PENDING
+- `DELETE /applications/{client_id}/grant` needs a *live* token from the grant. Called with an already-revoked token it returns 404. Called with a live **scoped child** it returns **204**, and that child then gets 401. Deleting the grant is the only single call that ends every token of the contributor's authorization, scoped children included. A broker kill switch should use it, called with any live token it still holds.
+- **A scoped token cannot be scoped again:** 401 "A scoped token cannot create another scoped token." Narrowing is one level deep, so the broker has to scope from the unscoped ghu each time.
+- The first run left two scoped children (contents:read on the public fork, 8 h) that could not be revoked one by one, because the first ordering of the phase had not kept their values. After the contributor authorized again, the grant was deleted (204). GitHub documents that grant deletion revokes every token for that user–App pair, and on the second run a live child was observed dead afterwards. The two first-run children were not checked directly, because their values were never kept. The corrected script revokes or covers every token it mints.
 - Installation tokens: `DELETE /installation/token` → 204, then 401 on reuse.
 
 **Q4. Does git push work with ghu, and with a fork-only ghs? Can the narrowed tokens write to the upstream? Observed: push works with both; neither token can write to the upstream.**
