@@ -41,8 +41,9 @@ export interface HandoffAdmission {
   /** PR only: the authenticated receipt with this canonical SHA-256 (the one rendered in
    * the body) is valid for this candidate SHA. */
   receiptValid(candidateSha: string, receiptDigest: string): Promise<boolean>;
-  /** PR only, provided by the verified push (#1066): the fork branch SHA read back from the
-   * remote, or null when the branch is absent. Must equal the candidate. */
+  /** PR only, provided by the verified push (#1066, `ForkPusher.remoteBranchSha(target)`):
+   * the fork branch SHA read back from the remote, or null when the branch is absent.
+   * Must equal the candidate. */
   remoteBranchSha(): Promise<string | null>;
 }
 

@@ -6,7 +6,7 @@ import { CanonicalError } from './export';
 /** Internal plumbing only. Never points Git at an artifact's repository/config. */
 export class TrustedGit {
   readonly directory: string;
-  // biome-ignore lint/correctness/noUnusedPrivateClassMembers: Biome misses the read in the environment-copy spread in run().
+  // biome-ignore lint/correctness/noUnusedPrivateClassMembers: Biome misses the read in the environment-copy spread in exec().
   private readonly env: NodeJS.ProcessEnv;
   constructor() {
     // Do not let inherited TMPDIR relocate trusted config into worker storage.
@@ -41,6 +41,23 @@ export class TrustedGit {
     }
   }
   run(args: readonly string[], input?: Buffer | string, identity: NodeJS.ProcessEnv = {}): Buffer {
+    const result = this.exec(args, { input, identity });
+    if (result.status !== 0) throw new CanonicalError('git_failed');
+    return result.stdout;
+  }
+  /** Like run(), but reports the exit status, for commands whose refusal is an expected
+   * outcome (a rejected lease). `config` adds `-c` entries after the hardening ones;
+   * `env` adds only `GIT_*` variables, e.g. a broker credential's `GIT_CONFIG_*` set. */
+  exec(
+    args: readonly string[],
+    options: {
+      input?: Buffer | string;
+      identity?: NodeJS.ProcessEnv;
+      env?: Readonly<Record<string, string>>;
+      config?: readonly string[];
+      timeoutMs?: number;
+    } = {}
+  ): { status: number | null; stdout: Buffer } {
     const gitEnv = { ...this.env };
     for (const key of [
       'GIT_AUTHOR_NAME',
@@ -50,8 +67,12 @@ export class TrustedGit {
       'GIT_COMMITTER_EMAIL',
       'GIT_COMMITTER_DATE',
     ]) {
-      const value = identity[key];
+      const value = options.identity?.[key];
       if (value !== undefined) gitEnv[key] = value;
+    }
+    for (const [key, value] of Object.entries(options.env ?? {})) {
+      if (!key.startsWith('GIT_')) throw new CanonicalError('git_failed');
+      gitEnv[key] = value;
     }
     const result = spawnSync(
       '/usr/bin/git',
@@ -69,20 +90,23 @@ export class TrustedGit {
         'commit.gpgSign=false',
         '-c',
         'core.quotePath=false',
+        ...(options.config ?? []).flatMap((entry) => ['-c', entry]),
         `--git-dir=${join(this.directory, 'repo')}`,
         ...args,
       ],
       {
         cwd: this.directory,
         env: gitEnv,
-        input,
+        input: options.input,
         maxBuffer: 128 * 1024 * 1024,
-        timeout: 60000,
+        timeout: options.timeoutMs ?? 60000,
         shell: false,
       }
     );
-    if (result.error || result.status !== 0) throw new CanonicalError('git_failed');
-    return result.stdout;
+    return {
+      status: result.error ? null : result.status,
+      stdout: result.stdout ?? Buffer.alloc(0),
+    };
   }
   close(): void {
     fs.rmSync(this.directory, { recursive: true, force: true });

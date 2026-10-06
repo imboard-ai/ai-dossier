@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  CONTRIBUTOR_CONFIRMED_OPERATIONS,
   engagementMarker,
   type Intent,
   IntentDriver,
@@ -17,6 +18,7 @@ import {
   replayIntents,
   type WriteAdapter,
   WriteBlockedError,
+  WriteRefusedError,
 } from '../intents';
 import { Journal, JournalError } from '../journal';
 import { SecretRedactionError } from '../redaction';
@@ -39,10 +41,12 @@ const run = advance(
   ReasonCode.VerificationPassed
 );
 const sha = 'a'.repeat(40);
+/** Kinds the broker may still write; the rest are contributor hand-offs (#1066). */
+const BROKERED = OPERATION_KINDS.filter((kind) => !CONTRIBUTOR_CONFIRMED_OPERATIONS.includes(kind));
 const input: IntentInput = {
   contributionId: 'c-1',
   target: 'o/r/pulls',
-  operationKind: 'pr_create',
+  operationKind: 'pr_update',
   candidateSha: sha,
 };
 const dirs: string[] = [];
@@ -160,7 +164,7 @@ describe('durable provider-independent write intents', () => {
       ...input,
       get operationKind() {
         kindReads++;
-        return kindReads === 1 ? ('pr_create' as const) : ('push_branch' as const);
+        return kindReads === 1 ? ('pr_update' as const) : ('push_branch' as const);
       },
     };
     let refReads = 0;
@@ -275,7 +279,7 @@ describe('durable provider-independent write intents', () => {
     expect(fake.writes).toBe(1);
   });
   it.each(
-    OPERATION_KINDS
+    BROKERED
   )('persists intended and attempted before %s and never duplicates confirmed writes', async (operationKind) => {
     const j = journal();
     const fake = new FakeAdapter();
@@ -288,7 +292,7 @@ describe('durable provider-independent write intents', () => {
       ]);
       return { artifactRef: 'existing', remoteSha: sha };
     });
-    const d = driver(j, fake, operationKind === 'engagement_comment' ? gating : run);
+    const d = driver(j, fake, run);
     const op = { ...input, operationKind };
     expect(await d.execute(op)).toBe('existing');
     expect(await d.execute(op)).toBe('existing');
@@ -296,21 +300,16 @@ describe('durable provider-independent write intents', () => {
     expect(replayIntents(j.read())).toEqual(d.snapshot());
   });
   it.each([
-    'pr_create',
-    'engagement_comment',
+    'pr_update',
     'push_branch',
   ] as const)('lost %s response resumes without duplicate artifacts (11/16/18)', async (operationKind) => {
     const dir = directory();
     const fake = new FakeAdapter();
     fake.mode = 'lost';
     const j = journal(dir);
-    const current = operationKind === 'engagement_comment' ? gating : run;
+    const current = run;
     const d = driver(j, fake, current);
-    const op = {
-      ...input,
-      operationKind,
-      candidateSha: operationKind === 'engagement_comment' ? null : sha,
-    };
+    const op = { ...input, operationKind };
     await expect(d.execute(op)).rejects.toBeInstanceOf(MutationUncertainError);
     j.close();
     const restored = driver(journal(dir), fake, current);
@@ -320,12 +319,21 @@ describe('durable provider-independent write intents', () => {
     expect(fake.reads).toBe(1);
     expect(restored.snapshot().intents.get(idempotencyKey(op))?.status).toBe('confirmed');
   });
-  it('reconciles a lost comment via its hidden contribution marker', async () => {
-    const comments: string[] = [];
+  it('reconciles a journaled pre-hand-off comment via its hidden contribution marker', async () => {
+    // Journals written before the hybrid hand-off still replay and reconcile.
+    const op = { ...input, operationKind: 'engagement_comment' as const, candidateSha: null };
+    const dir = directory();
+    const seeded = journal(dir);
+    seeded.append({ v: 1, type: 'run', run: gating, contributionId: 'c-1' });
+    seeded.append({ v: 1, type: 'intended', input: op });
+    seeded.append({ v: 1, type: 'attempted', key: idempotencyKey(op) });
+    seeded.close();
+    const comments = [`Request\n${engagementMarker(op.contributionId)}`];
+    let writes = 0;
     const adapter: WriteAdapter = {
-      async mutate(i) {
-        comments.push(`Request\n${engagementMarker(i.contributionId)}`);
-        throw new Error('lost');
+      async mutate() {
+        writes++;
+        return { artifactRef: 'comment/2' };
       },
       async reconcile(i) {
         return comments.some((c) => parseEngagementMarker(c) === i.contributionId)
@@ -333,11 +341,54 @@ describe('durable provider-independent write intents', () => {
           : { kind: 'absent' };
       },
     };
-    const d = driver(journal(), adapter, gating);
-    const op = { ...input, operationKind: 'engagement_comment' as const, candidateSha: null };
-    await expect(d.execute(op)).rejects.toThrow(MutationUncertainError);
-    expect(await d.execute(op)).toBe('comment/1');
-    expect(comments).toHaveLength(1);
+    const d = driver(journal(dir), adapter, gating);
+    await d.resume();
+    expect(d.snapshot().intents.get(idempotencyKey(op))?.artifactRef).toBe('comment/1');
+    expect(() => d.execute(op)).toThrow(IntentError);
+    expect(writes).toBe(0);
+  });
+  it.each(
+    CONTRIBUTOR_CONFIRMED_OPERATIONS
+  )('refuses brokered %s fail-closed before journaling or the adapter (hybrid hand-off)', async (operationKind) => {
+    expect(CONTRIBUTOR_CONFIRMED_OPERATIONS).toEqual(['engagement_comment', 'pr_create']);
+    for (const current of [gating, run]) {
+      const fake = new FakeAdapter();
+      const j = journal();
+      const d = driver(j, fake, current);
+      const before = fs.readFileSync(j.filePath, 'utf8');
+      const op = {
+        ...input,
+        operationKind,
+        candidateSha: operationKind === 'engagement_comment' ? null : sha,
+      };
+      expect(() => d.execute(op)).toThrow(IntentError);
+      expect(fs.readFileSync(j.filePath, 'utf8')).toBe(before);
+      expect(fake.writes + fake.reads).toBe(0);
+      // The refusal does not latch the driver: brokered kinds still work.
+      if (current === run) await expect(d.execute(input)).resolves.toBe('artifact-1');
+    }
+  });
+  it.each([
+    'remote_diverged',
+    'authorization_refused',
+  ] as const)('blocks on an adapter refusal (%s) instead of retrying', async (reason) => {
+    const fake = new FakeAdapter();
+    const j = journal();
+    const d = driver(j, fake);
+    vi.spyOn(fake, 'mutate').mockRejectedValue(new WriteRefusedError(reason));
+    await expect(d.execute(input)).rejects.toThrow(WriteBlockedError);
+    expect(d.snapshot().blockedReason).toBe(reason);
+    expect(replayIntents(j.read())).toEqual(d.snapshot());
+    await expect(d.execute({ ...input, target: 'other' })).rejects.toThrow(WriteBlockedError);
+  });
+  it('blocks with remote_diverged when reconciliation proves unexpected remote content', async () => {
+    const fake = new FakeAdapter();
+    fake.mode = 'lost';
+    const d = driver(journal(), fake);
+    await expect(d.execute(input)).rejects.toThrow(MutationUncertainError);
+    vi.spyOn(fake, 'reconcile').mockRejectedValue(new WriteRefusedError('remote_diverged'));
+    await expect(d.resume()).rejects.toThrow(WriteBlockedError);
+    expect(d.snapshot().blockedReason).toBe('remote_diverged');
   });
   it('bounds an absent retry across repeated restarts', async () => {
     const dir = directory();
@@ -464,7 +515,7 @@ describe('durable provider-independent write intents', () => {
       const d = driver(j, fake);
       for (let index = 0; index < 25; index++) {
         random = (Math.imul(random, 1664525) + 1013904223) >>> 0;
-        const kinds = OPERATION_KINDS.filter((kind) => kind !== 'engagement_comment');
+        const kinds = BROKERED;
         const operationKind = kinds[random % kinds.length] as IntentInput['operationKind'];
         const op = { ...input, target: `target-${index}`, operationKind };
         fake.mode = random % 3 === 0 ? 'lost' : 'success';
@@ -765,17 +816,20 @@ describe('current controller lifecycle admission', () => {
   it.each(lifecycleRuns)('enforces operation scope in $state', async (current) => {
     const allowed =
       current.state === 'shipping'
-        ? ['fork_ensure', 'push_branch', 'pr_create', 'pr_update', 'pr_close']
+        ? ['fork_ensure', 'push_branch', 'pr_update', 'pr_close']
         : current.state === 'revising'
           ? ['pr_update', 'pr_close']
-          : ['gating', 'awaiting_maintainer'].includes(current.state)
-            ? ['engagement_comment']
-            : ['submitted', 'awaiting_review', 'accepted'].includes(current.state)
-              ? ['pr_close']
-              : [];
+          : ['submitted', 'awaiting_review', 'accepted'].includes(current.state)
+            ? ['pr_close']
+            : [];
     for (const operationKind of OPERATION_KINDS) {
       const fake = new FakeAdapter();
       const d = driver(journal(), fake, current);
+      if (CONTRIBUTOR_CONFIRMED_OPERATIONS.includes(operationKind)) {
+        expect(() => d.execute({ ...input, operationKind })).toThrow(IntentError);
+        expect(fake.writes).toBe(0);
+        continue;
+      }
       const result = d.execute({ ...input, operationKind });
       if (allowed.includes(operationKind)) await expect(result).resolves.toBe('artifact-1');
       else await expect(result).rejects.toThrow(WriteBlockedError);
@@ -806,7 +860,7 @@ describe('current controller lifecycle admission', () => {
         expect((restored.read().at(-1) as { type: string }).type).toBe(
           kind === 'found' ? 'confirmed' : 'absent'
         );
-        for (const operationKind of OPERATION_KINDS)
+        for (const operationKind of BROKERED)
           await expect(d.execute({ ...input, operationKind })).rejects.toThrow(WriteBlockedError);
         expect(fake.writes).toBe(0);
         expect(replayIntents(restored.read())).toEqual(d.snapshot());

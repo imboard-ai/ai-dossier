@@ -20,6 +20,12 @@ export const OPERATION_KINDS = Object.freeze([
   'pr_close',
 ] as const);
 export type OperationKind = (typeof OPERATION_KINDS)[number];
+/** Hybrid hand-off (PRD §5.7, §5.9): the contributor submits these from their own account.
+ * They stay journal-replayable, but the brokered write path refuses them. */
+export const CONTRIBUTOR_CONFIRMED_OPERATIONS: readonly OperationKind[] = Object.freeze([
+  'engagement_comment',
+  'pr_create',
+]);
 const MAX_WRITE_ATTEMPTS = 2; // Initial attempt plus one retry after proven absence.
 export interface IntentInput {
   readonly contributionId: string;
@@ -63,6 +69,8 @@ export const WRITE_BLOCK_REASONS = Object.freeze([
   'invalid_evidence',
   'unexpected_remote_sha',
   'retry_exhausted',
+  'remote_diverged',
+  'authorization_refused',
 ] as const);
 export type WriteBlockReason = (typeof WRITE_BLOCK_REASONS)[number];
 export class IntentError extends Error {
@@ -75,6 +83,16 @@ export class WriteBlockedError extends Error {
   constructor() {
     super('Zero-trust writes blocked; reconciliation requires hand-off');
     this.name = 'WriteBlockedError';
+  }
+}
+/** Thrown by a trusted adapter that proved nothing unintended was written, or that the
+ * remote holds content it must not touch: the driver blocks instead of retrying. */
+export class WriteRefusedError extends Error {
+  constructor(
+    readonly reason: Extract<WriteBlockReason, 'remote_diverged' | 'authorization_refused'>
+  ) {
+    super(`Zero-trust write refused: ${reason}`);
+    this.name = 'WriteRefusedError';
   }
 }
 export class MutationUncertainError extends Error {
@@ -372,8 +390,8 @@ export class IntentDriver {
           kind === 'found'
             ? { kind, artifactRef: observed.artifactRef, remoteSha: observed.remoteSha }
             : { kind };
-      } catch {
-        this.block('reconciliation_error');
+      } catch (error) {
+        this.block(error instanceof WriteRefusedError ? error.reason : 'reconciliation_error');
       }
       if (this.failed) throw new WriteBlockedError();
       if (!result || result.kind === 'unknown') this.block();
@@ -406,6 +424,8 @@ export class IntentDriver {
   }
   execute(input: IntentInput): Promise<string> {
     const valid = inputOf(input);
+    // Refused before anything is journaled: these are contributor hand-offs, not writes.
+    if (CONTRIBUTOR_CONFIRMED_OPERATIONS.includes(valid.operationKind)) throw new IntentError();
     const key = idempotencyKey(valid);
     return this.serial(async () => {
       if (valid.contributionId !== this.state.contributionId) throw new IntentError();
@@ -423,7 +443,8 @@ export class IntentDriver {
       this.admit(valid.operationKind);
       try {
         result = await this.adapter.mutate(intent);
-      } catch {
+      } catch (error) {
+        if (error instanceof WriteRefusedError) this.block(error.reason);
         this.persist({ v: 1, type: 'ambiguous', key });
         throw new MutationUncertainError();
       }

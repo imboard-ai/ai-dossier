@@ -8,8 +8,10 @@ import { describe, expect, it } from 'vitest';
 
 const SRC = path.resolve(__dirname, '../..');
 const GITHUB = path.join(SRC, 'github');
-/** The only modules that hold or handle GitHub credentials. */
-const CREDENTIAL = ['broker.ts', 'app-auth.ts', 'token-journal.ts'].map((name) =>
+/** The only modules that hold or handle GitHub credentials. push.ts passes the broker's
+ * push credential to git, so it is controller-only too: nothing outside this set, the
+ * package index included, may import it. */
+const CREDENTIAL = ['broker.ts', 'app-auth.ts', 'token-journal.ts', 'push.ts'].map((name) =>
   path.join(GITHUB, name)
 );
 const isCredential = (file: string) => CREDENTIAL.includes(file);
