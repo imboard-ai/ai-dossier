@@ -2,7 +2,7 @@
   "name": "@ai-dossier/monorepo",
   "version": "1.0.0",
   "private": true,
-  "description": "Dossier monorepo - automation standard for AI agents",
+  "description": "Dossier monorepo: signed, versioned agent skills for model-driven orchestration",
   "workspaces": [
     "packages/*",
     "mcp-server",

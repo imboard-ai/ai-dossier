@@ -1,7 +1,7 @@
 {
   "name": "@ai-dossier/sched",
-  "version": "0.68.3",
-  "description": "Deterministic scheduler for multi-agent coding workflows: queue work, orchestrate parallel agents, verify completion, and recover stalled runs.",
+  "version": "0.68.4",
+  "description": "The deterministic shell for hybrid model-driven orchestration of signed, versioned agent skills; never invokes an LLM.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
@@ -22,7 +22,18 @@
     "workflow-orchestration",
     "state-machine",
     "coding-agents",
-    "task-scheduler"
+    "task-scheduler",
+    "agent-skills",
+    "model-driven-orchestration",
+    "agent-orchestration",
+    "ai-agents",
+    "llm",
+    "skill-md",
+    "claude-code",
+    "claude-skills",
+    "supply-chain-security",
+    "signed",
+    "versioning"
   ],
   "author": "Yuval Dimnik <yuval.dimnik@gmail.com>",
   "license": "AGPL-3.0-only",
