@@ -3,7 +3,7 @@
 **Version**: 1.0
 **Status**: Stable
 
-This document is a complete reference for the MCP orchestration tools that enable multi-dossier journey execution.
+This document is a complete reference for the MCP orchestration tools that enable multi-dossier journey execution. For the concept behind them, and how they fit with signed skills and the deterministic scheduler, see [Model-driven orchestration for AI agents](docs/explanation/model-driven-orchestration.md).
 
 ---
 

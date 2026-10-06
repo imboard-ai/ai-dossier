@@ -1,6 +1,7 @@
 import sitemap from '@astrojs/sitemap';
 import { defineConfig } from 'astro/config';
 import remarkDocsLinks from './src/plugins/remark-docs-links.mjs';
+import remarkMermaid from './src/plugins/remark-mermaid.mjs';
 
 // SITE_URL is the single source for canonical, og:url, sitemap and robots.txt. Deliberately
 // not derived from VERCEL_PROJECT_PRODUCTION_URL (a different alias than the public site).
@@ -20,7 +21,7 @@ export default defineConfig({
     }),
   ],
   markdown: {
-    remarkPlugins: [remarkDocsLinks],
+    remarkPlugins: [remarkDocsLinks, remarkMermaid],
     shikiConfig: { themes: { light: 'github-light', dark: 'github-dark-default' } },
   },
 });
