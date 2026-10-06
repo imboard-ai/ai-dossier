@@ -1,0 +1,13 @@
+{
+  "files": {
+    "CONTRIBUTING.md": "No assignment is needed.\nFeel free to open a PR.\nPre-existing test failures are allowed."
+  },
+  "expected": {
+    "ai": "silent",
+    "assignment": "not_required",
+    "directPr": "welcomed",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": true
+  }
+}

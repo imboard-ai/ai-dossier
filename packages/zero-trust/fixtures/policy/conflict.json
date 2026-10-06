@@ -1,0 +1,14 @@
+{
+  "files": {
+    "CONTRIBUTING.md": "AI contributions are banned.",
+    "AI-POLICY.md": "AI contributions are welcome."
+  },
+  "expected": {
+    "ai": "unclear",
+    "assignment": "unclear",
+    "directPr": "unclear",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": false
+  }
+}

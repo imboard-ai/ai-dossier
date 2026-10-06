@@ -1,0 +1,11 @@
+{
+  "files": { "AI_POLICY.md": "AI-generated contributions are not accepted." },
+  "expected": {
+    "ai": "banned",
+    "assignment": "unclear",
+    "directPr": "unclear",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": false
+  }
+}

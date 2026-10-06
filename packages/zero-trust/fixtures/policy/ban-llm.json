@@ -1,0 +1,11 @@
+{
+  "files": { "CONTRIBUTING.md": "# Contributions\nLLM contributions are banned." },
+  "expected": {
+    "ai": "banned",
+    "assignment": "unclear",
+    "directPr": "unclear",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": false
+  }
+}

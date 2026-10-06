@@ -1,0 +1,13 @@
+{
+  "files": {
+    "CONTRIBUTING.md": "Direct PRs are welcome.\nOpen an issue before submitting a pull request."
+  },
+  "expected": {
+    "ai": "silent",
+    "assignment": "unclear",
+    "directPr": "unclear",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": false
+  }
+}

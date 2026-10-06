@@ -1,0 +1,11 @@
+{
+  "files": { "CONTRIBUTING.md": "Run the focused tests." },
+  "expected": {
+    "ai": "silent",
+    "assignment": "unclear",
+    "directPr": "unclear",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": false
+  }
+}

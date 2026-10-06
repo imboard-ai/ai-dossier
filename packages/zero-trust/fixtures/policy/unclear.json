@@ -1,0 +1,11 @@
+{
+  "files": { "AI_POLICY.md": "AI usage depends on the situation." },
+  "expected": {
+    "ai": "unclear",
+    "assignment": "unclear",
+    "directPr": "unclear",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": false
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "files": {
+    ".github/pull_request_template.md": "No additional sections.\nBaseline failures are permitted."
+  },
+  "expected": {
+    "ai": "silent",
+    "assignment": "unclear",
+    "directPr": "unclear",
+    "draftRequired": false,
+    "receiptBlockAllowed": false,
+    "baselineFailuresPermitted": true
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "files": { "CONTRIBUTING.txt": "We do not accept AI-generated contributions." },
+  "expected": {
+    "ai": "banned",
+    "assignment": "unclear",
+    "directPr": "unclear",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": false
+  }
+}

@@ -216,6 +216,58 @@ for the same validated facts. Configuration,
 RunStore and status helpers are exported from the package index; credential
 modules remain isolated, including type-only imports.
 
+## Contribution policy (#1091)
+
+`discoverPolicy(read: GitHubRead, { owner, repo, ref })` performs credential-free
+Contents GETs at a **40-character lowercase commit SHA**. Supply `anonymousReader()`
+or an offline fake; no credential module is imported. `POLICY_PATHS` is the frozen
+list of contributing files, AI policies, individual templates and README; one
+`.github/PULL_REQUEST_TEMPLATE/` listing adds at most 20 immediate regular files.
+Listing paths never supply a URL or change the target. `POLICY_FILE_LIMIT` is
+256 KiB decoded bytes and `POLICY_TOTAL_LIMIT` is 1 MiB. Base64 must be canonical
+(GitHub CR/LF wrapping is allowed), size must match, and UTF-8 decoding is strict.
+The BOM is preserved. Symlinks, submodules, malformed responses, duplicate entries,
+truncated/over-cap listings, blob mismatches and every non-404 failed read yield
+`{ kind: 'unknown' }`, without partial files, retries or a weaker fallback. A listed
+file disappearing also yields unknown. Complete absence is `{ kind: 'known', files: [] }`.
+`PolicyDiscovery` and `PolicyFile` describe the result; each file has `path`, `sha`
+(Git blob SHA) and `content` (untrusted text). The injected reader is responsible
+for the GitHub protocol and complete response; GitHub's 1,000-entry directory
+truncation is necessarily above the stricter 20-entry cap.
+
+`classifyPolicy(files)` returns `PolicyAssessment`: `ai` is `banned`,
+`requires_approval`, `disclosure_required`, `welcomed`, `silent` or `unclear`;
+`assignment` is `required`, `not_required` or `unclear`; `directPr` is `welcomed`,
+`discussion_first` or `unclear`. It also returns `draftRequired`,
+`receiptBlockAllowed` (false for fixed templates/no extra sections),
+`baselineFailuresPermitted` (default false), and `citations` with original `path`,
+1-based `line`, stable `ruleId` and at most 200-character `excerpt`.
+Secret-bearing lines are replaced with `[redacted]` after `assertNoSecrets`, including
+secrets outside the excerpt slice. Evidence retains the first occurrence of each
+rule per file and is capped at 128 citations; every line still affects classification.
+README contributes only sections headed with `/contribut/i` (ATX or setext headings,
+including nested sections), preserving original line numbers. Other README prose
+does not count. Direct inputs are bounded/validated by `validatePolicyFiles` and
+invalid snapshots raise non-echoing `PolicyInputError` (unsafe paths also fail the
+secret guard).
+
+`POLICY_RULES` is frozen case-insensitive **data**, with category and ID for each
+pattern; `PolicyRule`, `PolicyCategory` and `POLICY_AI_MENTION` are exported.
+Opposing categories make their dimension `unclear`. An unrecognized AI mention
+also makes AI unclear rather than silent. Assignment silence is `not_required`
+only when direct PRs are welcomed; otherwise unclear. No model classification is
+performed. These bounded literal rules do not understand all natural language;
+`unknown` and `unclear` always require a block/hand-off, never permission. Repository
+text is never executed or interpreted as controller instructions.
+
+`policyDigest(assessment, files)` hashes canonical sorted-key JSON containing the
+assessment (with sorted citations) and sorted `{ path, sha }` file identities using
+SHA-256. Input order and object-key order cannot affect the digest; any blob SHA or
+assessment change does. Content is bound by the supplied GitHub blob identity;
+callers must use discovered snapshots, not fabricate SHA/content pairs. A digest
+is a freshness binding, not authorization or proof that contributions are permitted.
+Twenty synthetic fixtures in `fixtures/policy/` and fake-read tests run offline.
+
 ## Development commands
 
 ```sh

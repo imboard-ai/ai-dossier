@@ -1,0 +1,11 @@
+{
+  "files": { "CONTRIBUTING.md": "Discuss the change before opening a PR." },
+  "expected": {
+    "ai": "silent",
+    "assignment": "unclear",
+    "directPr": "discussion_first",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": false
+  }
+}

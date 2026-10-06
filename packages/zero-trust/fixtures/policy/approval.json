@@ -1,0 +1,11 @@
+{
+  "files": { ".github/AI_POLICY.md": "AI contributions require maintainer approval." },
+  "expected": {
+    "ai": "requires_approval",
+    "assignment": "unclear",
+    "directPr": "unclear",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": false
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "files": {
+    ".github/CONTRIBUTING.md": "We welcome AI-assisted contributions.\nDirect PRs are welcome."
+  },
+  "expected": {
+    "ai": "welcomed",
+    "assignment": "not_required",
+    "directPr": "welcomed",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": false
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "files": { "CONTRIBUTING.md": "Assignment is required.\nAssignment is optional." },
+  "expected": {
+    "ai": "silent",
+    "assignment": "unclear",
+    "directPr": "unclear",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": false
+  }
+}

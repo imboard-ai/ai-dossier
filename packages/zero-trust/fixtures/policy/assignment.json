@@ -1,0 +1,13 @@
+{
+  "files": {
+    "docs/CONTRIBUTING.md": "You must be assigned before contributing.\nDirect pull requests are welcome."
+  },
+  "expected": {
+    "ai": "silent",
+    "assignment": "required",
+    "directPr": "welcomed",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": false
+  }
+}
