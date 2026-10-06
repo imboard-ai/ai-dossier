@@ -13,9 +13,10 @@ import {
   type Intent,
   type IntentInput,
   idempotencyKey,
-  MAX_WRITE_ATTEMPTS,
+  MAX_ATTEMPT_SEQUENCE,
   MutationDeferredError,
   type MutationResult,
+  MutationVoidedError,
   ReconcileDeferredError,
   type ReconcileResult,
   type WriteAdapter,
@@ -121,7 +122,7 @@ function intendedValid(e: Record<string, unknown>, prior: Intended | undefined):
   if (
     !Number.isSafeInteger(e.attempt) ||
     (e.attempt as number) < 1 ||
-    (e.attempt as number) > MAX_WRITE_ATTEMPTS ||
+    (e.attempt as number) > MAX_ATTEMPT_SEQUENCE ||
     typeof e.branch !== 'string' ||
     !isCommitSha(e.candidateSha) ||
     !(e.expectedRemoteSha === null || isCommitSha(e.expectedRemoteSha))
@@ -267,11 +268,24 @@ export class ForkPusher implements WriteAdapter {
       candidateSha: sha,
       expectedRemoteSha: expected,
     });
-    const outcome = await this.options.broker.withForkPush(
-      intent,
-      { repositoryId: at.fork.repositoryId },
-      (credential, signal) => this.casPush(candidate, at, expected, credential.env(), signal)
-    );
+    let handedOut = false;
+    let outcome: PushOutcome;
+    try {
+      outcome = await this.options.broker.withForkPush(
+        intent,
+        { repositoryId: at.fork.repositoryId },
+        (credential, signal) => {
+          handedOut = true;
+          return this.casPush(candidate, at, expected, credential.env(), signal);
+        }
+      );
+    } catch (error) {
+      // No credential ever reached git (the mint failed, was refused, or was cancelled), so
+      // nothing can have been pushed. The nonce and this attempt's mint slot are spent: void
+      // the attempt; the next one needs a fresh receipt but keeps the retry budget.
+      if (!handedOut) throw new MutationVoidedError(voidReason(error));
+      throw error;
+    }
     if (outcome.remote === sha) return this.verified(intent, at, sha);
     if (outcome.remote !== undefined && outcome.remote !== expected)
       throw diverged(expected, outcome.remote);
@@ -396,6 +410,14 @@ export class ForkPusher implements WriteAdapter {
       });
     return { artifactRef: `${intent.target}@${sha}`, remoteSha: sha };
   }
+}
+
+/** A broker refusal code, or the error's name: secret-free either way. */
+function voidReason(error: unknown): string {
+  const code = (error as { code?: unknown })?.code;
+  const name = error instanceof Error ? error.name : 'unknown';
+  const reason = `mint:${typeof code === 'string' ? code : name}`.toLowerCase();
+  return /^[a-z_:0-9]{1,64}$/u.test(reason) ? reason : 'mint:failed';
 }
 
 function refFailure(error: ForkRefError): string {
