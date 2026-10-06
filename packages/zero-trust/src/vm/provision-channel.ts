@@ -18,6 +18,9 @@ export const DEFAULT_MAX_CONNECTIONS = 64;
 export const DEFAULT_MAX_PENDING_BYTES = 64 * 1024;
 /** Back-off before refilling the pool after idle connections closed unused. */
 const REDIAL_MS = 250;
+/** An idle connection is replaced after this long, so one that slirp never delivered
+ * to a listening relay cannot hold a pool slot forever. */
+export const IDLE_REFRESH_MS = 30_000;
 
 export interface ProvisionChannelOptions {
   /** Host loopback port of the VM's provisioning forward. */
@@ -31,6 +34,8 @@ export interface ProvisionChannelOptions {
   readonly maxConnections?: number;
   /** Bytes a guest may send before the upstream is connected. */
   readonly maxPendingBytes?: number;
+  /** Idle connections are replaced after this long (default `IDLE_REFRESH_MS`). */
+  readonly idleRefreshMs?: number;
   readonly connect?: (port: number, host: string) => net.Socket;
 }
 
@@ -71,6 +76,7 @@ export class ProvisionChannel {
   private readonly poolSize: number;
   private readonly maxConnections: number;
   private readonly maxPending: number;
+  private readonly idleRefreshMs: number;
   private readonly connect: (port: number, host: string) => net.Socket;
   private readonly sockets = new Set<net.Socket>();
   private idle = 0;
@@ -87,6 +93,7 @@ export class ProvisionChannel {
     this.poolSize = options.poolSize ?? DEFAULT_POOL_SIZE;
     this.maxConnections = options.maxConnections ?? DEFAULT_MAX_CONNECTIONS;
     this.maxPending = options.maxPendingBytes ?? DEFAULT_MAX_PENDING_BYTES;
+    this.idleRefreshMs = options.idleRefreshMs ?? IDLE_REFRESH_MS;
     // Half-open so one side's end() is forwarded instead of closing both directions.
     this.connect =
       options.connect ?? ((port, host) => net.connect({ port, host, allowHalfOpen: true }));
@@ -143,6 +150,7 @@ export class ProvisionChannel {
     };
     guest.on('error', () => guest.destroy());
     guest.once('close', () => leaveIdle(false));
+    guest.setTimeout(this.idleRefreshMs, () => guest.destroy());
     const onFirstData = (chunk: Buffer) => {
       pending.push(chunk);
       pendingBytes += chunk.length;
@@ -151,6 +159,7 @@ export class ProvisionChannel {
         return;
       }
       if (pending.length > 1) return; // upstream dial already under way
+      guest.setTimeout(0);
       leaveIdle(true);
       const upstream = this.connect(this.target.port, this.target.host);
       this.track(upstream);

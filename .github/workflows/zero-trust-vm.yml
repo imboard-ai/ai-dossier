@@ -279,6 +279,8 @@ jobs:
         env:
           ZT_PROXY_E2E: '1'
           ZT_ACCEL: kvm
+          # Failing commands print their stderr tail (inside the stop-commands guard).
+          ZT_PROXY_DEBUG: '1'
         run: |
           export ZT_PROFILE_DIR="$RUNNER_TEMP/zt-profile"
           export ZT_PROXY_ENDPOINTS="$RUNNER_TEMP/zt-proxy-endpoints.json"

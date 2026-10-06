@@ -338,7 +338,8 @@ describe('config rendering', () => {
     expect(conf).toContain('http_access deny forbidden_dst');
     expect(conf).toContain('169.254.0.0/16');
     expect(conf).toContain('http_access allow CONNECT mirrors tls_port registry_hosts');
-    // Hop limit 0: Squid refuses every redirect response.
+    // Hop limit 0: Squid refuses every redirect response (a 304 is not one).
+    expect(conf).toContain('acl redirect_status http_status 300-303 305-399');
     expect(conf).toContain('http_reply_access deny redirect_status\n');
     expect(conf).not.toContain('!registry_location');
     expect(renderSquidConfig(deployment, { ...PROXY_POLICY, maxRedirects: 2 })).toContain(

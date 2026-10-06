@@ -693,7 +693,9 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
         (e) => !evaluateRequest({ method: e.method, url: e.url }).allowed
       );
       const denied = traffic.filter((e) => e.result.startsWith('TCP_DENIED'));
-      const redirects = requests.filter((e) => e.status >= 300 && e.status < 400);
+      const redirects = requests.filter(
+        (e) => e.status >= 300 && e.status < 400 && e.status !== 304
+      );
       const hosts = [...new Set(requests.map((e) => new URL(e.url).hostname))].sort();
       squidAudit = {
         malformedLines: malformed,

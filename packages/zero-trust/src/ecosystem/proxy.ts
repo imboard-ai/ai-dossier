@@ -446,7 +446,8 @@ export function renderSquidConfig(
     'acl chunked_body req_header Transfer-Encoding .',
     'acl CONNECT method CONNECT',
     `acl package_methods method ${policy.methods.join(' ')}`,
-    'acl redirect_status http_status 300-399',
+    // Every 3xx except 304 Not Modified, which answers a mirror's conditional request.
+    'acl redirect_status http_status 300-303 305-399',
   ];
   const allowed: string[] = [];
   for (const rule of policy.rules) {

@@ -567,6 +567,9 @@ def main():
                 op = request.get("op")
                 if op == "hello":
                     if relay is not None:
+                        # Answer only once the relay listens (or has failed): the host
+                        # starts dialing in as soon as it has the hello.
+                        relay.settled.wait(RELAY_START_WAIT_S)
                         relay.set_key(request.get("relayKey"))
                     reply({"id": rid, "hello": "zt-broker-v1", "scope": scope, "phase": phase})
                     continue

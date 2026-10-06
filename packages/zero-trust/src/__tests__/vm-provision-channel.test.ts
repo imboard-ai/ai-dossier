@@ -81,6 +81,14 @@ describe('ProvisionChannel', () => {
     expect(channel.stats.spliced).toBe(0);
   });
 
+  it('replaces an idle connection that never carried a request', async () => {
+    const relay = await fakeRelay();
+    const channel = start(relay.port, 1, { poolSize: 1, idleRefreshMs: 100 });
+    const first = await relay.next();
+    await hungUp(first);
+    await expect.poll(() => channel.stats.dialed).toBeGreaterThanOrEqual(2);
+  });
+
   it('opens every guest connection with the relay key', async () => {
     const relay = await fakeRelay();
     start(relay.port, 1, { poolSize: 1 });
