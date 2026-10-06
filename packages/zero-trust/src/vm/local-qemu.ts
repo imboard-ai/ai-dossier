@@ -27,7 +27,13 @@ import {
 } from './adapter';
 import { BrokerClient } from './broker';
 import { type HostTools, preflightHost } from './host';
-import { parseManifest, profileDigest, sha256File, type VmProfileManifest } from './profile';
+import {
+  BAKED_DISK_GIB,
+  parseManifest,
+  profileDigest,
+  sha256File,
+  type VmProfileManifest,
+} from './profile';
 import { BOOT_TIMEOUT_MS, buildRunArgs, MAX_SOCKET_PATH_BYTES, TIMEOUT_SCALE } from './qemu-args';
 
 export const AGENT_SOURCE_PATH = path.join(__dirname, '..', '..', 'vm-guest', 'agent.py');
@@ -262,6 +268,8 @@ export class LocalQemuAdapter implements VmAdapter {
         'the incident kill switch is engaged; no new VMs are admitted'
       );
     if (!ID.test(spec.runId)) throw new Error('Invalid run ID');
+    if (!Number.isSafeInteger(spec.limits.diskGiB) || spec.limits.diskGiB < BAKED_DISK_GIB)
+      throw new Error(`Disk limit must be at least the baked image size (${BAKED_DISK_GIB} GiB)`);
     assertNoSecrets(spec.runId);
     this.verifyImage();
     const vmId = `zt-${randomBytes(6).toString('hex')}`;

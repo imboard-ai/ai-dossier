@@ -9,6 +9,7 @@ import { BAKE_FAILED_MARKER, BAKE_RESULT_MARKER, bakeMetaData, bakeUserData } fr
 import { type HostTools, preflightHost } from './host';
 import { AGENT_SOURCE_PATH, type HostOps, systemOps } from './local-qemu';
 import {
+  BAKED_DISK_GIB,
   PROFILE_PINS,
   parseManifest,
   profileDigest,
@@ -122,7 +123,7 @@ export async function bakeProfile(options: BakeOptions): Promise<VmProfileManife
     const disk = path.join(work, 'disk.qcow2');
     await ops.run(
       tools.qemuImg,
-      ['create', '-q', '-f', 'qcow2', '-F', 'qcow2', '-b', base, disk, '16G'],
+      ['create', '-q', '-f', 'qcow2', '-F', 'qcow2', '-b', base, disk, `${BAKED_DISK_GIB}G`],
       QEMU_ENV
     );
     const consoleLog = path.join(work, 'console.log');

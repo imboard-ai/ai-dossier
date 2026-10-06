@@ -27,7 +27,7 @@ import { BROKER_PORT_NAME, SCOPE_FW_CFG } from '../vm/qemu-args';
 
 const AGENT = 'print("fake guest agent")\n';
 const IMAGE_BYTES = Buffer.from('baked profile image');
-const LIMITS: VmLimits = { vcpus: 2, memoryMiB: 2048, diskGiB: 8, commandTimeoutMs: 5000 };
+const LIMITS: VmLimits = { vcpus: 2, memoryMiB: 2048, diskGiB: 16, commandTimeoutMs: 5000 };
 const PID = 4242;
 const CANARY = 'ZT_TEST_CANARY_SECRET';
 
@@ -309,7 +309,7 @@ describe('LocalQemuAdapter.create', () => {
     expect(img?.binary).toBe('/opt/fake/qemu-img');
     expect(img?.args).toContain('-b');
     expect(img?.args[img.args.indexOf('-b') + 1]).toBe(path.join(profileDir, 'image.qcow2'));
-    expect(img?.args.at(-1)).toBe('8G');
+    expect(img?.args.at(-1)).toBe('16G');
 
     const [launch] = host.calls.launch;
     expect(launch?.binary).toBe('/opt/fake/qemu-system-x86_64');
@@ -348,7 +348,7 @@ describe('LocalQemuAdapter.create', () => {
       pid: PID,
       vcpus: 2,
       memoryMiB: 2048,
-      diskGiB: 8,
+      diskGiB: 16,
     });
   });
 
@@ -417,6 +417,15 @@ describe('LocalQemuAdapter.create', () => {
 
   it.each(['', 'bad id', '../x', 'a'.repeat(129)])('rejects run ID %j', async (runId) => {
     await expect(adapter().create(spec(runId))).rejects.toThrow('Invalid run ID');
+  });
+
+  it.each([
+    8, 15.5,
+  ])('refuses a disk limit below the baked image size (%j GiB)', async (diskGiB) => {
+    await expect(adapter().create({ ...spec(), limits: { ...LIMITS, diskGiB } })).rejects.toThrow(
+      /baked image size/
+    );
+    expect(host.calls.run).toEqual([]);
   });
 
   it('rejects a secret-shaped run ID', async () => {

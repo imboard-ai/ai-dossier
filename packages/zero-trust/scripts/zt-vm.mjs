@@ -36,7 +36,7 @@ try {
       stateDir: arg('state-dir'),
       accelerator: arg('accel', 'auto'),
     });
-    const limits = { ...zt.DEFAULT_LIMITS, vcpus: 2, memoryMiB: 4096, diskGiB: 10 };
+    const limits = { ...zt.DEFAULT_LIMITS, vcpus: 2, memoryMiB: 4096, diskGiB: zt.BAKED_DISK_GIB };
     const t0 = Date.now();
     const vm = await adapter.create({ runId: `smoke-${Date.now()}`, limits, scope: 'container' });
     const t1 = Date.now();

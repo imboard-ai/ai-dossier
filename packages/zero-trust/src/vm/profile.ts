@@ -28,6 +28,10 @@ export const PROFILE_PINS = Object.freeze({
 /** Bumped whenever cloud-init, the guest agent or the hardening changes. */
 export const BAKE_RECIPE_VERSION = 1;
 
+/** Virtual size of the baked disk. A run overlay may not be smaller: the guest
+ * kernel rejects a GPT whose partitions end past the disk and cannot find root. */
+export const BAKED_DISK_GIB = 16;
+
 export interface VmProfileManifest {
   readonly schema: 'zt-vm-profile-v1';
   /** Digest over pins + recipe version + guest agent source. */

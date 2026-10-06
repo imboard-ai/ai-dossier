@@ -26,10 +26,16 @@ import {
   parseReports,
 } from '../vm/evidence';
 import { LocalQemuAdapter } from '../vm/local-qemu';
+import { BAKED_DISK_GIB } from '../vm/profile';
 
 const ENABLED = process.env.ZT_VM_E2E === '1';
 const FIXTURES = path.join(__dirname, '..', '..', 'fixtures', 'hostile');
-const LIMITS: VmLimits = { vcpus: 2, memoryMiB: 4096, diskGiB: 10, commandTimeoutMs: 10 * 60_000 };
+const LIMITS: VmLimits = {
+  vcpus: 2,
+  memoryMiB: 4096,
+  diskGiB: BAKED_DISK_GIB,
+  commandTimeoutMs: 10 * 60_000,
+};
 /** Categories whose denial must hold even for root inside the VM: they are
  * enforced by QEMU on the host, not by the container runtime. */
 const HOST_ENFORCED = new Set([
