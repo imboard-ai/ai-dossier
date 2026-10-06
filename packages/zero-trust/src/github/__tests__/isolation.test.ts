@@ -1,6 +1,6 @@
 /** AC8: the credential broker is controller-only. No module outside the
  * credential-holding set, including the package index, the credential-free
- * hand-off modules beside it in src/github/ and the worker broker under src/vm/,
+ * hand-off and fork modules beside it in src/github/ and the worker broker under src/vm/,
  * may reach it through any chain of static or dynamic imports. */
 import fs from 'node:fs';
 import * as path from 'node:path';
@@ -8,8 +8,10 @@ import { describe, expect, it } from 'vitest';
 
 const SRC = path.resolve(__dirname, '../..');
 const GITHUB = path.join(SRC, 'github');
-/** The only modules that hold or handle GitHub credentials. */
-const CREDENTIAL = ['broker.ts', 'app-auth.ts', 'token-journal.ts'].map((name) =>
+/** The only modules that hold or handle GitHub credentials. `contributor.ts` (#1065) joins
+ * them: it runs the user authorization, holds the refresh token and hands the access token
+ * to the broker. Its credential-free half, `fork.ts`, stays outside and is scanned. */
+const CREDENTIAL = ['broker.ts', 'app-auth.ts', 'token-journal.ts', 'contributor.ts'].map((name) =>
   path.join(GITHUB, name)
 );
 const isCredential = (file: string) => CREDENTIAL.includes(file);
@@ -73,6 +75,8 @@ describe('credential broker isolation', () => {
     const broker = path.join(GITHUB, 'broker.ts');
     expect(reaches(broker)).toContain(path.join(GITHUB, 'app-auth.ts'));
     expect(resolve(path.join(SRC, 'index.ts'), './github/broker')).toBe(broker);
+    expect(outside).toContain(path.join(GITHUB, 'fork.ts'));
+    expect(reaches(path.join(GITHUB, 'contributor.ts'))).toContain(broker);
     expect(resolve(path.join(SRC, 'x.ts'), '@ai-dossier/zero-trust')).toBe(
       path.join(SRC, 'index.ts')
     );

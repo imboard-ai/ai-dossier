@@ -84,6 +84,8 @@ const at = (state: RunState) => routes[state].reduce(move, initial());
 
 // Independent product-level adjacency expectation, not copied from exported table.
 const failTargets = ['blocked', 'unsupported', 'failed', 'cancelled', 'blocked_cleanup'];
+// fork_missing and installation_missing wait; installation_too_broad blocks (#1065).
+const prerequisiteWaits = ['awaiting_contributor', 'awaiting_contributor', 'blocked'];
 const expected: Record<RunState, string[]> = {
   gating: [
     ...failTargets,
@@ -91,6 +93,7 @@ const expected: Record<RunState, string[]> = {
     'planning',
     'paused_user',
     'awaiting_contributor',
+    ...prerequisiteWaits,
   ],
   awaiting_maintainer: [...failTargets, 'gating', 'declined'],
   planning: [...failTargets, 'implementing', 'paused_user'],
@@ -105,8 +108,21 @@ const expected: Record<RunState, string[]> = {
     'shipping',
     'revising',
   ],
-  shipping: [...failTargets, 'submitted', 'paused_user', 'awaiting_contributor'],
-  awaiting_contributor: [...failTargets, 'awaiting_maintainer', 'submitted'],
+  shipping: [
+    ...failTargets,
+    'submitted',
+    'paused_user',
+    'awaiting_contributor',
+    ...prerequisiteWaits,
+  ],
+  awaiting_contributor: [
+    ...failTargets,
+    'awaiting_maintainer',
+    'submitted',
+    ...prerequisiteWaits,
+    'gating',
+    'shipping',
+  ],
   submitted: [...failTargets, 'merged', 'accepted', 'declined', 'awaiting_review', 'revising'],
   awaiting_review: [...failTargets, 'merged', 'accepted', 'declined', 'revising'],
   revising: [...failTargets, 'verifying', 'paused_user'],
@@ -150,6 +166,14 @@ describe('lifecycle contract', () => {
         // The publication hand-off is issued from shipping, not from gating.
         if (state === 'awaiting_contributor' && reason === R.PublicationObserved)
           run = move(at('shipping'), R.ContributorHandoff);
+        // Prerequisite re-checks and resumes leave a fork/installation wait, not a link wait.
+        if (
+          state === 'awaiting_contributor' &&
+          (to === 'awaiting_contributor' || to === 'gating' || reason === R.InstallationTooBroad)
+        )
+          run = move(at('gating'), R.ForkMissing);
+        if (state === 'awaiting_contributor' && to === 'shipping')
+          run = move(at('shipping'), R.InstallationMissing);
         const original = serializeRun(run);
         if (to) {
           const next = transitionRun(run, reason, '2026-10-05T00:01:00.000Z');
@@ -252,6 +276,50 @@ describe('lifecycle contract', () => {
       from: 'awaiting_contributor',
       to: 'submitted',
       reasonCode: R.PublicationObserved,
+      timestamp: time,
+    });
+    expect(() => restoreRun(forged)).toThrow(IllegalTransitionError);
+  });
+
+  it('keeps a prerequisite wait and a link hand-off apart (#1065)', () => {
+    const waiting = move(at('shipping'), R.ForkMissing);
+    expect(waiting.state).toBe('awaiting_contributor');
+    expect(waiting.reasonCode).toBe(R.ForkMissing);
+    // The re-check finds the next prerequisite missing: same wait, new reason.
+    const install = move(waiting, R.InstallationMissing);
+    expect(install.state).toBe('awaiting_contributor');
+    expect(install.reasonCode).toBe(R.InstallationMissing);
+    // A resume returns only to the phase that entered the wait, across self-loops.
+    expect(move(install, R.ResumeShipping).state).toBe('shipping');
+    expect(() => move(install, R.ResumeGating)).toThrow(IllegalTransitionError);
+    // Nothing was submitted: an observation cannot leave a prerequisite wait.
+    expect(() => move(install, R.PublicationObserved)).toThrow(IllegalTransitionError);
+    expect(() => move(install, R.EngagementObserved)).toThrow(IllegalTransitionError);
+    expect(move(install, R.InstallationTooBroad).state).toBe('blocked');
+    // Only the fork/installation check blocks as too broad: not a link wait, not other phases.
+    expect(() => move(at('accepted'), R.InstallationTooBroad)).toThrow(IllegalTransitionError);
+    expect(() => move(at('planning'), R.InstallationTooBroad)).toThrow(IllegalTransitionError);
+    // A pending link cannot be skipped by a resume or relabelled as a prerequisite wait.
+    const link = move(at('shipping'), R.ContributorHandoff);
+    expect(() => move(link, R.ResumeShipping)).toThrow(IllegalTransitionError);
+    expect(() => move(link, R.ForkMissing)).toThrow(IllegalTransitionError);
+    expect(() => move(link, R.InstallationTooBroad)).toThrow(IllegalTransitionError);
+    // After the resume, a later link hand-off is judged by its own entry.
+    const resumed = move(install, R.ResumeShipping);
+    const later = move(resumed, R.ContributorHandoff);
+    expect(move(later, R.PublicationObserved).state).toBe('submitted');
+    expect(() => move(later, R.ResumeShipping)).toThrow(IllegalTransitionError);
+    expect(deserializeRun(serializeRun(install))).toEqual(install);
+    // Replay enforces the same guard: a forged resume to another phase is rejected.
+    const forged = {
+      ...JSON.parse(serializeRun(install)),
+      state: 'gating',
+      reasonCode: R.ResumeGating,
+    };
+    forged.history.push({
+      from: 'awaiting_contributor',
+      to: 'gating',
+      reasonCode: R.ResumeGating,
       timestamp: time,
     });
     expect(() => restoreRun(forged)).toThrow(IllegalTransitionError);

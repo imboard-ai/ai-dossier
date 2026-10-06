@@ -198,7 +198,7 @@ Example provenance: “This contribution used substantial LLM assistance, orches
 | `planning`, `implementing`, `verifying` | Isolated active execution |
 | `paused_user` | Selected checkpoint or pause request; no active compute |
 | `shipping` | Typed authenticated operations on verified candidate |
-| `awaiting_contributor` | Durable hand-off: comment link + prepared body or prefilled PR link issued, or manual fork/App installation pending; no compute; resume reconciles by marker |
+| `awaiting_contributor` | Durable hand-off: comment link + prepared body or prefilled PR link issued, or manual fork/App installation pending; no compute; resume reconciles a link by marker, or re-checks the fork and App installation and returns to the phase that entered the wait |
 | `submitted` | Initial run complete, PR URL persisted; CI may be pending |
 | `awaiting_review` | Durable post-submission hand-off |
 | `revising` | Explicit resume addresses actionable feedback on same PR |
