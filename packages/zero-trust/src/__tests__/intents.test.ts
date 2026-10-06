@@ -361,6 +361,9 @@ describe('durable provider-independent write intents', () => {
     expect(await d.execute(input)).toBe('artifact-2');
     expect(fake.reads).toBe(1);
     expect(fake.writes).toBe(2);
+    expect(await d.execute({ ...input, target: 'fork:22:branch:task-validation' })).toBe(
+      'artifact-3'
+    );
   });
   it.each([
     'unknown',

@@ -15,8 +15,8 @@ describe('shared credential rejection policy', () => {
     'sk-12345678',
     '_sk-proj-syntheticKey_',
     'credential_sk-12345678',
-    'nsk-12345678',
-    '0sk-12345678',
+    `nsk-${'A'.repeat(48)}`,
+    `0sk-${'A'.repeat(48)}`,
     String.raw`\nsk-proj-syntheticKey`,
     String.raw`\u0020sk-12345678`,
     'Bearer x',
@@ -34,6 +34,7 @@ describe('shared credential rejection policy', () => {
     String.raw`Authorization:\x9token\u20x`,
     String.raw`Authorization:\U00000009token\U00000020x`,
     JSON.stringify({ header: 'Authorization:\ttoken\tx' }),
+    'Authorization:\\\n token syntheticOpaqueToken',
   ])('rejects synthetic credential %# without echoing input', (credential) => {
     for (const text of [credential, credential.toUpperCase(), `prefix ${credential} suffix`]) {
       // Repeated calls must not depend on a global/sticky regex lastIndex.
@@ -55,6 +56,10 @@ describe('shared credential rejection policy', () => {
     'public facts only',
     'task-ready',
     'risk-budget',
+    'npm run task-validation',
+    'risk-assessment',
+    'fork:22:branch:task-validation',
+    'https://github.com/o/task-readiness/issues/1',
     'token counts',
     'Authorization: public',
     'retry without credentials',

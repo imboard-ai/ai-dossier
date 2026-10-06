@@ -61,6 +61,7 @@ describe('status contract', () => {
     'sk-proj-syntheticKey',
     'Authorization: token x',
     'AUTHORIZATION:\tTOKEN x',
+    'Authorization:\\\n token syntheticOpaqueToken',
     '_sk-proj-syntheticKey_',
     'credential_sk-12345678',
     String.raw`\nsk-proj-syntheticKey`,
@@ -140,6 +141,10 @@ describe('status contract', () => {
     };
     expect(JSON.parse(renderJson(value))).toEqual(value);
     expect(() => assertNoSecrets('public facts only')).not.toThrow();
+    for (const render of [renderHuman, renderJson])
+      expect(render({ ...status, nextPermittedAction: 'risk-assessment' })).toContain(
+        'risk-assessment'
+      );
   });
 
   it('snapshots getter-backed facts once before validation and secret detection', () => {

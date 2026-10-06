@@ -47,14 +47,16 @@ estimates contain nonnegative finite `amount` and a matching three-letter
 use JSON quoting to neutralize line injection. Both use the exported, immutable
 `SECRET_PATTERNS` policy shared with intent and receipt validation. Case-insensitive
 rejection covers GitHub `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` and `github_pat_`,
-`sk-ant-`/`sk-proj-`, standalone `sk-` prefixes, and embedded generic `sk-` keys
-with at least eight alphanumeric/underscore/hyphen payload characters. Prefix-only
-detection is intentionally conservative; ordinary `task-ready`/`risk-budget` text
-is allowed. `Bearer` followed by whitespace and `Authorization: token` followed
+`sk-ant-`/`sk-proj-`, word-boundary or underscore-delimited `sk-` prefixes,
+and embedded generic `sk-` keys with at least 32 alphanumeric/underscore/hyphen
+payload characters. Prefix-only detection is intentionally conservative;
+ordinary `task-validation`/`risk-assessment` text is allowed. `Bearer` followed
+by whitespace and `Authorization: token` followed
 by whitespace are rejected (spaces/tabs before the colon, whitespace after it).
 Literal JSON/shell whitespace escapes (`\t`, `\n`, `\r`, `\v`, `\f`, and
 ASCII whitespace in bounded octal, `\xHH`, `\uHHHH`, and `\UHHHHHHHH`
-forms, including shell short forms) are scanned in a normalized view;
+forms, including shell short forms) are scanned in a normalized view after
+removing shell backslash-newline continuations;
 input is never executed. Rejection raises `SecretRedactionError` containing no
 input. Other malformed facts raise
 `InvalidStatusError`. Pattern detection is a defense-in-depth guard, not proof

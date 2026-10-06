@@ -456,6 +456,7 @@ describe('controller receipt — scenarios 10/17, contributor integrity, S3/S4',
     'ghr_synthetic',
     'sk-proj-syntheticKey',
     'Authorization: token x',
+    'Authorization:\\\n token syntheticOpaqueToken',
     '_sk-proj-syntheticKey_',
     'credential_sk-12345678',
     String.raw`\nsk-proj-syntheticKey`,
@@ -476,6 +477,8 @@ describe('controller receipt — scenarios 10/17, contributor integrity, S3/S4',
     expect(sign).not.toHaveBeenCalled();
   });
   it('escapes hostile HTML/Markdown and reports actual counts/log digests', async () => {
+    input.commands[0].command = 'npm run task-validation';
+    expect(renderReceipt((await issue()).receipt)).toContain('npm run task-validation');
     input.commands[0].command = 'npm test </code><script>alert(1)</script> `\n';
     const text = renderReceipt((await issue()).receipt);
     expect(text).not.toContain('<script>');

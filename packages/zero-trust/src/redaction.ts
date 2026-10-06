@@ -11,8 +11,8 @@ export const SECRET_PATTERNS: readonly string[] = Object.freeze([
   'github_pat_',
   'sk-ant-',
   'sk-proj-',
-  'sk-[A-Za-z0-9_-]{8,}',
-  '\\bsk-',
+  'sk-[A-Za-z0-9_-]{32,}',
+  '(?:\\b|_)sk-',
   'bearer\\s',
   'authorization[ \\t]*:\\s*token\\s',
 ]);
@@ -32,7 +32,9 @@ function normalizeWhitespace(sequence: string): string {
 export function assertNoSecrets(value: string): void {
   if (
     credentialPattern.test(value) ||
-    credentialPattern.test(value.replace(escapedWhitespace, normalizeWhitespace))
+    credentialPattern.test(
+      value.replace(/\\\r?\n/g, '').replace(escapedWhitespace, normalizeWhitespace)
+    )
   )
     throw new SecretRedactionError();
 }
