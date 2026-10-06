@@ -236,7 +236,7 @@ return evictedMemberIds(batch).size > threshold;   // evictedMemberIds = new Set
 
 It is the only dissolve trigger, `evictions.length` appears nowhere in `packages/sched/src/`, and
 the journal's `evictions=` field is that same de-duplicated count (`evictedCount:
-evictedMemberIds(batch).size`). the runner host's deployed `@ai-dossier/sched` was 0.21.0, published
+evictedMemberIds(batch).size`). The runner host's deployed `@ai-dossier/sched` was 0.21.0, published
 2026-09-02T21:32:25Z — before the 05:58 dissolve — and its `dist/recovery.js` carries the
 de-duplicating form.
 

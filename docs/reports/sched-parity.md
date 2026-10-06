@@ -69,11 +69,11 @@ Per-issue wall-clock comes from runstate trails (`ai-dossier runstate stats --is
 |---|---|---|---|---|---|
 | dev machine | 1 247 | 11 | 2 | **0** | 0.19.0 |
 | second host | 4 226 | 2 | 2 | **2** | 0.14.0 |
-| the runner host | 868 | 209 | 209 | 191 | 0.19.0 |
+| runner host | 868 | 209 | 209 | 191 | 0.19.0 |
 
 - **dev machine: zero imboard-cwd runs in the window** — no cohort activity occurred there; nothing undercounted.
 - **second host: 2 imboard-cwd runs in the window** — the only off-host activity. The only non-validation imboard runstate activity inside the window is fleet member #3856's tail (report done 22:44:27Z Aug 29, run `r-3856-6d2a`, PR #3918 — the session already in flight when this validation started), whose dossier fetches these entries plausibly are; the dev machine supervisor characterizes them as an interactive session, not fleet units. They are not part of either comparison cohort (Fleet A's 12 FLEET-PLANs and all its unit trails are the runner host-local; every sched unit ran on the runner host), and at 2-vs-191 they are immaterial either way.
-- **the runner host: 209 in-window entries, 100% carrying duration telemetry, 191 in imboard-monorepo** — consistent with both comparison arms executing here. CLI 0.19.0 ≥ 0.13.0 for the measured window ✅ (the fleet-baseline window opened before the runner host's CLI was upgraded — see §6).
+- **runner host: 209 in-window entries, 100% carrying duration telemetry, 191 in imboard-monorepo** — consistent with both comparison arms executing here. CLI 0.19.0 ≥ 0.13.0 for the measured window ✅ (the fleet-baseline window opened before the runner host's CLI was upgraded — see §6).
 - `input_tokens`/`output_tokens` are null across **all** hosts' runs.jsonl for this window (opencode-spawned runs don't populate them) — the report's per-unit token data from the agent CLIs' own records (claude result JSON + opencode session streams) is therefore the *only* token source, not a fallback.
 
 Fleet B (the claude-model cohort, Aug 25–26) executed on a different host entirely — its tokens are unreachable from the runner host (§6).
