@@ -16,6 +16,7 @@ import {
   IntentDriver,
   type IntentInput,
   idempotencyKey,
+  MutationDeferredError,
   MutationUncertainError,
   ReconcileDeferredError,
   replayIntents,
@@ -385,17 +386,23 @@ describe('verified CAS push to the fork (#1066)', () => {
   it('pushes exactly the candidate under a fork-only lease, persisting expected first (AC2/AC4)', async () => {
     const r = await rig();
     r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
-    let ledgerAtPreflight: string[] = [];
-    r.fork.overrides.push((p) => {
-      if (p.includes('/git/ref/') && r.fork.refReads() === 1) ledgerAtPreflight = r.events();
-      return undefined;
-    });
+    let ledgerAtPush: string[] = [];
+    r.wrap = (inner) => async (intent, target, operation, cancel) =>
+      inner(
+        intent,
+        target,
+        (credential, signal) => {
+          ledgerAtPush = r.events();
+          return operation(credential, signal);
+        },
+        cancel
+      );
     const exec = vi.spyOn(TrustedGit.prototype, 'execAsync');
     expect(r.pusher.expectedRemoteSha(pushOf(SHA1))).toBeNull();
     const ref = await r.driver.execute(pushOf(SHA1));
     expect(ref).toBe(`${TARGET}@${SHA1}`);
     expect(r.fork.sha()).toBe(SHA1);
-    expect(ledgerAtPreflight).toEqual(['push_intended']);
+    expect(ledgerAtPush).toEqual(['push_intended']);
     expect(r.events()).toEqual(['push_intended', 'push_verified']);
     expect(r.ledger.read()[0]).toMatchObject({
       branch: BRANCH,
@@ -432,7 +439,9 @@ describe('verified CAS push to the fork (#1066)', () => {
     r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
     expect(await r.driver.execute(pushOf(SHA1))).toBe(`${TARGET}@${SHA1}`);
     expect(r.mints()).toBe(0);
-    expect(r.events()).toEqual(['push_intended', 'push_verified']);
+    // Nothing to push, so nothing was authorized: the receipt is still unspent.
+    expect(r.events()).toEqual(['push_verified']);
+    expect(r.grants).toHaveLength(1);
   });
 
   it('blocks remote_diverged at preflight and pushes nothing (scenario 18, AC3)', async () => {
@@ -678,11 +687,49 @@ describe('verified CAS push to the fork (#1066)', () => {
     expect(r.driver.snapshot().intents.get(idempotencyKey(pushOf(SHA1)))?.retryReady).toBe(true);
   });
 
-  it('a nonce-store failure is not a refusal: the attempt stays ambiguous', async () => {
+  it('transient failures before the write never spend the retry budget or block', async () => {
+    const r = await rig();
+    const key = idempotencyKey(pushOf(SHA1));
+    const unspent = () =>
+      expect(r.driver.snapshot().intents.get(key)).toMatchObject({
+        status: 'intended',
+        attempts: 0,
+      });
+    // 1. Rate-limited preflight, three times in a row.
+    let limited = 3;
+    r.fork.overrides.push((p) =>
+      p.includes('/git/ref/') && limited-- > 0
+        ? { status: 403, body: { message: 'rate limit' } }
+        : undefined
+    );
+    for (let i = 0; i < 3; i++)
+      await expect(r.driver.execute(pushOf(SHA1))).rejects.toThrow('ref_unknown:403');
+    unspent();
+    // 2. The controller could not produce an authorization.
+    await expect(r.driver.execute(pushOf(SHA1))).rejects.toThrow(MutationDeferredError);
+    unspent();
+    // 3. The nonce store's lock was busy: nothing was consumed.
+    const consume = vi.spyOn(ReceiptNonceStore.prototype, 'consume').mockImplementationOnce(() => {
+      throw new ReceiptError('store_locked');
+    });
+    r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
+    await expect(r.driver.execute(pushOf(SHA1))).rejects.toThrow('store_locked');
+    unspent();
+    consume.mockRestore();
+    expect(r.driver.snapshot().blockedReason).toBeUndefined();
+    expect(r.mints()).toBe(0);
+    expect(replayIntents(journals[2]?.read() ?? [])).toEqual(r.driver.snapshot());
+    // Then it goes through on the first counted attempt, with the same nonce.
+    r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
+    expect(await r.driver.execute(pushOf(SHA1))).toBe(`${TARGET}@${SHA1}`);
+    expect(r.driver.snapshot().intents.get(key)?.attempts).toBe(1);
+  });
+
+  it('a store failure that may have consumed the nonce stays ambiguous, never refused', async () => {
     const r = await rig();
     r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
     vi.spyOn(ReceiptNonceStore.prototype, 'consume').mockImplementation(() => {
-      throw new ReceiptError('store_locked');
+      throw new ReceiptError('persistence_uncertain');
     });
     await expect(r.driver.execute(pushOf(SHA1))).rejects.toThrow(MutationUncertainError);
     expect(r.driver.snapshot().blockedReason).toBeUndefined();
@@ -701,30 +748,31 @@ describe('verified CAS push to the fork (#1066)', () => {
     expect(r.fork.sha()).toBeNull();
   });
 
-  it('a rate-limited or failed read never blocks: preflight is ambiguous, resume defers', async () => {
+  it('an unreadable remote on resume defers without journaling or blocking', async () => {
     const r = await rig();
     r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
+    r.wrap = () => async () => {
+      throw new Error('lost');
+    };
+    await expect(r.driver.execute(pushOf(SHA1))).rejects.toThrow(MutationUncertainError);
+    r.wrap = (inner) => inner;
     let limited = true;
     r.fork.overrides.push((p) =>
       limited && p.includes('/git/ref/')
         ? { status: 403, body: { message: 'rate limit' } }
         : undefined
     );
-    const error = await r.driver.execute(pushOf(SHA1)).catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(MutationUncertainError);
-    expect((error as Error).cause).toMatchObject({ code: 'ref_unknown', status: 403 });
-    expect(r.mints()).toBe(0);
-    // Resume while still limited: deferred, not blocked, nothing journaled.
     const before = journals.map((j) => j.read().length);
     await expect(r.driver.resume()).rejects.toThrow(ReconcileDeferredError);
     await expect(r.driver.resume()).rejects.toThrow('ref_unknown:403');
+    await expect(r.driver.execute(pushOf(SHA1))).rejects.toThrow(ReconcileDeferredError);
     expect(r.driver.snapshot().blockedReason).toBeUndefined();
     expect(journals.map((j) => j.read().length)).toEqual(before);
-    // Readable again: the remote is still absent, so the one retry is admitted.
     limited = false;
     r.fork.overrides.push((p) => (p === `/repos/${OWNER}/fixture` ? 'throw' : undefined));
     await expect(r.driver.resume()).rejects.toThrow(ReconcileDeferredError);
     r.fork.overrides.pop();
+    // Readable again: still absent, so the one retry is admitted.
     await r.driver.resume();
     r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-2' });
     expect(await r.driver.execute(pushOf(SHA1))).toBe(`${TARGET}@${SHA1}`);

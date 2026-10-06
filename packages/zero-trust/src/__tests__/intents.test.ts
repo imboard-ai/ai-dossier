@@ -11,6 +11,7 @@ import {
   IntentError,
   type IntentInput,
   idempotencyKey,
+  MutationDeferredError,
   MutationUncertainError,
   OPERATION_KINDS,
   parseEngagementMarker,
@@ -381,6 +382,33 @@ describe('durable provider-independent write intents', () => {
     expect(d.snapshot().blockedReason).toBe(reason);
     expect(replayIntents(j.read())).toEqual(d.snapshot());
     await expect(d.execute({ ...input, target: 'other' })).rejects.toThrow(WriteBlockedError);
+  });
+  it('withdraws an attempt the adapter proved unsent, without spending the retry budget', async () => {
+    const fake = new FakeAdapter();
+    const j = journal();
+    const d = driver(j, fake);
+    const key = idempotencyKey(input);
+    vi.spyOn(fake, 'mutate').mockRejectedValueOnce(new MutationDeferredError('rate_limited'));
+    await expect(d.execute(input)).rejects.toThrow(MutationDeferredError);
+    expect(d.snapshot().intents.get(key)).toMatchObject({ status: 'intended', attempts: 0 });
+    // After a proven absence, a withdrawn retry returns to the admitted retry.
+    fake.mode = 'fail';
+    await expect(d.execute(input)).rejects.toThrow(MutationUncertainError);
+    fake.mode = 'success';
+    await d.resume();
+    vi.spyOn(fake, 'mutate').mockRejectedValueOnce(new MutationDeferredError());
+    await expect(d.execute(input)).rejects.toThrow(MutationDeferredError);
+    expect(d.snapshot().intents.get(key)).toMatchObject({
+      status: 'ambiguous',
+      attempts: 1,
+      retryReady: true,
+    });
+    expect(replayIntents(j.read())).toEqual(d.snapshot());
+    expect(d.snapshot().blockedReason).toBeUndefined();
+    // Only an attempted intent can be withdrawn.
+    expect(() => replayIntents([...j.read(), { v: 1, type: 'withdrawn', key }])).toThrow(
+      IntentError
+    );
   });
   it('blocks with remote_diverged when reconciliation proves unexpected remote content', async () => {
     const fake = new FakeAdapter();

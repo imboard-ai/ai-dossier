@@ -64,7 +64,8 @@ export interface WriteAdapter {
    * Either method may throw `WriteRefusedError` when it proved nothing unintended was
    * written, or that the remote holds content it must not touch: the driver then blocks
    * with that reason instead of treating the attempt as a retryable absence. `reconcile`
-   * throws `ReconcileDeferredError` when the evidence is only temporarily unreadable. */
+   * throws `ReconcileDeferredError` when the evidence is only temporarily unreadable;
+   * `mutate` throws `MutationDeferredError` when it proved nothing was sent. */
   mutate(intent: Intent): Promise<MutationResult>;
 }
 export interface IntentState {
@@ -123,6 +124,15 @@ export class ReconcileDeferredError extends Error {
   constructor(readonly detail?: string) {
     super(`Zero-trust reconciliation deferred${detail ? ` (${detail})` : ''}; resume later`);
     this.name = 'ReconcileDeferredError';
+  }
+}
+/** Thrown by `mutate` when it proved that nothing was sent and no single-use authority
+ * was consumed (a transient read or lock failure before the write): the driver withdraws
+ * the attempt instead of spending the retry budget on it. */
+export class MutationDeferredError extends Error {
+  constructor(readonly detail?: string) {
+    super(`Zero-trust write deferred${detail ? ` (${detail})` : ''}; nothing was sent`);
+    this.name = 'MutationDeferredError';
   }
 }
 export class MutationUncertainError extends Error {
@@ -192,7 +202,7 @@ type Event =
   | { v: 1; type: 'run'; run: RunRecord; contributionId: string }
   | { v: 1; type: 'run_update'; run: RunRecord }
   | { v: 1; type: 'intended'; input: IntentInput }
-  | { v: 1; type: 'attempted' | 'ambiguous' | 'absent' | 'exhausted'; key: string }
+  | { v: 1; type: 'attempted' | 'ambiguous' | 'absent' | 'exhausted' | 'withdrawn'; key: string }
   | { v: 1; type: 'confirmed'; key: string; artifactRef: string; remoteSha?: string }
   | { v: 1; type: 'blocked'; run: RunRecord; reason: WriteBlockReason };
 
@@ -293,6 +303,14 @@ function reduce(state: IntentState | undefined, raw: unknown): IntentState {
       case 'ambiguous':
         if (intent.status !== 'attempted') throw new IntentError();
         next = { ...intent, status: 'ambiguous' };
+        break;
+      case 'withdrawn':
+        // Undo the attempt exactly: back to `intended`, or to the admitted retry.
+        if (intent.status !== 'attempted' || intent.attempts < 1) throw new IntentError();
+        next =
+          intent.attempts === 1
+            ? { ...intent, status: 'intended', attempts: 0, retryReady: false }
+            : { ...intent, status: 'ambiguous', attempts: intent.attempts - 1, retryReady: true };
         break;
       case 'absent':
         if (
@@ -483,6 +501,10 @@ export class IntentDriver {
         result = await this.adapter.mutate(intent);
       } catch (error) {
         if (error instanceof WriteRefusedError) this.block(error.reason, error);
+        if (error instanceof MutationDeferredError) {
+          this.persist({ v: 1, type: 'withdrawn', key });
+          throw error;
+        }
         this.persist({ v: 1, type: 'ambiguous', key });
         throw new MutationUncertainError({ cause: error });
       }

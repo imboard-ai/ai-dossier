@@ -14,6 +14,7 @@ import {
   type IntentInput,
   idempotencyKey,
   MAX_WRITE_ATTEMPTS,
+  MutationDeferredError,
   type MutationResult,
   ReconcileDeferredError,
   type ReconcileResult,
@@ -41,8 +42,8 @@ import type { GitHubRead } from './reconcile';
 import type { TokenStore } from './token-journal';
 
 const PUSH_TIMEOUT_MS = 120_000;
-/** Nonce-store failures say nothing about the receipt: the attempt stays ambiguous, and
- * reconciliation (remote still at the expected SHA) admits the one retry. */
+/** Nonce-store failures say nothing about the receipt. A lock that was never taken defers;
+ * the others may have consumed the nonce, so the attempt stays ambiguous. */
 const STORE_FAILURES = Object.freeze([
   'store_locked',
   'persistence_uncertain',
@@ -231,10 +232,7 @@ export class ForkPusher implements WriteAdapter {
       remote = await this.readRef(at);
     } catch (error) {
       // Rate limit, 5xx, network: nothing is known yet, so nothing is decided.
-      if (error instanceof ForkRefError)
-        throw new ReconcileDeferredError(
-          `${error.code}${error.status === undefined ? '' : `:${error.status}`}`
-        );
+      if (error instanceof ForkRefError) throw new ReconcileDeferredError(refFailure(error));
       throw error;
     }
     if (remote === sha) return { kind: 'found', ...this.verified(intent, at, sha) };
@@ -246,6 +244,16 @@ export class ForkPusher implements WriteAdapter {
   async mutate(intent: Intent): Promise<MutationResult> {
     const { at, sha } = this.target(intent);
     const expected = this.expectedRemoteSha(intent);
+    // Preflight first: a transient read failure here has sent and consumed nothing.
+    let before: string | null;
+    try {
+      before = await this.readRef(at);
+    } catch (error) {
+      if (error instanceof ForkRefError) throw new MutationDeferredError(refFailure(error));
+      throw error;
+    }
+    if (before === sha) return this.verified(intent, at, sha);
+    if (before !== expected) throw diverged(expected, before);
     const candidate = await this.admit(intent, sha, expected);
     // Write-ahead: a crash from here on is reconciled against these values.
     this.record({
@@ -258,9 +266,6 @@ export class ForkPusher implements WriteAdapter {
       candidateSha: sha,
       expectedRemoteSha: expected,
     });
-    const before = await this.readRef(at);
-    if (before === sha) return this.verified(intent, at, sha);
-    if (before !== expected) throw diverged(expected, before);
     const outcome = await this.options.broker.withForkPush(
       intent,
       { repositoryId: at.fork.repositoryId },
@@ -291,7 +296,14 @@ export class ForkPusher implements WriteAdapter {
     sha: string,
     expected: string | null
   ): Promise<CanonicalCandidate> {
-    const { receipt, context, candidate } = await this.options.authorize(intent);
+    let authorization: ShippingAuthorization;
+    try {
+      authorization = await this.options.authorize(intent);
+    } catch (error) {
+      // The controller could not produce one: no nonce was touched.
+      throw new MutationDeferredError(`authorize:${(error as Error)?.name ?? 'Error'}`);
+    }
+    const { receipt, context, candidate } = authorization;
     try {
       // Only the reconstructed, receipt-bound candidate on the verified parent ships.
       if (
@@ -312,6 +324,9 @@ export class ForkPusher implements WriteAdapter {
       );
       return candidate;
     } catch (error) {
+      // The lock was never taken, so the nonce was not consumed.
+      if (error instanceof ReceiptError && error.code === 'store_locked')
+        throw new MutationDeferredError(error.code);
       if (error instanceof ReceiptError && !STORE_FAILURES.includes(error.code))
         throw new WriteRefusedError('authorization_refused', error.code);
       if (error instanceof ForkPushError)
@@ -381,6 +396,10 @@ export class ForkPusher implements WriteAdapter {
       });
     return { artifactRef: `${intent.target}@${sha}`, remoteSha: sha };
   }
+}
+
+function refFailure(error: ForkRefError): string {
+  return `${error.code}${error.status === undefined ? '' : `:${error.status}`}`;
 }
 
 function diverged(expected: string | null, observed: string | null): WriteRefusedError {

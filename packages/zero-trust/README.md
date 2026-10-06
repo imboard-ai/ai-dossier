@@ -159,7 +159,10 @@ reason is still journaled. Proven absence after the final attempt is journaled a
 storing provider exception text. A `reconcile` that throws `ReconcileDeferredError`
 (evidence temporarily unreadable: rate limit, network) records nothing and blocks
 nothing; `resume()`/`execute()` rethrow it and a later resume reads again. Only positive
-evidence blocks.
+evidence blocks. Likewise a `mutate` that throws `MutationDeferredError` (it proved nothing
+was sent and no single-use authority was consumed, e.g. a rate-limited preflight or a
+busy nonce-store lock) gets its attempt withdrawn (`withdrawn` event), so transient
+failures never spend the one retry.
 Every intent and attempt is fsynced before the adapter runs;
 confirmation is fsynced before success returns. File and ancestor directory entries
 are fsynced on open. Write uncertainty poisons the live driver; recover from disk
