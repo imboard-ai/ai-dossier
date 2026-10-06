@@ -3,6 +3,7 @@ import { Code } from 'astro:components';
 import CopyCommand from '../components/CopyCommand.astro';
 import Base from '../layouts/Base.astro';
 import { loadRegistry } from '../lib/registry.mjs';
+import { softwareApplicationSchema } from '../lib/seo.mjs';
 
 const registry = await loadRegistry();
 const repo = 'https://github.com/imboard-ai/ai-dossier';
@@ -41,7 +42,7 @@ const example = `---dossier
 The skill an AI agent follows, written in plain markdown.
 The header above is what makes them verifiable.`;
 ---
-<Base bare title="AI Dossier" description="Your agent skills, versioned and signed. Publish a skill once, install it on every machine, and let teammates and customers verify it came from you.">
+<Base bare title="AI Dossier" schema={softwareApplicationSchema(new URL('/', Astro.site).href)} description="Your agent skills, versioned and signed. Publish a skill once, install it on every machine, and let teammates and customers verify it came from you.">
   <section class="hero">
     <div class="wrap hero-grid">
       <div class="hero-copy">

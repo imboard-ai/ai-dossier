@@ -1,5 +1,6 @@
 import sitemap from '@astrojs/sitemap';
 import { defineConfig } from 'astro/config';
+import { docsPageLastmod } from './src/lib/lastmod.mjs';
 import remarkDocsLinks from './src/plugins/remark-docs-links.mjs';
 import remarkMermaid from './src/plugins/remark-mermaid.mjs';
 
@@ -18,6 +19,12 @@ export default defineConfig({
     // Internal working notes stay reachable but out of the sitemap.
     sitemap({
       filter: (page) => !/\/docs\/(reports|agent-traps|contributing\/mcp)(\/|$)/.test(page),
+      // lastmod from the git history of the markdown behind each docs page; other pages omit it
+      // rather than claim every deploy changed them.
+      serialize(item) {
+        const lastmod = docsPageLastmod(new URL(item.url).pathname);
+        return lastmod ? { ...item, lastmod } : item;
+      },
     }),
   ],
   markdown: {

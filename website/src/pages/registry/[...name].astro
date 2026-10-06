@@ -2,6 +2,7 @@
 import CopyCommand from '../../components/CopyCommand.astro';
 import Base from '../../layouts/Base.astro';
 import { loadRegistry } from '../../lib/registry.mjs';
+import { trimTo } from '../../lib/seo.mjs';
 
 export async function getStaticPaths() {
   const { dossiers } = await loadRegistry();
@@ -11,7 +12,7 @@ export async function getStaticPaths() {
 const { d } = Astro.props;
 const sig = d.signature;
 ---
-<Base title={`${d.title} (${d.name})`} description={d.description.slice(0, 200) || `${d.title} on the AI Dossier registry`}>
+<Base title={`${d.title} (${d.name})`} description={d.description ? trimTo(d.description, 160) : `${d.title} (${d.name}) on the AI Dossier registry`}>
   <p class="back"><a href="/registry/">&larr; All dossiers</a></p>
   <h1>{d.title}</h1>
   <p class="meta">

@@ -2,6 +2,8 @@
 import { getCollection, render } from 'astro:content';
 import Base from '../../layouts/Base.astro';
 import { docsNav, titleOf } from '../../lib/docs-nav';
+import { docsPageLastmod } from '../../lib/lastmod.mjs';
+import { docDescription, techArticleSchema } from '../../lib/seo.mjs';
 
 export async function getStaticPaths() {
   const entries = await getCollection('docs');
@@ -17,10 +19,19 @@ const toc = headings.filter((h) => h.depth === 2 || h.depth === 3);
 const nav = await docsNav();
 const title = titleOf(entry.id, entry.body);
 const current = entry.id === 'index' ? '' : entry.id;
+const description = docDescription({ data: entry.data, body: entry.body, title });
+const site = new URL('/', Astro.site).href;
+const article = techArticleSchema({
+  url: new URL(Astro.url.pathname, Astro.site).href,
+  headline: title,
+  description,
+  site,
+  dateModified: docsPageLastmod(Astro.url.pathname),
+});
 const source = `docs/${entry.filePath?.replace(/^.*?docs\//, '') ?? ''}`;
 const editUrl = `https://github.com/imboard-ai/ai-dossier/blob/main/${source}`;
 ---
-<Base title={title} description={`${title}: AI Dossier documentation.`} wide>
+<Base title={title} description={description} schema={article} wide>
   <div class="layout">
     <nav class="side" aria-label="Documentation">
       <a href="/docs/" aria-current={current === '' ? 'page' : undefined}><strong>Overview</strong></a>
