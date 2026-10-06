@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { forkTarget } from '../github/fork-ref';
 import {
   compareLink,
   engagementBody,
@@ -21,6 +22,7 @@ import {
   replayHandoffs,
 } from '../github/handoff-driver';
 import { buildPrContent, type PrContentInput } from '../github/pr-body';
+import { ForkPusher } from '../github/push';
 import {
   anonymousReader,
   type GitHubRead,
@@ -641,7 +643,7 @@ describe('awaiting_contributor hand-off driver', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  /** #1066 is not built yet: the verified-push read-back is a stub here. */
+  /** The verified-push read-back is a stub here; the real adapter is exercised below. */
   function admission(overrides: Partial<HandoffAdmission> = {}): HandoffAdmission {
     return {
       policyFresh: async () => true,
@@ -728,6 +730,69 @@ describe('awaiting_contributor hand-off driver', () => {
     expect(d.status()).toBeNull();
     expect(d.snapshot().run.state).toBe('shipping');
     expect(journal.read()).toHaveLength(1);
+  });
+
+  /** The production adapter (#1066): `ForkPusher.handoffReadBack` over a fork ref fake. */
+  function pusherReadBack(remote: string | null, verified: string | null) {
+    const fork = { repositoryId: 4242, owner: 'alice', repo: 'proj' };
+    const target = forkTarget(fork, binding.branch);
+    const ledger = verified
+      ? [
+          {
+            v: 1,
+            type: 'push_verified',
+            key: 'k',
+            repositoryId: fork.repositoryId,
+            branch: binding.branch,
+            remoteSha: verified,
+          },
+        ]
+      : [];
+    const pusher = new ForkPusher({
+      broker: { withForkPush: async () => Promise.reject(new Error('no push here')) },
+      read: async (p) =>
+        p === '/repos/alice/proj'
+          ? { status: 200, body: { id: fork.repositoryId } }
+          : remote
+            ? {
+                status: 200,
+                body: {
+                  ref: `refs/heads/${binding.branch}`,
+                  object: { type: 'commit', sha: remote },
+                },
+              }
+            : { status: 404, body: null },
+      fork,
+      ledger: { read: () => ledger, append: () => undefined },
+      trustedControllerKey: 'unused',
+      nonces: {} as never,
+      authorize: async () => Promise.reject(new Error('no authorization here')),
+    });
+    return pusher.handoffReadBack(target);
+  }
+
+  it.each([
+    ['another verified SHA', OTHER, OTHER],
+    ['an unverified SHA', CANDIDATE, null],
+    ['an absent branch', null, CANDIDATE],
+  ] as const)('the real read-back blocks the link on %s', async (_name, remote, verified) => {
+    const d = driver(
+      github({ pulls: [] }).read,
+      shipping,
+      admission({ remoteBranchSha: pusherReadBack(remote, verified) })
+    );
+    await expect(d.issuePr(prRequest())).rejects.toThrow('admission_remote_sha');
+    expect(d.status()).toBeNull();
+    expect(journal.read()).toHaveLength(1);
+  });
+
+  it('the real read-back admits the verified candidate', async () => {
+    const d = driver(
+      github({ pulls: [] }).read,
+      shipping,
+      admission({ remoteBranchSha: pusherReadBack(CANDIDATE, CANDIDATE) })
+    );
+    expect((await d.issuePr(prRequest())).kind).toBe('awaiting_contributor');
   });
 
   it('never issues while a matching PR exists in any state, or when GitHub is unreadable', async () => {
