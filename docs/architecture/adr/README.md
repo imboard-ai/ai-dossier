@@ -38,6 +38,10 @@ What becomes easier or more difficult to do because of this change?
 
 *No ADRs yet - this is a new addition to the project structure.*
 
+Feature-scoped decision records live next to their feature's PRD instead, under
+`docs/features/<feature>/decisions/`, for example
+[zero-trust-full-cycle/decisions](../../features/zero-trust-full-cycle/decisions/).
+
 ## Examples of Good ADR Topics
 
 - Choice of programming language or framework

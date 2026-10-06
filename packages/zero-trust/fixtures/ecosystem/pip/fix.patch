@@ -1,0 +1,12 @@
+diff --git a/slugify.py b/slugify.py
+index b7894b8..9e895b2 100644
+--- a/slugify.py
++++ b/slugify.py
+@@ -5,6 +5,4 @@ import re
+ 
+ def slugify(title: str) -> str:
+     """Lowercase, replace non-alphanumerics with single hyphens, trim hyphens."""
+-    # Known bug: each separator character becomes its own hyphen, so runs of
+-    # punctuation or spaces produce "--" instead of a single "-".
+-    return re.sub(r"[^a-z0-9]", "-", title.lower()).strip("-")
++    return re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")

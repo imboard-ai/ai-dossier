@@ -1,0 +1,14 @@
+diff --git a/test/regression.test.js b/test/regression.test.js
+new file mode 100644
+index 0000000..9b3793a
+--- /dev/null
++++ b/test/regression.test.js
+@@ -0,0 +1,8 @@
++const assert = require('node:assert/strict');
++const test = require('node:test');
++const { toSeconds } = require('../src/duration');
++
++test('converts seconds and minutes to whole seconds', () => {
++  assert.equal(toSeconds('90s'), 90);
++  assert.equal(toSeconds('2m'), 120);
++});

@@ -4,7 +4,7 @@ export default defineConfig({
   test: {
     globalSetup: ['../../test-support/isolated-home.mjs'],
     environment: 'node',
-    exclude: ['**/worktrees/**', '**/node_modules/**', '**/dist/**'],
+    exclude: ['**/worktrees/**', '**/node_modules/**', '**/dist/**', 'fixtures/**'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],

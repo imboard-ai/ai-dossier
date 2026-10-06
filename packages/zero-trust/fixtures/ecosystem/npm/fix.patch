@@ -1,0 +1,14 @@
+diff --git a/src/duration.js b/src/duration.js
+index bf275d8..eeed224 100644
+--- a/src/duration.js
++++ b/src/duration.js
+@@ -4,8 +4,7 @@ const ms = require('ms');
+ function toSeconds(text) {
+   const millis = ms(text);
+   if (typeof millis !== 'number') throw new TypeError(`Invalid duration: ${text}`);
+-  // Known bug: milliseconds are divided by 100, so "90s" becomes 900.
+-  return Math.round(millis / 100);
++  return Math.round(millis / 1000);
+ }
+ 
+ module.exports = { toSeconds };

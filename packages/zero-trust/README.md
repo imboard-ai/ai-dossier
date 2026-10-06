@@ -1,9 +1,11 @@
 # @ai-dossier/zero-trust
 
 Private, provider-independent foundation for [PRD-ZTFC-001](../../docs/features/zero-trust-full-cycle/prd.md)
-§5.1, §5.7, §5.8 and §5.9. No VM/network/model/GitHub calls; receipts use core's
-Ed25519 signer abstraction and Ajv schema validation.
-This provides lifecycle/status, durable intent/budget, canonical Git and receipt primitives.
+§5.1, §5.5 and §5.6 (gate 2 prep), §5.7, §5.8 and §5.9. No VM/network/model/GitHub
+calls; receipts use core's Ed25519 signer abstraction and Ajv schema validation.
+This provides lifecycle/status, durable intent/budget, canonical Git and receipt primitives,
+plus ecosystem detection, runtime profiles, command plans and package-proxy policy
+(see the gate 2 section below).
 Publication remains gated on S1 feasibility.
 
 ```ts
@@ -385,3 +387,31 @@ no worker access or administrative deletion of the consumed history; not NFS.
 when upstream policy/template allows it. It rejects credential-pattern strings and
 never prints raw logs. Rendering does not authenticate a signature; its evidence
 claim is limited to the exact candidate and is not proof of patch correctness.
+
+## Ecosystem support and package proxy (gate 2 prep)
+
+`src/ecosystem/` prepares feasibility gate 2 without a VM. Design and open questions:
+[package-proxy decision record](../../docs/features/zero-trust-full-cycle/decisions/package-proxy.md).
+
+- `detectEcosystem(files)` (or `sourceFilesFromManifest(manifest)` first) accepts npm with
+  `package-lock.json`, pip with a fully hash-pinned `requirements.txt`, and uv with
+  `uv.lock`. Everything else returns `unsupported_environment` with a specific reason.
+- `selectProfile(detection)` picks a runtime from the versioned `profiles.json` that
+  satisfies every project declaration and never substitutes a version.
+  `recordProfileSelection` / `loadProfileRecord` store the choice once per run and
+  re-verify it before execution. `profileReceiptBinding` gives the receipt's profile fields.
+- `buildCommandPlan(manager, proxy, options?)` returns provisioning (`package_proxy`) and
+  verification (`none`) commands as argv data. `options` sets test targets (e.g. the
+  regression test), timeouts, the profile's interpreter and an environment directory
+  outside the repository. This package executes nothing.
+- `classifyOutcome`, `classifyRegression`, `applyProvisioning` and `applyVerification`
+  treat timeouts, unreadable reports and zero suites as `inconclusive`, map provisioning
+  failures to `unsupported_environment`, and enforce the two-repair cap from run history
+  (`assertRepairAllowed`). `commandEvidence` and `overallStatus` build receipt evidence.
+- `PROXY_POLICY`, `evaluateRequest`, `evaluateRedirect`, `buildLockIndex` and
+  `checkArtifact` define the proxy policy. `renderSquidConfig`, `renderVerdaccioConfig`,
+  `verdaccioEnvironment` and `proxpiEnvironment` render it for the OSS components that
+  enforce it. Registry addresses and hash formats live in `registries.ts`.
+
+Fixtures with known bugs live in `fixtures/ecosystem/`. CI self-checks them
+(`scripts/zero-trust-fixtures-selfcheck.mjs`); that is the only host-side install/test run.
