@@ -33,9 +33,9 @@ describe('token journal replay', () => {
     const ledger = replayTokens([
       ...base,
       { v: 1, type: 'token_used', id: install, at },
-      { v: 1, type: 'token_revoke_failed', id: install, at },
+      { v: 1, type: 'token_revoke_failed', id: install, stage: 'delete', status: 502, at },
       { v: 1, type: 'token_revoked', id: install, verified: true, at },
-      { v: 1, type: 'token_revoked', id: user, verified: false, at },
+      { v: 1, type: 'token_revoked', id: user, verified: true, at },
       { v: 1, type: 'admissions_disabled', reason: 'kill_switch', at },
       { v: 1, type: 'admissions_disabled', reason: 'cleanup_blocked', at },
       { v: 1, type: 'grant_delete_refused', via: child, status: 404, at },

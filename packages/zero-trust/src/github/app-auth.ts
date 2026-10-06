@@ -2,9 +2,20 @@
  * operator's environment, stay in memory, and never reach run artifacts. */
 import { createSign } from 'node:crypto';
 import { inspect } from 'node:util';
+import { isRecord } from '../state';
 
 export const GITHUB_API = 'https://api.github.com';
 export const GITHUB_API_VERSION = '2022-11-28';
+/** App JWT: backdated for clock skew, valid under GitHub's 10-minute maximum. */
+const JWT_CLOCK_SKEW_S = 60;
+const JWT_LIFETIME_S = 540;
+/** A stalled call must not hold a revocation open past the use window. */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+const MAX_RESPONSE_BYTES = 1024 * 1024;
+export const INSTALLATION_TOKEN_PREFIX = 'ghs_';
+export const USER_TOKEN_PREFIX = 'ghu_';
+/** Token values go into headers and git config: allow only GitHub's token alphabet. */
+export const TOKEN_FORMAT = /^gh[su]_[A-Za-z0-9_]{20,255}$/u;
 
 export class GitHubAuthError extends Error {
   constructor() {
@@ -18,6 +29,8 @@ export class GitHubTransportError extends Error {
     this.name = 'GitHubTransportError';
   }
 }
+
+const APP_REDACTED = '[AppCredentials redacted]';
 
 /** Opaque holder: secret fields are private, so serialization cannot reach them. */
 export class AppCredentials {
@@ -49,11 +62,11 @@ export class AppCredentials {
   get clientId(): string {
     return this.#clientId;
   }
-  /** RS256 App JWT, valid 9 minutes with 60 s of clock-skew allowance. */
+  /** RS256 App JWT; throws GitHubAuthError before any request when the key cannot sign. */
   appJwt(nowMs: number): string {
     const now = Math.floor(nowMs / 1000);
     const enc = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
-    const data = `${enc({ alg: 'RS256', typ: 'JWT' })}.${enc({ iat: now - 60, exp: now + 540, iss: this.#appId })}`;
+    const data = `${enc({ alg: 'RS256', typ: 'JWT' })}.${enc({ iat: now - JWT_CLOCK_SKEW_S, exp: now + JWT_LIFETIME_S, iss: this.#appId })}`;
     try {
       return `${data}.${createSign('RSA-SHA256').update(data).sign(this.#privateKey, 'base64url')}`;
     } catch {
@@ -64,10 +77,10 @@ export class AppCredentials {
     return `Basic ${Buffer.from(`${this.#clientId}:${this.#clientSecret}`).toString('base64')}`;
   }
   toJSON(): string {
-    return '[AppCredentials redacted]';
+    return APP_REDACTED;
   }
   [inspect.custom](): string {
-    return '[AppCredentials redacted]';
+    return APP_REDACTED;
   }
 }
 
@@ -107,7 +120,11 @@ export interface GitHubResponse {
 /** Injected transport: tests replay recorded responses, never live GitHub. */
 export type GitHubHttp = (request: GitHubRequest) => Promise<GitHubResponse>;
 
-export function fetchGitHubHttp(base = GITHUB_API, fetchImpl: typeof fetch = fetch): GitHubHttp {
+export function fetchGitHubHttp(
+  base = GITHUB_API,
+  fetchImpl: typeof fetch = fetch,
+  timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS
+): GitHubHttp {
   return async (request) => {
     let response: Response;
     let text: string;
@@ -123,6 +140,7 @@ export function fetchGitHubHttp(base = GITHUB_API, fetchImpl: typeof fetch = fet
         },
         body: request.body === undefined ? undefined : JSON.stringify(request.body),
         redirect: 'error',
+        signal: AbortSignal.timeout(timeoutMs),
       });
       text = await response.text();
     } catch {
@@ -131,7 +149,7 @@ export function fetchGitHubHttp(base = GITHUB_API, fetchImpl: typeof fetch = fet
     }
     let json: unknown = null;
     try {
-      json = text ? JSON.parse(text) : null;
+      json = text && text.length <= MAX_RESPONSE_BYTES ? JSON.parse(text) : null;
     } catch {
       json = null;
     }
@@ -146,30 +164,32 @@ export interface IssuedToken {
   readonly expiresAt: string;
   readonly permissions: Readonly<Record<string, string>> | null;
   readonly repositoryIds: readonly number[] | null;
+  /** `selected` when GitHub confirms a repository-limited token. */
+  readonly repositorySelection: string | null;
 }
 export type IssueResult =
   | { readonly kind: 'issued'; readonly token: IssuedToken }
   | { readonly kind: 'refused'; readonly status: number }
   | { readonly kind: 'malformed'; readonly status: number };
 
-function record(value: unknown): Record<string, unknown> | null {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
+const asObject = (value: unknown): Record<string, unknown> | null =>
+  isRecord(value) ? value : null;
 function issued(status: number, json: unknown, prefix: string): IssueResult {
-  const body = record(json);
+  const body = asObject(json);
   const value = body?.token;
   const expiresAt = body?.expires_at;
   if (
     typeof value !== 'string' ||
     !value.startsWith(prefix) ||
+    !TOKEN_FORMAT.test(value) ||
     typeof expiresAt !== 'string' ||
     !Number.isFinite(Date.parse(expiresAt))
   )
     return { kind: 'malformed', status };
-  const permissions = record(record(body?.installation)?.permissions ?? body?.permissions);
+  const installation = asObject(body?.installation);
+  const permissions = asObject(installation?.permissions ?? body?.permissions);
   const repositories = body?.repositories;
+  const selection = installation?.repository_selection ?? body?.repository_selection;
   return {
     kind: 'issued',
     token: {
@@ -179,8 +199,9 @@ function issued(status: number, json: unknown, prefix: string): IssueResult {
         ? Object.fromEntries(Object.entries(permissions).map(([k, v]) => [k, String(v)]))
         : null,
       repositoryIds: Array.isArray(repositories)
-        ? repositories.map((repo) => Number(record(repo)?.id))
+        ? repositories.map((repo) => Number(asObject(repo)?.id))
         : null,
+      repositorySelection: typeof selection === 'string' ? selection : null,
     },
   };
 }
@@ -200,7 +221,7 @@ export async function mintInstallationToken(
     body: { repository_ids: [repositoryId], permissions: { contents: 'write' } },
   });
   if (response.status !== 201) return { kind: 'refused', status: response.status };
-  return issued(response.status, response.json, 'ghs_');
+  return issued(response.status, response.json, INSTALLATION_TOKEN_PREFIX);
 }
 
 /** `POST /applications/{client_id}/token/scoped`: one level only, from an unscoped ghu. */
@@ -224,7 +245,7 @@ export async function scopeUserToken(
   });
   if (response.status !== 200 && response.status !== 201)
     return { kind: 'refused', status: response.status };
-  return issued(response.status, response.json, 'ghu_');
+  return issued(response.status, response.json, USER_TOKEN_PREFIX);
 }
 
 /** `DELETE /installation/token` (ghs) or `DELETE /applications/{client_id}/token` (ghu). */

@@ -119,6 +119,22 @@ describe('fetchGitHubHttp', () => {
   });
 });
 
+describe('fetchGitHubHttp timeout', () => {
+  it('turns a stalled request into a transport error', async () => {
+    const stalled = fetchGitHubHttp(
+      'https://api.example.test',
+      ((_url: string, init: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => reject(new Error('aborted')));
+        })) as unknown as typeof fetch,
+      20
+    );
+    await expect(
+      stalled({ method: 'DELETE', path: '/installation/token', authorization: 'Bearer x' })
+    ).rejects.toBeInstanceOf(GitHubTransportError);
+  });
+});
+
 describe('recorded-response fake matches the gate-3 probe evidence', () => {
   // Redacted live evidence; the fake must reproduce each recorded status code.
   const evidence = fs

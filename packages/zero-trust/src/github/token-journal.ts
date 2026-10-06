@@ -7,6 +7,8 @@ import { isRecord, isTimestamp } from '../state';
 
 export const TOKEN_KINDS = Object.freeze(['installation', 'user', 'user_scoped'] as const);
 export type TokenKind = (typeof TOKEN_KINDS)[number];
+/** The kinds a fork push can be minted as. */
+export type ForkPushVia = Exclude<TokenKind, 'user'>;
 export type TokenStatus =
   /** Mint request journaled; GitHub's answer not yet recorded (may exist). */
   | 'requested'
@@ -36,14 +38,15 @@ export interface TokenRecord {
   readonly attempt: number | null;
   readonly repositoryId: number | null;
   readonly requestedAt: string;
-  /** Broker-enforced use deadline (mint + 15 min); null for the user token. */
+  /** Broker-enforced use deadline (mint request + 15 min); null for the user token. */
   readonly useBy: string | null;
   /** GitHub's native expiry (1 h / 8 h); recorded, never relied on. */
   readonly expiresAt: string | null;
   readonly status: TokenStatus;
   readonly revokedVia?: 'token' | 'grant';
-  /** True when a post-revocation probe observed 401. */
+  /** True when a 401 was observed after revocation or rotation, or a grant deletion returned 204. */
   readonly verified?: boolean;
+  /** Audit count of failed revocation attempts. */
   readonly revokeFailures: number;
 }
 
@@ -61,16 +64,27 @@ export type TokenEvent =
       useBy: string | null;
     }
   | { v: 1; type: 'token_minted'; id: string; expiresAt: string }
+  /** `status` 0 means no request reached GitHub (e.g. the App key could not sign). */
   | { v: 1; type: 'token_mint_failed'; id: string; status: number }
   | { v: 1; type: 'token_used'; id: string; at: string }
-  | { v: 1; type: 'token_revoke_failed'; id: string; at: string }
-  | { v: 1; type: 'token_revoked'; id: string; verified: boolean; at: string }
+  /** `status`: the last HTTP status observed (0 = no response); `stage`: which call failed. */
+  | {
+      v: 1;
+      type: 'token_revoke_failed';
+      id: string;
+      stage: RevokeStage;
+      status: number;
+      at: string;
+    }
+  | { v: 1; type: 'token_revoked'; id: string; verified: true; at: string }
   | { v: 1; type: 'token_rotated'; id: string; at: string }
   | { v: 1; type: 'token_unrevocable'; id: string; at: string }
   | { v: 1; type: 'grant_deleted'; via: string; at: string }
   | { v: 1; type: 'grant_delete_refused'; via: string; status: number; at: string }
   | { v: 1; type: 'admissions_disabled'; reason: AdmissionCloser; at: string }
   | { v: 1; type: 'reauthorization_required'; at: string };
+export const REVOKE_STAGES = Object.freeze(['delete', 'probe'] as const);
+export type RevokeStage = (typeof REVOKE_STAGES)[number];
 
 export interface TokenLedger {
   readonly tokens: ReadonlyMap<string, TokenRecord>;
@@ -87,125 +101,140 @@ export class TokenJournalError extends Error {
 
 /** Pending/live statuses still need revocation. */
 export const OUTSTANDING: readonly TokenStatus[] = Object.freeze(['requested', 'live', 'used']);
+/** Statuses that keep a run from closing cleanly. */
+export const UNRESOLVED: readonly TokenStatus[] = Object.freeze([...OUTSTANDING, 'unrevocable']);
+/** Minted and not yet revoked: a value GitHub still honours. */
+export const HELD: readonly TokenStatus[] = Object.freeze(['live', 'used']);
 export const isUserChain = (kind: TokenKind): boolean => kind !== 'installation';
+const isTokenKind = (value: unknown): value is TokenKind =>
+  TOKEN_KINDS.includes(value as TokenKind);
+
+/** One token per journaled intent attempt; the broker pre-check and replay share this rule. */
+export function hasTokenFor(
+  tokens: ReadonlyMap<string, TokenRecord>,
+  intentKey: string,
+  attempt: number
+): boolean {
+  return [...tokens.values()].some((t) => t.intentKey === intentKey && t.attempt === attempt);
+}
 
 const ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
-const fail = (): never => {
+function fail(): never {
   throw new TokenJournalError();
-};
+}
 const id = (value: unknown): string =>
   typeof value === 'string' && ID.test(value) ? value : fail();
 const at = (value: unknown): string => (isTimestamp(value) ? value : fail());
-const status = (value: unknown): number =>
-  Number.isInteger(value) && (value as number) >= 0 && (value as number) < 1000
-    ? (value as number)
+const httpStatus = (value: unknown): number =>
+  typeof value === 'number' && Number.isInteger(value) && value >= 0 && value < 1000
+    ? value
     : fail();
+const positive = (value: unknown): number =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : fail();
 const nullable = <T>(value: unknown, check: (v: unknown) => T): T | null =>
   value === null ? null : check(value);
 
+function requestedToken(
+  tokens: ReadonlyMap<string, TokenRecord>,
+  event: Record<string, unknown>
+): TokenRecord {
+  const tokenId = id(event.id);
+  const kind = event.kind;
+  if (tokens.has(tokenId) || !isTokenKind(kind)) fail();
+  const parentId = nullable(event.parentId, id);
+  const parent = parentId === null ? undefined : tokens.get(parentId);
+  // Narrowing is one level deep: a scoped child names an unscoped user parent.
+  if ((kind === 'user_scoped') !== (parent?.kind === 'user')) fail();
+  const intentKey = nullable(event.intentKey, (v) =>
+    typeof v === 'string' && v.length > 0 && v.length <= 8192 ? v : fail()
+  );
+  const attempt = nullable(event.attempt, positive);
+  const repositoryId = nullable(event.repositoryId, positive);
+  const useBy = nullable(event.useBy, at);
+  // Operation tokens carry an intent, attempt, repository and use window; the user token none.
+  const operation = kind !== 'user';
+  if (
+    [intentKey, attempt, repositoryId, useBy].some((v) => (v === null) === operation) ||
+    (kind !== 'user_scoped' && parentId !== null) ||
+    (operation && hasTokenFor(tokens, intentKey as string, attempt as number))
+  )
+    fail();
+  return Object.freeze({
+    id: tokenId,
+    kind,
+    parentId,
+    intentKey,
+    attempt,
+    repositoryId,
+    requestedAt: at(event.at),
+    useBy,
+    expiresAt: null,
+    status: 'requested',
+    revokeFailures: 0,
+  });
+}
+
 function reduceToken(ledger: TokenLedger, raw: unknown): TokenLedger {
   if (!isRecord(raw) || raw.v !== 1) fail();
-  const event = raw as Record<string, unknown>;
+  const event = raw;
   const tokens = new Map(ledger.tokens);
-  const update = (key: unknown, allowed: readonly TokenStatus[], patch: Partial<TokenRecord>) => {
+  const update = (
+    key: unknown,
+    allowed: readonly TokenStatus[],
+    patch: (current: TokenRecord) => Partial<TokenRecord>
+  ) => {
     const current = tokens.get(id(key));
     if (!current || !allowed.includes(current.status)) fail();
-    tokens.set(current?.id as string, Object.freeze({ ...(current as TokenRecord), ...patch }));
+    tokens.set(current.id, Object.freeze({ ...current, ...patch(current) }));
   };
   let { admissionsClosed, reauthorizationRequired } = ledger;
   switch (event.type) {
     case 'token_requested': {
-      const tokenId = id(event.id);
-      const kind = event.kind as TokenKind;
-      if (tokens.has(tokenId) || !TOKEN_KINDS.includes(kind)) fail();
-      const parentId = nullable(event.parentId, id);
-      const parent = parentId === null ? undefined : tokens.get(parentId);
-      // Narrowing is one level deep: a scoped child names an unscoped user parent.
-      if ((kind === 'user_scoped') !== (parent?.kind === 'user')) fail();
-      const intentKey = nullable(event.intentKey, (v) =>
-        typeof v === 'string' && v.length > 0 && v.length <= 8192 ? v : fail()
-      );
-      const attempt = nullable(event.attempt, (v) =>
-        Number.isInteger(v) && (v as number) > 0 ? (v as number) : fail()
-      );
-      const repositoryId = nullable(event.repositoryId, (v) =>
-        Number.isSafeInteger(v) && (v as number) > 0 ? (v as number) : fail()
-      );
-      const useBy = nullable(event.useBy, at);
-      // Operation tokens carry an intent, attempt, repository and use window; the user token none.
-      const operation = kind !== 'user';
-      if (
-        [intentKey, attempt, repositoryId, useBy].some((v) => (v === null) === operation) ||
-        (kind === 'user') !== (parentId === null && intentKey === null) ||
-        (kind === 'installation' && parentId !== null)
-      )
-        fail();
-      if (
-        operation &&
-        [...tokens.values()].some((t) => t.intentKey === intentKey && t.attempt === attempt)
-      )
-        fail();
-      tokens.set(
-        tokenId,
-        Object.freeze({
-          id: tokenId,
-          kind,
-          parentId,
-          intentKey,
-          attempt,
-          repositoryId,
-          requestedAt: at(event.at),
-          useBy,
-          expiresAt: null,
-          status: 'requested',
-          revokeFailures: 0,
-        })
-      );
+      const token = requestedToken(tokens, event);
+      tokens.set(token.id, token);
       break;
     }
     case 'token_minted':
-      update(event.id, ['requested'], { status: 'live', expiresAt: at(event.expiresAt) });
+      update(event.id, ['requested'], () => ({ status: 'live', expiresAt: at(event.expiresAt) }));
       break;
     case 'token_mint_failed':
-      status(event.status);
-      update(event.id, ['requested'], { status: 'mint_failed' });
+      httpStatus(event.status);
+      update(event.id, ['requested'], () => ({ status: 'mint_failed' }));
       break;
     case 'token_used':
       at(event.at);
-      update(event.id, ['live'], { status: 'used' });
-      if (tokens.get(event.id as string)?.kind === 'user') fail();
+      if (tokens.get(id(event.id))?.kind === 'user') fail();
+      update(event.id, ['live'], () => ({ status: 'used' }));
       break;
-    case 'token_revoke_failed': {
+    case 'token_revoke_failed':
       at(event.at);
-      const current = tokens.get(id(event.id));
-      update(event.id, OUTSTANDING, { revokeFailures: (current?.revokeFailures ?? 0) + 1 });
+      httpStatus(event.status);
+      if (!REVOKE_STAGES.includes(event.stage as RevokeStage)) fail();
+      update(event.id, OUTSTANDING, (current) => ({
+        revokeFailures: current.revokeFailures + 1,
+      }));
       break;
-    }
     case 'token_revoked':
       at(event.at);
-      if (typeof event.verified !== 'boolean') fail();
-      update(event.id, ['live', 'used'], {
-        status: 'revoked',
-        revokedVia: 'token',
-        verified: event.verified as boolean,
-      });
+      if (event.verified !== true) fail();
+      update(event.id, HELD, () => ({ status: 'revoked', revokedVia: 'token', verified: true }));
       break;
     case 'token_rotated':
       at(event.at);
       if (tokens.get(id(event.id))?.kind !== 'user') fail();
-      update(event.id, ['live'], { status: 'rotated', verified: true });
+      update(event.id, ['live'], () => ({ status: 'rotated', verified: true }));
       break;
     case 'token_unrevocable':
       at(event.at);
-      update(event.id, OUTSTANDING, { status: 'unrevocable' });
+      update(event.id, OUTSTANDING, () => ({ status: 'unrevocable' }));
       break;
     case 'grant_deleted': {
       at(event.at);
       const via = tokens.get(id(event.via));
-      if (!via || !isUserChain(via.kind) || !['live', 'used'].includes(via.status)) fail();
+      if (!via || !isUserChain(via.kind) || !HELD.includes(via.status)) fail();
       // Grant deletion ends EVERY token of the authorization, scoped children included.
       for (const token of tokens.values())
-        if (isUserChain(token.kind) && [...OUTSTANDING, 'unrevocable'].includes(token.status))
+        if (isUserChain(token.kind) && UNRESOLVED.includes(token.status))
           tokens.set(
             token.id,
             Object.freeze({ ...token, status: 'revoked', revokedVia: 'grant', verified: true })
@@ -214,7 +243,7 @@ function reduceToken(ledger: TokenLedger, raw: unknown): TokenLedger {
     }
     case 'grant_delete_refused':
       at(event.at);
-      status(event.status);
+      httpStatus(event.status);
       if (!tokens.has(id(event.via))) fail();
       break;
     case 'admissions_disabled':
@@ -259,6 +288,9 @@ export class TokenJournal {
     return this.ledger;
   }
   record(event: TokenEvent): TokenLedger {
+    // Scan the one free-form value raw as well as the encoded event (trap #1004).
+    if (event.type === 'token_requested' && event.intentKey !== null)
+      assertNoSecrets(event.intentKey);
     assertNoSecrets(JSON.stringify(event));
     const next = reduceToken(this.ledger, event);
     this.store.append(event);
@@ -266,6 +298,8 @@ export class TokenJournal {
     return next;
   }
 }
+
+const VAULT_REDACTED = '[TokenVault redacted]';
 
 /** Process-memory token values. Never serialized; a new process starts empty. */
 export class TokenVault {
@@ -276,16 +310,16 @@ export class TokenVault {
   get(tokenId: string): string | undefined {
     return this.#values.get(tokenId);
   }
+  has(tokenId: string): boolean {
+    return this.#values.has(tokenId);
+  }
   delete(tokenId: string): void {
     this.#values.delete(tokenId);
   }
-  get size(): number {
-    return this.#values.size;
-  }
   toJSON(): string {
-    return '[TokenVault redacted]';
+    return VAULT_REDACTED;
   }
   [inspect.custom](): string {
-    return '[TokenVault redacted]';
+    return VAULT_REDACTED;
   }
 }

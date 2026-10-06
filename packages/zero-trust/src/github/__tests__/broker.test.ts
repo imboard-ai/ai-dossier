@@ -14,7 +14,7 @@ import {
 } from '../../intents';
 import { Journal } from '../../journal';
 import { createRun, ReasonCode, type RunRecord, transitionRun } from '../../state';
-import { AppCredentials } from '../app-auth';
+import { AppCredentials, type GitHubHttp } from '../app-auth';
 import {
   type BrokerOptions,
   type CleanupReport,
@@ -133,13 +133,14 @@ function rig(
   const blocked: CleanupReport[] = [];
   const broker = new ForkCredentialBroker({
     store: overrides.store ?? store,
-    http: fake.http,
+    http: overrides.http ?? fake.http,
     app,
     fork: { repositoryId: FORK_ID, installationId: INSTALLATION_ID, owner: OWNER },
     intents: () => intents,
     vault,
     now: clock.now,
     setTimer: clock.setTimer,
+    sleep: async () => undefined,
     onCleanupBlocked: (report) => {
       blocked.push(report);
       overrides.onCleanupBlocked?.(report);
@@ -282,7 +283,7 @@ describe('AC2 15-minute use window', () => {
         signal.addEventListener('abort', () => {
           observedAbort = true;
         });
-        expect(credential.env().GIT_CONFIG_COUNT).toBe('2');
+        expect(credential.env().GIT_CONFIG_COUNT).toBe('9');
         await new Promise<void>((resolve) => {
           release = resolve;
         });
@@ -391,6 +392,7 @@ describe('AC3 revoke on every exit path', () => {
       intents: () => (driver as IntentDriver).snapshot(),
       now: clock.now,
       setTimer: clock.setTimer,
+      sleep: async () => undefined,
     });
     await broker.recover();
     driver = new IntentDriver(
@@ -399,7 +401,7 @@ describe('AC3 revoke on every exit path', () => {
         reconcile: async () => ({ kind: 'absent' }),
         mutate: (intent) =>
           broker.withForkPush(intent, { repositoryId: FORK_ID }, async (credential) => {
-            expect(credential.env().GIT_CONFIG_KEY_1).toBe('http.https://github.com/.extraheader');
+            expect(credential.env().GIT_CONFIG_KEY_8).toBe('http.https://github.com/.extraheader');
             return { artifactRef: 'refs/heads/fix', remoteSha: sha };
           }),
       },
@@ -463,7 +465,8 @@ describe('AC5 crash recovery', () => {
     // The scoped child is revoked on its own, not through its parent.
     expect(tokens.get(child.tokenId)).toMatchObject({ status: 'revoked', revokedVia: 'token' });
     expect(second.fake.count(`DELETE /applications/${CLIENT_ID}/token`)).toBe(2);
-    expect(ledgerOf(second).reauthorizationRequired).toBe(false);
+    // The held user token was revoked too, which ends its refresh chain.
+    expect(ledgerOf(second).reauthorizationRequired).toBe(true);
   });
 
   it('crash between revoke and journal write: recovery re-checks and records the revocation', async () => {
@@ -581,6 +584,7 @@ describe('AC6/AC12 kill switch', () => {
       admissionsDisabled: true,
       grant: { deleted: true, via: expect.any(String) },
       installationTokens: { revoked: [install.tokenId], failed: [] },
+      scopedTokens: { revoked: [], failed: [] },
       complete: true,
     });
     const tokens = ledgerOf(r).tokens;
@@ -621,7 +625,14 @@ describe('AC6/AC12 kill switch', () => {
     expect(grantCalls).toHaveLength(1);
     expect(grantCalls[0]?.token).not.toBe(stale);
     expect(report.grant.deleted).toBe(false);
-    expect(ledgerOf(r).tokens.get(child.tokenId)?.status).toBe('live');
+    // Without the grant, the child is ended on its own; the parent stays for a later attempt.
+    expect(report.scopedTokens).toEqual({ revoked: [child.tokenId], failed: [] });
+    expect(ledgerOf(r).tokens.get(child.tokenId)).toMatchObject({
+      status: 'revoked',
+      revokedVia: 'token',
+    });
+    expect(r.fake.live(stale)).toBe(true);
+    expect(report.complete).toBe(false);
     expect(r.blocked).toHaveLength(1);
   });
 });
@@ -723,7 +734,7 @@ describe('AC11 the user token is revoked only at run end', () => {
     expect(r.fake.live(user)).toBe(true);
     expect(ledgerOf(r).tokens.get(parentId)?.status).toBe('live');
     await r.broker.mintForkPush(r.retry(), { repositoryId: FORK_ID });
-    await r.broker.endRun('cancelled');
+    await r.broker.endRun();
     const deletes = r.fake.calls.filter((c) => c.method === 'DELETE');
     expect(deletes.at(-1)?.token).toBe(user);
     expect(r.fake.tokens.get(user)?.refreshAlive).toBe(false);
@@ -737,7 +748,7 @@ describe('AC11 the user token is revoked only at run end', () => {
     const r = await ready();
     await r.broker.mintForkPush(intentOf(r.intents), { repositoryId: FORK_ID });
     r.fake.override('DELETE /installation/token', 'throw', MAX_REVOKE_ATTEMPTS);
-    await expect(r.broker.endRun('completed')).rejects.toBeInstanceOf(CredentialCleanupError);
+    await expect(r.broker.endRun()).rejects.toBeInstanceOf(CredentialCleanupError);
     expect(r.blocked).toHaveLength(1);
   });
 });
@@ -752,7 +763,7 @@ describe('AC7 secrecy', () => {
     await r.broker
       .withForkPush(intentOf(r.intents), { repositoryId: FORK_ID }, async (credential) => {
         credentialText = `${JSON.stringify(credential)} ${inspect(credential)} ${String(credential)}`;
-        envText = credential.env().GIT_CONFIG_VALUE_1;
+        envText = credential.env().GIT_CONFIG_VALUE_8;
         throw new Error('push rejected');
       })
       .catch((error: Error) => {
@@ -787,11 +798,27 @@ describe('AC7 secrecy', () => {
       GIT_TERMINAL_PROMPT: '0',
       GIT_CONFIG_NOSYSTEM: '1',
       GIT_CONFIG_GLOBAL: '/dev/null',
-      GIT_CONFIG_COUNT: '2',
+      GIT_TRACE_REDACT: '1',
+      GIT_CONFIG_COUNT: '9',
       GIT_CONFIG_KEY_0: 'credential.helper',
       GIT_CONFIG_VALUE_0: '',
-      GIT_CONFIG_KEY_1: 'http.https://github.com/.extraheader',
-      GIT_CONFIG_VALUE_1: `Authorization: Basic ${Buffer.from(`x-access-token:${value}`).toString('base64')}`,
+      // Repository config and hooks cannot redirect, proxy or read the header.
+      GIT_CONFIG_KEY_1: 'core.hooksPath',
+      GIT_CONFIG_VALUE_1: '/dev/null',
+      GIT_CONFIG_KEY_2: 'core.fsmonitor',
+      GIT_CONFIG_VALUE_2: 'false',
+      GIT_CONFIG_KEY_3: 'http.sslVerify',
+      GIT_CONFIG_VALUE_3: 'true',
+      GIT_CONFIG_KEY_4: 'http.proxy',
+      GIT_CONFIG_VALUE_4: '',
+      GIT_CONFIG_KEY_5: 'http.followRedirects',
+      GIT_CONFIG_VALUE_5: 'false',
+      GIT_CONFIG_KEY_6: 'protocol.allow',
+      GIT_CONFIG_VALUE_6: 'never',
+      GIT_CONFIG_KEY_7: 'protocol.https.allow',
+      GIT_CONFIG_VALUE_7: 'always',
+      GIT_CONFIG_KEY_8: 'http.https://github.com/.extraheader',
+      GIT_CONFIG_VALUE_8: `Authorization: Basic ${Buffer.from(`x-access-token:${value}`).toString('base64')}`,
     });
     expect(Object.isFrozen(env)).toBe(true);
   });
@@ -825,6 +852,258 @@ describe('broker construction', () => {
     await expect(
       r.broker.mintForkPush(intentOf(r.intents), { repositoryId: FORK_ID })
     ).rejects.toEqual(refusal('admission_closed'));
-    expect(r.broker.status().admissions).toBe('cleanup_blocked');
+    expect(r.broker.status().admissions).toBe('journal_failed');
+  });
+});
+
+/** An HTTP wrapper that holds requests matching `match` until released. */
+function gated(fake: GitHubFake, match: string) {
+  let release: () => void = () => undefined;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let entered: () => void = () => undefined;
+  const reached = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const http: GitHubHttp = async (request) => {
+    if (`${request.method} ${request.path}`.startsWith(match)) {
+      entered();
+      await gate;
+    }
+    return fake.http(request);
+  };
+  return { http, release, reached };
+}
+
+describe('review regressions: races and fail-closed paths', () => {
+  it('a cancel that arrives during the mint revokes the token and runs nothing', async () => {
+    const clock = new Clock();
+    const fake = new GitHubFake(clock.now);
+    const g = gated(fake, 'POST /app/installations');
+    const r = await ready({ fake, clock, http: g.http });
+    const cancel = new AbortController();
+    let ran = false;
+    const run = r.broker.withForkPush(
+      intentOf(r.intents),
+      { repositoryId: FORK_ID },
+      async () => {
+        ran = true;
+      },
+      cancel.signal
+    );
+    await g.reached;
+    cancel.abort();
+    g.release();
+    await expect(run).rejects.toEqual(refusal('cancelled'));
+    expect(ran).toBe(false);
+    expect([...ledgerOf(r).tokens.values()][0]?.status).toBe('revoked');
+  });
+
+  it('the kill switch waits for an in-flight mint, then revokes its token', async () => {
+    const clock = new Clock();
+    const fake = new GitHubFake(clock.now);
+    const g = gated(fake, 'POST /app/installations');
+    const r = await ready({ fake, clock, http: g.http });
+    const mint = r.broker.mintForkPush(intentOf(r.intents), { repositoryId: FORK_ID });
+    await g.reached;
+    const kill = r.broker.killAll();
+    g.release();
+    await expect(mint).rejects.toEqual(refusal('admission_closed'));
+    const report = await kill;
+    expect([...fake.tokens.values()].some((t) => t.live)).toBe(false);
+    expect([...ledgerOf(r).tokens.values()][0]?.status).toBe('revoked');
+    expect(report.installationTokens.failed).toEqual([]);
+    expect(r.broker.status().admissions).toBe('kill_switch');
+  });
+
+  it('refuses to hand out a credential whose revocation is in flight', async () => {
+    const clock = new Clock();
+    const fake = new GitHubFake(clock.now);
+    const g = gated(fake, 'DELETE /installation/token');
+    const r = await ready({ fake, clock, http: g.http });
+    const lease = await r.broker.mintForkPush(intentOf(r.intents), { repositoryId: FORK_ID });
+    const revoking = r.broker.revoke(lease);
+    await g.reached;
+    expect(() => r.broker.take(lease)).toThrow(refusal('token_reused'));
+    g.release();
+    await revoking;
+  });
+
+  it('a grant deletion during an individual revocation does not latch the broker', async () => {
+    const clock = new Clock();
+    const fake = new GitHubFake(clock.now);
+    const g = gated(fake, `DELETE /applications/${CLIENT_ID}/token`);
+    const r = await ready({ fake, clock, http: g.http });
+    r.broker.registerUserToken(
+      fake.authorizeUser(),
+      new Date(clock.ms + 8 * 3600_000).toISOString()
+    );
+    const child = await r.broker.mintForkPush(intentOf(r.intents), {
+      repositoryId: FORK_ID,
+      via: 'user_scoped',
+    });
+    const revoking = r.broker.revoke(child);
+    await g.reached;
+    const report = await r.broker.killAll();
+    g.release();
+    await expect(revoking).resolves.toBeUndefined();
+    expect(report.complete).toBe(true);
+    expect(ledgerOf(r).tokens.get(child.tokenId)).toMatchObject({ revokedVia: 'grant' });
+    expect(r.broker.status().admissions).toBe('kill_switch');
+  });
+
+  it('a DELETE answered 204 still fails when the liveness read is not 401', async () => {
+    const r = await ready();
+    const lease = await r.broker.mintForkPush(intentOf(r.intents), { repositoryId: FORK_ID });
+    r.fake.override('GET /installation/repositories', { status: 500, json: null }, 3);
+    await expect(r.broker.revoke(lease)).rejects.toBeInstanceOf(CredentialCleanupError);
+    const failures = (
+      r.store.journal.read() as { type: string; stage?: string; status?: number }[]
+    ).filter((e) => e.type === 'token_revoke_failed');
+    expect(failures).toHaveLength(3);
+    expect(failures[0]).toMatchObject({ stage: 'probe', status: 500 });
+    expect(r.blocked).toHaveLength(1);
+  });
+
+  it('an App key that cannot sign is refused without a request or a cleanup block', async () => {
+    const clock = new Clock();
+    const fake = new GitHubFake(clock.now);
+    const { journal: j } = journal();
+    const broker = new ForkCredentialBroker({
+      store: j,
+      http: fake.http,
+      app: new AppCredentials({
+        appId: '1',
+        clientId: CLIENT_ID,
+        clientSecret: 's',
+        privateKey: '-----BEGIN PRIVATE KEY-----\nnot a key\n-----END PRIVATE KEY-----',
+      }),
+      fork: { repositoryId: FORK_ID, installationId: INSTALLATION_ID, owner: OWNER },
+      intents: () => intentsWith(),
+      now: clock.now,
+    });
+    await broker.recover();
+    await expect(
+      broker.mintForkPush(intentOf(intentsWith()), { repositoryId: FORK_ID })
+    ).rejects.toEqual(refusal('app_credentials_invalid'));
+    expect(fake.calls).toEqual([]);
+    expect(broker.status()).toMatchObject({
+      admissions: 'open',
+      tokens: [expect.objectContaining({ status: 'mint_failed' })],
+    });
+  });
+
+  it('refuses a scoped token GitHub did not confirm as repository-selected', async () => {
+    const r = await ready();
+    r.broker.registerUserToken(
+      r.fake.authorizeUser(),
+      new Date(r.clock.ms + 8 * 3600_000).toISOString()
+    );
+    const wide = r.fake.issue('user_scoped');
+    r.fake.override(`POST /applications/${CLIENT_ID}/token/scoped`, {
+      status: 200,
+      json: {
+        token: wide,
+        expires_at: new Date(r.clock.ms + 8 * 3600_000).toISOString(),
+        installation: {
+          permissions: { contents: 'write', metadata: 'read' },
+          repository_selection: 'all',
+        },
+      },
+    });
+    await expect(
+      r.broker.mintForkPush(intentOf(r.intents), { repositoryId: FORK_ID, via: 'user_scoped' })
+    ).rejects.toEqual(refusal('overbroad_token'));
+    expect(r.fake.live(wide)).toBe(false);
+  });
+
+  it('a rotation that finishes after the kill switch holds no new token', async () => {
+    const clock = new Clock();
+    const fake = new GitHubFake(clock.now);
+    const g = gated(fake, 'GET /user');
+    const r = await ready({ fake, clock, http: g.http });
+    const user = fake.authorizeUser();
+    const expires = new Date(clock.ms + 8 * 3600_000).toISOString();
+    r.broker.registerUserToken(user, expires);
+    const rotation = r.broker.rotateUserToken(fake.refresh(user), expires);
+    await g.reached;
+    await r.broker.killAll();
+    g.release();
+    await expect(rotation).rejects.toEqual(refusal('admission_closed'));
+    expect(ledgerOf(r).tokens.size).toBe(1);
+  });
+
+  it('run end deletes the grant while the parent lives when a child will not die', async () => {
+    const r = await ready();
+    const user = r.fake.authorizeUser();
+    r.broker.registerUserToken(user, new Date(r.clock.ms + 8 * 3600_000).toISOString());
+    const child = await r.broker.mintForkPush(intentOf(r.intents), {
+      repositoryId: FORK_ID,
+      via: 'user_scoped',
+    });
+    r.fake.override(`DELETE /applications/${CLIENT_ID}/token`, { status: 500, json: null }, 3);
+    await r.broker.endRun();
+    const ledger = ledgerOf(r);
+    expect(ledger.tokens.get(child.tokenId)).toMatchObject({
+      status: 'revoked',
+      revokedVia: 'grant',
+    });
+    expect([...r.fake.tokens.values()].every((t) => !t.live)).toBe(true);
+    expect(ledger.reauthorizationRequired).toBe(true);
+  });
+
+  it('recovery after a closed run admits nothing', async () => {
+    const first = await ready();
+    await first.broker.endRun();
+    first.store.journal.close();
+    const second = rig({ dir: first.store.dir, fake: first.fake, clock: first.clock });
+    await expect(second.broker.recover()).resolves.toEqual({
+      admitted: false,
+      closedBy: 'run_ended',
+    });
+  });
+
+  it('keeps the operation error when cleanup also fails', async () => {
+    const r = await ready();
+    r.fake.override('DELETE /installation/token', { status: 500, json: null }, 3);
+    const error = await r.broker
+      .withForkPush(intentOf(r.intents), { repositoryId: FORK_ID }, async () => {
+        throw new Error('push failed');
+      })
+      .catch((e: CredentialCleanupError) => e);
+    expect(error).toBeInstanceOf(CredentialCleanupError);
+    expect((error as CredentialCleanupError).operationError).toEqual(new Error('push failed'));
+    expect((error as CredentialCleanupError).report?.outstanding).toHaveLength(1);
+    expect(Object.keys(error as object)).not.toContain('operationError');
+  });
+
+  it('a closed broker cannot write to the journal its successor owns', async () => {
+    const first = await ready();
+    await first.broker.mintForkPush(intentOf(first.intents), { repositoryId: FORK_ID });
+    first.broker.close();
+    await first.clock.advance(USE_WINDOW_MS);
+    expect([...ledgerOf(first).tokens.values()][0]?.status).toBe('live');
+    expect(first.fake.count('DELETE')).toBe(0);
+  });
+
+  it('refuses to scope from an installation token without latching', async () => {
+    const r = await ready();
+    r.broker.registerUserToken(
+      r.fake.authorizeUser(),
+      new Date(r.clock.ms + 8 * 3600_000).toISOString()
+    );
+    const install = await r.broker.mintForkPush(intentOf(r.intents), { repositoryId: FORK_ID });
+    await expect(
+      r.broker.mintForkPush(
+        r.retry(),
+        { repositoryId: FORK_ID, via: 'user_scoped' },
+        install.tokenId
+      )
+    ).rejects.toEqual(refusal('no_user_token'));
+    expect(r.broker.status().admissions).toBe('open');
+    expect(() => r.broker.registerUserToken(r.fake.authorizeUser(), timestamp)).toThrow(
+      refusal('user_token_held')
+    );
   });
 });

@@ -134,7 +134,10 @@ export class GitHubFake {
           token: this.issue('user_scoped'),
           // Probe Q2: 8 h from SCOPING, independent of the parent.
           expires_at: new Date(this.now() + 8 * HOUR).toISOString(),
-          installation: { permissions: { contents: 'write', metadata: 'read' } },
+          installation: {
+            permissions: { contents: 'write', metadata: 'read' },
+            repository_selection: 'selected',
+          },
         },
       };
     }
