@@ -33,6 +33,7 @@ const routes: Record<RunState, R[]> = {
   verifying: [R.GatePassed, R.PlanApproved, R.CandidateReady],
   paused_user: [R.UserPaused],
   shipping: [R.GatePassed, R.PlanApproved, R.CandidateReady, R.VerificationPassed],
+  awaiting_contributor: [R.ContributorHandoff],
   submitted: [
     R.GatePassed,
     R.PlanApproved,
@@ -84,7 +85,13 @@ const at = (state: RunState) => routes[state].reduce(move, initial());
 // Independent product-level adjacency expectation, not copied from exported table.
 const failTargets = ['blocked', 'unsupported', 'failed', 'cancelled', 'blocked_cleanup'];
 const expected: Record<RunState, string[]> = {
-  gating: [...failTargets, 'awaiting_maintainer', 'planning', 'paused_user'],
+  gating: [
+    ...failTargets,
+    'awaiting_maintainer',
+    'planning',
+    'paused_user',
+    'awaiting_contributor',
+  ],
   awaiting_maintainer: [...failTargets, 'gating', 'declined'],
   planning: [...failTargets, 'implementing', 'paused_user'],
   implementing: [...failTargets, 'verifying', 'paused_user'],
@@ -98,7 +105,8 @@ const expected: Record<RunState, string[]> = {
     'shipping',
     'revising',
   ],
-  shipping: [...failTargets, 'submitted', 'paused_user'],
+  shipping: [...failTargets, 'submitted', 'paused_user', 'awaiting_contributor'],
+  awaiting_contributor: [...failTargets, 'awaiting_maintainer', 'submitted'],
   submitted: [...failTargets, 'merged', 'accepted', 'declined', 'awaiting_review', 'revising'],
   awaiting_review: [...failTargets, 'merged', 'accepted', 'declined', 'revising'],
   revising: [...failTargets, 'verifying', 'paused_user'],
@@ -113,7 +121,7 @@ const expected: Record<RunState, string[]> = {
 };
 
 describe('lifecycle contract', () => {
-  it('has exactly the required 18 states and immutable table', () => {
+  it('has exactly the required 19 states and immutable table', () => {
     expect(RUN_STATES).toEqual(Object.keys(expected));
     expect(TERMINAL_STATES).toEqual([
       'merged',
@@ -139,6 +147,9 @@ describe('lifecycle contract', () => {
         let run = at(state);
         if (state === 'paused_user' && to && !failTargets.includes(to))
           run = move(at(to), R.UserPaused);
+        // The publication hand-off is issued from shipping, not from gating.
+        if (state === 'awaiting_contributor' && reason === R.PublicationObserved)
+          run = move(at('shipping'), R.ContributorHandoff);
         const original = serializeRun(run);
         if (to) {
           const next = transitionRun(run, reason, '2026-10-05T00:01:00.000Z');
@@ -221,6 +232,29 @@ describe('lifecycle contract', () => {
     expect(move(paused, R.ResumeImplementing).state).toBe('implementing');
     expect(() => move(paused, R.ResumeShipping)).toThrow(IllegalTransitionError);
     expect(() => move(paused, R.ResumeGating)).toThrow(IllegalTransitionError);
+  });
+
+  it('an observed hand-off must match the phase that issued its link', () => {
+    const engagement = move(at('gating'), R.ContributorHandoff);
+    expect(move(engagement, R.EngagementObserved).state).toBe('awaiting_maintainer');
+    expect(() => move(engagement, R.PublicationObserved)).toThrow(IllegalTransitionError);
+    const publication = move(at('shipping'), R.ContributorHandoff);
+    expect(move(publication, R.PublicationObserved).state).toBe('submitted');
+    expect(() => move(publication, R.EngagementObserved)).toThrow(IllegalTransitionError);
+    expect(move(publication, R.PolicyBlocked).state).toBe('blocked');
+    // A tampered history cannot launder the origin on replay.
+    const forged = {
+      ...JSON.parse(serializeRun(engagement)),
+      state: 'submitted',
+      reasonCode: R.PublicationObserved,
+    };
+    forged.history.push({
+      from: 'awaiting_contributor',
+      to: 'submitted',
+      reasonCode: R.PublicationObserved,
+      timestamp: time,
+    });
+    expect(() => restoreRun(forged)).toThrow(IllegalTransitionError);
   });
 
   it('freezes the run and all history entries', () => {
