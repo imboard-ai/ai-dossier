@@ -1,5 +1,12 @@
 # Agent Traps
 
+## Budget admission traps
+
+| Symptom (grep this) | What went wrong | Fix | PR |
+|---|---|---|---|
+| `ceiling_exceeded` denies teardown after a settled work overrun / `cleanupAllowance` | Admission against aggregate money lets an observed work overrun consume funds reserved for cleanup, even though the original work reservation respected its ceiling. Capping observations hides real spend; exempting all teardown from budgeting permits overspending. | Derive committed money by purpose under the existing ledger lock: teardown capacity is `cleanupAllowance + max(0, ceiling - cleanupAllowance - work commitments)`, less teardown commitments. Keep work admission conservative, observations uncapped, and token/time limits enforced. Test reserve → overrun settlement → reopen → cleanup, partial cleanup/release, safe-integer sums, and real concurrent cleanup reservers. | PR #1027 (#1021) |
+| `Cannot find module .../packages/zero-trust/dist/index.js` in receipt/intents child-process tests after a warm pool claim | The pool entry can predate a new private package, so installed dependencies and old build artifacts do not prove its dist exists. Budget process tests compile source and pass, while unrelated process tests require the package build. | Run `make build-zero-trust` before the package suite (or `make build-all` before the full gate); do not classify a missing dist prerequisite as a code regression or modify intents/canonical. | PR #1027 (#1021) |
+
 Grep-first symptom → trap → fix index. `plan-issue` reads this file in full and greps it
 for terms from the issue title and affected paths before planning (Step 4.5); `report-issue`
 appends a row here when a run required a CI fix or surfaced a trap a future agent should
