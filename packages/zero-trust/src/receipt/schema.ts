@@ -137,24 +137,35 @@ const validate = new Ajv({ strict: true }).compile<Receipt>(RECEIPT_SCHEMA);
  * Copy before any async boundary; nothing can change between validation/signing/use. */
 export function canonicalJson(input: unknown): string {
   let nodes = 0;
+  let bytes = 0;
+  const maxBytes = 128 * 1024;
+  function reserve(count: number): void {
+    bytes += count;
+    if (bytes > maxBytes) throw new ReceiptError('invalid_json');
+  }
+  function atom(text: string): string {
+    reserve(Buffer.byteLength(text));
+    return text;
+  }
   function encode(value: unknown, depth: number): string {
     if (++nodes > 20000 || depth > 12) throw new ReceiptError('invalid_json');
-    if (value === null || typeof value === 'boolean') return JSON.stringify(value);
+    if (value === null || typeof value === 'boolean') return atom(JSON.stringify(value));
     if (typeof value === 'number' && Number.isSafeInteger(value) && !Object.is(value, -0))
-      return JSON.stringify(value);
+      return atom(JSON.stringify(value));
     if (typeof value === 'string') {
-      if (value.length > 8192 || !Buffer.from(value).toString().includes(value))
+      if (value.length > 8192 || Buffer.from(value).toString() !== value)
         throw new ReceiptError('invalid_json');
       assertNoSecrets(value);
-      return JSON.stringify(value);
+      return atom(JSON.stringify(value));
     }
     if (typeof value !== 'object' || value === null) throw new ReceiptError('invalid_json');
     const array = Array.isArray(value);
     if (Object.getPrototypeOf(value) !== (array ? Array.prototype : Object.prototype))
       throw new ReceiptError('invalid_json');
+    const keys = Reflect.ownKeys(value);
+    if (keys.length > 20000 || keys.some((k) => typeof k !== 'string'))
+      throw new ReceiptError('invalid_json');
     const descriptors = Object.getOwnPropertyDescriptors(value);
-    const keys = Reflect.ownKeys(descriptors);
-    if (keys.some((k) => typeof k !== 'string')) throw new ReceiptError('invalid_json');
     for (const key of keys as string[]) {
       const d = descriptors[key];
       if (!('value' in d) || (key !== 'length' && !d.enumerable))
@@ -163,6 +174,7 @@ export function canonicalJson(input: unknown): string {
     if (array) {
       const length = descriptors.length.value as number;
       if (length > 20000 || keys.length !== length + 1) throw new ReceiptError('invalid_json');
+      reserve(length + 1);
       const items: string[] = [];
       for (let i = 0; i < length; i++) {
         if (!descriptors[String(i)]) throw new ReceiptError('invalid_json');
@@ -170,13 +182,14 @@ export function canonicalJson(input: unknown): string {
       }
       return `[${items.join(',')}]`;
     }
+    reserve(keys.length * 2 + 1);
     return `{${(keys as string[])
       .sort()
       .map((key) => `${encode(key, depth + 1)}:${encode(descriptors[key].value, depth + 1)}`)
       .join(',')}}`;
   }
   const result = encode(input, 0);
-  if (Buffer.byteLength(result) > 128 * 1024) throw new ReceiptError('invalid_json');
+  if (Buffer.byteLength(result) > maxBytes) throw new ReceiptError('invalid_json');
   return result;
 }
 export function snapshotJson<T>(input: T): T {

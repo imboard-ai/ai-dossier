@@ -1,8 +1,9 @@
 # @ai-dossier/zero-trust
 
 Private, provider-independent foundation for [PRD-ZTFC-001](../../docs/features/zero-trust-full-cycle/prd.md)
-§5.1, §5.7, §5.8 and §5.9. No runtime dependencies or VM/network/model/GitHub calls.
-This provides lifecycle/status, durable intent/budget and canonical Git primitives.
+§5.1, §5.7, §5.8 and §5.9. No VM/network/model/GitHub calls; receipts use core's
+Ed25519 signer abstraction and Ajv schema validation.
+This provides lifecycle/status, durable intent/budget, canonical Git and receipt primitives.
 Publication remains gated on S1 feasibility.
 
 ```ts
@@ -235,7 +236,8 @@ Adversarial tests use real symlink/FIFO/socket/files, malformed raw baseline tre
 gitlinks, no-follow race injection, and executable malicious filter/hook sentinels
 with positive execution controls. Device rejection uses an actual `/dev/null` stat
 injected at the source lstat boundary so the test requires no mknod privileges.
-# Controller-signed receipts
+
+## Controller-signed receipts
 
 `issueReceipt(input, signer, now)` accepts independently supervised command evidence
 and the actual `@ai-dossier/core` `Signer` interface. Only Ed25519 is admitted. The
@@ -248,12 +250,14 @@ same bytes with SHA-256. Schema version is `ztfc-receipt-v1`.
 controller key material, exact authenticated identity/SHA bindings, and the trusted
 profile's required command list. It does **not** authorize a write or consume a nonce.
 The caller obtains `context` from fresh authenticated facts and policy/checkpoint
-checks, never from the receipt itself or worker output. Command statuses are
+checks, never from the receipt itself or worker output. Its `allowedShippingOperations`
+is a fresh authenticated kind/target/expected-remote allowlist; a valid signed grant
+cannot widen that current scope. Command statuses are
 `passed | failed | inconclusive | skipped`. This conservative slice requires all
 commands passed, exit zero and a positive known suite count to earn `verified`;
-unknown discovery cannot authorize shipping. Do not label non-test setup/build
-commands as required suite checks; capture them separately until command-kind
-semantics are introduced.
+unknown discovery cannot authorize shipping. All configured required verification
+commands must appear verbatim. Unknown or zero discovery requires a hand-off; never
+invent counts or omit required checks to obtain authorization.
 
 Use `authorizeShipping` inside the trusted `WriteAdapter.mutate` after `IntentDriver`
 has persisted its attempted intent. Pass the exact expected remote SHA (`null` for
@@ -262,6 +266,9 @@ directory**. Grants bind the existing `idempotencyKey`, operation kind/target,
 expected remote SHA and a unique controller-generated nonce. Receipts expire exactly
 15 minutes after issuance. Each grant is consumed and fsynced before authorization
 returns. The returned grant permits only that one mutation, not repeated calls.
+The store also fences repeated authorization of the same intent attempt even across
+newly signed receipts/nonces. A new attempt number comes only from IntentDriver's
+durable retry after reconciliation proved absence; it still requires a fresh grant.
 
 Provision the nonce directory first; call `initialize()` only on first creation.
 Never initialize/reset it on resume. Missing/corrupt/torn history fails closed.

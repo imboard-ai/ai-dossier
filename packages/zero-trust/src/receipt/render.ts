@@ -2,6 +2,9 @@ import { receiptDigest } from './issue';
 import { parseReceipt } from './schema';
 
 function escapeHtml(text: string): string {
+  // Repository-controlled command/profile text is evidence, never a success
+  // claim. Neutralize the forbidden blanket claim even when quoted by a command.
+  text = text.replace(/all tests passed/gi, '[untrusted success claim]');
   return text.replace(
     /[&<>"'`\r\n]/g,
     (c) =>

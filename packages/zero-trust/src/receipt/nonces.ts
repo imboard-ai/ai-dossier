@@ -46,13 +46,19 @@ export class ReceiptNonceStore {
         if (canonicalJson(events[0]) !== '{"type":"receipt-nonces","v":1}')
           throw new ReceiptError('corrupt_store');
         const nonces = new Set<string>();
+        const attempts = new Map<string, number>();
         for (const event of events.slice(1)) {
           validateRow(event);
           const prior = event as NonceConsumption;
           if (nonces.has(prior.nonce)) throw new ReceiptError('corrupt_store');
+          if ((attempts.get(prior.operationKey) ?? 0) >= prior.attempt)
+            throw new ReceiptError('corrupt_store');
           nonces.add(prior.nonce);
+          attempts.set(prior.operationKey, prior.attempt);
         }
         if (nonces.has(row.nonce)) throw new ReceiptError('replayed_nonce');
+        if ((attempts.get(row.operationKey) ?? 0) >= row.attempt)
+          throw new ReceiptError('replayed_operation');
         // Successful return is the authorization; fsync precedes all side effects.
         journal.append(row);
       } finally {
@@ -94,10 +100,12 @@ function validateRow(raw: unknown): asserts raw is NonceConsumption {
   const row = raw as NonceConsumption;
   if (
     Object.keys(row).sort().join(',') !== 'attempt,nonce,operationKey,receiptDigest' ||
+    typeof row.nonce !== 'string' ||
     !/^[A-Za-z0-9_-]{1,128}$/.test(row.nonce) ||
     typeof row.operationKey !== 'string' ||
     row.operationKey.length < 1 ||
     row.operationKey.length > 4096 ||
+    typeof row.receiptDigest !== 'string' ||
     !/^[a-f0-9]{64}$/.test(row.receiptDigest) ||
     !Number.isSafeInteger(row.attempt) ||
     row.attempt < 1 ||

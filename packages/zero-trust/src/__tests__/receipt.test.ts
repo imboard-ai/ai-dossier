@@ -1,11 +1,11 @@
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Ed25519Signer, Ed25519Verifier } from '@ai-dossier/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { type Intent, idempotencyKey } from '../intents';
+import { type Intent, IntentDriver, idempotencyKey } from '../intents';
 import { Journal } from '../journal';
 import {
   issueReceipt,
@@ -17,6 +17,7 @@ import { ReceiptNonceStore } from '../receipt/nonces';
 import { renderReceipt } from '../receipt/render';
 import { canonicalJson, parseReceipt, RECEIPT_TTL_MS } from '../receipt/schema';
 import { authorizeShipping, type ReceiptContext, verifyReceipt } from '../receipt/verify';
+import { createRun } from '../state';
 
 const SHA = 'a'.repeat(40);
 const CANDIDATE = 'b'.repeat(40);
@@ -99,6 +100,9 @@ beforeEach(async () => {
     ...bindings,
     requiredCommands: [{ id: 'regression', command: 'npm test' }],
     policyPermitsShipping: true,
+    allowedShippingOperations: [
+      { kind: 'push_branch', target: operation.target, expectedRemoteSha: SHA },
+    ],
   };
   fs.mkdirSync(path.join(directory, 'nonces'));
   store = new ReceiptNonceStore(path.join(directory, 'nonces'));
@@ -115,6 +119,112 @@ const authorize = (r: SignedReceipt, i = intent, s = store) =>
   authorizeShipping(r, publicKey, context, i, SHA, s, () => AT);
 
 describe('controller receipt — scenarios 10/17, contributor integrity, S3/S4', () => {
+  it.each([
+    true,
+    false,
+  ])('real IntentDriver persists attempt before authorization and observes writes only for valid policy: %s', async (allowed) => {
+    const r = await issue();
+    if (!allowed) context.allowedShippingOperations = [];
+    const journal = new Journal(path.join(directory, 'intents'));
+    const writes: string[] = [];
+    const driver = new IntentDriver(
+      journal,
+      {
+        reconcile: async () => ({ kind: 'absent' }),
+        mutate: async (attempted) => {
+          expect(journal.read().at(-1)).toMatchObject({ type: 'attempted', key: attempted.key });
+          await authorize(r, attempted);
+          writes.push(attempted.key);
+          return { artifactRef: 'https://github.com/alice/fork/tree/task', remoteSha: CANDIDATE };
+        },
+      },
+      {
+        run: createRun(
+          {
+            runId: 'run-1',
+            contributor: 'alice',
+            upstreamIssue: 'https://github.com/o/r/issues/8',
+          },
+          new Date(AT).toISOString()
+        ),
+        contributionId: input.contributionId,
+      },
+      () => new Date(AT).toISOString()
+    );
+    try {
+      if (allowed) {
+        await driver.execute(intent);
+        await driver.execute(intent);
+        expect(writes).toEqual([intent.key]);
+      } else {
+        await expect(driver.execute(intent)).rejects.toThrow('Mutation outcome uncertain');
+        expect(writes).toEqual([]);
+      }
+    } finally {
+      journal.close();
+    }
+  });
+  it('requires fresh policy scope even for a valid signed grant, without consuming on denial', async () => {
+    const r = await issue();
+    context.allowedShippingOperations = [];
+    const consumed = vi.spyOn(store, 'consume');
+    await expect(authorize(r)).rejects.toThrow('policy_scope_denied');
+    expect(consumed).not.toHaveBeenCalled();
+    context.allowedShippingOperations = [
+      { kind: 'push_branch', target: intent.target, expectedRemoteSha: SHA },
+    ];
+    await expect(authorize(r)).resolves.toBeDefined();
+  });
+  it('neutralizes worker success claims in rendered text when checks are inconclusive', async () => {
+    input.commands[0].command = 'printf "all tests passed"';
+    input.commands[0].status = 'inconclusive';
+    const text = renderReceipt((await issue()).receipt);
+    expect(text).not.toMatch(/all tests passed/i);
+    expect(text).toContain('[untrusted success claim]');
+  });
+  it('rejects signer algorithms and inconsistent signatures at issuance', async () => {
+    await expect(
+      issueReceipt(
+        input,
+        {
+          algorithm: 'kms',
+          sign: signer.sign.bind(signer),
+          getPublicKey: signer.getPublicKey.bind(signer),
+        },
+        () => AT
+      )
+    ).rejects.toThrow('unsupported_signer');
+    await expect(
+      issueReceipt(
+        input,
+        {
+          algorithm: 'ed25519',
+          sign: async () => ({
+            algorithm: 'ed25519',
+            public_key: publicKey,
+            signature: Buffer.alloc(64).toString('base64'),
+            signed_at: new Date(AT).toISOString(),
+          }),
+          getPublicKey: signer.getPublicKey.bind(signer),
+        },
+        () => AT
+      )
+    ).rejects.toThrow('invalid_signature');
+    await expect(issueReceipt(input, signer, () => NaN)).rejects.toThrow('invalid_clock');
+    input.permittedShippingOperations[0].operationKey = 'other';
+    await expect(issue()).rejects.toThrow('invalid_scope');
+  });
+  it('denies expiry between signature verification and nonce burn without a write', async () => {
+    const r = await issue();
+    let calls = 0;
+    const consume = vi.spyOn(store, 'consume');
+    await expect(
+      authorizeShipping(r, publicKey, context, intent, SHA, store, () =>
+        ++calls === 1 ? AT : AT + RECEIPT_TTL_MS
+      )
+    ).rejects.toThrow('expired');
+    expect(consume).not.toHaveBeenCalled();
+  });
   it('round-trips the ACTUAL public core signer shape and canonical bytes', async () => {
     const r = await issue();
     expect(r.signature).toEqual({
@@ -269,6 +379,17 @@ describe('controller receipt — scenarios 10/17, contributor integrity, S3/S4',
       r.digest
     );
   });
+  it('cannot authorize the same journaled attempt twice using newly issued nonces', async () => {
+    const first = await issue();
+    await authorize(first);
+    input.permittedShippingOperations[0].nonce = 'new-nonce';
+    const second = await issue();
+    await expect(authorize(second)).rejects.toThrow('replayed_operation');
+    // IntentDriver creates attempt 2 only after reconciliation proved absence;
+    // a new receipt/current policy then permits that new journaled attempt once.
+    await expect(authorize(second, { ...intent, attempts: 2 })).resolves.toBeDefined();
+    await expect(authorize(second, { ...intent, attempts: 2 })).rejects.toThrow('replayed_nonce');
+  });
   it('serializes concurrent authorizations and burns per operation, not whole receipt', async () => {
     const pr = { ...intent, operationKind: 'pr_create' as const };
     pr.key = idempotencyKey(pr);
@@ -277,6 +398,11 @@ describe('controller receipt — scenarios 10/17, contributor integrity, S3/S4',
       target: pr.target,
       operationKey: pr.key,
       nonce: 'nonce-2',
+      expectedRemoteSha: null,
+    });
+    context.allowedShippingOperations.push({
+      kind: 'pr_create',
+      target: pr.target,
       expectedRemoteSha: null,
     });
     const r = await issue();
@@ -346,10 +472,47 @@ describe('controller receipt — scenarios 10/17, contributor integrity, S3/S4',
     ])
       expect(() => parseReceipt({ ...r, ...patch })).toThrow('invalid_schema');
   });
+  it('bounds aggregate serialization before materializing arbitrarily large output', () => {
+    expect(() => canonicalJson(Array.from({ length: 128 }, () => 'x'.repeat(8192)))).toThrow(
+      'invalid_json'
+    );
+    expect(() =>
+      canonicalJson(Object.fromEntries(Array.from({ length: 20001 }, (_, n) => [String(n), true])))
+    ).toThrow('invalid_json');
+  });
 });
 
 describe('controller nonce durability — concurrent processes and crash boundaries', () => {
   const row = { nonce: 'nonce-1', operationKey: 'operation-1', receiptDigest: DIGEST, attempt: 1 };
+  it('a failure after the durable append does not yield permission or allow another writer', () => {
+    const append = Journal.prototype.append;
+    vi.spyOn(Journal.prototype, 'append').mockImplementation(function (this: Journal, event) {
+      append.call(this, event);
+      throw new Error('lost acknowledgement after fsync');
+    });
+    expect(() => store.consume(row)).toThrow('lost acknowledgement');
+    vi.restoreAllMocks();
+    expect(fs.readFileSync(path.join(directory, 'nonces/events.jsonl'), 'utf8')).toContain(
+      row.nonce
+    );
+    expect(() => new ReceiptNonceStore(path.join(directory, 'nonces')).consume(row)).toThrow(
+      'store_locked'
+    );
+    // Simulate supervisor proving old owner stopped and reconciling its durable
+    // history, then releasing the lock. The nonce still cannot authorize twice.
+    fs.unlinkSync(path.join(directory, 'nonces/receipt.lock'));
+    expect(() => new ReceiptNonceStore(path.join(directory, 'nonces')).consume(row)).toThrow(
+      'replayed_nonce'
+    );
+  });
+  it('rejects coerced identifiers and unsafe store aliases', () => {
+    expect(() => store.consume({ ...row, nonce: 42 } as unknown as typeof row)).toThrow(
+      'corrupt_store'
+    );
+    const alias = path.join(directory, 'alias');
+    fs.symlinkSync(path.join(directory, 'nonces'), alias);
+    expect(() => new ReceiptNonceStore(alias)).toThrow('unsafe_store');
+  });
   it('missing, corrupt or torn history never resets the consumed set', () => {
     const file = path.join(directory, 'nonces/events.jsonl');
     fs.unlinkSync(file);
@@ -371,10 +534,25 @@ describe('controller nonce durability — concurrent processes and crash boundar
       'store_locked'
     );
   });
-  it('retains a durable consumed record if the controller exits immediately after authorization', () => {
-    const code = `const {ReceiptNonceStore}=require(${JSON.stringify(path.resolve(__dirname, '../../dist/receipt/nonces.js'))});new ReceiptNonceStore(process.argv[1]).consume(${JSON.stringify(row)});process.exit(17)`;
-    const result = spawnSync(process.execPath, ['-e', code, path.join(directory, 'nonces')]);
-    expect(result.status, result.stderr.toString()).toBe(17);
+  it('retains a durable consumed record after real controller SIGKILL following authorization', async () => {
+    const code = `const {ReceiptNonceStore}=require(${JSON.stringify(path.resolve(__dirname, '../../dist/receipt/nonces.js'))});new ReceiptNonceStore(process.argv[1]).consume(${JSON.stringify(row)});process.send('consumed');setInterval(()=>{},1000)`;
+    const child = spawn(process.execPath, ['-e', code, path.join(directory, 'nonces')], {
+      stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+    });
+    const exited = new Promise<string | null>((resolve) =>
+      child.on('exit', (_code, signal) => resolve(signal))
+    );
+    try {
+      await new Promise<void>((resolve, reject) => {
+        child.once('message', () => resolve());
+        child.once('error', reject);
+        child.once('exit', () => reject(new Error('child exited before consumption')));
+      });
+      child.kill('SIGKILL');
+      expect(await exited).toBe('SIGKILL');
+    } finally {
+      child.kill('SIGKILL');
+    }
     expect(() => store.consume(row)).toThrow('replayed_nonce');
   });
   it('admits at most one of separate processes racing the same nonce', async () => {

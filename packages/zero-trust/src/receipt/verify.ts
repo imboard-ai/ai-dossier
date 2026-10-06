@@ -31,6 +31,8 @@ export interface ReceiptContext {
   requiredCommands: { id: string; command: string }[];
   /** Set by fresh controller policy/checkpoint admission immediately before use. */
   policyPermitsShipping: boolean;
+  /** Fresh controller allowlist with authenticated target routing. */
+  allowedShippingOperations: Pick<ShippingGrant, 'kind' | 'target' | 'expectedRemoteSha'>[];
 }
 const BINDINGS = [
   'contributionId',
@@ -120,7 +122,8 @@ export async function authorizeShipping(
 ): Promise<ShippingGrant> {
   const envelope = snapshotJson(input);
   const intent = snapshotJson(attemptedIntent);
-  const receipt = await verifyReceipt(envelope, trustedControllerKey, context, now);
+  const expected = snapshotJson(context);
+  const receipt = await verifyReceipt(envelope, trustedControllerKey, expected, now);
   const key = idempotencyKey(intent);
   if (
     intent.status !== 'attempted' ||
@@ -141,6 +144,16 @@ export async function authorizeShipping(
       g.expectedRemoteSha === expectedRemoteSha
   );
   if (!grant) throw new ReceiptError('operation_denied');
+  if (
+    !Array.isArray(expected.allowedShippingOperations) ||
+    !expected.allowedShippingOperations.some(
+      (g) =>
+        g.kind === grant.kind &&
+        g.target === grant.target &&
+        g.expectedRemoteSha === grant.expectedRemoteSha
+    )
+  )
+    throw new ReceiptError('policy_scope_denied');
   // Recheck after asynchronous verification, immediately before synchronous consume.
   const clock = now();
   if (
