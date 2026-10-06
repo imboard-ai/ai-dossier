@@ -184,6 +184,10 @@ export async function bakeProfile(options: BakeOptions): Promise<ProfileManifest
     );
     return manifest;
   } finally {
+    // Keep the trusted bake console for diagnosis; it never contains run data.
+    const consoleLog = path.join(work, 'console.log');
+    if (fs.existsSync(consoleLog))
+      fs.copyFileSync(consoleLog, path.join(options.profileDir, 'last-bake-console.log'));
     fs.rmSync(work, { recursive: true, force: true });
   }
 }

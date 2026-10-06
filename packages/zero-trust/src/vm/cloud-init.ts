@@ -13,7 +13,7 @@ function dockerfile(packages: readonly string[]): string {
     // Tools are installed at image build time; runtime sudo and every setuid/setgid
     // bit are removed so no in-container path regains privilege.
     `RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${packages.join(' ')} \\`,
-    ' && apt-get purge -y sudo && apt-get autoremove -y \\',
+    ' && SUDO_FORCE_REMOVE=yes apt-get purge -y sudo && apt-get autoremove -y \\',
     ' && rm -rf /etc/sudoers /etc/sudoers.d /var/lib/apt/lists/* \\',
     ' && find / -xdev -type f -perm /6000 -exec chmod ug-s {} +',
     'USER 1000:1000',
