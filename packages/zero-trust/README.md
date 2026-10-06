@@ -92,7 +92,80 @@ console.log(renderJson(status));
 The values above are illustrative controller-supplied facts; the status renderer
 does not calculate spend, elapsed time or shipping authorization.
 
-## Development
+## Controller configuration, storage and status (#1090)
+
+`validateRunConfig(raw)` accepts only the issue #1090 configuration fields and
+returns a detached `RunConfig` with parsed `upstream: { owner, repo, issue }`.
+The exact GitHub issue URL and contributor login are validated; unknown keys at
+every configuration object level fail closed. Environment fields name variables
+(`apiKeyEnv`, `privateKeyEnv`, `clientSecretEnv`), never their values. Every string,
+including unknown keys, is scanned before serialization. `RunConfigError.code`
+is a fixed, non-echoing reason such as `secret_detected`, `missing_rate`,
+`invalid_limits` or `unsupported_environment`.
+
+The supported execution provider is `local-qemu` with explicit `profileDir`,
+`stateDir`, `accelerator` and `proxyEndpointsFile`. Each planning/implementing
+(and optional repair) model has adapter, model, endpoint and API-key variable
+name; endpoints cannot contain user credentials, queries or fragments. Rates
+are keyed by the phase's model name and must include even zero-price models,
+with FX targeting the budget currency. Budget ceilings, cleanup allowance,
+tokens and active minutes are positive safe integers. Cleanup allowance cannot
+exceed the ceiling. Resource limits default to `DEFAULT_LIMITS` plus 120 active
+minutes; overrides may only lower caps, including the 20-minute command cap.
+The active budget cannot exceed the active limit. A smaller VM disk is still
+subject to the adapter's baked-image minimum when execution starts.
+Checkpoints default to `[]`; retention defaults to 30 days (1–3650).
+`signerKeyFile` must be a single-link, current-user-owned, mode-0600 Ed25519
+private key. Only its path is persisted. No environment credential is read.
+
+`RunStore.create(root, config, now)` allocates a random `ztc-<16 hex>` contribution
+and `<contributionId>-run-1`; `now` is a Date or canonical ISO timestamp.
+`RunStore.open(root, runId)` restores it without initializing missing evidence.
+Both return a lifetime-exclusive controller handle. `run`, `config`,
+`contributionId`, `runId`, `directory`, `upstreamRepositoryId`,
+`storeDirectory(name)` and `budgetSessionId(n)` expose safe metadata. Budget
+session IDs are `<runId>-s<n>` (positive safe integer). Each store has 0700
+directories and 0600 files, immutable `config.json` plus `config.sha256`, and
+`run.json`. Dedicated directories are `intents`, `handoff`, `track`, `tokens`,
+`push-ledger`, `nonces`, `budget`, `vm`, `profile`, `artifacts`, `bodies`,
+and `control`. Individual primitives still initialize their own evidence only
+on first creation; opening a RunStore does not initialize or reset them.
+
+`persistRun(run)` admits only replay-valid exact continuations, journals them in
+`control/events.jsonl`, then atomically rewrites the snapshot. Opening compares
+the snapshot against this durable witness, rejecting rollback, divergence,
+corruption and incomplete publication. A snapshot/journal mismatch is a block
+requiring controller reconciliation, never a silent reset. A failed write
+poisons the handle with `persistence_uncertain` and retains its kernel fence
+until the process terminates. `close()` is otherwise idempotent and releases
+the handle. A process crash releases the kernel lock; merely losing a JavaScript
+reference in a live process does not. Linux-local storage and util-linux
+`/usr/bin/flock` are required. Never unlink/replace `.controller.guard`, and
+keep stores outside worker write access. This is not a distributed lease.
+
+Record the authenticated upstream repository ID once with
+`recordUpstreamRepositoryId(id)`. `assertResumeMatches(config)` compares
+contributor, exact issue URL, execution provider and, once bound, the supplied
+`upstreamRepositoryId`. A changed or omitted bound ID yields
+`RunStoreError('resume_identity_mismatch')`. Changed identity or target requires
+a new contribution. Model/budget changes do not reset historical primitives.
+Retention policy is configuration only here; this API performs no expiry deletion.
+
+`assembleStatus({ run, now, budget, sessionId, phase?, candidateSha?, handoff?,
+tracker?, prerequisite? })` returns all `StatusRecord` facts and performs no
+polling or network writes. Active time sums only gating, planning, implementing,
+verifying, shipping and revising intervals, including the current active interval;
+waits, pauses, submitted/outcome/terminal intervals are excluded. Estimated spend
+is the selected budget session's conservative spent plus reserved **minor units**;
+remaining is the ceiling less that total, floored at zero. It reports the latest
+transition reason and prioritizes pending `handoffStatus`, credential-free
+tracker status, `prerequisiteAction` (upstream binding and App slug), then
+`DEFAULT_STATE_ACTIONS`. Driver facts must describe the current run/state.
+Use `renderJson` or `renderHuman` for the same validated facts. Configuration,
+RunStore and status helpers are exported from the package index; credential
+modules remain isolated, including type-only imports.
+
+## Development commands
 
 ```sh
 npm run build --workspace=@ai-dossier/zero-trust
