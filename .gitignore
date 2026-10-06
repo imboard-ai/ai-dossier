@@ -170,3 +170,6 @@ dist-binaries/
 website/dist/
 website/.astro/
 website/node_modules/
+
+# Python bytecode (the VM guest agent and the proxpi shim)
+__pycache__/
