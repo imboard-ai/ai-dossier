@@ -401,13 +401,11 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
     return path.join(dir, 'budget.js');
   }
 
-  it('races real processes sharing one persisted file', async () => {
-    const module = compiledModule();
-    const script = `const {BudgetLedger}=require(${JSON.stringify(module)}); try {new BudgetLedger(${JSON.stringify(file)},'contribution-1').reserve('initial',${JSON.stringify(estimate(60))});process.exitCode=0;}catch(e){process.exitCode=e.code==='ceiling_exceeded'?2:3;}`;
+  async function runRacers(script: string): Promise<(number | null)[]> {
     const racers = Array.from({ length: 8 }, () =>
       spawn(process.execPath, ['-e', script], { stdio: 'ignore' })
     );
-    const exits = await Promise.all(
+    return Promise.all(
       racers.map(
         (child) =>
           new Promise<number | null>((resolve, reject) => {
@@ -416,6 +414,12 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
           })
       )
     );
+  }
+
+  it('races real processes sharing one persisted file', async () => {
+    const module = compiledModule();
+    const script = `const {BudgetLedger}=require(${JSON.stringify(module)}); try {new BudgetLedger(${JSON.stringify(file)},'contribution-1').reserve('initial',${JSON.stringify(estimate(60))});process.exitCode=0;}catch(e){process.exitCode=e.code==='ceiling_exceeded'?2:3;}`;
+    const exits = await runRacers(script);
     expect(exits.filter((c) => c === 0)).toHaveLength(1);
     expect(exits.filter((c) => c === 2)).toHaveLength(7);
     expect(budgetTotals(ledger.snapshot(), 'initial').reserved).toBe(60);
@@ -431,18 +435,7 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
     });
     const module = compiledModule();
     const script = `const {BudgetLedger}=require(${JSON.stringify(module)});try{new BudgetLedger(${JSON.stringify(file)},'contribution-1').reserve('initial',${JSON.stringify(estimate(6))},'teardown');process.exitCode=0;}catch(e){process.exitCode=e.code==='ceiling_exceeded'?2:3;}`;
-    const racers = Array.from({ length: 8 }, () =>
-      spawn(process.execPath, ['-e', script], { stdio: 'ignore' })
-    );
-    const exits = await Promise.all(
-      racers.map(
-        (child) =>
-          new Promise<number | null>((resolve, reject) => {
-            child.once('error', reject);
-            child.once('exit', resolve);
-          })
-      )
-    );
+    const exits = await runRacers(script);
     expect(exits.filter((c) => c === 0)).toHaveLength(1);
     expect(exits.filter((c) => c === 2)).toHaveLength(7);
     const resumed = new BudgetLedger(file, 'contribution-1');
