@@ -1,5 +1,6 @@
 import { Ed25519Verifier, isSupportedPublicKey, publicKeysMatch } from '@ai-dossier/core';
 import { type Intent, idempotencyKey, MAX_ATTEMPT_SEQUENCE } from '../intents';
+import { type BoundaryEvidence, isCleanHeldVerdict } from '../vm/evidence';
 import { receiptDigest, type SignedReceipt } from './issue';
 import type { ReceiptNonceStore } from './nonces';
 import {
@@ -33,6 +34,25 @@ export interface ReceiptContext {
   policyPermitsShipping: boolean;
   /** Fresh controller allowlist with authenticated target routing. */
   allowedShippingOperations: Pick<ShippingGrant, 'kind' | 'target' | 'expectedRemoteSha'>[];
+  /** The run's host-side isolation evidence (`evaluateBoundary`). Shipping is refused
+   * unless it shows the boundary held; missing evidence is refused too. */
+  boundaryEvidence: BoundaryEvidence;
+}
+
+/** A run whose isolation was breached, or whose evidence is missing, not a clean
+ * verdict or another run's, may never ship (scenario 4). Checked first and on its
+ * own snapshot: a breach verdict carries guest text, which must classify as
+ * `boundary_not_held`, never as some other failure of the context snapshot. */
+function assertBoundaryHeldForShipping(context: ReceiptContext): void {
+  let evidence: unknown;
+  try {
+    evidence = snapshotJson(context?.boundaryEvidence ?? null);
+  } catch {
+    throw new ReceiptError('boundary_not_held');
+  }
+  if (evidence === null || typeof evidence !== 'object')
+    throw new ReceiptError('boundary_evidence_missing');
+  if (!isCleanHeldVerdict(evidence)) throw new ReceiptError('boundary_not_held');
 }
 const BINDINGS = [
   'contributionId',
@@ -120,9 +140,13 @@ export async function authorizeShipping(
   store: ReceiptNonceStore,
   now: () => number
 ): Promise<ShippingGrant> {
+  assertBoundaryHeldForShipping(context);
   const envelope = snapshotJson(input);
   const intent = snapshotJson(attemptedIntent);
   const expected = snapshotJson(context);
+  // Only this run's own verdict counts, compared on the same snapshot the receipt binds.
+  if (expected.boundaryEvidence.runId !== expected.runId)
+    throw new ReceiptError('boundary_wrong_run');
   const receipt = await verifyReceipt(envelope, trustedControllerKey, expected, now);
   const key = idempotencyKey(intent);
   if (

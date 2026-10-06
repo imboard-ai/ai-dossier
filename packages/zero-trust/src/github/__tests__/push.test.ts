@@ -29,6 +29,7 @@ import { ReceiptNonceStore } from '../../receipt/nonces';
 import { ReceiptError } from '../../receipt/schema';
 import type { ReceiptContext } from '../../receipt/verify';
 import { createRun, ReasonCode, transitionRun } from '../../state';
+import { type BoundaryInput, evaluateBoundary } from '../../vm/evidence';
 import { AppCredentials } from '../app-auth';
 import { CredentialBrokerError, ForkCredentialBroker } from '../broker';
 import { ForkRefError, forkTarget, parseForkTarget, readForkBranch } from '../fork-ref';
@@ -282,6 +283,17 @@ function receiptInput(g: Grant): ReceiptInput {
     ...g.receipt,
   };
 }
+/** A clean gate result: one host-side broker check, rejected. */
+const HELD_BOUNDARY: BoundaryInput = {
+  reports: [],
+  guestOutputs: [],
+  canaries: [],
+  listenerConnections: 0,
+  brokerChecks: [{ attempt: 'op-outside-set', rejected: true }],
+  malformedReports: 0,
+  requiredCategories: ['broker-abuse'],
+};
+
 async function authorization(g: Grant): Promise<ShippingAuthorization> {
   const input = receiptInput({ ...g, receipt: undefined });
   const receipt: SignedReceipt = await issueReceipt({ ...input, ...g.receipt }, signer, Date.now);
@@ -293,6 +305,7 @@ async function authorization(g: Grant): Promise<ShippingAuthorization> {
     allowedShippingOperations: [
       { kind: 'push_branch', target: TARGET, expectedRemoteSha: g.expected },
     ],
+    boundaryEvidence: evaluateBoundary({ ...HELD_BOUNDARY, runId: bindings.runId }),
     ...g.context,
   };
   return { receipt, context, candidate: g.candidate };
@@ -641,6 +654,37 @@ describe('verified CAS push to the fork (#1066)', () => {
       'policy denies shipping',
       'policy_denied',
       (g) => ({ ...g, context: { policyPermitsShipping: false } }),
+    ],
+    [
+      'the isolation boundary was breached (#1076)',
+      'boundary_not_held',
+      (g) => ({
+        ...g,
+        context: {
+          boundaryEvidence: evaluateBoundary({ ...HELD_BOUNDARY, listenerConnections: 1 }),
+        },
+      }),
+    ],
+    [
+      'a probe report was malformed (#1076)',
+      'boundary_not_held',
+      (g) => ({
+        ...g,
+        context: { boundaryEvidence: evaluateBoundary({ ...HELD_BOUNDARY, malformedReports: 1 }) },
+      }),
+    ],
+    [
+      "the boundary evidence is another run's (#1076)",
+      'boundary_wrong_run',
+      (g) => ({
+        ...g,
+        context: { boundaryEvidence: evaluateBoundary({ ...HELD_BOUNDARY, runId: 'other-run' }) },
+      }),
+    ],
+    [
+      'the boundary evidence is missing (#1076)',
+      'boundary_evidence_missing',
+      (g) => ({ ...g, context: { boundaryEvidence: null as never } }),
     ],
   ])('refuses %s before minting a token (scenarios 10/17, AC1/AC7)', async (_name, code, mutate) => {
     const r = await rig();
