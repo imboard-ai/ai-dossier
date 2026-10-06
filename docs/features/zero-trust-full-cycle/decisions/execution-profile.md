@@ -19,8 +19,11 @@ image and configuration.
 
 ## Evidence
 
-CI run [37499725515](https://github.com/imboard-ai/ai-dossier/actions/runs/37499725515) (GitHub-hosted
-`ubuntu-24.04`, KVM), artifact `zero-trust-vm-evidence-kvm`:
+CI run [37510359866](https://github.com/imboard-ai/ai-dossier/actions/runs/37510359866) (GitHub-hosted
+`ubuntu-24.04`, KVM, the code in this record), artifact `zero-trust-vm-evidence-kvm`. Earlier runs
+[37499725515](https://github.com/imboard-ai/ai-dossier/actions/runs/37499725515) and
+[37509153781](https://github.com/imboard-ai/ai-dossier/actions/runs/37509153781) gave the same
+verdict and coverage.
 
 - Boundary held: **yes**, 0 violations, 126 judged attempts, 0 connections on the planted host
   listeners, no canary value (raw, hex or base64) in any guest output.
@@ -143,26 +146,28 @@ The accelerator is recorded in the `vm_created` journal event and bound into the
 (`profile.accelerator`).
 
 Measured on GitHub-hosted `ubuntu-24.04` runners (same image, same smoke workload; the TCG
-job has no `/dev/kvm` access), CI run 37499725515:
+job has no `/dev/kvm` access). Ranges cover three CI runs (37499725515, 37509153781,
+37510359866); runner hardware varies between runs, which shows up mostly under TCG:
 
 | Step | KVM | TCG | TCG / KVM |
 |---|---|---|---|
-| Boot to broker ready | 12.6 s | 61.6 s | 4.9× |
-| `node -e` in the Node container | 0.57 s | 5.04 s | 8.8× |
-| `python3 -c` in the Python container | 0.27 s | 2.68 s | 10× |
-| Destroy | 0.10 s | 0.11 s | 1× |
-| Smoke total | 13.5 s | 69.5 s | 5.1× |
-| Profile bake | 194 s | not measured in CI | — |
+| Boot to broker ready | 12.5–13.3 s | 61.6–102.5 s | 4.9–7.7× |
+| `node -e` in the Node container | 0.52–0.57 s | 5.0–7.6 s | 8.8–14× |
+| `python3 -c` in the Python container | 0.27–0.32 s | 2.7–4.1 s | 10–15× |
+| Destroy | 0.10 s | 0.10 s | 1× |
+| Smoke total | 13.4–14.2 s | 69.5–114.3 s | 5.1–8.0× |
+| Profile bake | 191–194 s | not measured in CI | — |
 
-Hostile suite under KVM: worker VM boot 12.7 s, `npm install` with lifecycle scripts 25.5 s,
-`npm test` 13.0 s, pip install 4.0 s, pip test 0.3 s, `vm-root` VM boot 9.5 s and probe 12.6 s.
-The probe time is dominated by its own 3–4 s connection and DNS timeouts.
+Hostile suite under KVM (run 37510359866): worker VM boot 10.5 s, `npm install` with lifecycle
+scripts 25.2 s, `npm test` 12.8 s, pip install 3.4 s, pip test 0.8 s, `vm-root` VM boot 10.8 s and
+probe 12.5 s; the whole KVM job, including setup and the smoke test, took under 3 minutes with
+a cached profile. The probe time is dominated by its own 3–4 s connection and DNS timeouts.
 
 On a development machine without `/dev/kvm`, a TCG bake ran for over an hour without finishing
 (the earlier sketch measured about 330 s for the unbaked image's first boot alone), so bakes belong
 on a KVM host or in CI. Container start-up costs more under TCG than the ×4 command-timeout scale
-assumes for short commands (8.8–10×); the 20-minute base timeout leaves headroom for build and test
-commands, but the scale should be re-measured with real repositories in #1010.
+assumes for short commands (8.8–15×); the 20-minute base timeout leaves headroom for build and
+test commands, but the scale should be re-measured with real repositories in #1010.
 
 ## Attack categories (scenario 4)
 
