@@ -162,7 +162,13 @@ nothing; `resume()`/`execute()` rethrow it and a later resume reads again. Only 
 evidence blocks. Likewise a `mutate` that throws `MutationDeferredError` (it proved nothing
 was sent and no single-use authority was consumed, e.g. a rate-limited preflight or a
 busy nonce-store lock) gets its attempt withdrawn (`withdrawn` event), so transient
-failures never spend the one retry.
+failures never spend the one retry. A `mutate` that proved nothing was written but whose single-use authority
+for the attempt is spent (a consumed receipt nonce, a journaled token mint) throws
+`MutationVoidedError`: the driver journals `voided` with its reason. The attempt number is
+used up, so the next attempt needs a fresh receipt, but the retry budget is untouched. At
+most `MAX_VOIDED_ATTEMPTS` (3) attempts are voided; past that a void counts like any
+ambiguous attempt, so attempt numbers stay within `MAX_ATTEMPT_SEQUENCE` (5), which the
+receipt and nonce store accept.
 Every intent and attempt is fsynced before the adapter runs;
 confirmation is fsynced before success returns. File and ancestor directory entries
 are fsynced on open. Write uncertainty poisons the live driver; recover from disk
@@ -633,7 +639,8 @@ or, when the mint response was journaled, `settleExpired` after its native expir
    policy) blocks with `authorization_refused` before any token is minted. A failed
    `authorize` callback or a nonce-store refusal raised before the store appends
    withdraws the attempt; a failed append leaves it ambiguous. A retry needs a fresh
-   receipt.
+   receipt. If the broker never hands the credential to git (the mint failed, was refused
+   or was cancelled), nothing can have been pushed: the attempt is voided, not counted.
 3. `push_intended` (branch, candidate, expected remote SHA) is appended to the push
    ledger, its own `Journal`, scoped to the fork's repository id.
 4. Inside `broker.withForkPush`, git pushes exactly the candidate from a fresh

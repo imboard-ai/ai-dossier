@@ -18,6 +18,7 @@ import {
   idempotencyKey,
   MutationDeferredError,
   MutationUncertainError,
+  MutationVoidedError,
   ReconcileDeferredError,
   replayIntents,
   WriteBlockedError,
@@ -29,7 +30,7 @@ import { ReceiptError } from '../../receipt/schema';
 import type { ReceiptContext } from '../../receipt/verify';
 import { createRun, ReasonCode, transitionRun } from '../../state';
 import { AppCredentials } from '../app-auth';
-import { ForkCredentialBroker } from '../broker';
+import { CredentialBrokerError, ForkCredentialBroker } from '../broker';
 import { ForkRefError, forkTarget, parseForkTarget, readForkBranch } from '../fork-ref';
 import type { HandoffAdmission } from '../handoff-driver';
 import { ForkPushError, ForkPusher, replayPushes, type ShippingAuthorization } from '../push';
@@ -297,6 +298,13 @@ async function authorization(g: Grant): Promise<ShippingAuthorization> {
   return { receipt, context, candidate: g.candidate };
 }
 
+/** The credential reached git, but the push died before anything was sent (the process
+ * was lost mid-flight): the outcome is genuinely ambiguous until reconciled. */
+const lostInFlight =
+  (inner: ForkCredentialBroker['withForkPush']): ForkCredentialBroker['withForkPush'] =>
+  (intent, target, operation, cancel) =>
+    inner(intent, target, (credential) => operation(credential, AbortSignal.abort()), cancel);
+
 /** Pushes to the local bare repository instead of github.com; nothing else differs. */
 class LocalForkPusher extends ForkPusher {
   constructor(
@@ -511,9 +519,7 @@ describe('verified CAS push to the fork (#1066)', () => {
   it('remote still at expected after a lost response retries once, with a fresh receipt (AC5)', async () => {
     const r = await rig();
     r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
-    r.wrap = () => async () => {
-      throw new Error('transport failed before the push');
-    };
+    r.wrap = lostInFlight;
     await expect(r.driver.execute(pushOf(SHA1))).rejects.toThrow(MutationUncertainError);
     const restarted = await r.restart();
     await restarted.driver.resume();
@@ -532,26 +538,23 @@ describe('verified CAS push to the fork (#1066)', () => {
   it('a retry with the already-consumed receipt is a replay and is refused before minting', async () => {
     const r = await rig();
     r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
-    r.wrap = () => async () => {
-      throw new Error('transport failed before the push');
-    };
+    r.wrap = lostInFlight;
     await expect(r.driver.execute(pushOf(SHA1))).rejects.toThrow(MutationUncertainError);
     r.wrap = (inner) => inner;
     await r.driver.resume();
+    const minted = r.mints();
     r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
     const error = await r.driver.execute(pushOf(SHA1)).catch((e: unknown) => e);
     expect((error as Error).cause).toMatchObject({ detail: 'replayed_nonce' });
     expect(r.driver.snapshot().blockedReason).toBe('authorization_refused');
     expect(r.fork.sha()).toBeNull();
-    expect(r.mints()).toBe(0);
+    expect(r.mints()).toBe(minted);
   });
 
   it('a lost response with unexpected remote content blocks on resume (scenario 18)', async () => {
     const r = await rig();
     r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
-    r.wrap = () => async () => {
-      throw new Error('lost');
-    };
+    r.wrap = lostInFlight;
     await expect(r.driver.execute(pushOf(SHA1))).rejects.toThrow(MutationUncertainError);
     r.fork.outOfBand();
     const restarted = await r.restart();
@@ -772,9 +775,7 @@ describe('verified CAS push to the fork (#1066)', () => {
   it('an unreadable remote on resume defers without journaling or blocking', async () => {
     const r = await rig();
     r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
-    r.wrap = () => async () => {
-      throw new Error('lost');
-    };
+    r.wrap = lostInFlight;
     await expect(r.driver.execute(pushOf(SHA1))).rejects.toThrow(MutationUncertainError);
     r.wrap = (inner) => inner;
     let limited = true;
@@ -799,11 +800,85 @@ describe('verified CAS push to the fork (#1066)', () => {
     expect(await r.driver.execute(pushOf(SHA1))).toBe(`${TARGET}@${SHA1}`);
   });
 
-  it('a second lost response exhausts the single retry and blocks (scenario 18)', async () => {
+  it('failed token mints void the attempt: unblocked, budget kept, fresh receipt required', async () => {
+    const r = await rig();
+    const key = idempotencyKey(pushOf(SHA1));
+    // GitHub refuses the installation-token mint twice in a row.
+    r.fake.override(MINT, { status: 422, json: { message: 'synthetic refusal' } }, 2);
+    for (const nonce of ['nonce-1', 'nonce-2']) {
+      r.grants.push({ candidate: C1, expected: null, nonce });
+      const error = await r.driver.execute(pushOf(SHA1)).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(MutationVoidedError);
+      expect((error as MutationVoidedError).reason).toBe('mint:mint_refused');
+      expect((error as Error).cause).toMatchObject({ code: 'mint_refused' });
+      await r.driver.resume();
+    }
+    expect(r.driver.snapshot().blockedReason).toBeUndefined();
+    expect(r.driver.snapshot().intents.get(key)).toMatchObject({
+      status: 'ambiguous',
+      retryReady: true,
+      attempts: 2,
+      voided: 2,
+    });
+    expect(r.fork.sha()).toBeNull();
+    // A spent receipt is not reusable: its nonce was consumed by the voided attempt.
+    const replay = await r.driver.execute(pushOf(SHA1)).catch((e: unknown) => e);
+    expect(replay).toBeInstanceOf(MutationDeferredError); // no authorization prepared yet
+    r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-3' });
+    expect(await r.driver.execute(pushOf(SHA1))).toBe(`${TARGET}@${SHA1}`);
+    expect(r.driver.snapshot().intents.get(key)).toMatchObject({ attempts: 3, voided: 2 });
+    expect(replayIntents(journals[2]?.read() ?? [])).toEqual(r.driver.snapshot());
+  });
+
+  it('a broker invariant failure before hand-out is not voided: it counts', async () => {
     const r = await rig();
     r.wrap = () => async () => {
-      throw new Error('lost');
+      throw new CredentialBrokerError('duplicate_mint');
     };
+    r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
+    const error = await r.driver.execute(pushOf(SHA1)).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(MutationUncertainError);
+    expect((error as Error).cause).toMatchObject({ code: 'duplicate_mint' });
+    expect(r.driver.snapshot().intents.get(idempotencyKey(pushOf(SHA1)))?.voided).toBeUndefined();
+  });
+
+  it('a voided attempt never accepts its spent receipt again', async () => {
+    const r = await rig();
+    r.fake.override(MINT, { status: 422, json: { message: 'synthetic refusal' } }, 1);
+    r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
+    await expect(r.driver.execute(pushOf(SHA1))).rejects.toThrow(MutationVoidedError);
+    r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
+    const error = await r.driver.execute(pushOf(SHA1)).catch((e: unknown) => e);
+    expect((error as Error).cause).toMatchObject({ detail: 'replayed_nonce' });
+    expect(r.driver.snapshot().blockedReason).toBe('authorization_refused');
+    expect(r.mints()).toBe(1);
+    expect(r.fork.sha()).toBeNull();
+  });
+
+  it('voided attempts are bounded: once every attempt number is spent the run blocks', async () => {
+    const r = await rig();
+    r.fake.override(MINT, { status: 422, json: { message: 'synthetic refusal' } }, 3);
+    for (let i = 1; i <= 3; i++) {
+      r.grants.push({ candidate: C1, expected: null, nonce: `nonce-${i}` });
+      await expect(r.driver.execute(pushOf(SHA1))).rejects.toThrow(MutationVoidedError);
+    }
+    // Two attempt numbers remain (the budget); a lost one still allows the retry.
+    r.wrap = lostInFlight;
+    r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-4' });
+    await expect(r.driver.execute(pushOf(SHA1))).rejects.toThrow(MutationUncertainError);
+    r.wrap = (inner) => inner;
+    await r.driver.resume();
+    r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-5' });
+    expect(await r.driver.execute(pushOf(SHA1))).toBe(`${TARGET}@${SHA1}`);
+    expect(r.driver.snapshot().intents.get(idempotencyKey(pushOf(SHA1)))).toMatchObject({
+      attempts: 5,
+      voided: 3,
+    });
+  });
+
+  it('a second lost response exhausts the single retry and blocks (scenario 18)', async () => {
+    const r = await rig();
+    r.wrap = lostInFlight;
     r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
     await expect(r.driver.execute(pushOf(SHA1))).rejects.toThrow(MutationUncertainError);
     await r.driver.resume();

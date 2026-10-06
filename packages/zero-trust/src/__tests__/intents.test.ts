@@ -12,8 +12,11 @@ import {
   type IntentInput,
   idempotencyKey,
   isAdmitted,
+  MAX_ATTEMPT_SEQUENCE,
+  MAX_VOIDED_ATTEMPTS,
   MutationDeferredError,
   MutationUncertainError,
+  MutationVoidedError,
   OPERATION_KINDS,
   parseEngagementMarker,
   type ReconcileResult,
@@ -383,6 +386,46 @@ describe('durable provider-independent write intents', () => {
     expect(d.snapshot().blockedReason).toBe(reason);
     expect(replayIntents(j.read())).toEqual(d.snapshot());
     await expect(d.execute({ ...input, target: 'other' })).rejects.toThrow(WriteBlockedError);
+  });
+  it('voids attempts whose authority was spent without a write, up to a bound', async () => {
+    const fake = new FakeAdapter();
+    const j = journal();
+    const d = driver(j, fake);
+    const key = idempotencyKey(input);
+    const mutate = vi.spyOn(fake, 'mutate');
+    for (let i = 1; i <= MAX_VOIDED_ATTEMPTS; i++) {
+      mutate.mockRejectedValueOnce(new MutationVoidedError('mint:mint_refused'));
+      await expect(d.execute(input)).rejects.toThrow(MutationVoidedError);
+      expect(d.snapshot().intents.get(key)).toMatchObject({
+        status: 'ambiguous',
+        retryReady: true,
+        attempts: i,
+        voided: i,
+      });
+    }
+    // Past the allowance a void counts: then one retry remains, then exhaustion.
+    mutate.mockRejectedValueOnce(new MutationVoidedError('mint:mint_refused'));
+    await expect(d.execute(input)).rejects.toThrow(MutationUncertainError);
+    expect(d.snapshot().intents.get(key)).toMatchObject({ attempts: 4, voided: 3 });
+    await d.resume();
+    mutate.mockRejectedValueOnce(new Error('lost'));
+    await expect(d.execute(input)).rejects.toThrow(MutationUncertainError);
+    await expect(d.resume()).rejects.toThrow(WriteBlockedError);
+    expect(d.snapshot().blockedReason).toBe('retry_exhausted');
+    expect(d.snapshot().intents.get(key)?.attempts).toBe(MAX_ATTEMPT_SEQUENCE);
+    expect(replayIntents(j.read())).toEqual(d.snapshot());
+    // A void needs an attempted intent and a safe reason code.
+    const base = [
+      { v: 1, type: 'run', run, contributionId: 'c-1' },
+      { v: 1, type: 'intended', input },
+      { v: 1, type: 'attempted', key },
+    ];
+    expect(() =>
+      replayIntents([...base.slice(0, 2), { v: 1, type: 'voided', key, reason: 'x' }])
+    ).toThrow(IntentError);
+    expect(() =>
+      replayIntents([...base, { v: 1, type: 'voided', key, reason: 'Bad Reason!' }])
+    ).toThrow(IntentError);
   });
   it('withdraws an attempt the adapter proved unsent, without spending the retry budget', async () => {
     const fake = new FakeAdapter();
