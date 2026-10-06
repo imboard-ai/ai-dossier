@@ -235,3 +235,47 @@ Adversarial tests use real symlink/FIFO/socket/files, malformed raw baseline tre
 gitlinks, no-follow race injection, and executable malicious filter/hook sentinels
 with positive execution controls. Device rejection uses an actual `/dev/null` stat
 injected at the source lstat boundary so the test requires no mknod privileges.
+# Controller-signed receipts
+
+`issueReceipt(input, signer, now)` accepts independently supervised command evidence
+and the actual `@ai-dossier/core` `Signer` interface. Only Ed25519 is admitted. The
+controller owns the private key and signer; neither belongs in worker/model tools.
+The signature covers canonical sorted-key JSON bytes, including all identity,
+profile/policy, command, network and operation bindings. `receiptDigest` hashes those
+same bytes with SHA-256. Schema version is `ztfc-receipt-v1`.
+
+`verifyReceipt(envelope, trustedControllerKey, context, now)` verifies integrity,
+controller key material, exact authenticated identity/SHA bindings, and the trusted
+profile's required command list. It does **not** authorize a write or consume a nonce.
+The caller obtains `context` from fresh authenticated facts and policy/checkpoint
+checks, never from the receipt itself or worker output. Command statuses are
+`passed | failed | inconclusive | skipped`. This conservative slice requires all
+commands passed, exit zero and a positive known suite count to earn `verified`;
+unknown discovery cannot authorize shipping. Do not label non-test setup/build
+commands as required suite checks; capture them separately until command-kind
+semantics are introduced.
+
+Use `authorizeShipping` inside the trusted `WriteAdapter.mutate` after `IntentDriver`
+has persisted its attempted intent. Pass the exact expected remote SHA (`null` for
+PR operations) and a `ReceiptNonceStore` in a **separate, controller-owned local
+directory**. Grants bind the existing `idempotencyKey`, operation kind/target,
+expected remote SHA and a unique controller-generated nonce. Receipts expire exactly
+15 minutes after issuance. Each grant is consumed and fsynced before authorization
+returns. The returned grant permits only that one mutation, not repeated calls.
+
+Provision the nonce directory first; call `initialize()` only on first creation.
+Never initialize/reset it on resume. Missing/corrupt/torn history fails closed.
+Exclusive lock files serialize independent processes; a crashed lock is never
+automatically stolen. On uncertain persistence the instance is fenced and its lock
+retained. A supervisor must establish that the old owner is stopped and reconcile
+the journal and external mutation before removing a stale lock. A consumed nonce
+stays consumed after a crash or lost response. Reauthorization requires reconciliation,
+fresh policy checks and a new controller-issued grant for the same verified candidate;
+the store provides no automatic retry or external write. Assumptions: one trusted
+controller authority, durable local filesystem with exclusive create/fsync semantics,
+no worker access or administrative deletion of the consumed history; not NFS.
+
+`renderReceipt(receipt)` emits an optional escaped collapsible evidence block, only
+when upstream policy/template allows it. It rejects credential-pattern strings and
+never prints raw logs. Rendering does not authenticate a signature; its evidence
+claim is limited to the exact candidate and is not proof of patch correctness.
