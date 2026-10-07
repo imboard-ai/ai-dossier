@@ -1,5 +1,6 @@
-import { execFileSync } from 'node:child_process';
+import childProcess, { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -60,6 +61,7 @@ function acquire(f: ReturnType<typeof fixture>) {
 }
 afterEach(() => {
   vi.restoreAllMocks();
+  syncBuiltinESMExports();
   vi.unstubAllEnvs();
   for (const root of temps.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
@@ -406,16 +408,10 @@ describe('credential-free source acquisition', () => {
     const trusted = new TrustedGit();
     try {
       expect(trusted.run(['config', '--get', 'protocol.allow']).toString().trim()).toBe('never');
-      for (const url of [
-        f.url,
-        'ssh://invalid/repo',
-        'git://invalid/repo',
-        'http://invalid/repo',
-        'ext::touch sentinel',
-      ])
-        expect(trusted.exec(['fetch', url, f.baseSha], { sourceFetch: 'https' }).status).not.toBe(
-          0
-        );
+      // Real local refusal; no invalid-host connections even if a regression enables HTTP.
+      expect(trusted.exec(['fetch', f.url, f.baseSha], { sourceFetch: 'https' }).status).not.toBe(
+        0
+      );
       for (const extra of [{ env: {} }, { config: [] }, { identity: {} }])
         expect(() => trusted.exec(['fetch', f.url], { sourceFetch: 'https', ...extra })).toThrow(
           TypeError
@@ -428,6 +424,50 @@ describe('credential-free source acquisition', () => {
       expect(() => trusted.exec(['status'], { sourcePackBytes: 64 })).toThrow(TypeError);
       vi.stubEnv('VITEST', '');
       expect(() => trusted.exec(['fetch', f.url], { sourceFetch: 'file-test' })).toThrow(TypeError);
+    } finally {
+      trusted.close();
+    }
+  });
+  it('records an HTTPS-only production invocation and detects injected forbidden protocols', () => {
+    const trusted = new TrustedGit();
+    try {
+      const spawn = vi.spyOn(childProcess, 'spawnSync').mockReturnValue({
+        pid: 0,
+        output: [null, Buffer.alloc(0), Buffer.alloc(0)],
+        stdout: Buffer.alloc(0),
+        stderr: Buffer.alloc(0),
+        status: 0,
+        signal: null,
+      });
+      syncBuiltinESMExports();
+      vi.stubEnv('GITHUB_TOKEN', 'credential-canary');
+      vi.stubEnv('GIT_CONFIG_COUNT', '1');
+      vi.stubEnv('GIT_CONFIG_KEY_0', 'http.extraHeader');
+      vi.stubEnv('GIT_CONFIG_VALUE_0', 'credential-canary');
+      trusted.exec(['fetch', 'file:///nonexistent-offline-fixture', 'a'.repeat(40)], {
+        sourceFetch: 'https',
+      });
+      expect(spawn).toHaveBeenCalledTimes(1);
+      const [executable, argv, options] = spawn.mock.calls[0] as [
+        string,
+        readonly string[],
+        { env: NodeJS.ProcessEnv; shell: boolean },
+      ];
+      expect(executable).toBe('/usr/bin/env');
+      const assertPolicy = (args: readonly string[]) => {
+        expect(args).toContain('protocol.allow=never');
+        expect(args.filter((arg) => /^protocol\..*\.allow=/u.test(arg))).toEqual([
+          'protocol.https.allow=always',
+        ]);
+        expect(args).toContain('credential.helper=');
+        expect(args).toContain('http.followRedirects=false');
+      };
+      assertPolicy(argv);
+      for (const protocol of ['http', 'ssh', 'git', 'file', 'ext'])
+        expect(() => assertPolicy([...argv, '-c', `protocol.${protocol}.allow=always`])).toThrow();
+      expect(options.shell).toBe(false);
+      expect(options.env.GIT_TERMINAL_PROMPT).toBe('0');
+      expect(Object.values(options.env)).not.toContain('credential-canary');
     } finally {
       trusted.close();
     }
