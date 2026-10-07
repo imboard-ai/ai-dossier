@@ -2,6 +2,7 @@
  * TypeScript type definitions for Dossier format
  */
 
+import type { SignatureCoverage } from './signing-payload';
 import type { FrontmatterShape } from './spec-shape';
 
 export type DossierStatus = 'Draft' | 'Stable' | 'Deprecated' | 'Experimental';
@@ -76,7 +77,7 @@ export interface DossierFrontmatter {
      * Which bytes the signature covers. Absent means the legacy body-only scheme;
      * `spec-frontmatter+body` (v3) covers a spec-shaped file's on-disk frontmatter.
      */
-    covers?: 'body' | 'frontmatter+body' | 'spec-frontmatter+body';
+    covers?: SignatureCoverage;
   };
   [key: string]: unknown; // Allow additional fields
 }

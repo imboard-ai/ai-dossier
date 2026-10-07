@@ -11,8 +11,17 @@ import {
   toSpecFrontmatter,
 } from '@ai-dossier/core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import YAML from 'yaml';
 
 import { checkSignature, downloadFile, parseArgs, verifyDossier } from '../verify-dossier';
+
+/** A legacy-shaped parse result, for checkSignature. */
+const legacy = (body: string, frontmatter: DossierFrontmatter) => ({
+  frontmatter,
+  body,
+  rawFrontmatter: frontmatter,
+  shape: 'legacy' as const,
+});
 
 function sha256(content: string): string {
   return createHash('sha256').update(content, 'utf8').digest('hex');
@@ -109,23 +118,25 @@ describe('assessVerificationRisk (core)', () => {
 
 describe('checkSignature', () => {
   it('should return not-present when no signature in frontmatter', async () => {
-    const result = await checkSignature('body', { title: 'T', version: '1' });
+    const result = await checkSignature(legacy('body', { title: 'T', version: '1' }));
     expect(result.present).toBe(false);
     expect(result.verified).toBe(false);
     expect(result.message).toBe('No signature present');
   });
 
   it('should return failed for an invalid signature', async () => {
-    const result = await checkSignature('body', {
-      title: 'T',
-      version: '1',
-      signature: {
-        algorithm: 'ed25519',
-        signature: 'invalidsig',
-        public_key: 'invalidpk',
-        key_id: 'kid',
-      },
-    });
+    const result = await checkSignature(
+      legacy('body', {
+        title: 'T',
+        version: '1',
+        signature: {
+          algorithm: 'ed25519',
+          signature: 'invalidsig',
+          public_key: 'invalidpk',
+          key_id: 'kid',
+        },
+      })
+    );
     expect(result.present).toBe(true);
     expect(result.verified).toBe(false);
   });
@@ -183,7 +194,7 @@ describe('checkSignature', () => {
     const { rawBase64, frontmatter } = signWithFreshKey(body, 'unrelated-key-id');
     useTrustList(`${rawBase64} test-signer\n`);
 
-    const result = await checkSignature(body, frontmatter);
+    const result = await checkSignature(legacy(body, frontmatter));
 
     expect(result.verified).toBe(true);
     expect(result.trusted).toBe(true);
@@ -195,7 +206,7 @@ describe('checkSignature', () => {
     const { frontmatter } = signWithFreshKey(body);
     useTrustList('RWTSomeOtherKey== other-signer\n');
 
-    const result = await checkSignature(body, frontmatter);
+    const result = await checkSignature(legacy(body, frontmatter));
 
     expect(result.verified).toBe(true);
     expect(result.trusted).toBe(false);
@@ -227,28 +238,19 @@ describe('checkSignature', () => {
         ...(spec.metadata as Record<string, string>),
         'dossier.signature': encodeSpecValue(signature),
       };
-      const yaml = Object.entries({ ...spec, metadata })
-        .map(([k, v]) =>
-          typeof v === 'string'
-            ? `${k}: ${JSON.stringify(v)}`
-            : `${k}:\n${Object.entries(v as Record<string, string>)
-                .map(([mk, mv]) => `  ${mk}: ${JSON.stringify(mv)}`)
-                .join('\n')}`
-        )
-        .join('\n');
-      return parseDossierContent(`---\n${yaml}\n---\n${body}`);
+      return parseDossierContent(`---\n${YAML.stringify({ ...spec, metadata })}---\n${body}`);
     };
 
     it('verifies a v3-signed spec-shaped dossier', async () => {
       const parsed = signSpec('spec-frontmatter+body', 'spec-frontmatter+body');
       expect(parsed.shape).toBe('spec');
-      const result = await checkSignature(parsed.body, parsed.frontmatter, parsed);
+      const result = await checkSignature(parsed);
       expect(result.verified).toBe(true);
     });
 
     it('refuses a v2 signature on a spec-shaped dossier as a failed check, not a crash', async () => {
       const parsed = signSpec('frontmatter+body', 'frontmatter+body');
-      const result = await checkSignature(parsed.body, parsed.frontmatter, parsed);
+      const result = await checkSignature(parsed);
       expect(result.present).toBe(true);
       expect(result.verified).toBe(false);
       expect(result.message).toMatch(/^Verification error: .*only spec-frontmatter\+body/);
@@ -260,7 +262,7 @@ describe('checkSignature', () => {
         ...frontmatter,
         signature: { ...frontmatter.signature, covers: 'something-new' },
       } as unknown as DossierFrontmatter;
-      const result = await checkSignature(body, withUnknown);
+      const result = await checkSignature(legacy(body, withUnknown));
       expect(result.verified).toBe(false);
       expect(result.message).toMatch(/^Verification error: Unsupported signature coverage/);
     });

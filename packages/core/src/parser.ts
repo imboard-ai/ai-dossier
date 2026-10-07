@@ -7,7 +7,12 @@
  */
 
 import matter from 'gray-matter';
-import { fromSpecFrontmatter, hasYamlMergeKey, isSpecShapedFrontmatter } from './spec-shape';
+import {
+  fromSpecFrontmatter,
+  hasYamlMergeKey,
+  isSpecShapedFrontmatter,
+  SpecShapeError,
+} from './spec-shape';
 import type { DossierFrontmatter, ParsedDossier } from './types';
 import { getErrorMessage } from './utils/errors';
 import { readFileIfExists } from './utils/fs';
@@ -95,16 +100,18 @@ export function parseDossierContent(content: string): ParsedDossier {
   // on-disk object is kept alongside for v3 signature verification.
   const rawFrontmatter = parsed.data as Record<string, unknown>;
   const shape = isSpecShapedFrontmatter(rawFrontmatter) ? 'spec' : 'legacy';
-  let frontmatter: DossierFrontmatter;
-  try {
-    if (shape === 'spec' && hasYamlMergeKey(parsed.matter)) {
-      throw new Error('YAML merge keys (<<) are not allowed');
+  let frontmatter = rawFrontmatter as DossierFrontmatter;
+  if (shape === 'spec') {
+    try {
+      if (hasYamlMergeKey(parsed.matter)) {
+        throw new SpecShapeError('YAML merge keys (<<) are not allowed');
+      }
+      frontmatter = fromSpecFrontmatter(rawFrontmatter) as DossierFrontmatter;
+    } catch (err) {
+      throw new SpecShapeError(`Invalid spec-shaped frontmatter: ${getErrorMessage(err)}`, {
+        cause: err,
+      });
     }
-    frontmatter = (
-      shape === 'spec' ? fromSpecFrontmatter(rawFrontmatter) : rawFrontmatter
-    ) as DossierFrontmatter;
-  } catch (err) {
-    throw new Error(`Invalid spec-shaped frontmatter: ${getErrorMessage(err)}`);
   }
 
   return {

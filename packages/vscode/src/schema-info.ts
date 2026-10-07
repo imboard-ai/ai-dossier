@@ -24,7 +24,11 @@ interface SchemaProp {
 
 const props = (schema as { properties: Record<string, SchemaProp> }).properties;
 // Legacy-shape required fields sit under the root `else` since the schema also accepts the spec shape.
-const required = new Set((schema as { else?: { required?: string[] } }).else?.required ?? []);
+const required = new Set(
+  (schema as { else?: { required?: string[] }; required?: string[] }).else?.required ??
+    (schema as { required?: string[] }).required ??
+    []
+);
 
 export const FIELDS: FieldInfo[] = Object.entries(props).map(([name, p]) => ({
   name,

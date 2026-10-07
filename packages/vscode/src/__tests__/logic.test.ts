@@ -5,6 +5,7 @@ import { completionsAt, hoverAt } from '../completion';
 import { computeDiagnostics } from '../diagnostics';
 import { dryRunContent, formatDryRun } from '../dryrun';
 import { findFieldRange, locateFrontmatter } from '../frontmatter';
+import { FIELDS } from '../schema-info';
 import { buildDossier, slugify } from '../template';
 import { verifyContent } from '../verify';
 
@@ -126,6 +127,13 @@ describe('completion', () => {
 
   it('offers nothing outside the frontmatter', () => {
     expect(completionsAt(`${GOOD}\n"`, GOOD.split('\n').length, 1)).toEqual([]);
+  });
+});
+
+describe('schema-info', () => {
+  it('still marks the legacy required fields as required', () => {
+    const required = FIELDS.filter((f) => f.required).map((f) => f.name);
+    expect(required).toEqual(expect.arrayContaining(['title', 'version', 'risk_level']));
   });
 });
 

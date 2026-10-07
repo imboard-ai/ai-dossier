@@ -12,6 +12,7 @@ import path from 'node:path';
 import {
   type AgentRunUsage,
   type DossierFrontmatter,
+  getErrorMessage,
   parseAgentUsage,
   parseDossierContent,
   parseOpenCodeUsage,
@@ -786,12 +787,12 @@ export function parseDossierMetadataFromContent(
       objective: frontmatter.objective || '',
       error: null,
     };
-  } catch {
+  } catch (err) {
     return {
       path: filePath,
       filename: path.basename(filePath),
       title: path.basename(filePath, '.ds.md'),
-      error: 'Invalid frontmatter',
+      error: `Invalid frontmatter: ${getErrorMessage(err)}`,
     };
   }
 }

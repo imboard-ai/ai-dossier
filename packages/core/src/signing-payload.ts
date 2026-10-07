@@ -36,13 +36,10 @@ const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 
 const ED25519_RAW_KEY_BYTES = 32;
 
-export type SignatureCoverage = 'body' | 'frontmatter+body' | 'spec-frontmatter+body';
+/** Every `signature.covers` scheme a verifier accepts: v1, v2, v3. */
+export const SIGNATURE_COVERAGES = ['body', 'frontmatter+body', 'spec-frontmatter+body'] as const;
 
-const SIGNATURE_COVERAGES: readonly string[] = [
-  'body',
-  'frontmatter+body',
-  'spec-frontmatter+body',
-];
+export type SignatureCoverage = (typeof SIGNATURE_COVERAGES)[number];
 
 /** Key of the signature block inside a spec-shaped `metadata` map. */
 const SPEC_SIGNATURE_KEY = `${DOSSIER_METADATA_PREFIX}signature`;
@@ -60,11 +57,11 @@ export function signatureCoverage(signature: { covers?: unknown } | undefined): 
   if (covers === undefined) {
     return 'body';
   }
-  if (typeof covers === 'string' && SIGNATURE_COVERAGES.includes(covers)) {
+  if (typeof covers === 'string' && (SIGNATURE_COVERAGES as readonly string[]).includes(covers)) {
     return covers as SignatureCoverage;
   }
   throw new Error(
-    `Unsupported signature coverage ${JSON.stringify(covers)}; refusing to verify (upgrade @ai-dossier/core if this dossier is newer)`
+    `Unsupported signature coverage ${JSON.stringify(covers)}; refusing to verify (this dossier may need a newer ai-dossier CLI or VS Code extension)`
   );
 }
 
@@ -270,7 +267,9 @@ export function buildSignedPayload(
  * and vouch for on-disk bytes it never covered. Throws when the dossier is
  * unsigned, `covers` is unrecognized, or scheme and shape disagree.
  */
-export function buildVerificationPayload(parsed: ParsedDossier): string {
+export function buildVerificationPayload(
+  parsed: Pick<ParsedDossier, 'frontmatter' | 'body' | 'rawFrontmatter' | 'shape'>
+): string {
   const signature = parsed.frontmatter.signature;
   if (!signature) {
     throw new Error('Dossier is not signed');
@@ -291,9 +290,5 @@ export function buildVerificationPayload(parsed: ParsedDossier): string {
       'Legacy-shaped dossier carries a spec-frontmatter+body (v3) signature, which only covers the spec shape'
     );
   }
-  return buildSignedPayload(
-    parsed.frontmatter as unknown as Record<string, unknown>,
-    parsed.body,
-    coverage
-  );
+  return buildSignedPayload(parsed.frontmatter, parsed.body, coverage);
 }

@@ -1,6 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { type DossierFrontmatter, parseDossierContent, sha256Hex } from '@ai-dossier/core';
+import {
+  type DossierFrontmatter,
+  parseDossierContent,
+  SPEC_SHAPE_WRITE_UNSUPPORTED,
+  sha256Hex,
+} from '@ai-dossier/core';
 import type { Command } from 'commander';
 
 export function registerChecksumCommand(program: Command): void {
@@ -25,6 +30,9 @@ export function registerChecksumCommand(program: Command): void {
       let body: string;
       try {
         const parsed = parseDossierContent(content);
+        if (options.update && parsed.shape === 'spec') {
+          throw new Error(SPEC_SHAPE_WRITE_UNSUPPORTED);
+        }
         frontmatter = parsed.frontmatter;
         body = parsed.body;
       } catch (err: unknown) {

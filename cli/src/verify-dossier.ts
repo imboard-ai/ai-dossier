@@ -20,6 +20,7 @@ import {
   assessVerificationRisk,
   buildVerificationPayload,
   findTrustedIdentifier,
+  getErrorMessage,
   isKmsKeyIdentifier,
   isSupportedPublicKey,
   loadTrustedKeys,
@@ -125,14 +126,14 @@ export interface SignatureCheckResult {
   message: string;
 }
 
+/**
+ * Check a parsed dossier's signature. Takes the on-disk frontmatter and shape
+ * along with the logical view because a v3 signature covers the former.
+ */
 export async function checkSignature(
-  body: string,
-  frontmatter: DossierFrontmatter,
-  onDisk: Pick<ParsedDossier, 'rawFrontmatter' | 'shape'> = {
-    rawFrontmatter: frontmatter,
-    shape: 'legacy',
-  }
+  parsed: Pick<ParsedDossier, 'frontmatter' | 'body' | 'rawFrontmatter' | 'shape'>
 ): Promise<SignatureCheckResult> {
+  const { frontmatter } = parsed;
   if (!frontmatter.signature) {
     return {
       present: false,
@@ -154,13 +155,13 @@ export async function checkSignature(
   // does not match the file's shape — reported as a failed check, not a crash.
   let signedPayload: string;
   try {
-    signedPayload = buildVerificationPayload({ frontmatter, body, raw: '', ...onDisk });
+    signedPayload = buildVerificationPayload(parsed);
   } catch (err) {
     return {
       present: true,
       verified: false,
       trusted: false,
-      message: `Verification error: ${(err as Error).message}`,
+      message: `Verification error: ${getErrorMessage(err)}`,
     };
   }
 
@@ -303,7 +304,7 @@ export async function verifyDossier(input: string, options: VerifyOptions): Prom
 
     // Verify signature
     console.log(`\n${colors.bright}\uD83D\uDD0F Authenticity Check:${colors.reset}`);
-    const signatureResult = await checkSignature(body, frontmatter, parsed);
+    const signatureResult = await checkSignature(parsed);
 
     if (signatureResult.present) {
       if (signatureResult.verified && signatureResult.trusted) {

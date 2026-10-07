@@ -32,18 +32,33 @@ export const SPEC_TOP_LEVEL_FIELDS = [
 /** Prefix of the `metadata` keys that carry Dossier fields. */
 export const DOSSIER_METADATA_PREFIX = 'dossier.';
 
+/**
+ * Why a writer refuses spec-shaped input: until the writers learn the spec shape
+ * (#1123), re-serializing the logical view would silently turn the file back
+ * into the legacy layout — and orphan a v3 signature it carries.
+ */
+export const SPEC_SHAPE_WRITE_UNSUPPORTED =
+  'Rewriting spec-shaped (Agent Skills layout) dossiers is not supported yet; edit the file by hand or wait for #1123';
+
 /** Which on-disk layout a dossier's frontmatter uses. */
 export type FrontmatterShape = 'legacy' | 'spec';
 
 /** A spec-shaped frontmatter that cannot be read without guessing, or a value that cannot be encoded losslessly. */
 export class SpecShapeError extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
     this.name = 'SpecShapeError';
   }
 }
 
 const SPEC_TOP_LEVEL = new Set<string>(SPEC_TOP_LEVEL_FIELDS);
+
+/** Field names that cannot round-trip: empty, or one that would set an object's prototype. */
+function assertValidFieldName(field: string, label: string): void {
+  if (!field || field === '__proto__') {
+    throw new SpecShapeError(`${label} is not a valid field name`);
+  }
+}
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -168,9 +183,7 @@ export function toSpecFrontmatter(logical: Record<string, unknown>): Record<stri
     if (SPEC_TOP_LEVEL.has(key) || value === undefined) {
       continue;
     }
-    if (!key || key === '__proto__') {
-      throw new SpecShapeError(`"${key}" is not a valid field name`);
-    }
+    assertValidFieldName(key, `"${key}"`);
     metadata[`${DOSSIER_METADATA_PREFIX}${key}`] = encodeSpecValue(value, key);
   }
   if (Object.keys(metadata).length > 0) {
@@ -233,12 +246,7 @@ export function fromSpecFrontmatter(spec: Record<string, unknown>): Record<strin
     }
 
     const field = key.slice(DOSSIER_METADATA_PREFIX.length);
-    if (!field) {
-      throw new SpecShapeError(`metadata "${key}" names no field`);
-    }
-    if (field === '__proto__') {
-      throw new SpecShapeError(`metadata "${key}" is not a valid field name`);
-    }
+    assertValidFieldName(field, `metadata "${key}"`);
     if (SPEC_TOP_LEVEL.has(field)) {
       throw new SpecShapeError(
         `metadata "${key}" duplicates the top-level "${field}" field; it may only appear at the top level`
@@ -268,7 +276,11 @@ export function fromSpecFrontmatter(spec: Record<string, unknown>): Record<strin
  * merges — the one dossiers are parsed with applies them, others (including the
  * Agent Skills tooling's) do not — so a spec-shaped file using one could be
  * signed as one thing and read by a skills runtime as another.
+ *
+ * Matches `<<` only in key position — at the start of a block-mapping line
+ * (optionally after a sequence dash) or after `{`/`,` in a flow mapping — so a
+ * `<<:` inside a quoted value or a mid-line heredoc mention is not mistaken for one.
  */
 export function hasYamlMergeKey(frontmatterText: string): boolean {
-  return /(^|[\s{,[])<<\s*:/m.test(frontmatterText);
+  return /^[ \t]*(?:-[ \t]+)?<<[ \t]*:|[{,][ \t]*<<[ \t]*:/m.test(frontmatterText);
 }

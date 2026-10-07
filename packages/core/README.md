@@ -57,7 +57,7 @@ import {
 
 #### `parseDossierContent(content: string): ParsedDossier`
 
-Parse a dossier content string into frontmatter and body. Accepts both `---dossier` (JSON/YAML) and standard `---` (YAML) delimiters, in either frontmatter shape: legacy (every Dossier field flat at the top level) or spec (Agent Skills fields `name`, `description`, `license`, `compatibility`, `allowed-tools` at the top level, every other field under `metadata` as `dossier.<field>` strings). `frontmatter` is always the same flat logical object; `rawFrontmatter` is the frontmatter as it sits on disk and `shape` says which layout it uses.
+Parse a dossier content string into frontmatter and body. Accepts both `---dossier` (JSON/YAML) and standard `---` (YAML) delimiters, in either frontmatter shape: legacy (every Dossier field flat at the top level) or spec (Agent Skills fields `name`, `description`, `license`, `compatibility`, `allowed-tools` at the top level, every other field under `metadata` as `dossier.<field>` strings). `frontmatter` is always the same flat logical object; `rawFrontmatter` is the frontmatter as it sits on disk and `shape` says which layout it uses. Throws a `SpecShapeError` (message prefixed `Invalid spec-shaped frontmatter:`) when a spec-shaped frontmatter is ambiguous — see `fromSpecFrontmatter`.
 
 ```typescript
 const { frontmatter, body, raw, rawFrontmatter, shape } = parseDossierContent(content);

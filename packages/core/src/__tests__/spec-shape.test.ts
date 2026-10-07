@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import matter from 'gray-matter';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import rootSchemaCopy from '../../../../dossier-schema.json';
+import { formatDossierContent } from '../formatter';
 import { lintDossier } from '../linter';
 import { parseDossierContent } from '../parser';
 import dossierSchema from '../schema/dossier-schema.json';
@@ -14,13 +15,16 @@ import {
   buildSignedPayload,
   buildVerificationPayload,
   canonicalizeSpecFrontmatter,
+  SIGNATURE_COVERAGES,
   signatureCoverage,
 } from '../signing-payload';
 import {
   decodeSpecValue,
   encodeSpecValue,
   fromSpecFrontmatter,
+  hasYamlMergeKey,
   isSpecShapedFrontmatter,
+  SPEC_TOP_LEVEL_FIELDS,
   SpecShapeError,
   toSpecFrontmatter,
 } from '../spec-shape';
@@ -446,6 +450,31 @@ describe('spec-shape parsing rejects ambiguity', () => {
       )
     ).toThrow(/merge keys/);
   });
+
+  it('does not mistake "<<:" inside a value for a merge key', () => {
+    expect(hasYamlMergeKey('description: "Use a <<: b heredoc"\n')).toBe(false);
+    expect(hasYamlMergeKey('body: |\n  write <<: here\n')).toBe(false);
+    expect(hasYamlMergeKey('a:\n  - <<: *x\n')).toBe(true);
+    expect(hasYamlMergeKey('a: { b: 1, <<: *x }\n')).toBe(true);
+    const parsed = parseDossierContent(
+      specFile('name: n\ndescription: "Use a <<: b heredoc"\nmetadata:\n  dossier.title: T\n')
+    );
+    expect(parsed.frontmatter.description).toBe('Use a <<: b heredoc');
+  });
+
+  it('surfaces parse rejections as SpecShapeError', () => {
+    expect(() =>
+      parseDossierContent(
+        specFile('name: n\ndescription: d\nrisk_level: low\nmetadata:\n  dossier.title: T\n')
+      )
+    ).toThrow(SpecShapeError);
+  });
+
+  it('formatDossierContent refuses a spec-shaped dossier instead of rewriting it as legacy', () => {
+    expect(() =>
+      formatDossierContent(specFile('name: n\ndescription: d\nmetadata:\n  dossier.title: T\n'))
+    ).toThrow(/spec-shaped/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -809,6 +838,32 @@ describe('dossier schema accepts the spec shape', () => {
   it('still requires the legacy fields on a legacy-shaped object', () => {
     const { title: _dropped, ...rest } = legacy;
     expect(validate(rest)).toBe(false);
+  });
+
+  it('keeps the schema lists in step with the code that owns them', () => {
+    const schema = dossierSchema as unknown as {
+      else: { required: string[] };
+      definitions: {
+        specShape: {
+          properties: Record<string, unknown> & {
+            metadata: { required: string[]; propertyNames: { not: { enum: string[] } } };
+          };
+        };
+      };
+      properties: { signature: { oneOf: { properties: { covers: { enum: string[] } } }[] } };
+    };
+    const spec = schema.definitions.specShape;
+    expect(spec.properties.metadata.required).toEqual(
+      schema.else.required.map((f) => `dossier.${f}`)
+    );
+    expect(spec.properties.metadata.propertyNames.not.enum).toEqual([
+      'dossier.',
+      ...SPEC_TOP_LEVEL_FIELDS.map((f) => `dossier.${f}`),
+    ]);
+    expect(Object.keys(spec.properties)).toEqual([...SPEC_TOP_LEVEL_FIELDS, 'metadata']);
+    for (const variant of schema.properties.signature.oneOf) {
+      expect(variant.properties.covers.enum).toEqual([...SIGNATURE_COVERAGES]);
+    }
   });
 
   it('isSpecShapedFrontmatter agrees with the schema detection', () => {

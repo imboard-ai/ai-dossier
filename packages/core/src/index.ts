@@ -173,6 +173,7 @@ export {
   isSupportedPublicKey,
   normalizePublicKey,
   publicKeysMatch,
+  SIGNATURE_COVERAGES,
   signatureCoverage,
   toSpkiPem,
 } from './signing-payload';
@@ -184,6 +185,7 @@ export {
   encodeSpecValue,
   fromSpecFrontmatter,
   isSpecShapedFrontmatter,
+  SPEC_SHAPE_WRITE_UNSUPPORTED,
   SPEC_TOP_LEVEL_FIELDS,
   SpecShapeError,
   toSpecFrontmatter,
