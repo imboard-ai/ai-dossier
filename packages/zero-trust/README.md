@@ -449,7 +449,11 @@ empty ones) and credentials in endpoint URLs are refused; redirects
 are disabled. It POSTs to the API base plus `/chat/completions`, with `tools`,
 `max_tokens` and `stream: false`. The API key goes only in Authorization.
 `apiKeyEnv` must be a shell environment identifier; model/endpoint strings pass
-secret-pattern guards. Invalid options give `invalid_request`; absent/empty keys
+secret-pattern guards. Reserved GitHub-authority variables (`ZTFC_*`, `GIT_*`,
+`GH_TOKEN`, `GITHUB_TOKEN`, `GITHUB_CLIENT_SECRET`) and GitHub-token key values
+are refused by the adapter; no credential-module import is needed for this fence.
+Response and parsed-argument nesting beyond 256 levels is `invalid_response`.
+Invalid options give `invalid_request`; absent/empty keys
 give `model_unavailable`, as do whitespace/control-bearing keys (the exact value
 must match what the Authorization header sends). Local servers should use a long
 dummy key: even a short placeholder is rejected if echoed in ordinary output.

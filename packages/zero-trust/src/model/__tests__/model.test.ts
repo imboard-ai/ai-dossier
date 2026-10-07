@@ -84,6 +84,55 @@ afterEach(() => {
 
 describe('OpenAI-compatible untrusted responses and transport', () => {
   it.each([
+    'ZTFC_CLIENT_SECRET',
+    'ZTFC_PRIVATE_KEY',
+    'GH_TOKEN',
+    'GITHUB_TOKEN',
+    'GITHUB_CLIENT_SECRET',
+    'GIT_AUTH_TOKEN',
+  ])('cannot select reserved GitHub credential env %s', (apiKeyEnv) => {
+    vi.stubEnv(apiKeyEnv, KEY);
+    const fetcher = vi.fn<typeof fetch>();
+    expect(
+      () =>
+        new OpenAICompatibleAdapter({
+          model: 'model-a',
+          endpoint: 'https://provider.example/v1',
+          apiKeyEnv,
+          fetch: fetcher,
+        })
+    ).toThrow('invalid_request');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+  it.each([
+    'ghp_',
+    'gho_',
+    'ghu_',
+    'ghs_',
+    'ghr_',
+    'github_pat_',
+  ])('cannot dispatch GitHub authority as a model key %s', (prefix) => {
+    vi.stubEnv('MODEL_TEST_KEY', `${prefix}syntheticfixture`);
+    const fetcher = vi.fn<typeof fetch>();
+    expect(() => adapter(fetcher)).toThrow('model_unavailable');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+  it('deep raw data and decoded arguments fail closed as invalid response, never false secret evidence', async () => {
+    const args = '['.repeat(10000) + ']'.repeat(10000);
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(`{"extra":${args},"usage":{"prompt_tokens":10,"completion_tokens":2}}`)
+      )
+      .mockResolvedValueOnce(response(recorded({ tool_calls: [tool(args)] }, 'tool_calls')));
+    for (let i = 0; i < 2; i++)
+      expect(await adapter(fetcher).complete(request)).toMatchObject({
+        kind: 'malformed',
+        reason: 'invalid_response',
+        usage: { inputTokens: 10, outputTokens: 2 },
+      });
+  });
+  it.each([
     null,
     [],
   ])('accepts an empty optional call list for a text-only completion %#', async (tool_calls) => {
@@ -395,7 +444,11 @@ describe('OpenAI-compatible untrusted responses and transport', () => {
     ).toBe('model-a');
   });
   it('scans every returned/error/log/journal sink for recognizable or JSON-escaped key', async () => {
-    const logs = [vi.spyOn(console, 'log'), vi.spyOn(console, 'error'), vi.spyOn(console, 'warn')];
+    const logs = (Object.keys(console) as (keyof Console)[])
+      .filter((name) => typeof console[name] === 'function')
+      .map((name) => vi.spyOn(console, name));
+    const stdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const outputs: unknown[] = [];
     const store = ledger();
     for (const raw of [
@@ -433,7 +486,19 @@ describe('OpenAI-compatible untrusted responses and transport', () => {
     } catch (error) {
       outputs.push(String(error), JSON.stringify(error));
     }
-    outputs.push(fs.readFileSync(store.file, 'utf8'), ...logs.flatMap((log) => log.mock.calls));
+    const files = (dir: string): string[] =>
+      fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+        const full = path.join(dir, entry.name);
+        return entry.isDirectory() ? files(full) : [fs.readFileSync(full, 'utf8')];
+      });
+    outputs.push(
+      ...files(directory),
+      ...logs.flatMap((log) => log.mock.calls),
+      ...stdout.mock.calls,
+      ...stderr.mock.calls
+    );
+    stdout.mockRestore();
+    stderr.mockRestore();
     expect(JSON.stringify(outputs)).not.toContain(KEY);
     expect(logs.every((log) => log.mock.calls.length === 0)).toBe(true);
     expect(outputs[0]).toMatchObject({

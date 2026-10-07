@@ -16,6 +16,7 @@ import {
 } from './adapter';
 
 export const MAX_MODEL_RESPONSE_BYTES = 1024 * 1024;
+const MAX_RESPONSE_DEPTH = 256;
 const RETRY_DELAY_MS = 50;
 const count = (value: unknown): value is number =>
   Number.isSafeInteger(value) && (value as number) >= 0;
@@ -96,6 +97,20 @@ function containsKey(value: unknown, key: string): boolean {
     );
   return false;
 }
+function boundedDepth(value: unknown): boolean {
+  const stack: { value: unknown; depth: number }[] = [{ value, depth: 0 }];
+  while (stack.length) {
+    const item = stack.pop() as { value: unknown; depth: number };
+    if (item.depth > MAX_RESPONSE_DEPTH) return false;
+    const children = Array.isArray(item.value)
+      ? item.value
+      : isRecord(item.value)
+        ? Object.values(item.value)
+        : [];
+    for (const child of children) stack.push({ value: child, depth: item.depth + 1 });
+  }
+  return true;
+}
 function decode(bytes: Uint8Array, key: string, request: ModelRequest): ModelResult {
   let raw: unknown;
   try {
@@ -104,6 +119,7 @@ function decode(bytes: Uint8Array, key: string, request: ModelRequest): ModelRes
     return malformed('invalid_response');
   }
   const reported = isRecord(raw) ? usage(raw.usage) : null;
+  if (!boundedDepth(raw)) return malformed('invalid_response', reported);
   try {
     if (containsKey(raw, key)) return malformed('secret_detected', reported);
     assertSecretFree(raw);
@@ -117,6 +133,7 @@ function decode(bytes: Uint8Array, key: string, request: ModelRequest): ModelRes
     return malformed('invalid_response', reported);
   }
   try {
+    if (!boundedDepth(result)) return malformed('invalid_response', reported);
     if (containsKey(result, key)) return malformed('secret_detected', reported);
     assertSecretFree(result);
   } catch {
@@ -182,6 +199,8 @@ export class OpenAICompatibleAdapter implements ModelAdapter {
         typeof model !== 'string' ||
         !model ||
         !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(apiKeyEnv) ||
+        /^(?:ZTFC_|GIT_)/u.test(apiKeyEnv) ||
+        ['GH_TOKEN', 'GITHUB_TOKEN', 'GITHUB_CLIENT_SECRET'].includes(apiKeyEnv) ||
         typeof fetcher !== 'function'
       )
         throw new ModelError('invalid_request');
@@ -202,6 +221,8 @@ export class OpenAICompatibleAdapter implements ModelAdapter {
     // biome-ignore lint/suspicious/noControlCharactersInRegex: Refuse HTTP control/whitespace bytes in credentials before header normalization.
     if (!key || key !== key.trim() || /[\u0000-\u0020\u007f]/u.test(key))
       throw new ModelError('model_unavailable');
+    // Defense in depth against a controller profile accidentally selecting GitHub authority.
+    if (/^(?:gh[pousr]_|github_pat_)/u.test(key)) throw new ModelError('model_unavailable');
     return key;
   }
   private async post(
