@@ -23,6 +23,21 @@ export const VALID_STATUSES = ['Draft', 'Stable', 'Deprecated', 'Experimental'] 
 /** Valid values for the risk_level field. */
 export const VALID_RISK_LEVELS = ['low', 'medium', 'high', 'critical'] as const;
 
+function refuseEngine(): never {
+  throw new Error('Only YAML/JSON front matter is supported');
+}
+
+/** YAML only; gray-matter's code-evaluating engines are replaced with a refusal. */
+const MATTER_OPTIONS = {
+  language: 'yaml',
+  engines: {
+    js: refuseEngine,
+    javascript: refuseEngine,
+    coffee: refuseEngine,
+    coffeescript: refuseEngine,
+  },
+};
+
 /**
  * Parse dossier content into frontmatter and body.
  *
@@ -33,24 +48,31 @@ export function parseDossierContent(content: string): ParsedDossier {
     throw new Error('Invalid dossier format. Content must be a non-empty string.');
   }
 
-  // Normalize dossier-specific delimiters to standard --- for gray-matter
+  // Normalize dossier-specific delimiters to standard --- for gray-matter.
+  // Only YAML (and JSON, which is YAML) is accepted: gray-matter reads a
+  // language name off the opening fence and has engines that evaluate code, so
+  // any other opening line is refused rather than handed to it.
+  const firstNewline = content.indexOf('\n');
+  const openingLine = (firstNewline >= 0 ? content.slice(0, firstNewline) : content).trimEnd();
   let normalized = content;
-  if (content.startsWith('---dossier')) {
-    // Strip "---dossier" and any trailing text on the same line, keep the newline
-    const firstNewline = content.indexOf('\n');
+  if (content.startsWith('---dossier') || content.startsWith('---json')) {
+    // Strip the opening line and any trailing text on it, keep the newline
     normalized = `---\n${firstNewline >= 0 ? content.slice(firstNewline + 1) : ''}`;
-  } else if (content.startsWith('---json')) {
-    const firstNewline = content.indexOf('\n');
-    normalized = `---\n${firstNewline >= 0 ? content.slice(firstNewline + 1) : ''}`;
-  } else if (!content.startsWith('---')) {
+  } else if (openingLine !== '---' && openingLine !== '---yaml') {
     throw new Error(
-      'Invalid dossier format. Expected:\n---dossier\n{...}\n---\n[body]\nor standard YAML frontmatter (---)'
+      content.startsWith('---')
+        ? `Unsupported front-matter opening "${openingLine.slice(0, 40)}". Only YAML (---) or JSON (---dossier / ---json) front matter is accepted.`
+        : 'Invalid dossier format. Expected:\n---dossier\n{...}\n---\n[body]\nor standard YAML frontmatter (---)'
     );
+  } else if (openingLine === '---yaml') {
+    normalized = `---\n${firstNewline >= 0 ? content.slice(firstNewline + 1) : ''}`;
   }
 
   let parsed: matter.GrayMatterFile<string>;
   try {
-    parsed = matter(normalized);
+    // Passing options also bypasses gray-matter's content-keyed cache, which
+    // would otherwise hand every caller the same mutable data object.
+    parsed = matter(normalized, MATTER_OPTIONS);
   } catch (err) {
     throw new Error(`Failed to parse frontmatter: ${getErrorMessage(err)}`);
   }
