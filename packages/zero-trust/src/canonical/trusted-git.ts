@@ -5,6 +5,7 @@ import { CanonicalError } from './export';
 
 const DEFAULT_TIMEOUT_MS = 60000;
 const MAX_ASYNC_OUTPUT = 1024 * 1024;
+export const MAX_GIT_PACK_BYTES = 128 * 1024 * 1024;
 /** What a caller may add to the environment: a broker credential's `GIT_CONFIG_*` set and
  * the prompt/trace switches. Anything else (GIT_DIR, GIT_SSH_COMMAND, …) could undo the
  * hardening below. */
@@ -28,11 +29,20 @@ export interface GitExecOptions {
   /** Extra `-c` entries, e.g. `protocol.file.allow=always` for a local test remote. */
   readonly config?: readonly string[];
   readonly timeoutMs?: number;
+  /** Credential-free source fetch only; never combine with env/config overrides. */
+  readonly sourceFetch?: 'https' | 'file-test';
+  /** May only lower the receive-file bound; source fetch always has a hard 128 MiB cap. */
+  readonly sourcePackBytes?: number;
+  readonly maxOutputBytes?: number;
 }
 export interface GitResult {
   /** Null when git was killed (timeout, abort) or could not start. */
   readonly status: number | null;
   readonly stdout: Buffer;
+  readonly outputLimitExceeded?: boolean;
+  readonly fileLimitExceeded?: boolean;
+  /** Positively identified strict object/pack refusal, never generic nonzero exit. */
+  readonly strictImportRejected?: boolean;
 }
 
 /** Internal plumbing only. Never points Git at an artifact's repository/config. */
@@ -80,24 +90,59 @@ export class TrustedGit {
    * outcome (a rejected lease). */
   exec(args: readonly string[], options: GitExecOptions = {}): GitResult {
     const { argv, env } = this.invocation(args, options);
-    const result = spawnSync('/usr/bin/git', argv, {
-      cwd: this.directory,
-      env,
-      input: options.input,
-      maxBuffer: 128 * 1024 * 1024,
-      timeout: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-      shell: false,
-    });
+    // RLIMIT_FSIZE is inherited by Git's index-pack child and enforced by the kernel
+    // during download, not a post-fetch disk check. Force packed reception below.
+    const source = options.sourceFetch !== undefined;
+    const result = spawnSync(
+      source ? '/usr/bin/env' : '/usr/bin/git',
+      source
+        ? [
+            '--ignore-signal=XFSZ',
+            '/usr/bin/prlimit',
+            `--fsize=${options.sourcePackBytes ?? MAX_GIT_PACK_BYTES}`,
+            '--',
+            '/usr/bin/git',
+            ...argv,
+          ]
+        : argv,
+      {
+        cwd: this.directory,
+        env,
+        input: options.input,
+        maxBuffer: options.maxOutputBytes ?? 128 * 1024 * 1024,
+        timeout: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+        shell: false,
+      }
+    );
     return {
       status: result.error ? null : result.status,
       stdout: result.stdout ?? Buffer.alloc(0),
+      outputLimitExceeded: (result.error as NodeJS.ErrnoException | undefined)?.code === 'ENOBUFS',
+      fileLimitExceeded:
+        source &&
+        (result.signal === 'SIGXFSZ' ||
+          (result.stderr?.includes(Buffer.from('File too large')) ?? false)),
+      strictImportRejected:
+        args[0] === 'index-pack' &&
+        args.includes('--strict') &&
+        !result.error &&
+        result.status !== null &&
+        result.status !== 0 &&
+        // Only Git's fixed terminal diagnostics; do not expose raw stderr or trust
+        // names/messages embedded in earlier fsck lines. Unknown failure is unavailable.
+        /^fatal: (?:did not receive expected object [a-f0-9]{40}|fsck error in packed object|early EOF|pack signature mismatch)$/u.test(
+          result.stderr?.toString('utf8').trim().split('\n').at(-1) ?? ''
+        ),
     };
   }
   /** exec() for long network operations: the event loop stays free, so a revoked lease or
    * the kill switch can abort `signal`, which kills git (status null). */
   execAsync(
     args: readonly string[],
-    options: Omit<GitExecOptions, 'input'> & { readonly signal: AbortSignal }
+    options: Omit<
+      GitExecOptions,
+      'input' | 'maxOutputBytes' | 'sourceFetch' | 'sourcePackBytes'
+    > & { readonly signal: AbortSignal }
   ): Promise<GitResult> {
     const { argv, env } = this.invocation(args, options);
     return new Promise((resolve) => {
@@ -131,6 +176,25 @@ export class TrustedGit {
     options: GitExecOptions
   ): { argv: string[]; env: NodeJS.ProcessEnv } {
     const gitEnv = { ...this.env };
+    if (
+      options.sourcePackBytes !== undefined &&
+      (options.sourceFetch === undefined ||
+        !Number.isSafeInteger(options.sourcePackBytes) ||
+        options.sourcePackBytes <= 0 ||
+        options.sourcePackBytes > MAX_GIT_PACK_BYTES)
+    )
+      throw new TypeError('TrustedGit refuses unsafe source pack limit');
+    if (options.sourceFetch !== undefined) {
+      if (
+        args[0] !== 'fetch' ||
+        options.env !== undefined ||
+        options.config !== undefined ||
+        options.identity !== undefined ||
+        !['https', 'file-test'].includes(options.sourceFetch) ||
+        (options.sourceFetch === 'file-test' && !process.env.VITEST)
+      )
+        throw new TypeError('TrustedGit refuses unsafe source fetch options');
+    }
     for (const key of [
       'GIT_AUTHOR_NAME',
       'GIT_AUTHOR_EMAIL',
@@ -161,6 +225,20 @@ export class TrustedGit {
       'core.attributesFile=/dev/null',
       '-c',
       'protocol.allow=never',
+      ...(options.sourceFetch === undefined
+        ? []
+        : [
+            '-c',
+            `protocol.${options.sourceFetch === 'https' ? 'https' : 'file'}.allow=always`,
+            '-c',
+            'http.followRedirects=false',
+            '-c',
+            'fetch.unpackLimit=1',
+            '-c',
+            'fetch.writeCommitGraph=false',
+            '-c',
+            'gc.auto=0',
+          ]),
       '-c',
       'commit.gpgSign=false',
       '-c',
@@ -173,5 +251,14 @@ export class TrustedGit {
   }
   close(): void {
     fs.rmSync(this.directory, { recursive: true, force: true });
+  }
+}
+
+/** Source APIs classify trusted storage/process initialization as unavailable. */
+export function createSourceGit(): TrustedGit {
+  try {
+    return new TrustedGit();
+  } catch {
+    throw new CanonicalError('unavailable');
   }
 }

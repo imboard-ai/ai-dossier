@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import { resolve } from 'node:path';
 
 export type CanonicalReason =
+  | 'unavailable'
   | 'unsupported'
   | 'invalid_path'
   | 'path_collision'

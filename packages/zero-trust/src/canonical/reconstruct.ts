@@ -10,7 +10,7 @@ import {
   validateManifest,
   validateSourcePath,
 } from './export';
-import { TrustedGit } from './trusted-git';
+import { createSourceGit, MAX_GIT_PACK_BYTES, TrustedGit } from './trusted-git';
 
 export interface ContributorApproval {
   readonly login: string;
@@ -48,7 +48,7 @@ export interface CanonicalCandidate {
   /** Raw Git object data only; no refs, config, attributes, hooks or alternates. */
   readonly pack: Buffer;
 }
-const MAX_PACK_BYTES = 128 * 1024 * 1024;
+export const MAX_PACK_BYTES = MAX_GIT_PACK_BYTES;
 function oid(value: string): string {
   if (typeof value !== 'string' || !/^[a-f0-9]{40}$/u.test(value))
     throw new CanonicalError('invalid_manifest');
@@ -109,15 +109,18 @@ function inputs(raw: CommitInputs): CommitInputs {
     message,
   });
 }
-function importBase(git: TrustedGit, pack: Buffer, baseSha: string): void {
+/** Strict import shared by source acquisition and candidate reconstruction. */
+export function importPack(git: TrustedGit, pack: Buffer): void {
   if (!Buffer.isBuffer(pack) || !pack.length || pack.length > MAX_PACK_BYTES)
     throw new CanonicalError('limit_exceeded');
   // Copy once: caller cannot mutate bytes between checks/import.
-  try {
-    git.run(['index-pack', '--strict', '--stdin'], Buffer.from(pack));
-  } catch {
-    throw new CanonicalError('unsupported');
-  }
+  const result = git.exec(['index-pack', '--strict', '--stdin'], { input: Buffer.from(pack) });
+  if (result.status === null) throw new CanonicalError('unavailable');
+  if (result.status !== 0)
+    throw new CanonicalError(result.strictImportRejected ? 'unsupported' : 'unavailable');
+}
+function importBase(git: TrustedGit, pack: Buffer, baseSha: string): void {
+  importPack(git, pack);
   if (git.run(['cat-file', '-t', baseSha]).toString().trim() !== 'commit')
     throw new CanonicalError('unsupported');
 }
@@ -174,6 +177,23 @@ function baseTree(git: TrustedGit, base: string): string {
   const match = /^tree ([a-f0-9]{40})\n/u.exec(git.run(['cat-file', 'commit', base]).toString());
   if (!match) throw new CanonicalError('unsupported');
   return match[1] as string;
+}
+/** Validate the baseline through the same strict importer used by createCandidate. */
+export function baseManifest(pack: Buffer, baseSha: string): SourceManifest {
+  const base = oid(baseSha);
+  const git = createSourceGit();
+  try {
+    importBase(git, pack, base);
+    return inspectTree(git, baseTree(git, base), {});
+  } catch (error) {
+    if (error instanceof CanonicalError) {
+      if (error.reason === 'limit_exceeded' || error.reason === 'unavailable') throw error;
+      if (error.reason === 'git_failed') throw new CanonicalError('unavailable');
+    }
+    throw new CanonicalError('unsupported');
+  } finally {
+    git.close();
+  }
 }
 function buildTree(git: TrustedGit, manifest: SourceManifest): string {
   const directories = new Map<
