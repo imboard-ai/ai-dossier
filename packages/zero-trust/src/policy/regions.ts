@@ -14,6 +14,7 @@ export function policyRegions(file: PolicyFile): readonly PolicyRegion[] {
   let depth = 0;
   let fence: { marker: string; length: number } | undefined;
   let htmlEnd: RegExp | null | undefined;
+  let paragraph = false;
   const lines = file.content.split(/\r\n|\n|\r/u);
   if (!readme) {
     region = { ambiguous: false, lines: [] };
@@ -23,6 +24,7 @@ export function policyRegions(file: PolicyFile): readonly PolicyRegion[] {
     const text = lines[index];
     // Active HTML content cannot open a Markdown fence or manufacture a heading.
     if (htmlEnd !== undefined) {
+      paragraph = false;
       if (region) {
         region.ambiguous = true;
         region.lines.push({ text, line: index + 1 });
@@ -31,6 +33,7 @@ export function policyRegions(file: PolicyFile): readonly PolicyRegion[] {
       continue;
     }
     if (fence) {
+      paragraph = false;
       const close = /^ {0,3}(`{3,}|~{3,})[ \t]*$/u.exec(text);
       if (close && close[1][0] === fence.marker && close[1].length >= fence.length)
         fence = undefined;
@@ -38,6 +41,7 @@ export function policyRegions(file: PolicyFile): readonly PolicyRegion[] {
     }
     const open = /^ {0,3}(`{3,}|~{3,})(.*)$/u.exec(text);
     if (open && (open[1][0] !== '`' || !open[2].includes('`'))) {
+      paragraph = false;
       fence = { marker: open[1][0], length: open[1].length };
       continue;
     }
@@ -45,11 +49,12 @@ export function policyRegions(file: PolicyFile): readonly PolicyRegion[] {
     // Comments/raw tags have explicit ends; other HTML blocks end at a blank.
     const html = /^ {0,3}<(?:!--|\/?[A-Za-z]|!|\?)/u.test(text);
     if (readme && html) {
+      paragraph = false;
       if (region) {
         region.ambiguous = true;
         region.lines.push({ text, line: index + 1 });
       }
-      const raw = /^ {0,3}<(script|style|pre|textarea)(?:\s|>)/iu.exec(text);
+      const raw = /^ {0,3}<(script|style|pre|textarea)(?:\s|>|$)/iu.exec(text);
       const start = text.trimStart();
       htmlEnd = start.startsWith('<!--')
         ? /-->/u
@@ -68,6 +73,7 @@ export function policyRegions(file: PolicyFile): readonly PolicyRegion[] {
     if (readme) {
       const heading = /^ {0,3}(#{1,6})(?:[ \t]+(.*)|$)/u.exec(text);
       if (heading) {
+        paragraph = false;
         const level = heading[1].length;
         if (region && level <= depth) region = undefined;
         if (!region && /contribut/iu.test(heading[2] ?? '')) {
@@ -80,15 +86,16 @@ export function policyRegions(file: PolicyFile): readonly PolicyRegion[] {
         region?.lines.push({ text, line: index + 1 });
         continue;
       }
-      if (
-        region &&
-        index > 0 &&
-        lines[index - 1].trim() !== '' &&
-        /^ {0,3}(?:=+|-+)[ \t]*$/u.test(text)
-      )
-        region.ambiguous = true;
+      if (region && paragraph && /^ {0,3}(?:=+|-+)[ \t]*$/u.test(text)) region.ambiguous = true;
     }
     region?.lines.push({ text, line: index + 1 });
+    // Setext requires a paragraph, not merely a preceding nonblank physical
+    // line: ATX headings, list items and closed fences cannot become setext.
+    paragraph =
+      text.trim() !== '' &&
+      !/^ {0,3}(?:=+|-+)[ \t]*$/u.test(text) &&
+      !/^ {0,3}(?:[-+*][ \t]+|\d{1,9}[.)][ \t]+|>)/u.test(text) &&
+      !/^(?: {4}|\t)/u.test(text);
   }
   return regions;
 }

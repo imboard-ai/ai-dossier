@@ -115,4 +115,25 @@ describe('CommonMark subset policy regions', () => {
     });
     expect(classifyPolicy([file('## Contributing: no AI.')]).ai).toBe('banned');
   });
+  it.each([
+    'script',
+    'style',
+    'pre',
+    'textarea',
+  ])('recognizes a raw <%s end-of-line opener until its closing tag', (tag) => {
+    const html = `<${tag}\n\n## Usage\nNo AI.\nDraft optional.\nTemplate optional.\n</${tag}>`;
+    expect(classifyPolicy([file(`## Contributing\n${html}`)])).toMatchObject({
+      ai: 'unclear',
+      draftRequired: true,
+      receiptBlockAllowed: false,
+    });
+    expect(classifyPolicy([file(html.replace('## Usage', '## Contributing'))]).ai).toBe('silent');
+  });
+  it.each([
+    '## Contributing\n### No AI.\n---',
+    '## Contributing\nNo AI.\n```\nexcluded\n```\n---',
+    '## Contributing\n- No AI.\n---',
+  ])('does not taint thematic breaks after non-paragraph blocks: %s', (content) => {
+    expect(classifyPolicy([file(content)]).ai).toBe('banned');
+  });
 });
