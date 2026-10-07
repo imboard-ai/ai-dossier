@@ -326,7 +326,16 @@ describe('closed validation, confidence and monotonicity', () => {
         (Object.keys(floor).length === 0 ||
           ('minimumStrictness' in floor && floor.minimumStrictness === 0))
         ? { status: 'accepted', value: 'welcome' }
-        : { status: 'escalated', reason: 'floor' }
+        : {
+            status: 'escalated',
+            reason:
+              floor &&
+              (('minimumStrictness' in floor &&
+                [1, 2].includes(floor.minimumStrictness as number)) ||
+                ('escalate' in floor && floor.escalate === true))
+                ? 'floor'
+                : 'configuration',
+          }
     );
   });
   it('floor failures and provider decode failures use bounded reasons', async () => {
@@ -341,7 +350,7 @@ describe('closed validation, confidence and monotonicity', () => {
           },
         })
       ).reason
-    ).toBe('floor');
+    ).toBe('configuration');
     const bad = {
       ...fake.provider,
       decode: () => {
@@ -357,7 +366,8 @@ describe('closed validation, confidence and monotonicity', () => {
     for (let n = 0; n < 12; n++) {
       seed = (seed * 1664525 + 1013904223) >>> 0;
       const labels = ['allow', 'ask', 'ban'];
-      const rank = seed % 2;
+      const rank = (seed >>> 16) % 2;
+      const stricter = rank + 1 + ((seed >>> 20) % (2 - rank));
       const passes = 2 + (seed % 7);
       const pos = seed % passes;
       const q: TypedQuestion =
@@ -388,7 +398,7 @@ describe('closed validation, confidence and monotonicity', () => {
         passes,
       });
       expect(baseline.status).toBe('accepted');
-      unanimous[pos] = proposal(answer(labels[rank + 1]));
+      unanimous[pos] = proposal(answer(labels[stricter]));
       const v = await decide(q, inputs, {
         provider: scripted(unanimous).provider,
         budget: b,
@@ -400,7 +410,7 @@ describe('closed validation, confidence and monotonicity', () => {
           .provider,
         budget: b,
         passes,
-        floor: () => ({ minimumStrictness: rank + 1 }),
+        floor: () => ({ minimumStrictness: stricter }),
       });
       expect(f).toMatchObject({ status: 'escalated', reason: 'floor' });
     }
@@ -688,6 +698,9 @@ describe('optional external service and actual OpenAI adapter', () => {
     { endpoint: undefined },
     { model: '' },
     { model: 'ghp_syntheticfixture' },
+    { timeoutMs: 0 },
+    { maxOutputTokens: 0 },
+    { timeoutMs: Infinity },
   ])('external bad controller configuration is refused without echo %#', (extra) => {
     expect(() => external(vi.fn<typeof fetch>(), extra)).toThrow('invalid_request');
   });
@@ -737,6 +750,180 @@ describe('optional external service and actual OpenAI adapter', () => {
 });
 
 describe('independent review regressions', () => {
+  it('profile changes cannot reuse weaker agreement-only permission; disabled logprobs are absent on the wire', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () =>
+        openAiResponse(answer(), { content: [{ logprob: Math.log(0.5) }] })
+      );
+    const adapter = openAi(fetcher);
+    const c = cache();
+    const b = budget();
+    const weak = await decide(definition, inputs, {
+      provider: createLlmDecisionProvider({ adapter, logprobs: false }),
+      cache: c.store,
+      budget: b,
+    });
+    expect(weak.status).toBe('accepted');
+    expect(JSON.parse(fetcher.mock.calls[0][1]?.body as string)).not.toHaveProperty('logprobs');
+    const strict = await decide(definition, inputs, {
+      provider: createLlmDecisionProvider({ adapter }),
+      cache: c.store,
+      budget: b,
+    });
+    expect(strict).toMatchObject({ status: 'escalated', reason: 'confidence', confidence: 0.5 });
+    expect(fetcher).toHaveBeenCalledTimes(4);
+  });
+  it('configured external output limit, nullable citations, nesting and non-secret labels are enforced', async () => {
+    for (const body of [
+      ' '.repeat(101) + JSON.stringify({ value: 'ban', probability: 1 }),
+      JSON.stringify({ value: 'ban', probability: 1, citations: null }),
+      `{"value":"ban","probability":1,"citations":${'['.repeat(300)}${']'.repeat(300)}}`,
+    ]) {
+      const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => new Response(body));
+      const b = budget();
+      const provider = createExternalDecisionProvider({
+        endpoint: 'https://hidden.example/private',
+        apiKeyEnv: 'DECISION_TEST_KEY',
+        id: 'configured-judge',
+        model: 'model-a',
+        fetch: fetcher,
+        maxOutputTokens: body.includes('null') ? 1000 : 100,
+      });
+      const v = await decide(definition, inputs, { provider, budget: b });
+      expect(v.status).toBe('escalated');
+      expect(v.provider).toBe('configured-judge');
+      expect(JSON.stringify(v)).not.toContain(provider.cacheIdentity);
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    }
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockImplementation(
+        async () =>
+          new Response(
+            `{"value":"ban","probability":1,"citations":${'['.repeat(300)}${']'.repeat(300)}}`
+          )
+      );
+    const provider = createExternalDecisionProvider({
+      endpoint: 'https://judge.example',
+      apiKeyEnv: 'DECISION_TEST_KEY',
+      model: 'model-a',
+      fetch: fetcher,
+    });
+    expect((await decide(definition, inputs, { provider, budget: budget() })).reason).toBe(
+      'provider'
+    );
+  });
+  it('overlapping decisions preserve the first cached verdict instead of overwriting uncertainty', async () => {
+    let release: (result: ModelResult) => void = () => {};
+    let count = 0;
+    const complete = vi.fn(async () => {
+      count++;
+      if (count === 2)
+        return new Promise<ModelResult>((resolve) => {
+          release = resolve;
+        });
+      return proposal(answer(count === 3 ? 'ban' : 'welcome'));
+    });
+    const provider = createLlmDecisionProvider({ adapter: { id: 'model-a', complete } });
+    const b = budget();
+    const c = cache();
+    const deps = { provider, budget: b, cache: c.store };
+    const a = decide(definition, inputs, deps);
+    const pending = decide(definition, inputs, deps);
+    const first = await a;
+    expect(first.reason).toBe('disagreement');
+    release(proposal());
+    expect(await pending).toEqual(first);
+    expect(await decide(definition, inputs, deps)).toEqual(first);
+    expect(complete).toHaveBeenCalledTimes(4);
+  });
+  it('a later overlapping restrictive pass escalates and replaces earlier cached permission', async () => {
+    let release: (result: ModelResult) => void = () => {};
+    let count = 0;
+    const complete = vi.fn(async () => {
+      count++;
+      if (count === 2)
+        return new Promise<ModelResult>((resolve) => {
+          release = resolve;
+        });
+      return proposal();
+    });
+    const provider = createLlmDecisionProvider({ adapter: { id: 'model-a', complete } });
+    const b = budget();
+    const c = cache();
+    const deps = { provider, budget: b, cache: c.store };
+    const early = decide(definition, inputs, deps);
+    const later = decide(definition, inputs, deps);
+    expect((await early).status).toBe('accepted');
+    release(proposal(answer('ban')));
+    expect((await later).reason).toBe('disagreement');
+    expect((await decide(definition, inputs, deps)).reason).toBe('disagreement');
+  });
+  it('accidental asynchronous cache setters/getters fail closed and reject without unhandled promises', async () => {
+    const setter = {
+      get: () => undefined,
+      set: async () => {
+        throw new Error('private');
+      },
+    } as unknown as DecisionCache;
+    expect(
+      (
+        await decide(definition, inputs, {
+          provider: scripted().provider,
+          budget: budget(),
+          cache: setter,
+        })
+      ).reason
+    ).toBe('cache_write');
+    const getter = {
+      get: async () => {
+        throw new Error('private');
+      },
+      set: () => undefined,
+    } as unknown as DecisionCache;
+    expect(
+      (
+        await decide(definition, inputs, {
+          provider: scripted().provider,
+          budget: budget(),
+          cache: getter,
+        })
+      ).reason
+    ).toBe('cache');
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+  it.each([
+    'secret_detected',
+    'response_too_large',
+    'invalid_response',
+  ] as const)('adapter malformed %s is uncached transport/secret failure', async (reason) => {
+    const fake = scripted([{ kind: 'malformed', reason, usage: null }, proposal(), proposal()]);
+    const c = cache();
+    const b = budget();
+    const deps = { provider: fake.provider, cache: c.store, budget: b };
+    expect((await decide(definition, inputs, deps)).reason).toBe(
+      reason === 'secret_detected' ? 'secret' : 'provider'
+    );
+    expect(c.map.size).toBe(0);
+    expect((await decide(definition, inputs, deps)).status).toBe('accepted');
+    expect(fake.complete).toHaveBeenCalledTimes(3);
+  });
+  it('non-object logprob wire metadata fails closed rather than becoming missing evidence', async () => {
+    for (const logprobs of ['x', []]) {
+      const fetcher = vi
+        .fn<typeof fetch>()
+        .mockImplementation(async () => openAiResponse(answer(), logprobs));
+      expect(
+        (
+          await decide(definition, inputs, {
+            provider: createLlmDecisionProvider({ adapter: openAi(fetcher) }),
+            budget: budget(),
+          })
+        ).status
+      ).toBe('escalated');
+    }
+  });
   it('injection-obeying fake on either framing cannot outvote a restrictive independent pass, without a floor', async () => {
     for (const vulnerableFrame of [1, 2]) {
       const complete = vi.fn(async (request: ModelRequest) => {
@@ -940,6 +1127,8 @@ describe('independent review regressions', () => {
     });
     expect((await decide(definition, inputs, { provider, budget: b })).reason).toBe('budget');
     expect(complete).toHaveBeenCalledTimes(1);
+    expect(b.ledger.snapshot().reservations.map((r) => r.status)).toEqual(['settled', 'reserved']);
+    expect(new BudgetLedger(b.ledger.file, 'contribution').snapshot()).toEqual(b.ledger.snapshot());
   });
   it('strictness public helper rejects values outside the set', () => {
     expect(() => questionStrictness(definition, 'outside')).toThrow('Invalid typed question');
@@ -958,7 +1147,7 @@ describe('independent review regressions', () => {
         (await decide(definition, inputs, { provider, cache: c.store, budget: b })).status
       ).toBe('accepted');
     }
-    expect(fake.requests.every((r) => r.logprobs === false)).toBe(true);
+    expect(fake.requests.every((r) => r.logprobs === undefined)).toBe(true);
     expect(fake.complete).toHaveBeenCalledTimes(4);
   });
   it('max-sized evidence is validated in linear source preparation and cache accepts merged per-pass citations', async () => {

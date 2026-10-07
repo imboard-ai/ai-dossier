@@ -16,6 +16,7 @@ import {
 } from './adapter';
 import {
   assertModelKeyEnv,
+  modelValueWithinDepth as boundedDepth,
   containsModelKey as containsKey,
   modelEndpoint,
   readBoundedModelBody,
@@ -23,7 +24,6 @@ import {
 } from './transport';
 
 export const MAX_MODEL_RESPONSE_BYTES = 1024 * 1024;
-const MAX_RESPONSE_DEPTH = 256;
 const RETRY_DELAY_MS = 50;
 const count = (value: unknown): value is number =>
   Number.isSafeInteger(value) && (value as number) >= 0;
@@ -94,20 +94,6 @@ function parse(raw: unknown, request: ModelRequest, reported: ModelUsage | null)
   if (choice.finish_reason === 'stop' && typeof message.content === 'string' && noCalls)
     return { kind: 'text', text: message.content, usage: reported };
   return malformed('invalid_response', reported);
-}
-function boundedDepth(value: unknown): boolean {
-  const stack: { value: unknown; depth: number }[] = [{ value, depth: 0 }];
-  while (stack.length) {
-    const item = stack.pop() as { value: unknown; depth: number };
-    if (item.depth > MAX_RESPONSE_DEPTH) return false;
-    const children = Array.isArray(item.value)
-      ? item.value
-      : isRecord(item.value)
-        ? Object.values(item.value)
-        : [];
-    for (const child of children) stack.push({ value: child, depth: item.depth + 1 });
-  }
-  return true;
 }
 function decode(bytes: Uint8Array, key: string, request: ModelRequest): ModelResult {
   let raw: unknown;
@@ -195,7 +181,6 @@ export class OpenAICompatibleAdapter implements ModelAdapter {
       if (typeof model !== 'string' || !model || typeof fetcher !== 'function')
         throw new ModelError('invalid_request');
       assertNoSecrets(model);
-      assertNoSecrets(endpoint);
       this.id = model;
       this.url = `${url.href.replace(/\/$/u, '')}/chat/completions`;
       this.apiKeyEnv = apiKeyEnv;

@@ -9,6 +9,7 @@ import {
   assertModelKeyEnv,
   containsModelKey,
   modelEndpoint,
+  modelValueWithinDepth,
   readBoundedModelBody,
   readModelKey,
 } from '../../model/transport';
@@ -21,6 +22,8 @@ export interface ExternalDecisionOptions {
   endpoint?: string;
   apiKeyEnv?: string;
   model?: string;
+  /** Public non-secret label; endpoint fingerprint lives only in the cache key. */
+  id?: string;
   fetch: typeof fetch;
   timeoutMs?: number;
   /** One token-equivalent per byte: conservative output bound, explicit rates required. */
@@ -39,10 +42,21 @@ export function createExternalDecisionProvider(options: ExternalDecisionOptions)
     fetch: fetcher,
     timeoutMs = 30_000,
     maxOutputTokens = DEFAULT_EXTERNAL_OUTPUT_TOKENS,
+    id = 'external',
   } = options;
   let url: string | undefined;
   try {
     assertNoSecrets(model);
+    assertNoSecrets(id);
+    if (
+      !id ||
+      !Number.isSafeInteger(timeoutMs) ||
+      timeoutMs < 1 ||
+      timeoutMs > 2_147_483_647 ||
+      !Number.isSafeInteger(maxOutputTokens) ||
+      maxOutputTokens < 1
+    )
+      throw new ModelError('invalid_request');
     if (!model || typeof fetcher !== 'function') throw new Error();
     if (endpoint !== undefined || apiKeyEnv !== undefined) {
       if (!endpoint || !apiKeyEnv) throw new Error();
@@ -54,16 +68,16 @@ export function createExternalDecisionProvider(options: ExternalDecisionOptions)
   }
   const key = () => {
     if (!url || !apiKeyEnv) throw new ModelError('model_unavailable');
-    return readModelKey(apiKeyEnv, true);
+    return { url, credential: readModelKey(apiKeyEnv, true) };
   };
   const adapter: ModelAdapter = Object.freeze({
     id: model,
     async complete(request: ModelRequest): Promise<ModelResult> {
-      const credential = key(); // Re-read at dispatch as well as pre-admission.
+      const { url: target, credential } = key(); // Re-read at dispatch as well as pre-admission.
       try {
         const body = request.messages[0].content;
         if (typeof body !== 'string') throw new ModelError('invalid_request');
-        const response = await fetcher(url as string, {
+        const response = await fetcher(target, {
           method: 'POST',
           redirect: 'error',
           signal: request.signal,
@@ -75,9 +89,14 @@ export function createExternalDecisionProvider(options: ExternalDecisionOptions)
           void response.body?.cancel().catch(() => {});
           throw new ModelError('model_http', response.status);
         }
-        const bytes = await readBoundedModelBody(response, request.signal, MAX_EXTERNAL_BYTES);
+        const bytes = await readBoundedModelBody(
+          response,
+          request.signal,
+          Math.min(MAX_EXTERNAL_BYTES, request.maxOutputTokens)
+        );
         if (!bytes) throw new ModelError('model_unavailable');
         const raw: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+        if (!modelValueWithinDepth(raw)) throw new ModelError('model_unavailable');
         assertSecretFree(raw);
         if (
           containsModelKey(raw, credential) ||
@@ -96,7 +115,7 @@ export function createExternalDecisionProvider(options: ExternalDecisionOptions)
               arguments: {
                 value: raw.value,
                 confidence: raw.probability,
-                citations: raw.citations ?? [],
+                citations: raw.citations === undefined ? [] : raw.citations,
               },
             },
           ],
@@ -109,9 +128,10 @@ export function createExternalDecisionProvider(options: ExternalDecisionOptions)
     },
   });
   return Object.freeze({
-    id: url
-      ? `external:${createHash('sha256').update(url).digest('hex')}`
-      : 'external:unconfigured',
+    id,
+    cacheIdentity: createHash('sha256')
+      .update(JSON.stringify(['external-v1', url, maxOutputTokens, timeoutMs]))
+      .digest('hex'),
     model,
     confidenceKind: 'external' as const,
     adapter,

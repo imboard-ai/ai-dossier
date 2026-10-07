@@ -12,6 +12,8 @@ export function assertModelKeyEnv(name: string): void {
     throw new ModelError('invalid_request');
 }
 export function readModelKey(name: string, restricted = false): string {
+  // Validate exact header bytes: fetch normalization must not evade key-echo detection.
+  // Refuse accidental controller configuration selecting GitHub write authority.
   const key = process.env[name];
   if (
     !key ||
@@ -48,6 +50,21 @@ export function containsModelKey(value: unknown, key: string): boolean {
       ([name, item]) => name.includes(key) || containsModelKey(item, key)
     );
   return false;
+}
+/** Guard recursive secret/key scans against adversarial JSON nesting. */
+export function modelValueWithinDepth(value: unknown): boolean {
+  const stack: { value: unknown; depth: number }[] = [{ value, depth: 0 }];
+  while (stack.length) {
+    const item = stack.pop() as { value: unknown; depth: number };
+    if (item.depth > 256) return false;
+    const children = Array.isArray(item.value)
+      ? item.value
+      : isRecord(item.value)
+        ? Object.values(item.value)
+        : [];
+    for (const child of children) stack.push({ value: child, depth: item.depth + 1 });
+  }
+  return true;
 }
 /** Deadline races live in the caller; cancellation must never await a stalled tee. */
 export async function readBoundedModelBody(

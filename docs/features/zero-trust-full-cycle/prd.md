@@ -142,8 +142,11 @@ pass, disagreement, provider failure, exhausted budget or insufficient confidenc
 escalates with no weaker fallback. LLM confidence uses agreement and token
 likelihoods where exposed, never self-reported confidence; an explicitly configured
 external service may supply its probability. Calls are budget-metered and accepted
-verdicts cached by question/version, provider/model and input digest (also binding
-question/floor/pass configuration). Reasons, verdicts and logs remain secret-free.
+verdicts and model-derived escalations cached by question/version, provider/model
+and input digest (also binding question/floor/pass/provider-profile configuration).
+Without available token likelihoods unanimous LLM agreement is confidence 1;
+asymmetric thresholds then do not add a gate beyond unanimity and deterministic
+floors, and cannot detect correlated model errors. Reasons, verdicts and logs remain secret-free.
 These semantic judgments do not replace deterministic execution/write authority
 checks (§5.4), and integrating each consumer remains its own implementation slice.
 

@@ -6,6 +6,7 @@ import { isNonemptyString, isRecord } from '../state';
 
 export type DecisionValue = string | boolean;
 export const DEFAULT_DECISION_PASSES = 2;
+export const MIN_DECISION_PASSES = 2;
 export const MAX_DECISION_PASSES = 8;
 export const MAX_DECISION_SOURCES = 256;
 export const MAX_DECISION_INPUT_BYTES = 1024 * 1024;
@@ -78,13 +79,15 @@ export interface DecisionProvider {
   readonly id: string;
   readonly model: string;
   readonly confidenceKind: 'agreement' | 'external';
+  /** Non-secret configuration/schema/framing fingerprint; never returned in verdicts. */
+  readonly cacheIdentity?: string;
   readonly adapter: ModelAdapter;
   request(question: TypedQuestion, inputs: readonly DecisionInput[], pass: number): ModelRequest;
   decode(result: ModelResult): unknown;
 }
 export interface DecisionCache {
-  get(key: string): Verdict | undefined;
-  set(key: string, value: Verdict): void;
+  get(key: string): unknown;
+  set(key: string, value: Verdict): undefined;
 }
 export interface DecisionFloor {
   minimumStrictness?: number;
@@ -96,7 +99,7 @@ export interface DecisionDeps {
   /** Controller-owned trusted storage, outside worker write access. */
   cache?: DecisionCache;
   budget: DecisionBudget;
-  /** Independent calls with different trusted framings. Default two, maximum eight. */
+  /** Independent calls with alternating trusted framings. Default two, maximum eight. */
   passes?: number;
   signal?: AbortSignal;
 }
@@ -129,6 +132,13 @@ export function questionStrictness(question: TypedQuestion, value: DecisionValue
 const probability = (v: unknown): v is number =>
   typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1;
 export { probability as validDecisionProbability };
+function keyedByAnswers(raw: unknown, keys: string[], valid: (value: unknown) => boolean): boolean {
+  return (
+    isRecord(raw) &&
+    Object.keys(raw).length === keys.length &&
+    keys.every((key) => Object.hasOwn(raw, key) && valid(raw[key]))
+  );
+}
 
 /** Reject invalid definitions and detach/freeze every field at construction. */
 export function createTypedQuestion(raw: TypedQuestion): TypedQuestion {
@@ -170,30 +180,18 @@ export function createTypedQuestion(raw: TypedQuestion): TypedQuestion {
       Object.freeze(values);
     } else if (['true', 'false'].includes(q.escalateValue as string))
       throw new InvalidQuestionError();
-    const question = q as unknown as TypedQuestion;
-    const values = questionValues(question);
+    const values: readonly DecisionValue[] =
+      q.kind === 'boolean'
+        ? [true, false]
+        : ((q.kind === 'choice' ? q.options : q.scale) as string[]);
     const keys = values.map(String);
-    if (
-      Object.keys(q.acceptThreshold).length !== keys.length ||
-      keys.some(
-        (key) =>
-          !Object.hasOwn(q.acceptThreshold as object, key) ||
-          !probability((q.acceptThreshold as Record<string, unknown>)[key])
-      )
-    )
-      throw new InvalidQuestionError();
-    if (question.kind === 'choice') {
-      if (
-        !isRecord(question.strictness) ||
-        Object.keys(question.strictness).length !== keys.length ||
-        keys.some(
-          (key) =>
-            !Object.hasOwn(question.strictness, key) || !Number.isFinite(question.strictness[key])
-        )
-      )
+    if (!keyedByAnswers(q.acceptThreshold, keys, probability)) throw new InvalidQuestionError();
+    if (q.kind === 'choice') {
+      if (!keyedByAnswers(q.strictness, keys, (v) => typeof v === 'number' && Number.isFinite(v)))
         throw new InvalidQuestionError();
-      Object.freeze(question.strictness);
+      Object.freeze(q.strictness);
     }
+    const question = q as unknown as TypedQuestion;
     // Strictly more permissive answers must have strictly higher admission thresholds.
     for (const a of values)
       for (const b of values) {

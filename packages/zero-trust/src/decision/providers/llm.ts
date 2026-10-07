@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { ModelAdapter, ModelRequest, ModelResult } from '../../model/adapter';
 import {
   type DecisionInput,
@@ -28,6 +29,10 @@ export function createLlmDecisionProvider(options: LlmDecisionOptions): Decision
     id,
     model: adapter.id,
     confidenceKind: 'agreement' as const,
+    // Bump revision if framings/schema change; profile changes cannot reuse weaker evidence.
+    cacheIdentity: createHash('sha256')
+      .update(JSON.stringify(['llm-report-v1', logprobs, maxOutputTokens, timeoutMs]))
+      .digest('hex'),
     adapter,
     request(question: TypedQuestion, inputs: readonly DecisionInput[], pass: number): ModelRequest {
       return {
@@ -80,7 +85,7 @@ export function createLlmDecisionProvider(options: LlmDecisionOptions): Decision
         maxOutputTokens,
         timeoutMs,
         attempts: 1,
-        logprobs,
+        ...(logprobs ? { logprobs: true } : {}),
       };
     },
     decode(result: ModelResult): unknown {
