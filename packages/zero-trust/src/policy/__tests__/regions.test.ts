@@ -136,4 +136,13 @@ describe('CommonMark subset policy regions', () => {
   ])('does not taint thematic breaks after non-paragraph blocks: %s', (content) => {
     expect(classifyPolicy([file(content)]).ai).toBe('banned');
   });
+  it.each([
+    '***',
+    '___',
+    '* * *',
+    '_ _ _',
+    '- - -',
+  ])('does not reinterpret consecutive thematic breaks as setext: %s', (marker) => {
+    expect(classifyPolicy([file(`## Contributing\nNo AI.\n${marker}\n---`)]).ai).toBe('banned');
+  });
 });

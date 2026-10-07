@@ -91,8 +91,10 @@ export function policyRegions(file: PolicyFile): readonly PolicyRegion[] {
     region?.lines.push({ text, line: index + 1 });
     // Setext requires a paragraph, not merely a preceding nonblank physical
     // line: ATX headings, list items and closed fences cannot become setext.
+    const thematicBreak = /^(?:\*{3,}|_{3,}|-{3,})$/u.test(text.replace(/[ \t]/gu, ''));
     paragraph =
       text.trim() !== '' &&
+      !thematicBreak &&
       !/^ {0,3}(?:=+|-+)[ \t]*$/u.test(text) &&
       !/^ {0,3}(?:[-+*][ \t]+|\d{1,9}[.)][ \t]+|>)/u.test(text) &&
       !/^(?: {4}|\t)/u.test(text);
