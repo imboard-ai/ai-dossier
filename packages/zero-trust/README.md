@@ -568,7 +568,9 @@ profile fingerprint when sharing caches across changing configurations.
 
 Each pass's value must belong to the closed set. Citations are `{ sourceId, line,
 quote }`; `line` is one-based, and the nonempty quote must occur as a span on that
-specific line of that exact source, normalizing whitespace only. Sources are split
+specific line of that exact source, normalizing whitespace only. Line separators are
+CRLF, LF, CR, NEL, Unicode line separator (U+2028) and paragraph separator (U+2029).
+Sources are split
 and normalized once per decision, not once per citation. Unknown sources,
 wrong lines, fabricated quotes and malformed citations invalidate the pass. An
 accepted quote is the validated whitespace-normalized single-line form; non-whitespace

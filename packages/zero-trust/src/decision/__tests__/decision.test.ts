@@ -651,6 +651,9 @@ describe('optional external service and actual OpenAI adapter', () => {
     expect(fetcher).toHaveBeenCalledTimes(1);
   });
   it('external HTTP/error/timeout/invalid JSON/oversize/hanging body have no fallback', async () => {
+    const globalFetch = vi
+      .spyOn(globalThis, 'fetch')
+      .mockRejectedValue(new Error('Forbidden fallback transport'));
     const fetchers = [
       vi.fn<typeof fetch>().mockResolvedValue(new Response('private error', { status: 503 })),
       vi.fn<typeof fetch>().mockRejectedValue(new Error('ghp_syntheticfixture')),
@@ -670,6 +673,7 @@ describe('optional external service and actual OpenAI adapter', () => {
       expect(fetcher).toHaveBeenCalledTimes(1);
       expect(b.ledger.snapshot().reservations).toHaveLength(1);
     }
+    expect(globalFetch).not.toHaveBeenCalled();
   });
   it('unconfigured/absent/invalid/GitHub keys never dispatch', async () => {
     const fetcher = vi.fn<typeof fetch>();
@@ -753,6 +757,35 @@ describe('optional external service and actual OpenAI adapter', () => {
 });
 
 describe('independent review regressions', () => {
+  it.each([
+    '\r',
+    '\n',
+    '\r\n',
+    '\u0085',
+    '\u2028',
+    '\u2029',
+  ])('citation lines use source line separators %#', async (separator) => {
+    const source = [{ sourceId: 'x', text: `Contributing${separator}No AI contributions.` }];
+    const valid = { sourceId: 'x', line: 2, quote: 'No AI contributions.' };
+    const bad = { sourceId: 'x', line: 1, quote: 'Contributing No AI' };
+    expect(
+      (
+        await decide(definition, source, {
+          provider: scripted([proposal(answer('ban', [valid])), proposal(answer('ban', [valid]))])
+            .provider,
+          budget: budget(),
+        })
+      ).status
+    ).toBe('accepted');
+    expect(
+      (
+        await decide(definition, source, {
+          provider: scripted([proposal(answer('ban', [bad]))]).provider,
+          budget: budget(),
+        })
+      ).reason
+    ).toBe('invalid_pass');
+  });
   it('sparse inputs are typed structural errors with zero provider calls', async () => {
     const sparse = new Array<{ sourceId: string; text: string }>(2);
     sparse[1] = { sourceId: 'x', text: 'fixed' };

@@ -287,10 +287,11 @@ export async function decide(
     return escalate('input');
   if (signal?.aborted) return escalate('aborted');
   const sources: Sources = new Map(
-    inputs.map((i) => [i.sourceId, i.text.split(/\r?\n/u).map(whitespace)])
+    inputs.map((i) => [i.sourceId, i.text.split(/\r\n|[\n\r\u0085\u2028\u2029]/u).map(whitespace)])
   );
   try {
     assertSecretFree(inputs);
+    assertSecretFree(inputs.map((i) => whitespace(i.text)));
     assertSecretFree([...sources.values()]);
   } catch {
     return escalate('secret');
