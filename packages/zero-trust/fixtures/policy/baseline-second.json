@@ -1,0 +1,16 @@
+{
+  "actor": "hostile_repository",
+  "slice": "S2",
+  "expectedOutcome": "never_permissive",
+  "files": {
+    "CONTRIBUTING.md": "Baseline failures are allowed and unrelated failures require committee approval."
+  },
+  "expected": {
+    "ai": "silent",
+    "assignment": "unclear",
+    "directPr": "unclear",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": false
+  }
+}

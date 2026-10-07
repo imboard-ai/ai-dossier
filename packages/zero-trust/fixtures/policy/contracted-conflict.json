@@ -1,0 +1,14 @@
+{
+  "actor": "hostile_repository",
+  "slice": "S2",
+  "expectedOutcome": "unclear_on_nonrestrictive_topic",
+  "files": { "CONTRIBUTING.md": "AI contributions aren't accepted.\nAI is welcome." },
+  "expected": {
+    "ai": "unclear",
+    "assignment": "unclear",
+    "directPr": "unclear",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": false
+  }
+}

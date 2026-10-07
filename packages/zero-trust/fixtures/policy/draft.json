@@ -1,0 +1,16 @@
+{
+  "actor": "upstream_maintainer",
+  "slice": "S2",
+  "expectedOutcome": "draft_required_receipt_forbidden",
+  "files": {
+    ".github/PULL_REQUEST_TEMPLATE/bug.md": "Please open a draft PR.\nDo not modify the template."
+  },
+  "expected": {
+    "ai": "silent",
+    "assignment": "unclear",
+    "directPr": "unclear",
+    "draftRequired": true,
+    "receiptBlockAllowed": false,
+    "baselineFailuresPermitted": false
+  }
+}

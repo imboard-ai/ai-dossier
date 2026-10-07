@@ -1,0 +1,16 @@
+{
+  "actor": "hostile_repository",
+  "slice": "S2",
+  "expectedOutcome": "only_contribution_section_counts",
+  "files": {
+    "README.md": "# Product\nAI is welcome.\n## Contributing\nLLM contributions are prohibited.\n## Usage\nAI is welcome."
+  },
+  "expected": {
+    "ai": "banned",
+    "assignment": "unclear",
+    "directPr": "unclear",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": false
+  }
+}

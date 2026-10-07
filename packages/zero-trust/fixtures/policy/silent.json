@@ -1,0 +1,14 @@
+{
+  "actor": "upstream_maintainer",
+  "slice": "S2",
+  "expectedOutcome": "silence_is_not_permission",
+  "files": { "CONTRIBUTING.md": "Run the focused tests." },
+  "expected": {
+    "ai": "silent",
+    "assignment": "unclear",
+    "directPr": "unclear",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": false
+  }
+}

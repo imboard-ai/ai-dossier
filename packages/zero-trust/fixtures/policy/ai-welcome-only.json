@@ -1,0 +1,14 @@
+{
+  "actor": "upstream_maintainer",
+  "slice": "S2",
+  "expectedOutcome": "decision_required",
+  "files": { "CONTRIBUTING.md": "AI contributions are welcome." },
+  "expected": {
+    "ai": "unclear",
+    "assignment": "unclear",
+    "directPr": "unclear",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": false
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "actor": "hostile_repository",
+  "slice": "S2",
+  "expectedOutcome": "restriction_wins_inside_one_unit",
+  "files": {
+    "CONTRIBUTING.md": "Assignment is optional and assignment requires committee approval."
+  },
+  "expected": {
+    "ai": "silent",
+    "assignment": "required",
+    "directPr": "unclear",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": false
+  }
+}

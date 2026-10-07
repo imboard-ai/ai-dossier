@@ -1,0 +1,16 @@
+{
+  "actor": "hostile_repository",
+  "slice": "S2",
+  "expectedOutcome": "hand_off_on_conflict",
+  "files": {
+    "CONTRIBUTING.md": "Direct PRs are welcome.\nOpen an issue before submitting a pull request."
+  },
+  "expected": {
+    "ai": "silent",
+    "assignment": "unclear",
+    "directPr": "unclear",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": false
+  }
+}

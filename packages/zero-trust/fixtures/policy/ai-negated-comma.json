@@ -1,0 +1,14 @@
+{
+  "actor": "hostile_repository",
+  "slice": "S2",
+  "expectedOutcome": "banned_generous_negation",
+  "files": { "CONTRIBUTING.md": "It is not true, despite the examples, that AI is welcome." },
+  "expected": {
+    "ai": "banned",
+    "assignment": "unclear",
+    "directPr": "unclear",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": false
+  }
+}

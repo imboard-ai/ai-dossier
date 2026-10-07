@@ -3,7 +3,7 @@
 Private, provider-independent foundation for [PRD-ZTFC-001](../../docs/features/zero-trust-full-cycle/prd.md)
 §5.1, §5.5 and §5.6 (gate 2), §5.7, §5.8 and §5.9. Controller-side model calls; the only
 GitHub calls are the controller-only broker/push modules and credential-free reads in
-`src/github/`, and the VM adapter and proxy scripts are described below. Receipts use
+`src/github/` and `src/policy/`, and the VM adapter and proxy scripts are described below. Receipts use
 core's Ed25519 signer abstraction and Ajv schema validation.
 This provides lifecycle/status, durable intent/budget, canonical Git and receipt primitives,
 plus ecosystem detection, runtime profiles, command plans and package-proxy policy
@@ -215,6 +215,136 @@ session, wrong contribution, overflow and stale driver facts are refused with
 for the same validated facts. Configuration,
 RunStore and status helpers are exported from the package index; credential
 modules remain isolated, including type-only imports.
+
+## Contribution policy (#1091)
+
+`discoverPolicy(read: GitHubRead, { owner, repo, ref })` performs credential-free
+Contents GETs at a **40-character lowercase commit SHA**. Supply `anonymousReader()`
+or an offline fake; no credential module is imported. `POLICY_PATHS` is the frozen
+list of contributing files, AI policies, individual templates and README; one
+`.github/PULL_REQUEST_TEMPLATE/` listing adds at most 20 immediate regular files.
+Listing paths never supply a URL or change the target. `POLICY_FILE_LIMIT` is
+256 KiB decoded bytes and `POLICY_TOTAL_LIMIT` is 1 MiB. Base64 must be canonical
+(GitHub CR/LF wrapping is allowed), size must match, and UTF-8 decoding is strict.
+The BOM is preserved. Explicit symlink/submodule responses or metadata, malformed responses, duplicate entries,
+truncated/over-cap listings, blob mismatches and every non-404 failed read yield
+`{ kind: 'unknown' }`, without partial files, retries or a weaker fallback. A listed
+file disappearing also yields unknown. Complete absence is `{ kind: 'known', files: [] }`.
+`PolicyDiscovery` and `PolicyFile` describe the result; each file has `path`, `sha`
+(Git blob SHA) and `content` (untrusted text). The injected reader is responsible
+for the GitHub protocol and complete response; GitHub's 1,000-entry directory
+truncation is necessarily above the stricter 20-entry cap.
+Contents can dereference an in-repository symlink and return a normal file response;
+this API assesses that returned pinned content at its logical policy path, not Git
+tree modes. No additional tree reads or repository-controlled URLs are followed.
+
+Owner and repository names use the shared GitHub binding validators (1–39 ASCII
+alphanumeric login characters with optional single hyphens between them, up to
+77 total characters without trailing/consecutive hyphens; repository at most 100 ASCII
+letters/digits/underscore/dot/hyphen, excluding `.` and `..`). `POLICY_TEMPLATE_DIRECTORY`
+and `POLICY_TEMPLATE_LIMIT` export the directory and 20-file cap. Template names
+are 1–120 ASCII letters/digits/underscore/dot/space/hyphen, excluding `.` and `..`.
+Both discovery and direct validation enforce at most 20 templates and 34 total
+files, unique eligible paths, lowercase 40-hex SHAs, strict UTF-8, and byte caps.
+
+`classifyPolicy(files)` returns a **deterministic restriction floor**, not prose
+understanding or authorization. Its `PolicyAssessment` shape retains permissive
+enum members for future typed-decision integration (#1120), but this function
+**never emits `welcomed`, assignment `not_required`, or baseline permission**.
+`ai` is `banned`, `requires_approval`, `disclosure_required`, `silent` or `unclear`;
+`assignment` is `required` or `unclear`; `directPr` is `discussion_first` or `unclear`.
+It also returns `draftRequired` (true if any draft topic exists),
+`receiptBlockAllowed` (false if any template topic exists),
+`baselineFailuresPermitted` (always false), and `citations` with original `path`,
+1-based `line`, stable `ruleId` and at most 200-Unicode-code-point `excerpt`
+(`PolicyCitation`).
+Secret-bearing lines are replaced with `[redacted]` after `assertNoSecrets`, including
+secrets outside the excerpt slice. Evidence retains the first occurrence of each
+rule per file and is capped at 128 citations; every line still affects classification.
+README contributes only ATX sections headed with `/contribut/i`, including nested
+subsections. ATX headings have 0–3 leading spaces, 1–6 `#`, then a space or end of
+line (tabs also separate heading content). A same/higher-level heading ends the
+enclosing contribution region; in-region heading text itself remains policy evidence. Fences
+in every policy file open with 3+ backticks/tildes (0–3 spaces), and close only on
+the same marker with at least that length; fenced text is excluded. Backtick info
+strings may contain no backticks. An unclosed fence excludes its remaining text.
+Block structure is parsed with `markdown-it` in CommonMark mode (parse only,
+no rendering/plugins/linkification or resource reads); controller code applies
+the supported policy-region subset to source maps. This distinguishes HTML blocks
+from incomplete tags/inline HTML and setext paragraphs from thematic breaks.
+Source evidence includes all non-fenced lines, including link-reference definitions
+that have no block-token map. Reaching the parser nesting boundary (token level
+19 under its 20-level block cap) raises non-echoing `PolicyInputError` rather than
+treating omitted content as silence. Unsupported non-space/tab whitespace after
+an HTML opener line (including attributes or trailing text) is likewise refused,
+as are lowercase declaration-like openers (`<!doctype`, `<!note`). These are
+closed refusals for parser/CommonMark disagreements; excluded fenced text is not
+examined. Guards inspect both original lines and container-stripped HTML openers.
+Active HTML blocks cannot open Markdown fences or manufacture heading boundaries;
+comments, raw tags, declarations, processing instructions and CDATA terminate
+on their appropriate markers, other HTML blocks at a blank line. README setext
+headings and HTML blocks inside a region taint every dimension touched anywhere
+in that region as unclear, including preceding restrictions. Boolean dimensions
+retain their restrictive topic-presence defaults. Outside-region prose does not
+count. No full Markdown or prose parser is claimed. Direct inputs are bounded/validated by `validatePolicyFiles` and
+invalid snapshots and ineligible paths raise non-echoing `PolicyInputError`;
+otherwise eligible paths containing prohibited credential patterns raise
+`SecretRedactionError`.
+
+`POLICY_RULES` and `POLICY_TOPICS` are frozen case-insensitive **data**, with stable
+IDs. `PolicyRule`, `PolicyCategory`, `PolicyTopic`, `PolicyDimension`,
+`POLICY_AI_MENTION` and `POLICY_NEGATION` are exported. `POLICY_PERMISSION_CAVEAT`
+is an inert compatibility alias of `POLICY_NEGATION`; no permission rules exist.
+Matching lowercases, normalizes quotes/apostrophes, expands contractions (`n't` →
+` not`, `won't` → `will not`, `can't` → `cannot`), protects `a.i.` as an AI alias,
+then splits on `.`, `!`, `?`, `;`, newlines and list items. **Commas remain inside
+the unit**. AI topics include ai, a.i., llm, large language model, chatgpt, copilot,
+generated by, machine-generated and assistant. Other topic sets cover assignment,
+PR/discussion, draft, template/extra sections and baseline failures.
+
+Any negation/prohibition in a topical sentence is a restriction of that dimension,
+even phrases such as "AI is not banned" or "No assignment required". Explicit
+approval/disclosure, assignment, discussion-first, draft and template rules also
+recognize restrictions. Only-restrictive AI units yield the strictest kind:
+`banned > requires_approval > disclosure_required`. Several aliases in one unit
+are fine. Any other topical unit makes its dimension `unclear` (even a welcome).
+Assignment/direct-PR dimensions use the analogous restrictive/unclear rule. No AI
+topic yields `silent`; assignment silence remains unclear because the legacy
+exception requires `directPr=welcomed`, which the floor cannot produce. Booleans
+need no prose interpretation: draft topic ⇒ true, template topic ⇒ receipt false,
+baseline permission ⇒ always false. With no draft/template topics their defaults
+are false/true. `unknown` is blocked; `unclear` needs a decision, not necessarily a
+human. Typed decision wiring is owned by #1120, not invoked here. Repository text
+is never executed or interpreted as controller instructions.
+
+`policyDigest(assessment, files)` hashes canonical sorted-key JSON containing the
+assessment (with sorted citations) and sorted `{ path, sha }` file identities using
+SHA-256. The payload is `{ assessment: { ...assessment, citations }, files }`:
+citations sort lexicographically by each citation's entire canonical JSON, files
+sort lexicographically by path and contain only `{ path, sha }`. Hash input is
+UTF-8 and output is 64 lowercase hex characters. Input order and object-key order cannot affect the digest; any blob SHA or
+assessment change does. Content is bound by the supplied GitHub blob identity;
+callers must use discovered snapshots, not fabricate SHA/content pairs. A digest
+is a freshness binding, not authorization or proof that contributions are permitted.
+Files are validated; assessment semantic validity remains caller-owned: use
+`classifyPolicy` output. Canonical serialization rejects unsupported JSON or secrets
+with `ReceiptError('invalid_json')`/`SecretRedactionError`. Policy serialization uses
+a 256-KiB escaped-JSON budget; receipt callers retain their 128-KiB default.
+`canonicalJson(input, maxBytes?)` permits a positive safe-integer budget up to 1 MiB;
+this does not alter receipt parsing or signing defaults.
+An empty-snapshot test vector is
+`3236ec6be3056ffe44c3667e516c6bcb8c51fa9b5511f30e1839090e8fad581f`.
+Thirty-five synthetic fixtures in `fixtures/policy/` identify actor, expected outcome
+and S2 ownership, and fake-read tests run offline.
+
+```ts
+const discovery = await discoverPolicy(anonymousReader(), { owner, repo, ref: pinnedSha });
+if (discovery.kind === 'known') {
+  const assessment = classifyPolicy(discovery.files);
+  const digest = policyDigest(assessment, discovery.files);
+  // Persist the binding; the controller still decides block/hand-off/permission.
+}
+```
 
 ## Development commands
 

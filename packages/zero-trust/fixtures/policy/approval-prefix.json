@@ -1,0 +1,14 @@
+{
+  "actor": "upstream_maintainer",
+  "slice": "S2",
+  "expectedOutcome": "approval_required",
+  "files": { "docs/AI_POLICY.md": "Permission is required before using LLM contributions." },
+  "expected": {
+    "ai": "requires_approval",
+    "assignment": "unclear",
+    "directPr": "unclear",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": false
+  }
+}

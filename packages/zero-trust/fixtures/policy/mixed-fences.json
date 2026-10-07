@@ -1,0 +1,16 @@
+{
+  "actor": "hostile_repository",
+  "slice": "S2",
+  "expectedOutcome": "ban_after_matching_fence",
+  "files": {
+    "README.md": "## Contributing\n```text\n~~~\n## Usage\n```\nAI contributions are banned."
+  },
+  "expected": {
+    "ai": "banned",
+    "assignment": "unclear",
+    "directPr": "unclear",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": false
+  }
+}

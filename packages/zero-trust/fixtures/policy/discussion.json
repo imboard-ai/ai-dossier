@@ -1,0 +1,14 @@
+{
+  "actor": "upstream_maintainer",
+  "slice": "S2",
+  "expectedOutcome": "discussion_before_pr",
+  "files": { "CONTRIBUTING.md": "Discuss the change before opening a PR." },
+  "expected": {
+    "ai": "silent",
+    "assignment": "unclear",
+    "directPr": "discussion_first",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": false
+  }
+}

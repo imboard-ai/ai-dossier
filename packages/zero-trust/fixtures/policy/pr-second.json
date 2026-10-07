@@ -1,0 +1,14 @@
+{
+  "actor": "hostile_repository",
+  "slice": "S2",
+  "expectedOutcome": "never_permissive",
+  "files": { "CONTRIBUTING.md": "Direct PRs are welcome and PRs require committee approval." },
+  "expected": {
+    "ai": "silent",
+    "assignment": "unclear",
+    "directPr": "discussion_first",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": false
+  }
+}

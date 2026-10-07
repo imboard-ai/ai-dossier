@@ -1,0 +1,16 @@
+{
+  "actor": "upstream_maintainer",
+  "slice": "S2",
+  "expectedOutcome": "floor_needs_decision",
+  "files": {
+    ".github/CONTRIBUTING.md": "We welcome AI-assisted contributions.\nDirect PRs are welcome."
+  },
+  "expected": {
+    "ai": "unclear",
+    "assignment": "unclear",
+    "directPr": "unclear",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": false
+  }
+}

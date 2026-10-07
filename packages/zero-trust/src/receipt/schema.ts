@@ -137,10 +137,13 @@ const validate = new Ajv({ strict: true }).compile<Receipt>(RECEIPT_SCHEMA);
 
 /** Reject accessors, custom prototypes, sparse arrays and lossy/non-JSON values.
  * Copy before any async boundary; nothing can change between validation/signing/use. */
-export function canonicalJson(input: unknown): string {
+export function canonicalJson(input: unknown, maxBytes = 128 * 1024): string {
+  // Receipt callers retain the original budget. Other bounded evidence domains
+  // may request up to 1 MiB without changing receipt parsing/signing limits.
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0 || maxBytes > 1024 * 1024)
+    throw new ReceiptError('invalid_json');
   let nodes = 0;
   let bytes = 0;
-  const maxBytes = 128 * 1024;
   function reserve(count: number): void {
     bytes += count;
     if (bytes > maxBytes) throw new ReceiptError('invalid_json');

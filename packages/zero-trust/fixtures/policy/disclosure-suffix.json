@@ -1,0 +1,14 @@
+{
+  "actor": "upstream_maintainer",
+  "slice": "S2",
+  "expectedOutcome": "disclosure_required",
+  "files": { "AI_POLICY.md": "LLM usage must be disclosed." },
+  "expected": {
+    "ai": "disclosure_required",
+    "assignment": "unclear",
+    "directPr": "unclear",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": false
+  }
+}
