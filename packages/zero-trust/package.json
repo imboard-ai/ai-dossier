@@ -19,10 +19,12 @@
   "dependencies": {
     "@ai-dossier/core": "^1.14.4",
     "ajv": "^8.18.0",
+    "markdown-it": "^14.3.2",
     "semver": "^7.8.5",
     "smol-toml": "^1.9.0"
   },
   "devDependencies": {
+    "@types/markdown-it": "^14.1.2",
     "@types/node": "^24.10.0",
     "@types/semver": "^7.8.0",
     "@vitest/coverage-v8": "^4.0.9",

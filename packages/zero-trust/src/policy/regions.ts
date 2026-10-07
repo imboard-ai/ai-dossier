@@ -1,3 +1,4 @@
+import MarkdownIt from 'markdown-it';
 import type { PolicyFile } from './discover';
 
 export interface PolicyRegion {
@@ -5,99 +6,53 @@ export interface PolicyRegion {
   readonly lines: readonly { readonly text: string; readonly line: number }[];
 }
 
-/** The supported CommonMark subset. Unsupported setext/HTML constructs taint
- * the entire enclosing README region, including already-collected evidence. */
+// Parsing only: no rendering, plugins, linkification, callbacks or resource reads.
+const markdown = new MarkdownIt('commonmark');
+
+/** Apply the policy subset to CommonMark's block/source maps. This avoids
+ * mistaking HTML contents/thematic breaks for fences, ATX or setext headings.
+ * Unsupported setext/HTML taints the entire selected README contribution region. */
 export function policyRegions(file: PolicyFile): readonly PolicyRegion[] {
   const readme = file.path === 'README.md';
   const regions: { ambiguous: boolean; lines: { text: string; line: number }[] }[] = [];
   let region: (typeof regions)[number] | undefined;
   let depth = 0;
-  let fence: { marker: string; length: number } | undefined;
-  let htmlEnd: RegExp | null | undefined;
-  let paragraph = false;
+  let seen = new Set<number>();
   const lines = file.content.split(/\r\n|\n|\r/u);
   if (!readme) {
     region = { ambiguous: false, lines: [] };
     regions.push(region);
   }
-  for (let index = 0; index < lines.length; index++) {
-    const text = lines[index];
-    // Active HTML content cannot open a Markdown fence or manufacture a heading.
-    if (htmlEnd !== undefined) {
-      paragraph = false;
-      if (region) {
-        region.ambiguous = true;
-        region.lines.push({ text, line: index + 1 });
-      }
-      if (htmlEnd ? htmlEnd.test(text) : text.trim() === '') htmlEnd = undefined;
-      continue;
-    }
-    if (fence) {
-      paragraph = false;
-      const close = /^ {0,3}(`{3,}|~{3,})[ \t]*$/u.exec(text);
-      if (close && close[1][0] === fence.marker && close[1].length >= fence.length)
-        fence = undefined;
-      continue;
-    }
-    const open = /^ {0,3}(`{3,}|~{3,})(.*)$/u.exec(text);
-    if (open && (open[1][0] !== '`' || !open[2].includes('`'))) {
-      paragraph = false;
-      fence = { marker: open[1][0], length: open[1].length };
-      continue;
-    }
-    // An HTML block cannot manufacture a heading that ends the active region.
-    // Comments/raw tags have explicit ends; other HTML blocks end at a blank.
-    const html = /^ {0,3}<(?:!--|\/?[A-Za-z]|!|\?)/u.test(text);
-    if (readme && html) {
-      paragraph = false;
-      if (region) {
-        region.ambiguous = true;
-        region.lines.push({ text, line: index + 1 });
-      }
-      const raw = /^ {0,3}<(script|style|pre|textarea)(?:\s|>|$)/iu.exec(text);
-      const start = text.trimStart();
-      htmlEnd = start.startsWith('<!--')
-        ? /-->/u
-        : start.startsWith('<?')
-          ? /\?>/u
-          : start.startsWith('<![CDATA[')
-            ? /\]\]>/u
-            : /^<![A-Z]/u.test(start)
-              ? />/u
-              : raw
-                ? new RegExp(`</${raw[1]}\\s*>`, 'iu')
-                : null;
-      if (htmlEnd?.test(text)) htmlEnd = undefined;
-      continue;
-    }
-    if (readme) {
-      const heading = /^ {0,3}(#{1,6})(?:[ \t]+(.*)|$)/u.exec(text);
-      if (heading) {
-        paragraph = false;
-        const level = heading[1].length;
+  for (const token of markdown.parse(file.content, {})) {
+    if (!token.map || token.type === 'fence') continue;
+    const [start, end] = token.map;
+    if (readme && token.type === 'heading_open') {
+      // Only source ATX headings in the requested 0–3-space subset establish
+      // scope. A setext heading is ambiguity evidence, never a scope boundary.
+      const atx = /^ {0,3}(#{1,6})(?:[ \t]+(.*)|$)/u.exec(lines[start]);
+      if (atx) {
+        const level = atx[1].length;
         if (region && level <= depth) region = undefined;
-        if (!region && /contribut/iu.test(heading[2] ?? '')) {
+        if (!region && /contribut/iu.test(atx[2] ?? '')) {
           depth = level;
           region = { ambiguous: false, lines: [] };
           regions.push(region);
+          seen = new Set();
         }
-        // In-region headings can themselves state restrictions; boundary headings
-        // outside the selected contribution region must never become evidence.
-        region?.lines.push({ text, line: index + 1 });
-        continue;
+      } else if (region && (token.markup === '=' || token.markup === '-')) {
+        region.ambiguous = true;
       }
-      if (region && paragraph && /^ {0,3}(?:=+|-+)[ \t]*$/u.test(text)) region.ambiguous = true;
     }
-    region?.lines.push({ text, line: index + 1 });
-    // Setext requires a paragraph, not merely a preceding nonblank physical
-    // line: ATX headings, list items and closed fences cannot become setext.
-    const thematicBreak = /^(?:\*{3,}|_{3,}|-{3,})$/u.test(text.replace(/[ \t]/gu, ''));
-    paragraph =
-      text.trim() !== '' &&
-      !thematicBreak &&
-      !/^ {0,3}(?:=+|-+)[ \t]*$/u.test(text) &&
-      !/^ {0,3}(?:[-+*][ \t]+|\d{1,9}[.)][ \t]+|>)/u.test(text) &&
-      !/^(?: {4}|\t)/u.test(text);
+    if (readme && region && token.type === 'html_block') region.ambiguous = true;
+    // Leaf evidence only. Container maps (lists/quotes) span fenced blocks and
+    // must never reintroduce their excluded contents through an enclosing map.
+    if (!region || !['inline', 'html_block', 'code_block', 'heading_open'].includes(token.type))
+      continue;
+    for (let index = start; index < end; index++) {
+      if (seen.has(index)) continue;
+      region.lines.push({ text: lines[index], line: index + 1 });
+      seen.add(index);
+    }
   }
   return regions;
 }

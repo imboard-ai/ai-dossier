@@ -84,7 +84,7 @@ describe('CommonMark subset policy regions', () => {
   });
   it.each([
     '<!--\n```\n-->',
-    '<script>\n~~~\n</script   >',
+    '<script>\n~~~\n</script>',
     '<?xml\n```\n?>',
     '<![CDATA[\n~~~\n]]>',
   ])('does not let fence-looking HTML content hide subsequent restrictions: %s', (html) => {
@@ -144,5 +144,27 @@ describe('CommonMark subset policy regions', () => {
     '- - -',
   ])('does not reinterpret consecutive thematic breaks as setext: %s', (marker) => {
     expect(classifyPolicy([file(`## Contributing\nNo AI.\n${marker}\n---`)]).ai).toBe('banned');
+  });
+  it.each([
+    '<custom',
+    '<!doctype html>',
+  ])('does not manufacture an HTML block from %s', (prefix) => {
+    expect(
+      classifyPolicy([file(`${prefix}\n## Contributing\nNo AI.\nDraft required.\nNo templates.`)])
+    ).toMatchObject({ ai: 'banned', draftRequired: true, receiptBlockAllowed: false });
+  });
+  it('does not let type-7 inline HTML interrupt paragraphs or lose setext continuation', () => {
+    expect(classifyPolicy([file('## Contributing\nNo AI.\n<span>\n')]).ai).toBe('banned');
+    expect(classifyPolicy([file('## Contributing\nNo AI.\n    continued paragraph\n---')]).ai).toBe(
+      'unclear'
+    );
+  });
+  it('does not invent a CommonMark raw-tag terminator from a spaced HTML end tag', () => {
+    expect(classifyPolicy([file('<script>\n</script   >\n## Contributing\nNo AI.')]).ai).toBe(
+      'silent'
+    );
+    expect(classifyPolicy([file('## Contributing\n<script>\n</script   >\nNo AI.')]).ai).toBe(
+      'unclear'
+    );
   });
 });

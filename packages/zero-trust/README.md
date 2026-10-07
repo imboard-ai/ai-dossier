@@ -268,6 +268,10 @@ enclosing contribution region; in-region heading text itself remains policy evid
 in every policy file open with 3+ backticks/tildes (0–3 spaces), and close only on
 the same marker with at least that length; fenced text is excluded. Backtick info
 strings may contain no backticks. An unclosed fence excludes its remaining text.
+Block structure is parsed with `markdown-it` in CommonMark mode (parse only,
+no rendering/plugins/linkification or resource reads); controller code applies
+the supported policy-region subset to source maps. This distinguishes HTML blocks
+from incomplete tags/inline HTML and setext paragraphs from thematic breaks.
 Active HTML blocks cannot open Markdown fences or manufacture heading boundaries;
 comments, raw tags, declarations, processing instructions and CDATA terminate
 on their appropriate markers, other HTML blocks at a blank line. README setext
