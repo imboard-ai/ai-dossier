@@ -5,7 +5,7 @@ import { completionsAt, hoverAt } from '../completion';
 import { computeDiagnostics } from '../diagnostics';
 import { dryRunContent, formatDryRun } from '../dryrun';
 import { findFieldRange, locateFrontmatter } from '../frontmatter';
-import { FIELDS } from '../schema-info';
+import { FIELDS, legacyRequiredFields } from '../schema-info';
 import { buildDossier, slugify } from '../template';
 import { verifyContent } from '../verify';
 
@@ -134,6 +134,17 @@ describe('schema-info', () => {
   it('still marks the legacy required fields as required', () => {
     const required = FIELDS.filter((f) => f.required).map((f) => f.name);
     expect(required).toEqual(expect.arrayContaining(['title', 'version', 'risk_level']));
+  });
+
+  it('throws instead of falling back when the legacy required set is missing or empty', () => {
+    expect(() => legacyRequiredFields({})).toThrow(/no legacy-shape required fields/);
+    expect(() => legacyRequiredFields({ else: { required: [] } })).toThrow(
+      /no legacy-shape required fields/
+    );
+    // A root `required` list is never used as a stand-in.
+    expect(() =>
+      legacyRequiredFields({ required: ['metadata'] } as { else?: { required?: string[] } })
+    ).toThrow();
   });
 });
 
