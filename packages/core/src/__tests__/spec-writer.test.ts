@@ -39,6 +39,10 @@ describe('deriveSkillName', () => {
     expect(name).toBe('a'.repeat(63));
   });
 
+  it('names an installed SKILL.md after its directory', () => {
+    expect(deriveSkillName('/home/x/.claude/skills/my-skill/SKILL.md')).toBe('my-skill');
+  });
+
   it('returns undefined when nothing usable is left', () => {
     expect(deriveSkillName('---.ds.md')).toBeUndefined();
     expect(deriveSkillName('')).toBeUndefined();
@@ -91,13 +95,33 @@ describe('serializeSpecDossier', () => {
   it.each([
     ['apostrophes and colons', "it's a: test # not a comment"],
     ['line breaks', 'line one\n\nline two\n'],
-    ['control and separator characters', 'a\u0085b\u2028c\u007fd\te'],
+    ['separator characters and tabs', 'a\u2028b\u2029c\td\u00a0e'],
     ['leading and trailing spaces', '  padded  '],
     ['an empty string', ''],
     ['JSON-looking text', '{"a":[1,2]}'],
   ])('round-trips %s', (_label, value) => {
     const logical = { name: 'n', description: value, objective: value, extra: [value] };
     expect(parseDossierContent(renderSpecDossier(logical, body)).frontmatter).toEqual(logical);
+  });
+
+  it.each([
+    ['DEL', '\u007f'],
+    ['NEL', '\u0085'],
+    ['a C1 control', '\u0080'],
+  ])('refuses %s, which strict YAML readers reject or alter', (_label, ch) => {
+    expect(() =>
+      renderSpecDossier({ name: 'n', description: `a${ch}b`, title: 'T' }, body)
+    ).toThrow(/C1 control/);
+  });
+
+  it('quotes keys a YAML 1.1 reader would not read as the same string', () => {
+    const original = parseDossierContent(
+      "---\nname: 'n'\ndescription: 'd'\nmetadata:\n  'yes': 'x'\n  'a b': 'y'\n  dossier.title: 'T'\n---\n# B\n"
+    );
+    const content = renderSpecDossier(original.frontmatter, '# B\n', original);
+    expect(content).toContain("  'yes': 'x'");
+    expect(content).toContain("  'a b': 'y'");
+    expect(content).toContain("  dossier.title: 'T'");
   });
 
   it('never emits an empty metadata map', () => {
@@ -155,6 +179,40 @@ describe('formatDossierContent writes the spec shape', () => {
     const { formatted } = formatDossierContent(signed);
     expect(formatted.startsWith('---dossier\n')).toBe(true);
     expect(parseDossierContent(formatted).shape).toBe('legacy');
+  });
+
+  it('rewrites a spec-shaped file without re-encoding values a v3 signature covers', () => {
+    const file = [
+      '---dossier',
+      '{"name": "n", "description": "d", "metadata": {',
+      '  "dossier.title": "T",',
+      '  "dossier.tags": "[\\"b\\", \\"a\\"]",',
+      '  "dossier.checksum": "{\\"algorithm\\": \\"sha256\\", \\"hash\\": \\"0\\"}",',
+      '  "dossier.signature": "{\\"covers\\": \\"spec-frontmatter+body\\"}"}}',
+      '---',
+      '# Body',
+      '',
+    ].join('\n');
+    const before = parseDossierContent(file);
+    const { formatted } = formatDossierContent(file, { updateChecksum: false });
+    const after = parseDossierContent(formatted);
+    expect(formatted.startsWith('---\nname:')).toBe(true);
+    expect(after.rawFrontmatter).toEqual(before.rawFrontmatter);
+    expect(buildVerificationPayload(after)).toBe(buildVerificationPayload(before));
+    const blockStyle = (c: string) =>
+      lintDossier(c).diagnostics.filter((d) => /block-style/.test(d.message));
+    expect(blockStyle(file)).toHaveLength(1);
+    expect(blockStyle(formatted)).toEqual([]);
+  });
+
+  it('only replaces the checksum field of a spec-shaped file', () => {
+    const original = parseDossierContent(
+      '---\nname: \'n\'\ndescription: \'d\'\nmetadata:\n  dossier.tags: \'["b", "a"]\'\n  dossier.checksum: \'{"algorithm": "sha256", "hash": "0"}\'\n---\n# Body\n'
+    );
+    const { formatted } = formatDossierContent(original.raw);
+    const meta = parseDossierContent(formatted).rawFrontmatter.metadata as Record<string, string>;
+    expect(meta['dossier.tags']).toBe('["b", "a"]');
+    expect(JSON.parse(meta['dossier.checksum']).hash).toBe(calculateChecksum('# Body'));
   });
 
   it('honors toSpec: false for legacy input', () => {
@@ -244,6 +302,15 @@ describe('spec-shape and legacy-layout lint rules', () => {
     const messages = byRule(content, 'spec-shape').map((d) => d.message);
     expect(messages).toContainEqual(expect.stringMatching(/^description: /));
     expect(messages).toContain('Missing required field: metadata.dossier.checksum');
+  });
+
+  it('reports flow-style (JSON) spec frontmatter, which strict YAML readers reject', () => {
+    const flow =
+      '---dossier\n{"name": "good-name", "description": "d", "metadata": {"dossier.title": "T"}}\n---\n# B\n';
+    expect(byRule(flow, 'spec-shape').map((d) => d.message)).toContainEqual(
+      expect.stringMatching(/block-style YAML/)
+    );
+    expect(byRule(spec(), 'spec-shape')).toEqual([]);
   });
 
   it('flags the legacy layout as info, plus anything its conversion would trip on', () => {

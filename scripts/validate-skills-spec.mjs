@@ -80,14 +80,30 @@ export function summarize(results) {
 }
 
 /**
+ * Stand-in for the v3 signature block `sign` adds: same fields and sizes, so
+ * the check covers how `metadata["dossier.signature"]` is written. Validation
+ * reads its shape, never its bytes.
+ */
+export const PLACEHOLDER_SIGNATURE = {
+  algorithm: 'ed25519',
+  signature: `${'A'.repeat(86)}==`,
+  public_key: `${'B'.repeat(43)}=`,
+  signed_at: '2026-01-01T00:00:00.000Z',
+  covers: 'spec-frontmatter+body',
+  signed_by: 'Example Signer <signer@example.com>',
+};
+
+/**
  * A dossier as `ai-dossier sign` would write it: the Agent Skills layout, `name`
- * derived from the file name when absent. Its old signature is set aside — it
- * covered the legacy bytes, and re-signing needs the publisher's key.
+ * derived from the file name when absent, and a v3 signature block. The real
+ * signature is not reproduced — it covered the legacy bytes, and re-signing
+ * needs the publisher's key.
  */
 export function asWritten(content, file, core) {
   const parsed = core.parseDossierContent(content);
-  const { signature: _replaced, ...unsigned } = parsed.frontmatter;
-  return core.renderSpecDossier(core.withSkillIdentity(unsigned, file), parsed.body, parsed);
+  const logical = { ...core.withSkillIdentity(parsed.frontmatter, file) };
+  logical.signature = PLACEHOLDER_SIGNATURE;
+  return core.renderSpecDossier(logical, parsed.body, parsed);
 }
 
 function validate(bin, skillDir) {

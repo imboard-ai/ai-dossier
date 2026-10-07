@@ -1,4 +1,5 @@
 import type { ErrorObject } from 'ajv';
+import YAML, { visit } from 'yaml';
 import dossierSchema from '../../schema/dossier-schema.json';
 import { compileSchema } from '../../utils/ajv';
 import type { LintDiagnostic, LintRule } from '../types';
@@ -30,6 +31,28 @@ function toDiagnostic(err: ErrorObject): LintDiagnostic {
   return { ruleId: 'spec-shape', severity: 'error', message, field };
 }
 
+/**
+ * Whether the front matter uses a flow (JSON-style) mapping or sequence anywhere.
+ * Strict YAML readers — the Agent Skills validator among them — reject flow
+ * collections, and a spec-shaped file is installed as is, so it must be block-style.
+ */
+function usesFlowCollections(raw: string): boolean {
+  const block = /^---[^\n]*\n([\s\S]*?)\n---/.exec(raw);
+  if (!block) {
+    return false;
+  }
+  let flow = false;
+  const mark = (_key: unknown, node: { flow?: boolean }) => {
+    if (node.flow) {
+      flow = true;
+      return visit.BREAK;
+    }
+    return undefined;
+  };
+  visit(YAML.parseDocument(block[1]), { Map: mark, Seq: mark });
+  return flow;
+}
+
 /** A spec-shaped dossier must pass the Agent Skills layout checks as written. */
 export const specShapeRule: LintRule = {
   id: 'spec-shape',
@@ -39,10 +62,18 @@ export const specShapeRule: LintRule = {
     if (context.shape !== 'spec' || !context.rawFrontmatter) {
       return [];
     }
-    if (validateSpecShape(context.rawFrontmatter)) {
-      return [];
+    const diagnostics = validateSpecShape(context.rawFrontmatter)
+      ? []
+      : (validateSpecShape.errors || []).map(toDiagnostic);
+    if (usesFlowCollections(context.raw)) {
+      diagnostics.push({
+        ruleId: 'spec-shape',
+        severity: 'error',
+        message:
+          "Spec-shaped frontmatter must be block-style YAML; strict YAML readers reject JSON/flow mappings. 'ai-dossier format' rewrites it without changing what the signature covers",
+      });
     }
-    return (validateSpecShape.errors || []).map(toDiagnostic);
+    return diagnostics;
   },
 };
 

@@ -20,7 +20,7 @@
  *
  * A spec-shaped dossier (Agent Skills layout, #1088) is already what a runtime
  * reads, and its v3 signature covers every frontmatter field, so it is copied as
- * is — only a `---dossier`/`---json` fence is rewritten to `---`, which the parser
+ * is — only a `---dossier`/`---json`/`---yaml` fence is rewritten to `---`, which the parser
  * treats identically. Any other dossier that is already YAML-fronted is returned
  * unchanged.
  */
@@ -44,7 +44,7 @@ export function toSkillFrontmatter(rawContent: string, source?: string): string 
   }
 
   if (parsed.shape === 'spec') {
-    return rawContent.replace(/^---(dossier|json)[^\n]*/, '---');
+    return rawContent.replace(/^---(dossier|json|yaml)[^\n]*/, '---');
   }
   if (!rawContent.startsWith('---dossier')) {
     return rawContent; // already YAML-fronted — leave alone

@@ -8,6 +8,7 @@ import {
   errorKeys,
   errorLines,
   findDossiers,
+  PLACEHOLDER_SIGNATURE,
   skillName,
   summarize,
 } from './validate-skills-spec.mjs';
@@ -77,7 +78,7 @@ describe('findDossiers', () => {
 });
 
 describe('asWritten', () => {
-  it('renders the logical frontmatter minus its signature, naming it from the file', () => {
+  it('renders the logical frontmatter with a v3 signature block, naming it from the file', () => {
     const calls = [];
     const parsed = {
       frontmatter: { title: 'T', signature: { covers: 'frontmatter+body' } },
@@ -93,7 +94,11 @@ describe('asWritten', () => {
     };
     expect(asWritten('content', 'examples/x.ds.md', core)).toBe('rendered');
     expect(calls).toEqual([
-      { fm: { title: 'T', name: 'examples/x.ds.md' }, body: '# B\n', original: parsed },
+      {
+        fm: { title: 'T', name: 'examples/x.ds.md', signature: PLACEHOLDER_SIGNATURE },
+        body: '# B\n',
+        original: parsed,
+      },
     ]);
   });
 });

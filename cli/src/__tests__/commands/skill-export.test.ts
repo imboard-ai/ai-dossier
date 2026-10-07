@@ -186,6 +186,24 @@ describe('skill-export command', () => {
       expect.stringMatching(/my-skill[\\/]\.dossier-source$/),
       'myorg/tools/my-skill\n',
     ]);
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Signature dropped'));
+  });
+
+  it('reports a dropped signature in --json output', async () => {
+    mockedFs.existsSync.mockReturnValue(true);
+    mockedFs.readFileSync.mockReturnValue(
+      '---dossier\n{"name":"my-skill","title":"My Skill","version":"1.0.0","signature":{"covers":"frontmatter+body"}}\n---\n# Skill body'
+    );
+    mockClient.publishDossier.mockResolvedValue({ name: 'myorg/my-skill' });
+
+    const program = createTestProgram();
+    registerSkillExportCommand(program);
+    await program.parseAsync(['node', 'dossier', 'skill-export', 'my-skill', '-y', '--json']);
+
+    const out = JSON.parse(
+      (console.log as unknown as { mock: { calls: string[][] } }).mock.calls[0][0]
+    );
+    expect(out).toMatchObject({ exported: true, version: '1.1.0', signatureDropped: true });
   });
 
   it('should exit 1 when not logged in', async () => {

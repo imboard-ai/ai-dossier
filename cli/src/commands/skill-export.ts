@@ -194,6 +194,7 @@ export function registerSkillExportCommand(program: Command): void {
                   name: result.name || fullPath,
                   version: newVersion,
                   previousVersion: currentVersion !== newVersion ? currentVersion : undefined,
+                  signatureDropped: droppedSignature || undefined,
                   content_url: result.content_url || null,
                 },
                 null,

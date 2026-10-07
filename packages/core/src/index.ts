@@ -197,6 +197,7 @@ export {
   renderSpecDossier,
   serializeSpecDossier,
   withSkillIdentity,
+  withSpecField,
 } from './spec-writer';
 // Trace config resolver (precedence: env > project > user > defaults)
 export type {

@@ -4,8 +4,9 @@ import {
   type DossierFrontmatter,
   type ParsedDossier,
   parseDossierContent,
-  renderSpecDossier,
+  serializeSpecDossier,
   sha256Hex,
+  withSpecField,
 } from '@ai-dossier/core';
 import type { Command } from 'commander';
 
@@ -77,12 +78,17 @@ export function registerChecksumCommand(program: Command): void {
         };
 
         // Keep the file's layout: converting here would orphan a signature it
-        // carries ('sign' and 'format' are the commands that change layouts).
+        // carries ('sign' and 'format' are the commands that change layouts). A
+        // spec-shaped file gets only its checksum field replaced, so nothing else a
+        // v3 signature covers is re-encoded.
         let updatedContent: string;
         try {
           updatedContent =
             parsed.shape === 'spec'
-              ? renderSpecDossier(frontmatter, body, parsed)
+              ? serializeSpecDossier(
+                  withSpecField(parsed.rawFrontmatter, 'checksum', frontmatter.checksum),
+                  body
+                )
               : `---dossier\n${JSON.stringify(frontmatter, null, 2)}\n---\n${body}`;
         } catch (err: unknown) {
           console.log(`❌ ${(err as Error).message}`);
@@ -104,6 +110,11 @@ export function registerChecksumCommand(program: Command): void {
               console.log(`   SHA256: ${calculatedHash}`);
             }
           } else if (existingHash) {
+            if (frontmatter.signature) {
+              console.log(
+                "⚠️  The body changed since it was signed; the signature no longer verifies. Re-sign with 'ai-dossier sign'."
+              );
+            }
             console.log('✅ Checksum updated');
             console.log(`   Old: ${existingHash}`);
             console.log(`   New: ${calculatedHash}`);

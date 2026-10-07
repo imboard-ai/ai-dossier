@@ -172,9 +172,10 @@ describe('toSkillFrontmatter preserves verifiability', () => {
 
   it('only rewrites a ---dossier fence on a spec-shaped dossier, and v3 still verifies', async () => {
     const spec = await signedSpec();
-    const fenced = spec.replace(/^---\n/, '---dossier\n');
-    const out = toSkillFrontmatter(fenced, 'org/x');
-    expect(out).toBe(spec);
+    for (const fence of ['---dossier', '---json', '---yaml']) {
+      expect(toSkillFrontmatter(spec.replace(/^---\n/, `${fence}\n`), 'org/x')).toBe(spec);
+    }
+    const out = toSkillFrontmatter(spec.replace(/^---\n/, '---dossier\n'), 'org/x');
 
     const parsed = parseDossierContent(out);
     const result = await verifySignature(

@@ -20,12 +20,32 @@
 
 import YAML, { Scalar, visit } from 'yaml';
 import { parseDossierContent } from './parser';
-import { DOSSIER_METADATA_PREFIX, SpecShapeError, toSpecFrontmatter } from './spec-shape';
+import {
+  DOSSIER_METADATA_PREFIX,
+  encodeSpecValue,
+  SpecShapeError,
+  toSpecFrontmatter,
+} from './spec-shape';
 import type { DossierFrontmatter, ParsedDossier } from './types';
 import { stableStringify } from './utils/canonical-json';
 
 /** Longest Agent Skills `name`. */
 const MAX_SKILL_NAME_LENGTH = 64;
+
+/**
+ * DEL and the C1 controls (NEL among them). The YAML stringifier writes them raw;
+ * the parser dossiers are read with accepts that, but strict readers (the Agent
+ * Skills validator, Python runtimes) reject them or fold NEL into a space — so a
+ * signed value would read back differently there. Refused rather than written.
+ */
+const NON_PORTABLE_CHARS = /[\u007f-\u009f]/;
+
+/** A mapping key every YAML reader takes as that string when written plain. */
+const PLAIN_SAFE_KEY = /^[A-Za-z0-9_.\-/]+$/;
+
+/** Plain keys a YAML 1.1 reader turns into booleans or null. */
+const YAML11_SPECIAL_KEY =
+  /^(y|Y|yes|Yes|YES|n|N|no|No|NO|on|On|ON|off|Off|OFF|true|True|TRUE|false|False|FALSE|null|Null|NULL|~)$/;
 
 /**
  * An Agent Skills `name` derived from a registry path, file path or title: the
@@ -34,7 +54,12 @@ const MAX_SKILL_NAME_LENGTH = 64;
  * usable is left.
  */
 export function deriveSkillName(source: string): string | undefined {
-  const base = source.split(/[\\/]/).pop() ?? '';
+  const segments = source.split(/[\\/]/);
+  let base = segments.pop() ?? '';
+  // An installed skill is `<name>/SKILL.md`: the directory is the name.
+  if (base === 'SKILL.md' && segments.length > 0) {
+    base = segments.pop() ?? '';
+  }
   const slug = base
     .replace(/@[^@]*$/, '')
     .replace(/(\.ds)?\.md$/i, '')
@@ -106,6 +131,29 @@ export function buildSpecFrontmatter(
 }
 
 /**
+ * On-disk spec-shaped frontmatter with one Dossier field replaced, everything else
+ * (other fields' exact strings, foreign metadata, key order) left as it was.
+ *
+ * Rewriting a spec-shaped file through the logical view would re-encode every
+ * value canonically — a hand-written `'["b", "a"]'` becomes `'["b","a"]'` — and so
+ * change bytes a v3 signature covers. Edits that touch one field use this instead.
+ */
+export function withSpecField(
+  rawFrontmatter: Record<string, unknown>,
+  field: string,
+  value: unknown
+): Record<string, unknown> {
+  const metadata = (rawFrontmatter.metadata as Record<string, unknown> | undefined) ?? {};
+  return {
+    ...rawFrontmatter,
+    metadata: {
+      ...metadata,
+      [`${DOSSIER_METADATA_PREFIX}${field}`]: encodeSpecValue(value, field),
+    },
+  };
+}
+
+/**
  * Render spec-shaped frontmatter and a body as dossier file content
  * (`---` YAML front matter). Throws `SpecShapeError` when the result would not
  * parse back to the same frontmatter and body.
@@ -114,10 +162,21 @@ export function serializeSpecDossier(spec: Record<string, unknown>, body: string
   const doc = new YAML.Document(spec);
   visit(doc, {
     Scalar(key, node) {
-      if (key === 'key') {
-        // The stringifier still quotes a key that cannot be written plain.
+      if (typeof node.value !== 'string') {
+        return;
+      }
+      if (NON_PORTABLE_CHARS.test(node.value)) {
+        throw new SpecShapeError(
+          `${JSON.stringify(node.value.slice(0, 40))} contains DEL or a C1 control character, which strict YAML readers reject or alter`
+        );
+      }
+      if (
+        key === 'key' &&
+        PLAIN_SAFE_KEY.test(node.value) &&
+        !YAML11_SPECIAL_KEY.test(node.value)
+      ) {
         node.type = Scalar.PLAIN;
-      } else if (typeof node.value === 'string') {
+      } else {
         // Single quotes keep JSON-encoded values readable; a line break folds
         // in single quotes, so those get double quotes and an explicit `\n`.
         node.type = node.value.includes('\n') ? Scalar.QUOTE_DOUBLE : Scalar.QUOTE_SINGLE;
