@@ -10,6 +10,55 @@ plus ecosystem detection, runtime profiles, command plans and package-proxy poli
 (see the gate 2 section below).
 Publication remains gated on S1 feasibility.
 
+## Deterministic scope and test-integrity review (#1097)
+
+`reviewCandidate({ baseManifest, candidateManifest, baseDiscovery,
+candidateDiscovery, limits? })` is a pure, synchronous API returning
+`{ verdict: 'pass' | 'hand_off', findings: { code, path?, detail }[] }`.
+Both manifests are `SourceManifest` values and are revalidated into immutable
+snapshots. Both discovery values must be `JunitSummary | null` from
+`parseJunitReport` for the **same full-suite command**, bound by the caller to the
+respective trees. Counts/outcomes must be nonnegative safe integers and consistent.
+Missing, malformed or unreadable discovery produces `discovery_unknown`;
+decreased suite or test counts produce `discovery_reduced`. Successful summaries
+do not suppress patch findings or authorize shipping.
+
+Every finding hands off. Codes are `test_deleted` (also renames/file-to-directory
+replacements), `test_disabled`, `assertions_reduced`, `discovery_reduced`,
+`discovery_unknown`, `config_changed`, `generated_or_binary`, `patch_too_large`,
+`promotional`, and `invalid_input` (invalid/unreadable manifests, limits or
+secret-shaped paths). Diagnostics are fixed text; file contents and thrown errors
+are never returned. Findings use byte-sorted paths, fixed per-path check order,
+discovery findings first and patch-size findings last. Returned results are frozen.
+
+Test paths include any `test/`, `tests/`, `__tests__/` component, `*.test.*`,
+`*.spec.*`, `test_*.py` and `*_test.py`. Added lines are scanned for
+`it.skip`, `describe.skip`, `test.skip`, `xit`, `xdescribe`, `.only`, `it.todo`,
+pytest skip/skipif/xfail decorators and skip calls, and unittest skip/skipIf/skipUnless.
+Modified tests compare textual `expect(`, `assert` and `self.assert*` counts.
+The scanner permits whitespace between marker tokens and is conservative:
+comments, literals and moved lines can produce findings. Marker matches use full
+candidate context and must overlap an added line, including multiline markers
+assembled from unchanged and added lines. It is not semantic proof.
+Non-test added lines containing `ai-dossier` or `imboard` are `promotional`.
+
+Protected config includes `package.json`, `package-lock.json`, `pyproject.toml`,
+`uv.lock`, `requirements*.txt`, `setup.py`, `setup.cfg`, `tox.ini`, `pytest.ini`,
+`conftest.py`, `jest.config.*`, `vitest.config.*`, `.mocharc*`, `Makefile`,
+`Dockerfile`, `.gitattributes`, and all `.github/` and `.devcontainer/` paths,
+at any depth. Additions, deletions and mode changes all count; there is no
+justification bypass. Changed `dist/`, `build/`, `*.min.js`, `*.map`, non-UTF-8
+blobs and blobs above 1 MiB hand off, including removed blobs.
+
+`IntegrityLimits` defaults to `maxFiles: 20`, `maxChangedLines: 1000`; explicit
+limits must be nonnegative safe integers. Ordinary directory entries do not count
+as files; file mode changes do. Lines count additions plus deletions, preserving
+terminators (including terminal-newline changes). A bounded LCS diff removes equal
+prefix/suffix and examines up to 1,000,000 cells per file; larger comparisons use
+a conservative delete/add diff of the remaining lines. It can over-count, never
+under-count; uncertain oversized/binary bytes already hand off. No I/O, network,
+model review, credential access, lifecycle change or shipping grant is performed.
+
 ## Per-run boundary probe (#1096)
 
 `prepareBoundary(artifactsDir?)` runs **before** `adapter.create`: it plants fresh

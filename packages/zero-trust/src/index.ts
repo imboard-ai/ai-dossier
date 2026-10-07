@@ -37,6 +37,7 @@ export * from './receipt/render';
 export * from './receipt/schema';
 export * from './receipt/verify';
 export * from './redaction';
+export * from './review/integrity';
 export * from './state';
 export * from './status';
 export * from './vm/adapter';
