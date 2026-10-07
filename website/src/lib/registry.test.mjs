@@ -67,6 +67,8 @@ test('an unknown signature scheme is labelled, not guessed', () => {
   const odd = { meta: { signature: { algorithm: 'ed25519', covers: ['body'] } } };
   assert.equal(shape(entry, odd).signature.scheme, 'unrecognized');
   assert.equal(shape(entry, odd).signature.covers, '["body"]');
+  const nul = { meta: { signature: { algorithm: 'ed25519', covers: null } } };
+  assert.equal(shape(entry, nul).signature.scheme, 'unrecognized');
 });
 
 test('a refused spec-shaped header falls back to the registry entry', () => {

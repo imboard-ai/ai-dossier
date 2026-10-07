@@ -69,7 +69,9 @@ function fromSpecFrontmatter(spec) {
  * Split a `.ds.md` into its logical frontmatter and markdown body. Reads the legacy
  * `---dossier` JSON header and the spec-shaped (Agent Skills) `---` YAML header alike;
  * `meta` is always the flat logical view, so `meta.checksum`/`meta.signature` are found
- * in both. Returns null for anything core would refuse to parse.
+ * in both. Returns null for anything core refuses; at the margins (a header with no
+ * closing `---` line, YAML 1.1-only number forms) it is stricter or reads differently,
+ * and then the page falls back to the registry entry rather than guessing.
  */
 export function parseDossier(text) {
   // Same openings core accepts: `---dossier`/`---json` (any trailing text), `---`, `---yaml`.
@@ -94,7 +96,8 @@ export function parseDossier(text) {
   }
 }
 
-// Signature schemes by `covers` (core's SIGNATURE_COVERAGES); absent means v1.
+// Signature schemes by `covers` (core's SIGNATURE_COVERAGES). Only an absent `covers`
+// means v1: core refuses any other value it does not know, `null` included.
 const SIGNATURE_SCHEMES = {
   body: 'v1',
   'frontmatter+body': 'v2',
@@ -184,7 +187,9 @@ export function shape(entry, parsed) {
           signedAt: meta.signature.signed_at ?? '',
           publicKey: meta.signature.public_key ?? '',
           covers: coversLabel(meta.signature.covers),
-          scheme: signatureScheme(meta.signature.covers ?? 'body'),
+          scheme: signatureScheme(
+            meta.signature.covers === undefined ? 'body' : meta.signature.covers
+          ),
         }
       : null,
     headerShape: parsed?.shape ?? '',
