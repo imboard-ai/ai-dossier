@@ -250,5 +250,25 @@ export function fromSpecFrontmatter(spec: Record<string, unknown>): Record<strin
     logical[field] = decodeSpecValue(value);
   }
 
+  // `dossier.metadata` may legitimately hold a map, but not one that makes the
+  // logical object itself look spec-shaped: every reader of the logical view
+  // (the linter's schema check included) would then take it for on-disk spec
+  // shape, while the real Dossier fields sat one level down unchecked.
+  if (isSpecShapedFrontmatter(logical)) {
+    throw new SpecShapeError(
+      `metadata "${DOSSIER_METADATA_PREFIX}metadata" must not itself carry "${DOSSIER_METADATA_PREFIX}*" keys`
+    );
+  }
+
   return logical;
+}
+
+/**
+ * Whether YAML front matter uses a merge key (`<<:`). YAML parsers disagree on
+ * merges — the one dossiers are parsed with applies them, others (including the
+ * Agent Skills tooling's) do not — so a spec-shaped file using one could be
+ * signed as one thing and read by a skills runtime as another.
+ */
+export function hasYamlMergeKey(frontmatterText: string): boolean {
+  return /(^|[\s{,[])<<\s*:/m.test(frontmatterText);
 }

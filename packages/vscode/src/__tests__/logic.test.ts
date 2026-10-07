@@ -170,6 +170,18 @@ describe('verify', () => {
     const sig = r.checks.find((c) => c.name === 'Signature');
     expect(['pass', 'warn']).toContain(sig?.status);
   });
+
+  it('reports an unknown signature scheme as a failed check instead of throwing', async () => {
+    const tampered = example('test/hello-world.ds.md').replace(
+      '"signature": {',
+      '"signature": {\n    "covers": "something-new",'
+    );
+    const r = await verifyContent(tampered, new Map());
+    const sig = r.checks.find((c) => c.name === 'Signature');
+    expect(sig?.status).toBe('fail');
+    expect(sig?.message).toMatch(/Unsupported signature coverage/);
+    expect(r.ok).toBe(false);
+  });
 });
 
 describe('dry-run', () => {

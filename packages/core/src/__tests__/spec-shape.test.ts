@@ -417,6 +417,35 @@ describe('spec-shape parsing rejects ambiguity', () => {
       parseDossierContent(specFile('name: 12\ndescription: d\nmetadata:\n  dossier.title: T\n'))
     ).toThrow(/must be a string/);
   });
+
+  it('rejects dossier.metadata that would make the logical object look spec-shaped', () => {
+    const file = specFile(
+      `name: n\ndescription: d\nmetadata:\n  dossier.metadata: '{"dossier.title":"T"}'\n`
+    );
+    expect(() => parseDossierContent(file)).toThrow(/must not itself carry/);
+    // A plain map under dossier.metadata is still an ordinary field.
+    const plain = parseDossierContent(
+      specFile(`name: n\ndescription: d\nmetadata:\n  dossier.metadata: '{"author":"a"}'\n`)
+    );
+    expect(plain.frontmatter.metadata).toEqual({ author: 'a' });
+  });
+
+  it('rejects YAML merge keys in spec-shaped front matter', () => {
+    expect(() =>
+      parseDossierContent(
+        specFile(
+          'base: &base\n  description: from-merge\nname: n\n<<: *base\nmetadata:\n  dossier.title: T\n'
+        )
+      )
+    ).toThrow(/merge keys/);
+    expect(() =>
+      parseDossierContent(
+        specFile(
+          'name: n\ndescription: d\nmetadata:\n  <<: { dossier.risk_level: low }\n  dossier.title: T\n'
+        )
+      )
+    ).toThrow(/merge keys/);
+  });
 });
 
 // ---------------------------------------------------------------------------

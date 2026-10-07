@@ -7,7 +7,7 @@
  */
 
 import matter from 'gray-matter';
-import { fromSpecFrontmatter, isSpecShapedFrontmatter } from './spec-shape';
+import { fromSpecFrontmatter, hasYamlMergeKey, isSpecShapedFrontmatter } from './spec-shape';
 import type { DossierFrontmatter, ParsedDossier } from './types';
 import { getErrorMessage } from './utils/errors';
 import { readFileIfExists } from './utils/fs';
@@ -97,6 +97,9 @@ export function parseDossierContent(content: string): ParsedDossier {
   const shape = isSpecShapedFrontmatter(rawFrontmatter) ? 'spec' : 'legacy';
   let frontmatter: DossierFrontmatter;
   try {
+    if (shape === 'spec' && hasYamlMergeKey(parsed.matter)) {
+      throw new Error('YAML merge keys (<<) are not allowed');
+    }
     frontmatter = (
       shape === 'spec' ? fromSpecFrontmatter(rawFrontmatter) : rawFrontmatter
     ) as DossierFrontmatter;
