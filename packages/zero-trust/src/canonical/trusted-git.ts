@@ -5,6 +5,7 @@ import { CanonicalError } from './export';
 
 const DEFAULT_TIMEOUT_MS = 60000;
 const MAX_ASYNC_OUTPUT = 1024 * 1024;
+export const MAX_GIT_PACK_BYTES = 128 * 1024 * 1024;
 /** What a caller may add to the environment: a broker credential's `GIT_CONFIG_*` set and
  * the prompt/trace switches. Anything else (GIT_DIR, GIT_SSH_COMMAND, …) could undo the
  * hardening below. */
@@ -30,6 +31,8 @@ export interface GitExecOptions {
   readonly timeoutMs?: number;
   /** Credential-free source fetch only; never combine with env/config overrides. */
   readonly sourceFetch?: 'https' | 'file-test';
+  /** May only lower the receive-file bound; source fetch always has a hard 128 MiB cap. */
+  readonly sourcePackBytes?: number;
   readonly maxOutputBytes?: number;
 }
 export interface GitResult {
@@ -37,6 +40,7 @@ export interface GitResult {
   readonly status: number | null;
   readonly stdout: Buffer;
   readonly outputLimitExceeded?: boolean;
+  readonly fileLimitExceeded?: boolean;
 }
 
 /** Internal plumbing only. Never points Git at an artifact's repository/config. */
@@ -84,25 +88,48 @@ export class TrustedGit {
    * outcome (a rejected lease). */
   exec(args: readonly string[], options: GitExecOptions = {}): GitResult {
     const { argv, env } = this.invocation(args, options);
-    const result = spawnSync('/usr/bin/git', argv, {
-      cwd: this.directory,
-      env,
-      input: options.input,
-      maxBuffer: options.maxOutputBytes ?? 128 * 1024 * 1024,
-      timeout: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-      shell: false,
-    });
+    // RLIMIT_FSIZE is inherited by Git's index-pack child and enforced by the kernel
+    // during download, not a post-fetch disk check. Force packed reception below.
+    const source = options.sourceFetch !== undefined;
+    const result = spawnSync(
+      source ? '/usr/bin/env' : '/usr/bin/git',
+      source
+        ? [
+            '--ignore-signal=XFSZ',
+            '/usr/bin/prlimit',
+            `--fsize=${options.sourcePackBytes ?? MAX_GIT_PACK_BYTES}`,
+            '--',
+            '/usr/bin/git',
+            ...argv,
+          ]
+        : argv,
+      {
+        cwd: this.directory,
+        env,
+        input: options.input,
+        maxBuffer: options.maxOutputBytes ?? 128 * 1024 * 1024,
+        timeout: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+        shell: false,
+      }
+    );
     return {
       status: result.error ? null : result.status,
       stdout: result.stdout ?? Buffer.alloc(0),
       outputLimitExceeded: (result.error as NodeJS.ErrnoException | undefined)?.code === 'ENOBUFS',
+      fileLimitExceeded:
+        source &&
+        (result.signal === 'SIGXFSZ' ||
+          (result.stderr?.includes(Buffer.from('File too large')) ?? false)),
     };
   }
   /** exec() for long network operations: the event loop stays free, so a revoked lease or
    * the kill switch can abort `signal`, which kills git (status null). */
   execAsync(
     args: readonly string[],
-    options: Omit<GitExecOptions, 'input'> & { readonly signal: AbortSignal }
+    options: Omit<
+      GitExecOptions,
+      'input' | 'maxOutputBytes' | 'sourceFetch' | 'sourcePackBytes'
+    > & { readonly signal: AbortSignal }
   ): Promise<GitResult> {
     const { argv, env } = this.invocation(args, options);
     return new Promise((resolve) => {
@@ -136,6 +163,14 @@ export class TrustedGit {
     options: GitExecOptions
   ): { argv: string[]; env: NodeJS.ProcessEnv } {
     const gitEnv = { ...this.env };
+    if (
+      options.sourcePackBytes !== undefined &&
+      (options.sourceFetch === undefined ||
+        !Number.isSafeInteger(options.sourcePackBytes) ||
+        options.sourcePackBytes <= 0 ||
+        options.sourcePackBytes > MAX_GIT_PACK_BYTES)
+    )
+      throw new TypeError('TrustedGit refuses unsafe source pack limit');
     if (options.sourceFetch !== undefined) {
       if (
         args[0] !== 'fetch' ||
@@ -184,6 +219,12 @@ export class TrustedGit {
             `protocol.${options.sourceFetch === 'https' ? 'https' : 'file'}.allow=always`,
             '-c',
             'http.followRedirects=false',
+            '-c',
+            'fetch.unpackLimit=1',
+            '-c',
+            'fetch.writeCommitGraph=false',
+            '-c',
+            'gc.auto=0',
           ]),
       '-c',
       'commit.gpgSign=false',

@@ -1,6 +1,8 @@
 import { fileURLToPath } from 'node:url';
+import { isCommitSha } from '../github/fork-ref';
+import { isRepoName } from '../github/handoff';
 import { CanonicalError, type SourceManifest } from './export';
-import { baseManifest, MAX_PACK_BYTES } from './reconstruct';
+import { baseManifest, importPack, MAX_PACK_BYTES } from './reconstruct';
 import { TrustedGit } from './trusted-git';
 
 /** Structural read capability: no import chain into credential-bearing modules. */
@@ -11,18 +13,15 @@ export interface SourceUpstream {
   readonly owner: string;
   readonly repo: string;
 }
-const NAME = /^[A-Za-z0-9._-]{1,100}$/u;
 function name(value: string): string {
-  if (typeof value !== 'string' || !NAME.test(value) || value === '.' || value === '..')
-    throw new CanonicalError('unsupported');
+  if (!isRepoName(value)) throw new CanonicalError('unsupported');
   return value;
 }
 export function sourceUrl(upstream: SourceUpstream): string {
   return `https://github.com/${name(upstream.owner)}/${name(upstream.repo)}.git`;
 }
 function sha(value: unknown): string {
-  if (typeof value !== 'string' || !/^[a-f0-9]{40}$/u.test(value))
-    throw new CanonicalError('unavailable');
+  if (!isCommitSha(value)) throw new CanonicalError('unavailable');
   return value;
 }
 export async function resolveBase(
@@ -32,8 +31,8 @@ export async function resolveBase(
   sourceUrl(upstream);
   if (typeof upstream.defaultBranch !== 'string' || !upstream.defaultBranch.trim())
     throw new CanonicalError('unavailable');
-  const path = `/repos/${upstream.owner}/${upstream.repo}/branches/${encodeURIComponent(upstream.defaultBranch)}`;
   try {
+    const path = `/repos/${upstream.owner}/${upstream.repo}/branches/${encodeURIComponent(upstream.defaultBranch)}`;
     const response = await read(path);
     if (response.status !== 200) throw new CanonicalError('unavailable');
     return sha((response.body as { commit?: { sha?: unknown } } | null)?.commit?.sha);
@@ -83,6 +82,7 @@ export function acquireSource(
         ],
         { sourceFetch }
       );
+      if (fetched.fileLimitExceeded) throw new CanonicalError('limit_exceeded');
       if (fetched.status !== 0) throw new CanonicalError('unavailable');
       const result = git.exec(['pack-objects', '--stdout', '--revs'], {
         input: `${base}\n`,
@@ -100,8 +100,12 @@ export function acquireSource(
   // Only a strict import rejection permits the explicitly authorized full-history retry.
   const probe = new TrustedGit();
   try {
-    if (probe.exec(['index-pack', '--strict', '--stdin'], { input: pack }).status !== 0)
+    try {
+      importPack(probe, pack);
+    } catch (error) {
+      if (!(error instanceof CanonicalError) || error.reason !== 'unsupported') throw error;
       pack = fetchPack(false);
+    }
   } finally {
     probe.close();
   }

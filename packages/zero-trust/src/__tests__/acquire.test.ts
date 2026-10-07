@@ -247,13 +247,31 @@ describe('credential-free source acquisition', () => {
       acquireSource({ ...upstream, baseSha: '0'.repeat(40) }, { remoteUrlForTest: f.url })
     ).toThrow(new CanonicalError('unavailable'));
     expect(exec.mock.calls.filter(([args]) => args[0] === 'fetch')).toHaveLength(1);
-    for (const context of exec.mock.contexts) expect(fs.existsSync(context.directory)).toBe(false);
+    for (const context of exec.mock.contexts)
+      expect(fs.existsSync((context as TrustedGit).directory)).toBe(false);
     expect(() => acquireSource({ ...upstream, baseSha: '--upload-pack=evil' })).toThrow(
       CanonicalError
     );
   });
   it('rejects oversize pack output before importing or exposing it to a store', () => {
     const f = fixture();
+    const store = temp();
+    const writes: string[] = [];
+    const write = fs.writeFileSync;
+    const append = fs.appendFileSync;
+    const rename = fs.renameSync;
+    vi.spyOn(fs, 'writeFileSync').mockImplementation((path, data, options) => {
+      writes.push(String(path));
+      return write(path, data, options);
+    });
+    vi.spyOn(fs, 'appendFileSync').mockImplementation((path, data, options) => {
+      writes.push(String(path));
+      return append(path, data, options);
+    });
+    vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      writes.push(String(to));
+      return rename(from, to);
+    });
     const original = TrustedGit.prototype.exec;
     let packed = false;
     let imported = false;
@@ -270,9 +288,101 @@ describe('credential-free source acquisition', () => {
       if (args[0] === 'index-pack') imported = true;
       return original.call(this, args, options);
     });
-    expect(() => acquire(f)).toThrow(new CanonicalError('limit_exceeded'));
+    expect(() => {
+      const result = acquire(f);
+      fs.writeFileSync(join(store, 'baseline.pack'), result.pack);
+    }).toThrow(new CanonicalError('limit_exceeded'));
     expect(packed).toBe(true);
     expect(imported).toBe(false);
+    expect(writes.filter((path) => path.startsWith(`${store}/`))).toEqual([]);
+    expect(fs.readdirSync(store)).toEqual([]);
+    fs.writeFileSync(join(store, 'positive-control'), 'control');
+    expect(writes.filter((path) => path.startsWith(`${store}/`))).toHaveLength(1);
+  });
+  it('malformed Unicode branch returns unavailable without a read', async () => {
+    const read = vi.fn();
+    await expect(resolveBase(read, { ...upstream, defaultBranch: '\ud800' })).rejects.toThrow(
+      new CanonicalError('unavailable')
+    );
+    expect(read).not.toHaveBeenCalled();
+  });
+  it('an unavailable strict importer never retries or publishes', () => {
+    const f = fixture();
+    const original = TrustedGit.prototype.exec;
+    const exec = vi.spyOn(TrustedGit.prototype, 'exec').mockImplementation(function (
+      this: TrustedGit,
+      args,
+      options
+    ) {
+      if (args[0] === 'index-pack') return { status: null, stdout: Buffer.alloc(0) };
+      return original.call(this, args, options);
+    });
+    expect(() => acquire(f)).toThrow(new CanonicalError('unavailable'));
+    expect(exec.mock.calls.filter(([args]) => args[0] === 'fetch')).toHaveLength(1);
+    for (const context of exec.mock.contexts)
+      expect(fs.existsSync((context as TrustedGit).directory)).toBe(false);
+  });
+  it.each([
+    true,
+    false,
+  ])('kernel receive bound stops the actual fetch before pack publication, shallow=%s', (shallow) => {
+    const f = fixture();
+    const trusted = new TrustedGit();
+    try {
+      const result = trusted.exec(
+        [
+          'fetch',
+          ...(shallow ? ['--depth=1'] : []),
+          '--no-tags',
+          '--no-recurse-submodules',
+          f.url,
+          f.baseSha,
+        ],
+        { sourceFetch: 'file-test', sourcePackBytes: 64 }
+      );
+      expect(result.status).not.toBe(0);
+      expect(result.fileLimitExceeded).toBe(true);
+      const packDir = join(trusted.directory, 'repo', 'objects', 'pack');
+      for (const file of fs.readdirSync(packDir)) {
+        expect(fs.statSync(join(packDir, file)).size).toBeLessThanOrEqual(64);
+        expect(file).not.toMatch(/^pack-.*\.pack$/u);
+      }
+    } finally {
+      trusted.close();
+    }
+  });
+  it('receive overflow stops acquisition before generation, fallback or store exposure', () => {
+    const f = fixture();
+    const original = TrustedGit.prototype.exec;
+    const exec = vi.spyOn(TrustedGit.prototype, 'exec').mockImplementation(function (
+      this: TrustedGit,
+      args,
+      options
+    ) {
+      if (args[0] === 'fetch')
+        return { status: 128, stdout: Buffer.alloc(0), fileLimitExceeded: true };
+      return original.call(this, args, options);
+    });
+    expect(() => acquire(f)).toThrow(new CanonicalError('limit_exceeded'));
+    expect(exec.mock.calls.filter(([args]) => args[0] === 'fetch')).toHaveLength(1);
+    expect(
+      exec.mock.calls.some(([args]) => args[0] === 'pack-objects' || args[0] === 'index-pack')
+    ).toBe(false);
+  });
+  it('base inspection operational failure stays unavailable', () => {
+    const f = fixture(false);
+    const result = acquire(f);
+    const original = TrustedGit.prototype.run;
+    vi.spyOn(TrustedGit.prototype, 'run').mockImplementation(function (
+      this: TrustedGit,
+      args,
+      input,
+      identity
+    ) {
+      if (args[0] === 'cat-file') throw new CanonicalError('git_failed');
+      return original.call(this, args, input, identity);
+    });
+    expect(() => baseManifest(result.pack, f.baseSha)).toThrow(new CanonicalError('unavailable'));
   });
   it('real bounded subprocess reports output overflow', () => {
     const f = fixture(false);
@@ -311,6 +421,11 @@ describe('credential-free source acquisition', () => {
           TypeError
         );
       expect(() => trusted.exec(['push', f.url], { sourceFetch: 'https' })).toThrow(TypeError);
+      for (const sourcePackBytes of [0, Number.NaN, MAX_PACK_BYTES + 1])
+        expect(() =>
+          trusted.exec(['fetch', f.url], { sourceFetch: 'file-test', sourcePackBytes })
+        ).toThrow(TypeError);
+      expect(() => trusted.exec(['status'], { sourcePackBytes: 64 })).toThrow(TypeError);
       vi.stubEnv('VITEST', '');
       expect(() => trusted.exec(['fetch', f.url], { sourceFetch: 'file-test' })).toThrow(TypeError);
     } finally {

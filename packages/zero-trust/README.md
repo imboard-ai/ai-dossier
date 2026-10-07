@@ -509,7 +509,7 @@ excluding `.` and `..`. No repository-provided URL is followed.
 
 `acquireSource({ owner, repo, baseSha }, options?)` returns `{ pack, manifest }`
 after fetching into fresh trusted bare storage without credentials, tags, checkout
-or submodule recursion. Its fetch-only `TrustedGit.sourceFetch` option permits HTTPS
+or submodule recursion. Its fetch-only `GitExecOptions.sourceFetch` option permits HTTPS
 while all other protocols remain denied; redirects are disabled, credential helpers
 empty and prompts disabled. This option refuses env, identity and config overrides.
 All other callers retain `protocol.allow=never`. Hooks, attributes filters and
@@ -518,15 +518,24 @@ gitmodules are data, never executed. Temporary repositories are removed on all e
 Production first fetches with `--depth=1`. A root commit's pack imports strictly as
 is; commits with omitted parents fail `index-pack --strict` and trigger one fresh
 fetch without depth. This is a complete-history fallback, not a weaker importer.
-Both paths bound pack output to exported `MAX_PACK_BYTES` (128 MiB), refusing
+Both paths enforce a kernel receive-file bound using GNU `env` and util-linux
+`prlimit` (required on the trusted Linux controller). Git is forced to retain the
+received pack, never unpack it into loose files; `RLIMIT_FSIZE` inherited by
+index-pack stops writes past 128 MiB during reception, with no auto-GC or commit
+graph writes. This bounds each received pack/index file, not total controller
+storage across concurrent runs. `sourcePackBytes` may only lower that limit.
+Both paths also bound generated pack output to exported `MAX_PACK_BYTES` (128 MiB), refusing
 overflow with `limit_exceeded` before returning any artifact for the run store.
-Controllers map this source-size refusal to `unsupported_environment` with
+The integrating controller must map this source-size refusal to `unsupported_environment` with
 `source_too_large`. This primitive itself performs no run-store writes or transitions.
 
 `baseManifest(pack, baseSha)` imports with the same strict path as `createCandidate`
 and inspects raw trees. Unsupported modes (symlinks/gitlinks/special files), Git
 path aliases, collisions and malformed objects throw `unsupported`; source/pack
-limits remain `limit_exceeded`. No path or byte normalization occurs. The manifest
+limits remain `limit_exceeded`; unavailable Git inspection remains `unavailable`.
+The shared internal `importPack(git, pack)` plumbing distinguishes strict rejection
+from an unavailable subprocess; unavailable import never triggers another fetch.
+No path or byte normalization occurs. The manifest
 has the existing immutable `SourceManifest` shape. Both APIs are package exports.
 Tests alone can pass `options.remoteUrlForTest`, a local `file:` URL accepted only
 when `process.env.VITEST` is set; only then is file transport permitted. Tests use no
@@ -1181,8 +1190,9 @@ under a fresh `/tmp` directory (inherited `TMPDIR` is ignored),
 no templates/system/global config, disabled hooks/credential helpers/attributes,
 no replacements and `protocol.allow=never`. Subprocesses have a 60-second timeout
 and 128 MiB output cap; supervise controller resources independently for large or
-hostile compressed object packs. The canonical API needs no protocol exception. Only
-the fork push adds one: `exec`/`execAsync` accept the broker credential's
+hostile compressed object packs. Candidate reconstruction needs no protocol exception.
+Source fetch adds a credential-free HTTPS exception under the receive-file bound
+described above. Fork push adds its own exception: `exec`/`execAsync` accept the broker credential's
 `GIT_CONFIG_*` set (which allows HTTPS) and nothing else that could change the
 hardening, and the push runs asynchronously with a 120-second timeout so an aborted
 lease kills it.
