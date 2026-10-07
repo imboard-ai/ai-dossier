@@ -177,7 +177,7 @@ ai-dossier run org/my-skill --pull</code></pre></li>
       <p class="eyebrow">Format</p>
       <h2 id="example">What a dossier looks like</h2>
       <Code code={example} lang="markdown" themes={{ light: 'github-light', dark: 'github-dark-default' }} />
-      <p class="muted">Trimmed. This is the layout <code>ai-dossier sign</code> writes: a valid <a href="https://agentskills.io/specification">Agent Skill</a> as is, with the Dossier fields under <code>metadata</code> and a signature that covers the whole header and body. Dossiers signed before CLI 0.92.0, like the published <a href="/registry/getting-started/hello/">getting-started/hello</a>, use the older JSON layout and verify the same way. <a href="/docs/reference/spec-shape/">The format in detail</a>.</p>
+      <p class="muted">Trimmed. This is the layout <code>ai-dossier sign</code> writes: a valid <a href="https://agentskills.io/specification">Agent Skill</a> as is, with the Dossier fields under <code>metadata</code> and a signature that covers the whole header and body. Dossiers signed before CLI 0.92.0 use the older JSON layout and verify the same way. The published <a href="/registry/getting-started/hello/">getting-started/hello</a> is a good first one to open. <a href="/docs/reference/spec-shape/">The format in detail</a>.</p>
       <h3 class="trust-h">How trust works</h3>
       <ul class="trust">
         <li>Trust is a local decision. A valid signature from a key you have not added is reported as untrusted, never auto-trusted.</li>
