@@ -808,6 +808,11 @@ the token limit, or committed active time reaching its limit returns `escalated`
 with reason `budget` for every question, including warmed cache entries. An
 eligible cache hit still issues no model call, reservation, settlement or cache
 write. Missing/corrupt session evidence escalates as `ledger`; no history resets.
+The same read-only barrier is rechecked after metered calls and before publishing
+accepted/cache evidence: a final pass consuming the exact remaining allowance
+returns `budget`, not permission. A zero work-money ceiling remains eligible for
+zero-priced work while token/time capacity remains; any positive money overrun
+still exhausts it. Positive money ceilings stop at equality.
 
 ```ts
 const question = createTypedQuestion({

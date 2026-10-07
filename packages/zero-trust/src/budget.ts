@@ -325,9 +325,11 @@ export function isBudgetSessionExhausted(state: BudgetState, sessionId: string):
   const session = state.sessions.find((entry) => entry.id === sessionId);
   if (!session) throw new BudgetError('unknown_session', 'Unknown budget session');
   const totals = reservationTotals(state, sessionId);
+  const committedMoney = totals.spent + totals.reserved;
+  const workCeiling = BigInt(session.ceiling.minor) - BigInt(session.cleanupAllowance);
   return (
-    totals.spent + totals.reserved >=
-      BigInt(session.ceiling.minor) - BigInt(session.cleanupAllowance) ||
+    committedMoney > workCeiling ||
+    (workCeiling > 0n && committedMoney === workCeiling) ||
     totals.tokens >= BigInt(session.tokenLimit) ||
     totals.timeMs >= BigInt(session.timeLimitMs)
   );

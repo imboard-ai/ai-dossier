@@ -135,6 +135,88 @@ describe('read-only exhausted-session cache barrier', () => {
     'tokens',
     'time',
     'money',
+  ] as const)('refuses acceptance/cache publication when the final pass consumes the %s allowance', async (axis) => {
+    const b = budget();
+    b.rates[0].price = 1;
+    const measure = scripted();
+    expect((await decide(definition, inputs, { ...measure, budget: b })).status).toBe('accepted');
+    const totals = budgetTotals(b.ledger.snapshot(), 's1');
+    const bounds = {
+      ceiling: {
+        currency: 'USD',
+        minor: axis === 'money' ? totals.spent + totals.reserved : 1_000_000,
+      },
+      cleanupAllowance: 0,
+      tokenLimit: axis === 'tokens' ? totals.tokens : 10_000_000,
+      timeLimitMs: axis === 'time' ? totals.timeMs : 10_000_000,
+    };
+    b.ledger.startSession({ id: 'exact', ...bounds });
+    const deps = scripted();
+    const entries = cache();
+    const set = vi.spyOn(entries.store, 'set');
+    const exact = await decide(definition, inputs, {
+      ...deps,
+      budget: { ...b, sessionId: 'exact' },
+      cache: entries.store,
+    });
+    expect(exact).toMatchObject({ status: 'escalated', reason: 'budget' });
+    expect(deps.complete.mock.calls).toHaveLength(2);
+    expect(set.mock.calls).toEqual([]);
+    const final = budgetTotals(b.ledger.snapshot(), 'exact');
+    expect(
+      axis === 'money'
+        ? final.spent + final.reserved
+        : axis === 'time'
+          ? final.timeMs
+          : final.tokens
+    ).toBe(
+      axis === 'money'
+        ? bounds.ceiling.minor
+        : axis === 'time'
+          ? bounds.timeLimitMs
+          : bounds.tokenLimit
+    );
+    b.ledger.startSession({
+      ...bounds,
+      id: 'surplus',
+      ceiling: { ...bounds.ceiling, minor: bounds.ceiling.minor + (axis === 'money' ? 1 : 0) },
+      tokenLimit: bounds.tokenLimit + (axis === 'tokens' ? 1 : 0),
+      timeLimitMs: bounds.timeLimitMs + (axis === 'time' ? 1 : 0),
+    });
+    expect(
+      (await decide(definition, inputs, { ...scripted(), budget: { ...b, sessionId: 'surplus' } }))
+        .status
+    ).toBe('accepted');
+  });
+  it.each([
+    0, 1,
+  ])('keeps free-model sessions with zero work-money eligible (cleanup allowance %s)', async (allowance) => {
+    const b = budget();
+    b.ledger.startSession({
+      id: 'free',
+      ceiling: { currency: 'USD', minor: allowance },
+      cleanupAllowance: allowance,
+      tokenLimit: 10_000_000,
+      timeLimitMs: 10_000_000,
+    });
+    const deps = scripted();
+    const entries = cache();
+    const free = { ...b, sessionId: 'free' };
+    expect(
+      (await decide(definition, inputs, { ...deps, budget: free, cache: entries.store })).status
+    ).toBe('accepted');
+    const before = fs.readFileSync(b.ledger.file);
+    deps.complete.mockClear();
+    expect(
+      (await decide(definition, inputs, { ...deps, budget: free, cache: entries.store })).status
+    ).toBe('accepted');
+    expect(deps.complete.mock.calls).toEqual([]);
+    expect(fs.readFileSync(b.ledger.file)).toEqual(before);
+  });
+  it.each([
+    'tokens',
+    'time',
+    'money',
   ] as const)('refuses cached answers at the real %s ceiling without provider/cache/ledger effects', async (axis) => {
     const b = budget();
     const deps = scripted([

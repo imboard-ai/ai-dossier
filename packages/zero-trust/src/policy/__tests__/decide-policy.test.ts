@@ -118,6 +118,59 @@ function noWeaker(a: PolicyAssessment, floor: PolicyAssessment, files: readonly 
 }
 describe('typed policy assessment', () => {
   it.each([
+    ['AI is banned, and AI output is rejected.', 'banned'],
+    ['AI use must be disclosed: AI disclosure is required.', 'disclosure_required'],
+  ])('retains clean independently restrictive clauses: %s', async (text, value) => {
+    expect(analyzePolicyFloor([file(text)]).contradictions.ai).toBe(false);
+    expect(
+      (
+        await assessPolicy(
+          [file(text)],
+          fake((q, input) => ({
+            ...permissive(q, input),
+            value: q.id === 'policy-ai' ? value : permissive(q, input).value,
+          }))
+        )
+      ).ai
+    ).toBe(value);
+  });
+  it('never returns AI permission when its final pass exhausts the real session', async () => {
+    const files = [file('AI is welcome.')];
+    const measure = fake(permissive);
+    expect((await assessPolicy(files, measure)).ai).toBe('welcomed');
+    const state = measure.budget.ledger.snapshot();
+    const ai = budgetTotals({ ...state, reservations: state.reservations.slice(0, 2) }, 's1');
+    const bounds = {
+      ceiling: { currency: 'USD', minor: 1_000_000 },
+      cleanupAllowance: 0,
+      tokenLimit: ai.tokens,
+      timeLimitMs: 10_000_000,
+    };
+    measure.budget.ledger.startSession({ ...bounds, id: 'exact' });
+    const entries = new Map<string, Verdict>();
+    const set = vi.fn((key: string, value: Verdict): undefined => {
+      entries.set(key, value);
+    });
+    const cache = { get: (key: string) => entries.get(key), set };
+    const a = await assessPolicy(files, {
+      ...measure,
+      budget: { ...measure.budget, sessionId: 'exact' },
+      cache,
+    });
+    expect(a.ai).toBe('unclear');
+    expect(Object.values(a.decisions ?? {}).every((v) => v.reason === 'budget')).toBe(true);
+    expect(set.mock.calls).toEqual([]);
+    measure.budget.ledger.startSession({ ...bounds, id: 'surplus', tokenLimit: ai.tokens + 1 });
+    expect(
+      (
+        await assessPolicy(files, {
+          ...measure,
+          budget: { ...measure.budget, sessionId: 'surplus' },
+        })
+      ).ai
+    ).toBe('welcomed');
+  });
+  it.each([
     ', but ',
     ': ',
     ' (',

@@ -315,11 +315,15 @@ export async function decide(
   }
   // Cached judgments do not spend again, but an exhausted session is stopping.
   // This is a read-only ledger check before ANY floor/cache return or dispatch.
-  try {
-    if (isBudgetSessionExhausted(ledger.snapshot(), sessionId)) return escalate('budget');
-  } catch {
-    return escalate('ledger');
-  }
+  const budgetFailure = (): 'budget' | 'ledger' | undefined => {
+    try {
+      return isBudgetSessionExhausted(ledger.snapshot(), sessionId) ? 'budget' : undefined;
+    } catch {
+      return 'ledger';
+    }
+  };
+  const initialBudgetFailure = budgetFailure();
+  if (initialBudgetFailure) return escalate(initialBudgetFailure);
   let floor: DecisionFloor;
   try {
     floor = evaluateDecisionFloor(floorFn, question, inputs);
@@ -341,9 +345,13 @@ export async function decide(
     citationMode,
   ]);
   const remember = (v: Verdict): Verdict => {
+    const currentBudgetFailure = budgetFailure();
+    if (currentBudgetFailure) return escalate(currentBudgetFailure);
     let existing: unknown;
     try {
       existing = synchronousResult(cache?.get(key));
+      const observedBudgetFailure = budgetFailure();
+      if (observedBudgetFailure) return escalate(observedBudgetFailure);
     } catch {
       return escalate('cache');
     }
@@ -382,6 +390,8 @@ export async function decide(
     remember(escalate(reason, confidence));
   try {
     const cached = synchronousResult(cache?.get(key));
+    const cachedBudgetFailure = budgetFailure();
+    if (cachedBudgetFailure) return escalate(cachedBudgetFailure);
     if (cached !== undefined && cached !== null)
       return (
         readCache(structuredClone(cached), identity, question, floor, sources, verbatim) ??
@@ -411,6 +421,10 @@ export async function decide(
           rates,
           signal ? { ...request, signal } : request
         );
+        // Reservation/settlement can consume the final allowance while this
+        // call is awaiting. Exhaustion must not escape as accepted evidence.
+        const completedBudgetFailure = budgetFailure();
+        if (completedBudgetFailure) return escalate(completedBudgetFailure);
       } catch (error) {
         return escalate(
           error instanceof ModelError ||
