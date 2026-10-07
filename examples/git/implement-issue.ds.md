@@ -1,70 +1,23 @@
----dossier
-{
-  "dossier_schema_version": "1.0.0",
-  "title": "Implement Issue — Code and Test",
-  "version": "1.8.1",
-  "protocol_version": "1.0",
-  "status": "Stable",
-  "last_updated": "2026-09-09",
-  "objective": "Implement the solution described in the planning document, run tests, and auto-fix lint issues",
-  "category": [
-    "development"
-  ],
-  "tags": [
-    "issue",
-    "workflow",
-    "git",
-    "github",
-    "implement",
-    "test"
-  ],
-  "risk_level": "medium",
-  "requires_approval": false,
-  "risk_factors": [
-    "modifies_files"
-  ],
-  "inputs": {
-    "required": [
-      {
-        "name": "planning_file",
-        "description": "Path to the PLANNING-{number}-{slug}.md file",
-        "type": "string"
-      }
-    ],
-    "optional": [
-      {
-        "name": "base_branch",
-        "description": "Base branch for comparing pre-existing test failures",
-        "type": "string",
-        "default": "main"
-      },
-      {
-        "name": "run_id",
-        "description": "Runstate run id minted by gate-issue; pass through unchanged",
-        "type": "string"
-      }
-    ]
-  },
-  "authors": [
-    {
-      "name": "Yuval Dimnik"
-    }
-  ],
-  "name": "implement-issue",
-  "checksum": {
-    "algorithm": "sha256",
-    "hash": "fcac6c28b4efc509e335fa7f445d2decc4d2f0a752124afb2bb306c54f88cd71"
-  },
-  "signature": {
-    "algorithm": "ed25519",
-    "signature": "lancgO47rVSxO9CHpTn9oZsf84s4W5/QokuKLcmtM8Reu/0LD/FUrByBjnViUannSIx1e4ZZGs05g/g+EgboBA==",
-    "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-09T06:38:36.941Z",
-    "covers": "frontmatter+body",
-    "key_id": "imboard-ai",
-    "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
-  }
-}
+---
+name: 'implement-issue'
+description: 'Implement the solution described in the planning document, run tests, and auto-fix lint issues'
+metadata:
+  dossier.dossier_schema_version: '1.0.0'
+  dossier.title: 'Implement Issue — Code and Test'
+  dossier.version: '1.8.2'
+  dossier.protocol_version: '"1.0"'
+  dossier.status: 'Stable'
+  dossier.last_updated: '2026-09-09'
+  dossier.objective: 'Implement the solution described in the planning document, run tests, and auto-fix lint issues'
+  dossier.category: '["development"]'
+  dossier.tags: '["issue","workflow","git","github","implement","test"]'
+  dossier.risk_level: 'medium'
+  dossier.risk_factors: '["modifies_files"]'
+  dossier.requires_approval: 'false'
+  dossier.inputs: '{"optional":[{"default":"main","description":"Base branch for comparing pre-existing test failures","name":"base_branch","type":"string"},{"description":"Runstate run id minted by gate-issue; pass through unchanged","name":"run_id","type":"string"}],"required":[{"description":"Path to the PLANNING-{number}-{slug}.md file","name":"planning_file","type":"string"}]}'
+  dossier.authors: '[{"name":"Yuval Dimnik"}]'
+  dossier.checksum: '{"algorithm":"sha256","hash":"fcac6c28b4efc509e335fa7f445d2decc4d2f0a752124afb2bb306c54f88cd71"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"NGku30LYMCJdiP8v6xrL0FcMKUHj0wAxlmN8drhDidVZKK/O+2n0OSDUMsWfvvHWIEqqft7CevL047I1z6bxAw==","signed_at":"2026-10-07T11:59:28.401Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Implement Issue — Code and Test

@@ -6,9 +6,9 @@ name: Skills Spec
 # Two checks:
 # - As the CLI writes them (#1123): every example converted to the Agent Skills
 #   layout the way `ai-dossier sign`/`format` now write it. REQUIRED.
-# - As shipped: the examples are mirrors of signed registry dossiers, still in
-#   the legacy layout until they are re-signed and republished (#1126). This one
-#   stays REPORT-ONLY until then; drop its `continue-on-error` afterwards.
+# - As shipped (#1126): the examples are mirrors of the republished registry
+#   dossiers (spec layout, v3 signatures), validated byte-for-byte as they sit
+#   in the repo. REQUIRED.
 
 on:
   pull_request:
@@ -86,8 +86,6 @@ jobs:
           exit $status
 
       - name: Validate example dossiers as shipped
-        # Report-only until the examples are re-signed in the spec layout (#1126).
-        continue-on-error: true
         env:
           SKILLS_REF_BIN: ${{ runner.temp }}/skills-ref-venv/bin/skills-ref
         run: |
@@ -95,7 +93,7 @@ jobs:
           status=0
           node scripts/validate-skills-spec.mjs | tee "$RUNNER_TEMP/skills-spec.txt" || status=$?
           {
-            echo '### skills-ref validate, as shipped (report-only until #1126)'
+            echo '### skills-ref validate, as shipped'
             echo '```'
             cat "$RUNNER_TEMP/skills-spec.txt"
             echo '```'

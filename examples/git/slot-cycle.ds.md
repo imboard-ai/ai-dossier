@@ -1,82 +1,26 @@
----dossier
-{
-  "dossier_schema_version": "1.0.0",
-  "name": "slot-cycle",
-  "title": "Slot Cycle — SUPERSEDED by member-cycle",
-  "version": "1.1.2",
-  "protocol_version": "1.0",
-  "status": "Deprecated",
-  "last_updated": "2026-09-10",
-  "objective": "SUPERSEDED by imboard-ai/git/member-cycle. Executed one member issue inside a SHARED batch worktree, members serialised. RFC-0001 §J replaced that with per-member worktrees off an integration branch. Kept for reference only.",
-  "category": [
-    "development"
-  ],
-  "tags": [
-    "issue",
-    "workflow",
-    "batch-cycles",
-    "slot",
-    "runstate",
-    "conformance"
-  ],
-  "risk_level": "medium",
-  "risk_factors": [
-    "modifies_files",
-    "network_access"
-  ],
-  "requires_approval": false,
-  "destructive_operations": [
-    "Pushes exactly one commit to the shared batch branch (the scheduler owns that branch's lifecycle, including revert and eviction)"
-  ],
-  "inputs": {
-    "required": [
-      {
-        "name": "issue_number",
-        "description": "The member issue this slot executes",
-        "type": "number"
-      },
-      {
-        "name": "batch",
-        "description": "Batch id slug the scheduler enqueued this issue under (e.g. b1) — carried on every milestone as batch=<id>",
-        "type": "string"
-      },
-      {
-        "name": "worktree",
-        "description": "Absolute path to the scheduler-provided batch worktree: batch branch checked out, environment warm, prior members' issue-boundary commits already pushed",
-        "type": "string"
-      }
-    ],
-    "optional": []
-  },
-  "authors": [
-    {
-      "name": "Yuval Dimnik"
-    }
-  ],
-  "content_scope": "references-external",
-  "external_references": [
-    {
-      "url": "https://cli.github.com/",
-      "description": "GitHub CLI documentation",
-      "type": "documentation",
-      "trust_level": "trusted",
-      "required": false
-    }
-  ],
-  "checksum": {
-    "algorithm": "sha256",
-    "hash": "fc0a97532e19d51396d7dd9181d08e41e41d183b3cea0d3e2b3e887844699a5f"
-  },
-  "signature": {
-    "algorithm": "ed25519",
-    "signature": "pp/SiL1iDToAOQkKGjoj0DhBEG4oRsT7PegGkZHrBCz7tfSjKRWlRjij5lGcVuaT0uMg4YC/Mnp2E0iplmyYDA==",
-    "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-10T16:09:50.249Z",
-    "covers": "frontmatter+body",
-    "key_id": "imboard-ai",
-    "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
-  }
-}
+---
+name: 'slot-cycle'
+description: 'SUPERSEDED by imboard-ai/git/member-cycle. Executed one member issue inside a SHARED batch worktree, members serialised. RFC-0001 §J replaced that with per-member worktrees off an integration branch. Kept for reference only.'
+metadata:
+  dossier.dossier_schema_version: '1.0.0'
+  dossier.title: 'Slot Cycle — SUPERSEDED by member-cycle'
+  dossier.version: '1.1.3'
+  dossier.protocol_version: '"1.0"'
+  dossier.status: 'Deprecated'
+  dossier.last_updated: '2026-09-10'
+  dossier.objective: 'SUPERSEDED by imboard-ai/git/member-cycle. Executed one member issue inside a SHARED batch worktree, members serialised. RFC-0001 §J replaced that with per-member worktrees off an integration branch. Kept for reference only.'
+  dossier.category: '["development"]'
+  dossier.tags: '["issue","workflow","batch-cycles","slot","runstate","conformance"]'
+  dossier.risk_level: 'medium'
+  dossier.risk_factors: '["modifies_files","network_access"]'
+  dossier.requires_approval: 'false'
+  dossier.destructive_operations: '["Pushes exactly one commit to the shared batch branch (the scheduler owns that branch''s lifecycle, including revert and eviction)"]'
+  dossier.content_scope: 'references-external'
+  dossier.external_references: '[{"description":"GitHub CLI documentation","required":false,"trust_level":"trusted","type":"documentation","url":"https://cli.github.com/"}]'
+  dossier.inputs: '{"optional":[],"required":[{"description":"The member issue this slot executes","name":"issue_number","type":"number"},{"description":"Batch id slug the scheduler enqueued this issue under (e.g. b1) — carried on every milestone as batch=<id>","name":"batch","type":"string"},{"description":"Absolute path to the scheduler-provided batch worktree: batch branch checked out, environment warm, prior members'' issue-boundary commits already pushed","name":"worktree","type":"string"}]}'
+  dossier.authors: '[{"name":"Yuval Dimnik"}]'
+  dossier.checksum: '{"algorithm":"sha256","hash":"fc0a97532e19d51396d7dd9181d08e41e41d183b3cea0d3e2b3e887844699a5f"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"XP/F3403bXYHMtDYuDzC0wpKP3WEKNqwSk92FMTh1t9rPnuVwj7dZ+crVq8gbjHk04MM1M518L43uHT1mYPHBA==","signed_at":"2026-10-07T12:01:56.346Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Slot Cycle — Per-Issue Execution Unit Inside a Batch

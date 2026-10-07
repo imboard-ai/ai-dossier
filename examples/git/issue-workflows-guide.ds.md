@@ -1,45 +1,21 @@
----dossier
-{
-  "dossier_schema_version": "1.0.0",
-  "name": "issue-workflows-guide",
-  "title": "Issue Workflows Guide",
-  "version": "1.6.0",
-  "protocol_version": "1.0",
-  "status": "Stable",
-  "objective": "Reference guide for the issue workflow family — explains when to use each workflow, how they compose from shared sub-dossiers, and available flags",
-  "category": [
-    "documentation"
-  ],
-  "tags": [
-    "issue",
-    "workflow",
-    "git",
-    "github",
-    "guide",
-    "reference"
-  ],
-  "risk_level": "low",
-  "requires_approval": false,
-  "authors": [
-    {
-      "name": "Yuval Dimnik"
-    }
-  ],
-  "last_updated": "2026-09-29",
-  "checksum": {
-    "algorithm": "sha256",
-    "hash": "4cc19d5b0b729240bf53eab378600a93bfbcee8d64e30c662fd9f83d1c99269c"
-  },
-  "signature": {
-    "algorithm": "ed25519",
-    "signature": "8h26Nx2AIjbf9+jxUXBZrEGcJxow5EbkI6P6Pl+spU4BeheErAx4uukQMyg3drT0DEHDjRWZEiFAj8SUARlLDQ==",
-    "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-23T21:24:42.357Z",
-    "covers": "frontmatter+body",
-    "key_id": "imboard-ai",
-    "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
-  }
-}
+---
+name: 'issue-workflows-guide'
+description: 'Reference guide for the issue workflow family — explains when to use each workflow, how they compose from shared sub-dossiers, and available flags'
+metadata:
+  dossier.dossier_schema_version: '1.0.0'
+  dossier.title: 'Issue Workflows Guide'
+  dossier.version: '1.6.2'
+  dossier.protocol_version: '"1.0"'
+  dossier.status: 'Stable'
+  dossier.last_updated: '2026-10-06'
+  dossier.objective: 'Reference guide for the issue workflow family — explains when to use each workflow, how they compose from shared sub-dossiers, and available flags'
+  dossier.category: '["documentation"]'
+  dossier.tags: '["issue","workflow","git","github","guide","reference"]'
+  dossier.risk_level: 'low'
+  dossier.requires_approval: 'false'
+  dossier.authors: '[{"name":"Yuval Dimnik"}]'
+  dossier.checksum: '{"algorithm":"sha256","hash":"4cc19d5b0b729240bf53eab378600a93bfbcee8d64e30c662fd9f83d1c99269c"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"/64G2SpcwaLUdcGc5ZTgODVmQq3mhg1q0IbUcWo+qwbZV4aPImyw87+gwgOBmENKVIGnHhjgQYrlRuBapnPbBw==","signed_at":"2026-10-07T11:59:48.780Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Issue Workflows Guide

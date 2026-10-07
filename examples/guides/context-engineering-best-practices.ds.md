@@ -1,52 +1,27 @@
----dossier
-{
-  "dossier_schema_version": "1.0.0",
-  "title": "Context Engineering Best Practices for AI Coding Agents",
-  "version": "1.0.0",
-  "protocol_version": "1.0",
-  "status": "Draft",
-  "last_updated": "2026-03-09",
-  "objective": "Provide a reference guide for writing effective context files (AGENTS.md, CLAUDE.md, system prompts) that improve AI coding agent performance without over-constraining agent behavior",
-  "category": [
-    "documentation",
-    "development"
-  ],
-  "tags": [
-    "context-engineering",
-    "agents-md",
-    "claude-md",
-    "system-prompts",
-    "best-practices",
-    "llm",
-    "coding-agents"
-  ],
-  "tools_required": [],
-  "risk_level": "low",
-  "risk_factors": [],
-  "requires_approval": false,
-  "destructive_operations": [],
-  "content_scope": "references-external",
-  "external_references": [
-    {
-      "url": "https://arxiv.org/abs/2602.11988",
-      "description": "ETH Zurich paper evaluating the impact of AGENTS.md files on coding agent performance",
-      "type": "documentation",
-      "trust_level": "trusted",
-      "required": false
-    }
-  ],
-  "authors": [
-    {
-      "name": "Yuval Dimnik",
-      "email": "yuval.dimnik@gmail.com"
-    }
-  ],
-  "license": "AGPL-3.0",
-  "checksum": {
-    "algorithm": "sha256",
-    "hash": "9e93b02744e0833b86e8d05de232742703efb98cb4aaa3ee709f76ad1b18eb7e"
-  }
-}
+---
+name: 'context-engineering-best-practices'
+description: 'Provide a reference guide for writing effective context files (AGENTS.md, CLAUDE.md, system prompts) that improve AI coding agent performance without over-constraining agent behavior'
+license: 'AGPL-3.0'
+metadata:
+  dossier.dossier_schema_version: '1.0.0'
+  dossier.title: 'Context Engineering Best Practices for AI Coding Agents'
+  dossier.version: '1.0.0'
+  dossier.protocol_version: '"1.0"'
+  dossier.status: 'Draft'
+  dossier.last_updated: '2026-03-09'
+  dossier.objective: 'Provide a reference guide for writing effective context files (AGENTS.md, CLAUDE.md, system prompts) that improve AI coding agent performance without over-constraining agent behavior'
+  dossier.category: '["documentation","development"]'
+  dossier.tags: '["context-engineering","agents-md","claude-md","system-prompts","best-practices","llm","coding-agents"]'
+  dossier.tools_required: '[]'
+  dossier.risk_level: 'low'
+  dossier.risk_factors: '[]'
+  dossier.requires_approval: 'false'
+  dossier.destructive_operations: '[]'
+  dossier.content_scope: 'references-external'
+  dossier.external_references: '[{"description":"ETH Zurich paper evaluating the impact of AGENTS.md files on coding agent performance","required":false,"trust_level":"trusted","type":"documentation","url":"https://arxiv.org/abs/2602.11988"}]'
+  dossier.authors: '[{"email":"yuval.dimnik@gmail.com","name":"Yuval Dimnik"}]'
+  dossier.checksum: '{"algorithm":"sha256","hash":"9e93b02744e0833b86e8d05de232742703efb98cb4aaa3ee709f76ad1b18eb7e"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"4Py1u3GKGeeQGX8ftRMurO7evbWtaYcA9+h93jR1YBaOkwz1Uak6awE+/SMEdzBHmBSk264mBgRBxf9h8A/VAg==","signed_at":"2026-10-07T12:15:17.511Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 # Context Engineering Best Practices for AI Coding Agents
 

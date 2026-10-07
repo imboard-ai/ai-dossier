@@ -1,110 +1,25 @@
----dossier
-{
-  "dossier_schema_version": "1.0.0",
-  "name": "fleet-cycle",
-  "title": "Fleet Cycle — Orchestrate Multiple Issues",
-  "version": "1.9.0",
-  "protocol_version": "1.0",
-  "status": "Draft",
-  "last_updated": "2026-09-29",
-  "objective": "Take a SET of GitHub issues to merged PRs by building a dependency-aware wave plan, dispatching full-cycle-issue runs across background agents (detached where the repo can merge a parked PR, attached otherwise), and supervising every PR through merge — serial, parallel, or mixed",
-  "category": [
-    "development"
-  ],
-  "tags": [
-    "github",
-    "issues",
-    "workflow",
-    "autonomous",
-    "orchestration",
-    "batch",
-    "parallel",
-    "fleet",
-    "full-cycle",
-    "dependencies"
-  ],
-  "risk_level": "high",
-  "risk_factors": [
-    "modifies_files",
-    "network_access",
-    "executes_external_code"
-  ],
-  "requires_approval": false,
-  "destructive_operations": [
-    "Dispatches multiple full-cycle-issue runs, each of which creates branches, worktrees, PRs, and merges code",
-    "Spawns background agents that operate autonomously",
-    "Merges multiple pull requests"
-  ],
-  "inputs": {
-    "required": [
-      {
-        "name": "issues",
-        "description": "The issue set to process. Explicit list ('1,2,3'), range ('1..9'), or mixed ('1,2,5..8').",
-        "type": "string",
-        "example": "1..9"
-      }
-    ],
-    "optional": [
-      {
-        "name": "max_parallel",
-        "description": "Maximum number of full-cycle runs dispatched concurrently within a wave. Bounded by worktree-pool capacity.",
-        "type": "number",
-        "default": 3
-      },
-      {
-        "name": "mode",
-        "description": "Override the computed plan. 'auto' = dependency-aware waves (default). 'serial' = one issue at a time in number order. 'parallel' = ignore dependencies, run all at once (unsafe; use only for known-independent issues).",
-        "type": "string",
-        "default": "auto"
-      },
-      {
-        "name": "warmup_dossier",
-        "description": "Warm-worktree dossier passed through to each full-cycle-issue run.",
-        "type": "string",
-        "default": "imboard-ai/git/warm-worktree"
-      },
-      {
-        "name": "base_branch",
-        "description": "Default target branch for issues that do not declare their own. Passed through to each full-cycle-issue run.",
-        "type": "string",
-        "default": "auto"
-      },
-      {
-        "name": "dispatch_model_tier",
-        "description": "Model tier for dispatched full-cycle generation phases: cheap | mid | strong | auto. auto = per-issue by risk signals (labels, title, touched areas): docs/chore→cheap, standard→mid, security/payments/migrations/auth/schema→strong.",
-        "type": "string",
-        "default": "auto"
-      }
-    ]
-  },
-  "outputs": {
-    "files": [
-      {
-        "path": "~/.dossier/logs/fleet-cycle/{project}/FLEET-PLAN-{timestamp}.md.gz",
-        "description": "Gzipped dependency DAG and wave plan, written before dispatch, kept per-project outside the working tree (most recent 20 retained)",
-        "format": "markdown+gzip"
-      }
-    ]
-  },
-  "authors": [
-    {
-      "name": "Yuval Dimnik"
-    }
-  ],
-  "checksum": {
-    "algorithm": "sha256",
-    "hash": "76863d05303c69d4cd2e9a62a1212529121b5a6403ca5556abd6b414298d76aa"
-  },
-  "signature": {
-    "algorithm": "ed25519",
-    "signature": "T7EQde3wPZ5acHFeo9Owul1A0fTnCBtD261aQeSeTZj08OE3pIWKBiBro5fuoADeQqnlpdIbn+cpYyZQFhosDg==",
-    "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-29T13:21:57.508Z",
-    "covers": "frontmatter+body",
-    "key_id": "imboard-ai",
-    "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
-  }
-}
+---
+name: 'fleet-cycle'
+description: 'Take a SET of GitHub issues to merged PRs by building a dependency-aware wave plan, dispatching full-cycle-issue runs across background agents (detached where the repo can merge a parked PR, attached otherwise), and supervising every PR through merge — serial, parallel, or mixed'
+metadata:
+  dossier.dossier_schema_version: '1.0.0'
+  dossier.title: 'Fleet Cycle — Orchestrate Multiple Issues'
+  dossier.version: '1.9.2'
+  dossier.protocol_version: '"1.0"'
+  dossier.status: 'Draft'
+  dossier.last_updated: '2026-10-06'
+  dossier.objective: 'Take a SET of GitHub issues to merged PRs by building a dependency-aware wave plan, dispatching full-cycle-issue runs across background agents (detached where the repo can merge a parked PR, attached otherwise), and supervising every PR through merge — serial, parallel, or mixed'
+  dossier.category: '["development"]'
+  dossier.tags: '["github","issues","workflow","autonomous","orchestration","batch","parallel","fleet","full-cycle","dependencies"]'
+  dossier.risk_level: 'high'
+  dossier.risk_factors: '["modifies_files","network_access","executes_external_code"]'
+  dossier.requires_approval: 'false'
+  dossier.destructive_operations: '["Dispatches multiple full-cycle-issue runs, each of which creates branches, worktrees, PRs, and merges code","Spawns background agents that operate autonomously","Merges multiple pull requests"]'
+  dossier.inputs: '{"optional":[{"default":3,"description":"Maximum number of full-cycle runs dispatched concurrently within a wave. Bounded by worktree-pool capacity.","name":"max_parallel","type":"number"},{"default":"auto","description":"Override the computed plan. ''auto'' = dependency-aware waves (default). ''serial'' = one issue at a time in number order. ''parallel'' = ignore dependencies, run all at once (unsafe; use only for known-independent issues).","name":"mode","type":"string"},{"default":"imboard-ai/git/warm-worktree","description":"Warm-worktree dossier passed through to each full-cycle-issue run.","name":"warmup_dossier","type":"string"},{"default":"auto","description":"Default target branch for issues that do not declare their own. Passed through to each full-cycle-issue run.","name":"base_branch","type":"string"},{"default":"auto","description":"Model tier for dispatched full-cycle generation phases: cheap | mid | strong | auto. auto = per-issue by risk signals (labels, title, touched areas): docs/chore→cheap, standard→mid, security/payments/migrations/auth/schema→strong.","name":"dispatch_model_tier","type":"string"}],"required":[{"description":"The issue set to process. Explicit list (''1,2,3''), range (''1..9''), or mixed (''1,2,5..8'').","example":"1..9","name":"issues","type":"string"}]}'
+  dossier.outputs: '{"files":[{"description":"Gzipped dependency DAG and wave plan, written before dispatch, kept per-project outside the working tree (most recent 20 retained)","format":"markdown+gzip","path":"~/.dossier/logs/fleet-cycle/{project}/FLEET-PLAN-{timestamp}.md.gz"}]}'
+  dossier.authors: '[{"name":"Yuval Dimnik"}]'
+  dossier.checksum: '{"algorithm":"sha256","hash":"76863d05303c69d4cd2e9a62a1212529121b5a6403ca5556abd6b414298d76aa"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"P71mTDmaiuAvx80ZBqqfD56NjivbFPbX4qv9XpBB8CQa3zNc2O6tEcxc+qiyp41RzbEftAWSv9SO7bZcQFrJBA==","signed_at":"2026-10-07T11:58:48.197Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Fleet Cycle — Orchestrate Multiple Issues

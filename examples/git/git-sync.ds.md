@@ -1,68 +1,25 @@
----dossier
-{
-  "dossier_schema_version": "1.0.0",
-  "name": "git-sync",
-  "title": "Git Sync — Reconcile Local State with Origin",
-  "version": "1.0.3",
-  "protocol_version": "1.0",
-  "status": "Draft",
-  "last_updated": "2026-09-01",
-  "objective": "Triage untracked and modified files and reconcile local branch state with origin: gitignore obvious junk, commit and push real work, surface ambiguous items, and report stray branches and worktrees.",
-  "category": [
-    "development"
-  ],
-  "tags": [
-    "git",
-    "github",
-    "sync",
-    "commit",
-    "gitignore",
-    "worktree",
-    "cleanup"
-  ],
-  "tools_required": [
-    {
-      "name": "git"
-    },
-    {
-      "name": "gh"
-    }
-  ],
-  "estimated_duration": {
-    "min_minutes": 1,
-    "max_minutes": 5
-  },
-  "risk_level": "high",
-  "risk_factors": [
-    "modifies_files",
-    "deletes_files",
-    "network_access"
-  ],
-  "requires_approval": false,
-  "destructive_operations": [
-    "Appends entries to .gitignore for files matching well-known junk patterns",
-    "Deletes untracked files matching narrow scratch patterns (tmp/*, scratch/*, *.bak, *~)",
-    "Creates commits and pushes them to origin"
-  ],
-  "authors": [
-    {
-      "name": "Yuval Dimnik"
-    }
-  ],
-  "checksum": {
-    "algorithm": "sha256",
-    "hash": "ece506ad86270414d10e4ec317fc48838ab7cd3ca707205746065283cce27238"
-  },
-  "signature": {
-    "algorithm": "ed25519",
-    "signature": "IHDeXZu/r9/hEFzBds/t+3R/y2kYOfxuxDdrw7Lh9vSgjwKdBxe0pw8JEiheKROp6YaD/D5L6MEGu7MITat1AQ==",
-    "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-01T05:31:31.651Z",
-    "covers": "frontmatter+body",
-    "key_id": "imboard-ai",
-    "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
-  }
-}
+---
+name: 'git-sync'
+description: 'Triage untracked and modified files and reconcile local branch state with origin: gitignore obvious junk, commit and push real work, surface ambiguous items, and report stray branches and worktrees.'
+metadata:
+  dossier.dossier_schema_version: '1.0.0'
+  dossier.title: 'Git Sync — Reconcile Local State with Origin'
+  dossier.version: '1.0.4'
+  dossier.protocol_version: '"1.0"'
+  dossier.status: 'Draft'
+  dossier.last_updated: '2026-09-01'
+  dossier.objective: 'Triage untracked and modified files and reconcile local branch state with origin: gitignore obvious junk, commit and push real work, surface ambiguous items, and report stray branches and worktrees.'
+  dossier.category: '["development"]'
+  dossier.tags: '["git","github","sync","commit","gitignore","worktree","cleanup"]'
+  dossier.tools_required: '[{"name":"git"},{"name":"gh"}]'
+  dossier.estimated_duration: '{"max_minutes":5,"min_minutes":1}'
+  dossier.risk_level: 'high'
+  dossier.risk_factors: '["modifies_files","deletes_files","network_access"]'
+  dossier.requires_approval: 'false'
+  dossier.destructive_operations: '["Appends entries to .gitignore for files matching well-known junk patterns","Deletes untracked files matching narrow scratch patterns (tmp/*, scratch/*, *.bak, *~)","Creates commits and pushes them to origin"]'
+  dossier.authors: '[{"name":"Yuval Dimnik"}]'
+  dossier.checksum: '{"algorithm":"sha256","hash":"ece506ad86270414d10e4ec317fc48838ab7cd3ca707205746065283cce27238"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"pkicP7fIQMffhJBA49d5lu10C4CQPwqNXmpfKC/IU6Bo/CihmCar/AKqR70Cn3xLfKSh1uErU3XAV9GFMzzBAQ==","signed_at":"2026-10-07T11:54:49.698Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Git Sync — Reconcile Local State with Origin

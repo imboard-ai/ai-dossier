@@ -1,73 +1,25 @@
----dossier
-{
-  "dossier_schema_version": "1.0.0",
-  "name": "issue-cycle-classifier",
-  "title": "Issue Cycle Classifier — Structured Full/Slot Verdict + Review Level",
-  "version": "1.6.1",
-  "protocol_version": "1.0",
-  "status": "Draft",
-  "last_updated": "2026-09-29",
-  "objective": "Score one issue for execution mode AND review depth: prescreen:v4 excludes only on hard-block labels or open deps, and makes a risk/deploy keyword, plan:v1 risk-floor path or >8 plan:v1 files a candidate with review=full; candidates get a bounded mechanical-tier E.2/E.3 pass (rules 1, 4, 5 and 6 and a broad test scope raise review, never force full), one mid-tier escalation when uncertain, and a phase=classify verdict carrying review",
-  "category": [
-    "development"
-  ],
-  "tags": [
-    "issue",
-    "workflow",
-    "classification",
-    "batch-cycles",
-    "runstate"
-  ],
-  "risk_level": "low",
-  "risk_factors": [
-    "network_access"
-  ],
-  "requires_approval": false,
-  "inputs": {
-    "required": [
-      {
-        "name": "issue_number",
-        "description": "GitHub issue number to classify",
-        "type": "number"
-      }
-    ],
-    "optional": [
-      {
-        "name": "dry_run",
-        "description": "Compute and validate the verdict without posting the milestone, applying labels, or commenting (shadow-mode calibration, RFC-0001 E.2 Phase 2). Default false.",
-        "type": "boolean"
-      }
-    ]
-  },
-  "authors": [
-    {
-      "name": "Yuval Dimnik"
-    }
-  ],
-  "content_scope": "references-external",
-  "external_references": [
-    {
-      "url": "https://cli.github.com/",
-      "description": "GitHub CLI documentation",
-      "type": "documentation",
-      "trust_level": "trusted",
-      "required": false
-    }
-  ],
-  "checksum": {
-    "algorithm": "sha256",
-    "hash": "15cc60541769c3d1b1390b5f53148d97f999b4dcc49bf7574c887e62b4770d03"
-  },
-  "signature": {
-    "algorithm": "ed25519",
-    "signature": "zGzjUfs+HIjXyMY6Efh1h7ZpNOgI1t+A+28xz2hSke/4ID5KjXWfep63IXwLr6JrlUR76BhyWlnEJVZ/QQD/Dg==",
-    "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-29T15:28:26.481Z",
-    "covers": "frontmatter+body",
-    "key_id": "imboard-ai",
-    "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
-  }
-}
+---
+name: 'issue-cycle-classifier'
+description: 'Score one issue for execution mode AND review depth: prescreen:v4 excludes only on hard-block labels or open deps, and makes a risk/deploy keyword, plan:v1 risk-floor path or >8 plan:v1 files a candidate with review=full; candidates get a bounded mechanical-tier E.2/E.3 pass (rules 1, 4, 5 and 6 and a broad test scope raise review, never force full), one mid-tier escalation when uncertain, and a phase=classify verdict carrying review'
+metadata:
+  dossier.dossier_schema_version: '1.0.0'
+  dossier.title: 'Issue Cycle Classifier — Structured Full/Slot Verdict + Review Level'
+  dossier.version: '1.6.2'
+  dossier.protocol_version: '"1.0"'
+  dossier.status: 'Draft'
+  dossier.last_updated: '2026-09-29'
+  dossier.objective: 'Score one issue for execution mode AND review depth: prescreen:v4 excludes only on hard-block labels or open deps, and makes a risk/deploy keyword, plan:v1 risk-floor path or >8 plan:v1 files a candidate with review=full; candidates get a bounded mechanical-tier E.2/E.3 pass (rules 1, 4, 5 and 6 and a broad test scope raise review, never force full), one mid-tier escalation when uncertain, and a phase=classify verdict carrying review'
+  dossier.category: '["development"]'
+  dossier.tags: '["issue","workflow","classification","batch-cycles","runstate"]'
+  dossier.risk_level: 'low'
+  dossier.risk_factors: '["network_access"]'
+  dossier.requires_approval: 'false'
+  dossier.content_scope: 'references-external'
+  dossier.external_references: '[{"description":"GitHub CLI documentation","required":false,"trust_level":"trusted","type":"documentation","url":"https://cli.github.com/"}]'
+  dossier.inputs: '{"optional":[{"description":"Compute and validate the verdict without posting the milestone, applying labels, or commenting (shadow-mode calibration, RFC-0001 E.2 Phase 2). Default false.","name":"dry_run","type":"boolean"}],"required":[{"description":"GitHub issue number to classify","name":"issue_number","type":"number"}]}'
+  dossier.authors: '[{"name":"Yuval Dimnik"}]'
+  dossier.checksum: '{"algorithm":"sha256","hash":"15cc60541769c3d1b1390b5f53148d97f999b4dcc49bf7574c887e62b4770d03"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"edfRnvpxZjkHbxgAET37kJ8dPaIaFyAlX+DCuBqWYwk6mJX2xYxD1aW/oZUayPb8tULKEyTJyNkJlDOcqZyQBQ==","signed_at":"2026-10-07T11:59:37.718Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Issue Cycle Classifier — Structured Full/Slot Verdict + Review Level
