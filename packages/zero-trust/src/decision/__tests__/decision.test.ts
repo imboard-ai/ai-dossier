@@ -358,7 +358,7 @@ describe('closed validation, confidence and monotonicity', () => {
       },
     };
     expect((await decide(definition, inputs, { provider: bad, budget: budget() })).reason).toBe(
-      'provider'
+      'configuration'
     );
   });
   it('property: random permissive answers plus one stricter pass/floor cannot yield permission', async () => {
@@ -753,6 +753,72 @@ describe('optional external service and actual OpenAI adapter', () => {
 });
 
 describe('independent review regressions', () => {
+  it('normalized secret forms are refused before sending, and control-bearing citation output is invalid', async () => {
+    for (const gap of ['\u00a0', '\v']) {
+      const fake = scripted();
+      const b = budget();
+      expect(
+        (
+          await decide(definition, [{ sourceId: 'x', text: `authorization${gap}: token abcdef` }], {
+            provider: fake.provider,
+            budget: b,
+          })
+        ).reason
+      ).toBe('secret');
+      expect(fake.complete).not.toHaveBeenCalled();
+      expect(b.ledger.snapshot().reservations).toHaveLength(0);
+    }
+    for (const control of ['\u0085', '\u001b', '\0']) {
+      const text = `No AI${control}contributions.`;
+      const fake = scripted([proposal(answer('ban', [{ sourceId: 'x', line: 1, quote: text }]))]);
+      expect(
+        (
+          await decide(definition, [{ sourceId: 'x', text }], {
+            provider: fake.provider,
+            budget: budget(),
+          })
+        ).reason
+      ).toBe('invalid_pass');
+    }
+  });
+  it('OpenAI endpoint identity separates otherwise identical model profiles', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => openAiResponse(answer(), null));
+    const c = cache();
+    const b = budget();
+    for (const endpoint of ['https://model-a.example/v1', 'https://model-b.example/v1']) {
+      const adapter = new OpenAICompatibleAdapter({
+        model: 'model-a',
+        endpoint,
+        apiKeyEnv: 'DECISION_TEST_KEY',
+        fetch: fetcher,
+      });
+      const v = await decide(definition, inputs, {
+        provider: createLlmDecisionProvider({ adapter }),
+        cache: c.store,
+        budget: b,
+      });
+      expect(v.status).toBe('accepted');
+      expect(JSON.stringify(v)).not.toContain(adapter.cacheIdentity);
+    }
+    expect(fetcher).toHaveBeenCalledTimes(4);
+  });
+  it('missing deps/provider are typed controller errors; raw ledger persistence errors stay ledger failures', async () => {
+    const fake = scripted();
+    for (const deps of [undefined, { budget: budget() }])
+      await expect(
+        decide(definition, inputs, deps as Parameters<typeof decide>[2])
+      ).rejects.toThrow('Invalid decision configuration');
+    const b = budget();
+    vi.spyOn(b.ledger, 'settle').mockImplementation(() => {
+      throw new Error('private filesystem failure');
+    });
+    expect((await decide(definition, inputs, { provider: fake.provider, budget: b })).reason).toBe(
+      'ledger'
+    );
+    expect(b.ledger.snapshot().reservations).toHaveLength(1);
+  });
   it('fixed delimiter text remains inside fresh per-request data boundaries', async () => {
     const fake = scripted();
     await decide(
@@ -798,7 +864,7 @@ describe('independent review regressions', () => {
       },
     };
     expect((await decide(definition, inputs, { provider: decode, budget: b })).reason).toBe(
-      'provider'
+      'configuration'
     );
     await new Promise((resolve) => setImmediate(resolve));
   });

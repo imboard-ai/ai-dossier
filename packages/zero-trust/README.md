@@ -559,8 +559,9 @@ LLM options default to `maxOutputTokens: 1024`, `timeoutMs: 30000` and
 the parameter; this is an explicit profile choice, never a retry or fallback.
 Nullable/missing/empty logprob content means no token evidence. Optional non-secret
 `id` identifies the trusted endpoint/profile for shared caches (default `llm`);
-controllers using the same model name on different endpoints must set different
-IDs or separate their caches. Built-in provider `cacheIdentity` automatically binds
+The OpenAI-compatible adapter supplies a private endpoint fingerprint automatically;
+custom adapters using the same model name on different endpoints must set different
+IDs, supply an adapter fingerprint or separate their caches. Built-in provider `cacheIdentity` automatically binds
 the evidence/output/deadline profile and a framing/schema revision, even if the
 public ID is unchanged; custom providers must supply their own stable non-secret
 profile fingerprint when sharing caches across changing configurations.
@@ -570,6 +571,8 @@ quote }`; `line` is one-based, and the nonempty quote must occur as a span on th
 specific line of that exact source, normalizing whitespace only. Sources are split
 and normalized once per decision, not once per citation. Unknown sources,
 wrong lines, fabricated quotes and malformed citations invalidate the pass. An
+accepted quote is the validated whitespace-normalized single-line form; non-whitespace
+control characters and format controls in quoted evidence are rejected.
 empty list is permitted (no supporting citation claimed). Any invalid pass,
 provider failure, disagreement or insufficient confidence escalates, never majority
 votes into permission. Unanimous restrictive answers can meet the lower threshold.
@@ -588,7 +591,9 @@ invalid pass counts/provider identity throw non-echoing `InvalidDecisionError`
 
 `Verdict` carries `value`, `confidence`, `citations`, `status`, bounded `reason`,
 `provider`, `model`, `questionVersion`, and SHA-256 `inputDigest`. Every output passes
-the shared secret guard. Secret-bearing inputs are refused before sending; raw
+the shared secret guard. Both raw inputs and normalized source lines are scanned
+before sending, so whitespace normalization cannot introduce an unguarded credential
+pattern. Secret-bearing inputs are refused before sending; raw
 provider errors are never returned or logged. Decision modules import no GitHub
 credential modules. These verdicts grant no write/execution authority by themselves.
 `Verdict` is status-discriminated: consumers must first require `status: 'accepted'`,
@@ -608,7 +613,8 @@ fences, locking/persistence failures) are `ledger`, not provider failures. Rates
 must match the provider's `model`. Optional `deps.signal` stops before admission,
 interrupts active adapter calls and refuses subsequent passes. Unknown charges
 after interruption/error retain their holds and require controller reconciliation
-before a reopened ledger can admit new work. No transient failure is cached.
+before a reopened ledger can admit new work. Trusted request/decode dependency
+violations are `configuration`. No transient failure is cached.
 
 `DecisionCache` is a synchronous `get`/`set` store in controller-owned trusted
 storage, exclusively owned by the single controller, outside worker write access

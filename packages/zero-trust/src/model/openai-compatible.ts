@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { assertNoSecrets, assertSecretFree } from '../redaction';
 import { isRecord } from '../state';
@@ -170,6 +171,7 @@ export interface OpenAICompatibleOptions {
 /** Contains no credential field. The key is read only at startup check and call time. */
 export class OpenAICompatibleAdapter implements ModelAdapter {
   readonly id: string;
+  readonly cacheIdentity: string;
   private readonly url: string;
   private readonly apiKeyEnv: string;
   private readonly fetcher: typeof fetch;
@@ -183,6 +185,7 @@ export class OpenAICompatibleAdapter implements ModelAdapter {
       assertNoSecrets(model);
       this.id = model;
       this.url = `${url.href.replace(/\/$/u, '')}/chat/completions`;
+      this.cacheIdentity = createHash('sha256').update(this.url).digest('hex');
       this.apiKeyEnv = apiKeyEnv;
       this.fetcher = fetcher;
     } catch {

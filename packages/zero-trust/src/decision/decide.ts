@@ -128,6 +128,7 @@ function citations(
       Object.keys(c).some((k) => !['sourceId', 'line', 'quote'].includes(k)) ||
       typeof c.sourceId !== 'string' ||
       typeof c.quote !== 'string' ||
+      /[\p{Cc}\p{Cf}]/u.test(whitespace(c.quote)) ||
       !whitespace(c.quote) ||
       !Number.isSafeInteger(c.line) ||
       (c.line as number) < 1
@@ -226,6 +227,8 @@ export async function decide(
   deps: DecisionDeps
 ): Promise<Verdict> {
   const question = createTypedQuestion(definition);
+  if (!deps || typeof deps !== 'object' || !deps.provider || typeof deps.provider !== 'object')
+    throw new InvalidDecisionError('configuration');
   const {
     provider,
     budget,
@@ -279,8 +282,12 @@ export async function decide(
   )
     return escalate('input');
   if (signal?.aborted) return escalate('aborted');
+  const sources: Sources = new Map(
+    inputs.map((i) => [i.sourceId, i.text.split(/\r?\n/u).map(whitespace)])
+  );
   try {
     assertSecretFree(inputs);
+    assertSecretFree([...sources.values()]);
   } catch {
     return escalate('secret');
   }
@@ -291,9 +298,6 @@ export async function decide(
     return escalate('configuration');
   }
   if (floor.escalate) return escalate('floor');
-  const sources: Sources = new Map(
-    inputs.map((i) => [i.sourceId, i.text.split(/\r?\n/u).map(whitespace)])
-  );
   const key = digest([
     question.id,
     question.version,
@@ -307,11 +311,21 @@ export async function decide(
     floor,
   ]);
   const remember = (v: Verdict): Verdict => {
+    let existing: unknown;
+    try {
+      existing = synchronousResult(cache?.get(key));
+    } catch {
+      return escalate('cache');
+    }
     try {
       // Overlapping writes can retain uncertainty or become stricter, never erase it.
-      const existing = synchronousResult(cache?.get(key));
       if (existing !== undefined && existing !== null) {
-        const previous = readCache(structuredClone(existing), identity, question, floor, sources);
+        let previous: Verdict | null;
+        try {
+          previous = readCache(structuredClone(existing), identity, question, floor, sources);
+        } catch {
+          return escalate('cache');
+        }
         if (!previous) return escalate('cache');
         if (previous.status === 'escalated') return previous;
         if (
@@ -342,26 +356,48 @@ export async function decide(
   for (let pass = 0; pass < passes; pass++) {
     if (signal?.aborted) return escalate('aborted');
     try {
-      const request = synchronousResult(provider.request(question, inputs, pass)) as ReturnType<
-        typeof provider.request
-      >;
-      const result = await meteredComplete(
-        adapter,
-        budget.ledger,
-        budget.sessionId,
-        budget.rates,
-        signal ? { ...request, signal } : request
-      );
+      let request: ReturnType<typeof provider.request>;
+      try {
+        request = synchronousResult(provider.request(question, inputs, pass)) as ReturnType<
+          typeof provider.request
+        >;
+      } catch {
+        return escalate('configuration');
+      }
+      let result: ModelResult;
+      try {
+        result = await meteredComplete(
+          adapter,
+          budget.ledger,
+          budget.sessionId,
+          budget.rates,
+          signal ? { ...request, signal } : request
+        );
+      } catch (error) {
+        return escalate(
+          error instanceof ModelError ||
+            error instanceof BudgetError ||
+            error instanceof BudgetExhaustedError
+            ? failureReason(error, signal)
+            : 'ledger'
+        );
+      }
       if (signal?.aborted) return escalate('aborted');
       if (result.kind === 'malformed') {
         if (result.reason === 'invalid_response') return semantic('invalid_pass');
         return escalate(result.reason === 'secret_detected' ? 'secret' : 'provider');
       }
-      const raw = structuredClone(synchronousResult(provider.decode(result)));
+      let raw: unknown;
+      try {
+        raw = structuredClone(synchronousResult(provider.decode(result)));
+      } catch {
+        return escalate('configuration');
+      }
       assertSecretFree(raw);
       if (!isRecord(raw) || !questionValues(question).includes(raw.value as DecisionValue))
         return semantic('invalid_pass');
       const evidence = citations(raw.citations, sources);
+      assertSecretFree(evidence);
       const confidence = passConfidence(confidenceKind, raw, result);
       if (evidence === null || confidence === null) return semantic('invalid_pass');
       answers.push({ value: raw.value as DecisionValue, citations: evidence, confidence });
@@ -377,14 +413,18 @@ export async function decide(
   if (agreement !== 1) return semantic('disagreement', confidence);
   const reason = refusal(question, floor, strictest.value, confidence);
   if (reason) return semantic(reason, confidence);
-  return remember(
-    freezeVerdict({
-      ...identity,
-      value: strictest.value,
-      confidence,
-      citations: answers.flatMap((a) => a.citations),
-      status: 'accepted',
-      reason: 'accepted',
-    })
-  );
+  try {
+    return remember(
+      freezeVerdict({
+        ...identity,
+        value: strictest.value,
+        confidence,
+        citations: answers.flatMap((a) => a.citations),
+        status: 'accepted',
+        reason: 'accepted',
+      })
+    );
+  } catch {
+    return escalate('secret');
+  }
 }

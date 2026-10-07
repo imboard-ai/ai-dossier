@@ -47,6 +47,8 @@ export type ModelResult = (
 export interface ModelAdapter {
   /** Pricing resource ID (the configured model name), never a credential. */
   readonly id: string;
+  /** Optional non-secret endpoint/profile fingerprint, never a credential. */
+  readonly cacheIdentity?: string;
   complete(request: ModelRequest): Promise<ModelResult>;
 }
 

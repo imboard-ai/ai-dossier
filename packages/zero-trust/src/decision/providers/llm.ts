@@ -31,7 +31,15 @@ export function createLlmDecisionProvider(options: LlmDecisionOptions): Decision
     confidenceKind: 'agreement' as const,
     // Bump revision if framings/schema change; profile changes cannot reuse weaker evidence.
     cacheIdentity: createHash('sha256')
-      .update(JSON.stringify(['llm-report-v2', logprobs, maxOutputTokens, timeoutMs]))
+      .update(
+        JSON.stringify([
+          'llm-report-v2',
+          adapter.cacheIdentity,
+          logprobs,
+          maxOutputTokens,
+          timeoutMs,
+        ])
+      )
       .digest('hex'),
     adapter,
     request(question: TypedQuestion, inputs: readonly DecisionInput[], pass: number): ModelRequest {
