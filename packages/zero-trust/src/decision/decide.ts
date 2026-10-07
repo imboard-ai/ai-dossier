@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { isBudgetSessionExhausted } from '../budget';
 import { BudgetError } from '../budget-types';
 import { ModelError, type ModelResult } from '../model/adapter';
 import { BudgetExhaustedError, meteredComplete } from '../model/metered';
@@ -311,6 +312,13 @@ export async function decide(
     assertSecretFree([...sources.values()]);
   } catch {
     return escalate('secret');
+  }
+  // Cached judgments do not spend again, but an exhausted session is stopping.
+  // This is a read-only ledger check before ANY floor/cache return or dispatch.
+  try {
+    if (isBudgetSessionExhausted(ledger.snapshot(), sessionId)) return escalate('budget');
+  } catch {
+    return escalate('ledger');
   }
   let floor: DecisionFloor;
   try {

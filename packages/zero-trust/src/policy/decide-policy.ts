@@ -10,12 +10,14 @@ import {
 } from '../decision/types';
 import {
   analyzePolicyFloor,
+  canonicalPolicyDecisionCitations,
   comparePolicyText,
   POLICY_CITATION_LIMIT,
   type PolicyAssessment,
   type PolicyDecisionEvidence,
   type PolicyFloor,
   policyCitationKey,
+  policyDecisionCitationDigest,
   policyExcerpt,
 } from './classify';
 import { type PolicyFile, validatePolicyFiles } from './discover';
@@ -89,6 +91,15 @@ export type PolicyDecisionDeps = Omit<DecisionDeps, 'provider'> & {
 
 function floorFor(dimension: Dimension, analysis: PolicyFloor): DecisionFloor {
   const { assessment: floor, restrictions } = analysis;
+  const topicDimension =
+    dimension === 'draftRequired'
+      ? 'draft'
+      : dimension === 'receiptBlockAllowed'
+        ? 'template'
+        : dimension === 'baselineFailuresPermitted'
+          ? 'baseline'
+          : dimension;
+  if (analysis.contradictions[topicDimension]) return { escalate: true };
   if (dimension === 'ai') {
     // Even an unclear floor retains explicit restriction evidence. Model prose
     // understanding cannot erase a ban merely because another line welcomes AI.
@@ -132,7 +143,12 @@ export async function assessPolicy(
   const analysis = analyzePolicyFloor(snapshot);
   const floor = analysis.assessment;
   // A project with no AI topic is silent, not a paid permission inference.
-  if (floor.ai === 'silent') return floor;
+  if (floor.ai === 'silent')
+    return Object.freeze({
+      ...floor,
+      assignment: analysis.contradictions.assignment ? 'unclear' : floor.assignment,
+      directPr: analysis.contradictions.directPr ? 'unclear' : floor.directPr,
+    });
   const admitted = new Map<string, Map<number, string>>();
   let ambiguous = false;
   const inputs: DecisionInput[] = snapshot.map((file) => {
@@ -184,6 +200,9 @@ export async function assessPolicy(
       ) ?? false;
     const accepted = verdict?.status === 'accepted' && literal && verdict.citations.length > 0;
     const value = accepted && verdict ? verdict.value : question.escalateValue;
+    const fullCitations = canonicalPolicyDecisionCitations(
+      accepted && verdict ? verdict.citations : []
+    );
     if (dimension === 'ai') result.ai = value as PolicyAssessment['ai'];
     else if (dimension === 'assignment')
       result.assignment = value as PolicyAssessment['assignment'];
@@ -208,9 +227,11 @@ export async function assessPolicy(
       questionVersion: question.version,
       questionDigest: createHash('sha256').update(JSON.stringify(question)).digest('hex'),
       inputDigest: verdict?.inputDigest ?? '',
+      citations: fullCitations,
+      citationDigest: policyDecisionCitationDigest(fullCitations),
     });
     if (accepted && verdict)
-      for (const citation of verdict.citations.slice(0, 1)) {
+      for (const citation of fullCitations.slice(0, 1)) {
         const excerpt = policyExcerpt(admitted.get(citation.sourceId)?.get(citation.line) ?? '');
         const item = {
           path: citation.sourceId,
@@ -226,6 +247,26 @@ export async function assessPolicy(
         )
           citations.push(Object.freeze(item));
       }
+  }
+  // The first pass reserves one citation for every accepted dimension. Fill any
+  // remaining display capacity with distinct evidence; the complete set above
+  // remains intact even when these excerpts are truncated.
+  const displayed = new Set(citations.map(policyCitationKey));
+  for (const dimension of dimensions) {
+    const question = POLICY_QUESTIONS[dimension];
+    for (const citation of evidence[dimension].citations) {
+      const item = {
+        path: citation.sourceId,
+        line: citation.line,
+        ruleId: `decision:${question.id}@${question.version}`,
+        excerpt: policyExcerpt(admitted.get(citation.sourceId)?.get(citation.line) ?? ''),
+      };
+      const key = policyCitationKey(item);
+      if (citations.length < POLICY_CITATION_LIMIT && !displayed.has(key)) {
+        citations.push(Object.freeze(item));
+        displayed.add(key);
+      }
+    }
   }
   return Object.freeze({
     ...result,

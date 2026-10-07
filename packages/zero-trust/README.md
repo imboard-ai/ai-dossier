@@ -370,6 +370,11 @@ Uncapped restriction metadata from `analyzePolicyFloor` binds all dimensions eve
 when the displayed citations reach their cap or a dimension is unclear. A ban plus
 unresolved AI prose always escalates (including a mixed ban/welcome); deterministic
 negation rules remain conservative, so "AI is not banned" cannot yield permission.
+A separate refusal-only contradiction detector splits restrictive units on commas,
+colons, parentheses, em dashes and the word "but" for this check only. A topical
+sub-clause without its own negation/restriction cue forces that dimension to
+escalate, even if the full unit's floor enum is restrictive. Offline classification
+units and permission inference are unchanged.
 Any ambiguous Markdown region escalates all dimensions before dispatch. Boolean topic-presence floors
 remain conservative: draft topics require drafts, template topics forbid the receipt,
 and baseline failures stay forbidden even if a model proposes permission. Shared
@@ -383,17 +388,23 @@ and cached verdicts. Quotes retain raw whitespace and file line coordinates spli
 on CR/LF; Unicode paragraph separators within a source line do not renumber it. Policy citations
 use `decision:<questionId>@<version>`, original path/line, and the existing full-line
 secret redaction and 200-code-point excerpt cap (`policyExcerpt`). The combined
-evidence cap is 128 (`POLICY_CITATION_LIMIT`): up to 122 deterministic citations
-plus the first controlling citation for each accepted dimension. Permission never
+evidence cap is 128 (`POLICY_CITATION_LIMIT`): up to 122 deterministic citations,
+one reserved controlling citation per accepted dimension, then additional distinct
+citations while space remains. Permission never
 depends on this display cap. `PolicyDecisionDeps` describes the trusted dependencies;
 `PolicyDecisionEvidence` describes the retained verdict metadata.
 `PolicyAssessment.decisions` retains each dimension's status/reason/value, confidence
 as a deterministic decimal string, provider/model IDs, question version, a hash of
-the frozen question definition, and input
-digest. `policyDigest` binds this evidence along with final values and citations;
+the frozen question definition, input digest, and every distinct validated verdict
+citation in canonical order. `policyDigest` binds a canonical SHA-256 hash of the
+**complete** citation set per dimension along with verdict metadata, final values
+and displayed citations. Full quotes do not consume the display serialization
+budget; display truncation cannot erase citation-only digest changes.
 changing a model or question version changes it, while reversing input order does
 not. Confidence is a string because receipt canonical JSON accepts integer numbers
-only. Evidence `value` is the question answer/sentinel, not the final boolean field;
+only. `canonicalPolicyDecisionCitations` deduplicates/freezes the complete evidence;
+`policyDecisionCitationDigest` hashes its sorted-key JSON array incrementally.
+Evidence `value` is the question answer/sentinel, not the final boolean field;
 `policy-non-draft=true` means `draftRequired=false`. Missing configuration is
 `reason=configuration`, IDs `unconfigured` and an empty input digest; invalid
 citations are `invalid_pass`. AI-topic absence returns the offline defaults for all
@@ -789,6 +800,14 @@ escalate instead of being sanitized away.
 
 Strictly more permissive answers require strictly higher thresholds. The trusted
 question must encode the domain's ordering; untrusted text cannot choose it.
+
+Before any floor/cache return or provider dispatch, `decide` checks the current
+ledger session read-only with `isBudgetSessionExhausted`: committed work money
+reaching the ceiling minus protected cleanup allowance, committed tokens reaching
+the token limit, or committed active time reaching its limit returns `escalated`
+with reason `budget` for every question, including warmed cache entries. An
+eligible cache hit still issues no model call, reservation, settlement or cache
+write. Missing/corrupt session evidence escalates as `ledger`; no history resets.
 
 ```ts
 const question = createTypedQuestion({

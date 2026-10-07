@@ -130,6 +130,80 @@ function cache() {
   };
   return { map, store };
 }
+describe('read-only exhausted-session cache barrier', () => {
+  it.each([
+    'tokens',
+    'time',
+    'money',
+  ] as const)('refuses cached answers at the real %s ceiling without provider/cache/ledger effects', async (axis) => {
+    const b = budget();
+    const deps = scripted([
+      proposal(answer('welcome', [cite])),
+      proposal(answer('welcome', [cite])),
+    ]);
+    const entries = cache();
+    expect(
+      (await decide(definition, inputs, { ...deps, budget: b, cache: entries.store })).status
+    ).toBe('accepted');
+    const eligible = fs.readFileSync(b.ledger.file);
+    deps.complete.mockClear();
+    expect(
+      (await decide(definition, inputs, { ...deps, budget: b, cache: entries.store })).status
+    ).toBe('accepted');
+    expect(deps.complete.mock.calls).toEqual([]);
+    expect(fs.readFileSync(b.ledger.file)).toEqual(eligible);
+    const totals = budgetTotals(b.ledger.snapshot(), 's1');
+    b.ledger.reserve('s1', {
+      money: {
+        currency: 'USD',
+        minor: axis === 'money' ? 1_000_000 - totals.spent - totals.reserved : 0,
+      },
+      tokens: axis === 'tokens' ? 10_000_000 - totals.tokens : 1,
+      timeMs: axis === 'time' ? 10_000_000 - totals.timeMs : 1,
+      rates: b.rates,
+    });
+    const exhausted = fs.readFileSync(b.ledger.file);
+    const get = vi.spyOn(entries.store, 'get');
+    const set = vi.spyOn(entries.store, 'set');
+    for (const q of [
+      definition,
+      createTypedQuestion({
+        id: 'boolean-exhaustion',
+        version: '1',
+        prompt: 'Is permission granted?',
+        kind: 'boolean',
+        escalateValue: 'unclear',
+        acceptThreshold: { true: 0.95, false: 0.6 },
+      }),
+      createTypedQuestion({
+        id: 'score-exhaustion',
+        version: '1',
+        prompt: 'How restrictive is the policy?',
+        kind: 'score',
+        scale: ['low', 'high'],
+        escalateValue: 'unclear',
+        acceptThreshold: { low: 0.95, high: 0.6 },
+      }),
+    ]) {
+      expect(
+        await decide(q, inputs, {
+          ...deps,
+          budget: b,
+          cache: entries.store,
+          floor: () => ({ escalate: true }),
+        })
+      ).toMatchObject({ status: 'escalated', reason: 'budget' });
+      expect(await decide(q, inputs, { ...deps, budget: b, cache: entries.store })).toMatchObject({
+        status: 'escalated',
+        reason: 'budget',
+      });
+    }
+    expect(get.mock.calls).toEqual([]);
+    expect(set.mock.calls).toEqual([]);
+    expect(deps.complete.mock.calls).toEqual([]);
+    expect(fs.readFileSync(b.ledger.file)).toEqual(exhausted);
+  });
+});
 describe('typed questions', () => {
   it('constructs detached immutable choice, boolean and score definitions', () => {
     const q = createTypedQuestion(definition);

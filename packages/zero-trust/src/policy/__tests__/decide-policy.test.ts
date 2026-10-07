@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { BudgetLedger } from '../../budget';
+import { BudgetLedger, budgetTotals } from '../../budget';
 import type { BudgetRate } from '../../budget-types';
 import { createLlmDecisionProvider } from '../../decision/providers/llm';
 import type { DecisionInput, TypedQuestion, Verdict } from '../../decision/types';
@@ -117,6 +117,160 @@ function noWeaker(a: PolicyAssessment, floor: PolicyAssessment, files: readonly 
   if (restrictions.directPr.includes('discussion_first')) expect(a.directPr).not.toBe('welcomed');
 }
 describe('typed policy assessment', () => {
+  it.each([
+    ', but ',
+    ': ',
+    ' (',
+    ' — ',
+    ', ',
+    ' but ',
+  ])('refuses same-unit contradiction separated by %s', async (separator) => {
+    const text = `AI is banned${separator}AI is welcome${separator === ' (' ? ')' : ''}.`;
+    expect(classifyPolicy([file(text)]).ai).toBe('banned');
+    for (const value of ['banned', 'welcomed']) {
+      const deps = fake((q, input) => ({
+        ...permissive(q, input),
+        value: q.id === 'policy-ai' ? value : permissive(q, input).value,
+      }));
+      const a = await assessPolicy([file(text)], deps);
+      expect(a.ai).toBe('unclear');
+      expect(deps.request.mock.calls.filter(([q]) => q.id === 'policy-ai')).toEqual([]);
+    }
+  });
+  it('applies contradiction escalation to assignment/direct PR without changing floor units', async () => {
+    const text =
+      'AI is welcome.\nAssignment is required, but assignment is optional.\nDiscuss changes first before PRs: PRs are welcome.';
+    expect(classifyPolicy([file(text)])).toMatchObject({
+      assignment: 'required',
+      directPr: 'discussion_first',
+    });
+    const a = await assessPolicy(
+      [file(text)],
+      fake((q, input) => ({
+        ...permissive(q, input),
+        value:
+          q.id === 'policy-assignment'
+            ? 'required'
+            : q.id === 'policy-direct-pr'
+              ? 'discussion_first'
+              : permissive(q, input).value,
+      }))
+    );
+    expect(a).toMatchObject({ assignment: 'unclear', directPr: 'unclear' });
+    const deps = fake(permissive);
+    const silent = await assessPolicy([file(text.replace('AI is welcome.\n', ''))], deps);
+    expect(silent).toMatchObject({ ai: 'silent', assignment: 'unclear', directPr: 'unclear' });
+    expect(deps.request.mock.calls).toEqual([]);
+    expect(deps.complete.mock.calls).toEqual([]);
+  });
+  it('checks exhausted real session before cache permission with effect-free eligible controls', async () => {
+    const files = [file('AI is welcome.')];
+    const deps = fake(permissive);
+    const entries = new Map<string, Verdict>();
+    const cache = {
+      get: vi.fn((key: string) => entries.get(key)),
+      set: vi.fn((key: string, value: Verdict): undefined => {
+        entries.set(key, value);
+      }),
+    };
+    expect((await assessPolicy(files, { ...deps, cache })).ai).toBe('welcomed');
+    const eligible = fs.readFileSync(deps.budget.ledger.file);
+    deps.complete.mockClear();
+    expect((await assessPolicy(files, { ...deps, cache })).ai).toBe('welcomed');
+    expect(deps.complete.mock.calls).toEqual([]);
+    expect(fs.readFileSync(deps.budget.ledger.file)).toEqual(eligible);
+    deps.budget.ledger.reserve('s1', {
+      money: { currency: 'USD', minor: 0 },
+      tokens: 10_000_000 - budgetTotals(deps.budget.ledger.snapshot(), 's1').tokens,
+      timeMs: 1,
+      rates: deps.budget.rates,
+    });
+    const exhausted = fs.readFileSync(deps.budget.ledger.file);
+    cache.get.mockClear();
+    cache.set.mockClear();
+    for (const suppliedCache of [cache, undefined]) {
+      const a = await assessPolicy(files, { ...deps, cache: suppliedCache });
+      expect(a).toMatchObject({
+        ai: 'unclear',
+        assignment: 'unclear',
+        directPr: 'unclear',
+        draftRequired: true,
+        receiptBlockAllowed: false,
+        baselineFailuresPermitted: false,
+      });
+      expect(Object.values(a.decisions ?? {}).every((v) => v.reason === 'budget')).toBe(true);
+    }
+    expect(cache.get.mock.calls).toEqual([]);
+    expect(cache.set.mock.calls).toEqual([]);
+    expect(deps.complete.mock.calls).toEqual([]);
+    expect(fs.readFileSync(deps.budget.ledger.file)).toEqual(exhausted);
+  });
+  it('retains every distinct controlling citation and binds citation-only changes', async () => {
+    const lines = [
+      'AI-assisted contributions are acceptable.',
+      'Disclosure must accompany each change.',
+      'Declare the assistance in the pull request.',
+    ];
+    const files = [file(lines.join('\n'))];
+    const assess = async (second: number, reverse = false) =>
+      assessPolicy(
+        files,
+        fake((q, input) => {
+          const citations = [0, second].map((index) => ({
+            sourceId: 'CONTRIBUTING.md',
+            line: index + 1,
+            quote: lines[index],
+          }));
+          return q.id === 'policy-ai'
+            ? {
+                value: 'disclosure_required',
+                citations: reverse ? [...citations].reverse() : [...citations, citations[0]],
+              }
+            : permissive(q, input);
+        })
+      );
+    const a = await assess(1);
+    const b = await assess(2);
+    const reversed = await assess(1, true);
+    expect(a.ai).toBe('disclosure_required');
+    expect(a.decisions?.ai?.citations).toHaveLength(2);
+    expect(
+      a.citations
+        .filter((c) => c.ruleId === 'decision:policy-ai@1')
+        .map((c) => c.line)
+        .sort()
+    ).toEqual([1, 2]);
+    expect(policyDigest(a, files)).not.toBe(policyDigest(b, files));
+    expect(policyDigest(a, files)).toBe(policyDigest(reversed, files));
+  });
+  it('truncates display only, keeping full distinct verdict evidence in the digest', async () => {
+    const lines = Array.from(
+      { length: 150 },
+      (_, n) => `AI assistance is welcome for test ${String(n).padStart(3, '0')}.`
+    );
+    const files = [file(lines.join('\n'))];
+    const assess = async (omit: number) =>
+      assessPolicy(
+        files,
+        fake((q, input) =>
+          q.id === 'policy-ai'
+            ? {
+                value: 'welcomed',
+                citations: lines.flatMap((quote, index) =>
+                  index === omit ? [] : [{ sourceId: 'CONTRIBUTING.md', line: index + 1, quote }]
+                ),
+              }
+            : permissive(q, input)
+        )
+      );
+    const a = await assess(98);
+    const b = await assess(97);
+    expect(a.ai).toBe('welcomed');
+    expect(a.decisions?.ai?.citations).toHaveLength(149);
+    expect(a.citations).toHaveLength(128);
+    expect(a.citations).toEqual(b.citations);
+    expect(policyDigest(a, files)).not.toBe(policyDigest(b, files));
+  });
   it.each([
     ['AI-assisted PRs are fine if disclosed.', 'disclosure_required'],
     ['AI-assisted contributions need maintainer consent.', 'requires_approval'],
