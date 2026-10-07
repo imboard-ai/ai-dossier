@@ -98,6 +98,42 @@ export function requireBudgetRates(rates: BudgetRate[], resources: string[]): vo
 }
 
 /** Round UP once per resource using exact rational minor-unit conversion. */
+function priceQuantity(r: BudgetRate, quantity: bigint): bigint {
+  const numerator = quantity * BigInt(r.price) * BigInt(r.fx.numerator);
+  const denominator = BigInt(r.units) * BigInt(r.fx.denominator);
+  return (numerator + denominator - 1n) / denominator;
+}
+
+/** Price actual model usage, including zero output, with the same pinned arithmetic as admission. */
+export function observeModelBudget(
+  input: {
+    currency: string;
+    resource: string;
+    inputTokens: number;
+    outputTokens: number;
+    timeMs: number;
+  },
+  rates: BudgetRate[]
+): BudgetObservation {
+  const request = structuredClone(input);
+  const pinned = structuredClone(rates);
+  currency(request.currency);
+  integer(request.inputTokens, 'observed input tokens');
+  integer(request.outputTokens, 'observed output tokens');
+  integer(request.timeMs, 'observed time');
+  requireBudgetRates(pinned, [request.resource]);
+  const r = pinned.find((entry) => entry.resource === request.resource) as BudgetRate;
+  if (r.unit !== 'token' || r.fx.currency !== request.currency)
+    throw new BudgetError('invalid_budget', 'pricing unit or FX target mismatch');
+  const tokens = sum([request.inputTokens, request.outputTokens]);
+  return {
+    money: { currency: request.currency, minor: safe(priceQuantity(r, BigInt(tokens))) },
+    tokens,
+    timeMs: request.timeMs,
+    source: 'model_usage',
+  };
+}
+
 export function estimateBudget(request: EstimateRequest, rates: BudgetRate[]): BudgetEstimate {
   // Validate, price and persist the SAME primitive snapshot, including getters
   // supplied through a provider configuration object.
@@ -115,9 +151,7 @@ export function estimateBudget(request: EstimateRequest, rates: BudgetRate[]): B
     if (r.unit !== unit || r.fx.currency !== request.currency) {
       throw new BudgetError('invalid_budget', 'pricing unit or FX target mismatch');
     }
-    const numerator = quantity * BigInt(r.price) * BigInt(r.fx.numerator);
-    const denominator = BigInt(r.units) * BigInt(r.fx.denominator);
-    cost += (numerator + denominator - 1n) / denominator;
+    cost += priceQuantity(r, quantity);
     if (!used.some((entry) => entry.resource === resource)) used.push(structuredClone(r));
   };
   if (request.model) {
