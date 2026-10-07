@@ -10,7 +10,7 @@ import {
   validateManifest,
   validateSourcePath,
 } from './export';
-import { MAX_GIT_PACK_BYTES, TrustedGit } from './trusted-git';
+import { createSourceGit, MAX_GIT_PACK_BYTES, TrustedGit } from './trusted-git';
 
 export interface ContributorApproval {
   readonly login: string;
@@ -180,7 +180,7 @@ function baseTree(git: TrustedGit, base: string): string {
 /** Validate the baseline through the same strict importer used by createCandidate. */
 export function baseManifest(pack: Buffer, baseSha: string): SourceManifest {
   const base = oid(baseSha);
-  const git = new TrustedGit();
+  const git = createSourceGit();
   try {
     importBase(git, pack, base);
     return inspectTree(git, baseTree(git, base), {});

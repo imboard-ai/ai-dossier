@@ -386,6 +386,44 @@ describe('credential-free source acquisition', () => {
     });
     expect(() => baseManifest(result.pack, f.baseSha)).toThrow(new CanonicalError('unavailable'));
   });
+  it.each([
+    1, 2, 3, 4,
+  ])('source repository initialization failure at step %s stops without publication', (failureAt) => {
+    const f = fixture();
+    const original = TrustedGit.prototype.run;
+    let initializations = 0;
+    const directories: string[] = [];
+    const exec = vi.spyOn(TrustedGit.prototype, 'exec');
+    vi.spyOn(TrustedGit.prototype, 'run').mockImplementation(function (
+      this: TrustedGit,
+      args,
+      input,
+      identity
+    ) {
+      if (args[0] === 'init') {
+        directories.push(this.directory);
+        if (++initializations === failureAt) throw new CanonicalError('git_failed');
+      }
+      return original.call(this, args, input, identity);
+    });
+    expect(() => acquire(f)).toThrow(new CanonicalError('unavailable'));
+    expect(initializations).toBe(failureAt);
+    expect(exec.mock.calls.filter(([args]) => args[0] === 'fetch')).toHaveLength(
+      failureAt === 1 ? 0 : failureAt === 4 ? 2 : 1
+    );
+    for (const directory of directories) expect(fs.existsSync(directory)).toBe(false);
+  });
+  it('raw storage initialization failure is classified unavailable', () => {
+    vi.spyOn(fs, 'mkdtempSync').mockImplementation(() => {
+      throw new Error('private storage failure');
+    });
+    expect(() => acquireSource({ ...upstream, baseSha: 'a'.repeat(40) })).toThrow(
+      new CanonicalError('unavailable')
+    );
+    expect(() => baseManifest(Buffer.from('pack'), 'a'.repeat(40))).toThrow(
+      new CanonicalError('unavailable')
+    );
+  });
   it('real bounded subprocess reports output overflow', () => {
     const f = fixture(false);
     const trusted = new TrustedGit();

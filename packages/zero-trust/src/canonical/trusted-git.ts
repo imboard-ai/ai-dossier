@@ -240,3 +240,12 @@ export class TrustedGit {
     fs.rmSync(this.directory, { recursive: true, force: true });
   }
 }
+
+/** Source APIs classify trusted storage/process initialization as unavailable. */
+export function createSourceGit(): TrustedGit {
+  try {
+    return new TrustedGit();
+  } catch {
+    throw new CanonicalError('unavailable');
+  }
+}

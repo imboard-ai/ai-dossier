@@ -3,7 +3,7 @@ import { isCommitSha } from '../github/fork-ref';
 import { isRepoName } from '../github/handoff';
 import { CanonicalError, type SourceManifest } from './export';
 import { baseManifest, importPack, MAX_PACK_BYTES } from './reconstruct';
-import { TrustedGit } from './trusted-git';
+import { createSourceGit } from './trusted-git';
 
 /** Structural read capability: no import chain into credential-bearing modules. */
 export type SourceGitHubRead = (
@@ -69,7 +69,7 @@ export function acquireSource(
     }
   }
   const fetchPack = (shallow: boolean): Buffer => {
-    const git = new TrustedGit();
+    const git = createSourceGit();
     try {
       const fetched = git.exec(
         [
@@ -98,7 +98,7 @@ export function acquireSource(
   };
   let pack = fetchPack(true);
   // Only a strict import rejection permits the explicitly authorized full-history retry.
-  const probe = new TrustedGit();
+  const probe = createSourceGit();
   try {
     try {
       importPack(probe, pack);
