@@ -1,15 +1,21 @@
 import fs from 'node:fs';
-import { describe, expect, it, vi } from 'vitest';
+import { buildVerificationPayload, parseDossierContent } from '@ai-dossier/core';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerSignCommand } from '../../commands/sign';
 import { createTestProgram, makeDossier } from '../helpers/test-utils';
 
 vi.mock('node:fs');
+
+/** Every payload the mock KMS signer was asked to sign. */
+const signedPayloads: string[] = [];
+
 vi.mock('@ai-dossier/core', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@ai-dossier/core')>();
   return {
     ...actual,
     KmsSigner: class MockKmsSigner {
-      async sign() {
+      async sign(payload: string) {
+        signedPayloads.push(payload);
         return {
           algorithm: 'ECDSA-SHA-256',
           signature: 'mock-sig',
@@ -32,25 +38,58 @@ vi.mock('../../helpers', async (importOriginal) => {
 const mockedFs = vi.mocked(fs);
 const dossierContent = makeDossier();
 
-const specShaped = '---\nname: x\ndescription: d\nmetadata:\n  dossier.title: T\n---\n# Body\n';
+const specShaped =
+  "---\nname: 'x'\ndescription: 'd'\nmetadata:\n  dossier.title: 'T'\n  other.tool: 'kept'\n---\n# Body\n";
+
+/** Sign `content` with the mocked KMS key; return the written file and the signed payload. */
+async function signWithKms(content: string, file = 'test.ds.md') {
+  mockedFs.existsSync.mockReturnValue(true);
+  mockedFs.readFileSync.mockReturnValue(content);
+  mockedFs.writeFileSync.mockReset();
+  signedPayloads.length = 0;
+
+  const program = createTestProgram();
+  registerSignCommand(program);
+  await program.parseAsync(['node', 'dossier', 'sign', file, '--key-id', 'alias/my-org-key']);
+
+  expect(mockedFs.writeFileSync).toHaveBeenCalledTimes(1);
+  expect(signedPayloads).toHaveLength(1);
+  return { written: mockedFs.writeFileSync.mock.calls[0][1] as string, payload: signedPayloads[0] };
+}
 
 describe('sign command', () => {
-  // Until the writers learn the spec shape (#1123), rewriting the logical view
-  // would silently turn the file back into the legacy layout.
-  it('refuses to sign a spec-shaped dossier and writes nothing', async () => {
-    mockedFs.existsSync.mockReturnValue(true);
-    mockedFs.readFileSync.mockReturnValue(specShaped);
+  beforeEach(() => {
     mockedFs.writeFileSync.mockReset();
+  });
 
-    const program = createTestProgram();
-    registerSignCommand(program);
+  it('writes a legacy dossier in the spec layout under a v3 signature over that object', async () => {
+    const { written, payload } = await signWithKms(dossierContent, 'dir/my-dossier.ds.md');
+    const parsed = parseDossierContent(written);
 
-    await expect(
-      program.parseAsync(['node', 'dossier', 'sign', 'test.ds.md', '--method', 'kms'])
-    ).rejects.toThrow();
+    expect(written.startsWith('---\n')).toBe(true);
+    expect(parsed.shape).toBe('spec');
+    expect(parsed.frontmatter.signature?.covers).toBe('spec-frontmatter+body');
+    expect(parsed.frontmatter.checksum?.hash).toMatch(/^[0-9a-f]{64}$/);
+    // The verifier rebuilds exactly the bytes that were signed.
+    expect(buildVerificationPayload(parsed)).toBe(payload);
+  });
 
-    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('spec-shaped'));
-    expect(mockedFs.writeFileSync).not.toHaveBeenCalled();
+  it('derives the Agent Skills name and description when the dossier has none', async () => {
+    const { written } = await signWithKms(dossierContent, 'dir/my-dossier.ds.md');
+    const { frontmatter } = parseDossierContent(written);
+    const source = parseDossierContent(dossierContent).frontmatter;
+    expect(frontmatter.name).toBe(source.name ?? 'my-dossier');
+    expect(frontmatter.description).toBe(source.description ?? source.objective);
+  });
+
+  it("re-signs a spec-shaped dossier, keeping other tools' metadata under the signature", async () => {
+    const { written, payload } = await signWithKms(specShaped);
+    const parsed = parseDossierContent(written);
+
+    expect(parsed.shape).toBe('spec');
+    expect((parsed.rawFrontmatter.metadata as Record<string, string>)['other.tool']).toBe('kept');
+    expect(payload).toContain('other.tool');
+    expect(buildVerificationPayload(parsed)).toBe(payload);
   });
 
   it('should exit when file not found', async () => {
@@ -106,25 +145,10 @@ describe('sign command', () => {
   });
 
   it('should sign with KMS using custom key', async () => {
-    mockedFs.existsSync.mockReturnValue(true);
-    mockedFs.readFileSync.mockReturnValue(dossierContent);
-
-    const program = createTestProgram();
-    registerSignCommand(program);
-
-    await program.parseAsync([
-      'node',
-      'dossier',
-      'sign',
-      'test.ds.md',
-      '--key-id',
-      'alias/my-org-key',
-    ]);
-
-    expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.stringContaining('"algorithm": "ECDSA-SHA-256"'),
-      'utf8'
-    );
+    const { written } = await signWithKms(dossierContent);
+    expect(parseDossierContent(written).frontmatter.signature).toMatchObject({
+      algorithm: 'ECDSA-SHA-256',
+      key_id: 'alias/my-org-key',
+    });
   });
 });

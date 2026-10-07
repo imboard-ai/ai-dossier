@@ -8,11 +8,16 @@
 //
 // Why (#1088): our frontmatter carries ~15 top-level keys the spec does not
 // allow, so installed dossiers fail the validator the spec tells authors to
-// run. Until the v3 alignment lands this check reports the gap; the workflow
-// runs it non-blocking and flips to required afterwards.
+// run. Until the shipped examples are re-signed in the spec layout (#1126) this
+// check reports the gap; the workflow runs it non-blocking and flips to
+// required afterwards.
+//
+// `--as-written` validates each example the way the CLI writers now emit it
+// (#1123: `ai-dossier sign`/`format` write the Agent Skills layout) instead of
+// as shipped. That proves the writers' output, so the workflow requires it.
 //
 // Needs: a built CLI (`make build-all`) and `skills-ref` on PATH (or
-// SKILLS_REF_BIN). Usage: node scripts/validate-skills-spec.mjs [dir ...]
+// SKILLS_REF_BIN). Usage: node scripts/validate-skills-spec.mjs [--as-written] [dir ...]
 // ------------------------------------------------------------------
 
 import { spawnSync } from 'node:child_process';
@@ -74,25 +79,58 @@ export function summarize(results) {
   return { total: results.length, failed: failed.length, byError: new Map(sorted) };
 }
 
+/**
+ * Stand-in for the v3 signature block `sign` adds: same fields and sizes, so
+ * the check covers how `metadata["dossier.signature"]` is written. Validation
+ * reads its shape, never its bytes.
+ */
+export const PLACEHOLDER_SIGNATURE = {
+  algorithm: 'ed25519',
+  signature: `${'A'.repeat(86)}==`,
+  public_key: `${'B'.repeat(43)}=`,
+  signed_at: '2026-01-01T00:00:00.000Z',
+  covers: 'spec-frontmatter+body',
+  signed_by: 'Example Signer <signer@example.com>',
+};
+
+/**
+ * A dossier as `ai-dossier sign` would write it: the Agent Skills layout, `name`
+ * derived from the file name when absent, and a v3 signature block. The real
+ * signature is not reproduced — it covered the legacy bytes, and re-signing
+ * needs the publisher's key.
+ */
+export function asWritten(content, file, core) {
+  const parsed = core.parseDossierContent(content);
+  const logical = { ...core.withSkillIdentity(parsed.frontmatter, file) };
+  logical.signature = PLACEHOLDER_SIGNATURE;
+  return core.renderSpecDossier(logical, parsed.body, parsed);
+}
+
 function validate(bin, skillDir) {
   const p = spawnSync(bin, ['validate', skillDir], { encoding: 'utf8' });
   if (p.error) throw new Error(`cannot run ${bin}: ${p.error.message}`);
-  return { ok: p.status === 0, errors: errorLines(`${p.stdout}\n${p.stderr}`) };
+  const errors = errorLines(`${p.stdout}\n${p.stderr}`);
+  // A failing exit with no error bullets is still a failure, never a pass.
+  if (p.status !== 0 && errors.length === 0) errors.push(`${bin} exited ${p.status}`);
+  return { ok: p.status === 0, errors };
 }
 
 export function main(argv = process.argv.slice(2)) {
   const bin = process.env.SKILLS_REF_BIN || 'skills-ref';
-  const dirs = argv.length ? argv : [join(REPO_ROOT, 'examples')];
+  const written = argv.includes('--as-written');
+  const args = argv.filter((a) => a !== '--as-written');
+  const dirs = args.length ? args : [join(REPO_ROOT, 'examples')];
   // The CLI is CJS; createRequire keeps named-export interop out of the picture.
-  const { toSkillFrontmatter } = createRequire(import.meta.url)(
-    join(REPO_ROOT, 'cli/dist/skill-frontmatter.js')
-  );
+  const require = createRequire(import.meta.url);
+  const { toSkillFrontmatter } = require(join(REPO_ROOT, 'cli/dist/skill-frontmatter.js'));
+  const core = written ? require(join(REPO_ROOT, 'packages/core/dist/index.js')) : null;
 
   const tmp = mkdtempSync(join(tmpdir(), 'skills-spec-'));
   const results = [];
   try {
     for (const file of dirs.flatMap(findDossiers)) {
-      const rendered = toSkillFrontmatter(readFileSync(file, 'utf8'));
+      const source = readFileSync(file, 'utf8');
+      const rendered = toSkillFrontmatter(written ? asWritten(source, file, core) : source);
       const name = skillName(rendered) ?? 'unnamed';
       const skillDir = join(tmp, name);
       mkdirSync(skillDir, { recursive: true });
@@ -105,7 +143,8 @@ export function main(argv = process.argv.slice(2)) {
   }
 
   const s = summarize(results);
-  console.log(`skills-ref validate: ${s.total - s.failed}/${s.total} dossiers pass\n`);
+  const mode = written ? ' (as the CLI writes them)' : '';
+  console.log(`skills-ref validate${mode}: ${s.total - s.failed}/${s.total} dossiers pass\n`);
   for (const [error, files] of s.byError) {
     console.log(`${String(files.length).padStart(3)}x ${error}`);
   }

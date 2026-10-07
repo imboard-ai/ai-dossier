@@ -20,7 +20,7 @@ import {
   writeOpencodeWrapper,
 } from '../opencode-sync';
 import { parseNameVersion } from '../registry-client';
-import { checkSkillCollision, collisionMessage } from '../skill-collision';
+import { checkSkillCollision, collisionMessage, writeSourceSidecar } from '../skill-collision';
 import { toSkillFrontmatter } from '../skill-frontmatter';
 import {
   classify,
@@ -55,7 +55,8 @@ interface InstallResult {
 
 /**
  * Fetch one dossier and write it as a skill (claude and/or opencode copy), recording its
- * registry path as `x_source`. Throws on any failure; callers decide how to report it.
+ * registry path (`x_source` in a legacy copy's frontmatter, and `SOURCE_SIDECAR` beside
+ * it). Throws on any failure; callers decide how to report it.
  */
 async function installOne(
   dossierName: string,
@@ -104,9 +105,12 @@ async function installOne(
   // future flows (e.g. opencode-only refreshes via sync-skills) can opt out.
   if (ctx.targets.writeClaude) {
     fs.mkdirSync(skillDir, { recursive: true });
-    // Emit YAML frontmatter so the runtime can read `name`/`description`.
-    // The signed payload is unchanged — see skill-frontmatter.ts.
+    // Emit YAML frontmatter so the runtime can read `name`/`description`: a legacy
+    // dossier is re-serialized, a spec-shaped one copied as is. The signed payload
+    // is unchanged either way — see skill-frontmatter.ts.
     fs.writeFileSync(skillFile, toSkillFrontmatter(content, dossierName), 'utf8');
+    // A spec-shaped copy cannot carry `x_source`; record provenance beside it.
+    writeSourceSidecar(skillDir, dossierName);
   }
 
   // Dual-write the opencode wrapper when requested. YAML-native sources are

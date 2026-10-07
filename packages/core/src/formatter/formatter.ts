@@ -1,6 +1,11 @@
 import { calculateChecksum } from '../checksum';
 import { parseDossierContent } from '../parser';
-import { SPEC_SHAPE_WRITE_UNSUPPORTED } from '../spec-shape';
+import {
+  renderSpecDossier,
+  serializeSpecDossier,
+  withSkillIdentity,
+  withSpecField,
+} from '../spec-writer';
 import type { FormatOptions, FormatResult } from './types';
 import { defaultFormatOptions } from './types';
 
@@ -106,33 +111,45 @@ export function formatDossierContent(
 ): FormatResult {
   const opts: FormatOptions = { ...defaultFormatOptions, ...options };
   const parsed = parseDossierContent(content);
-  if (parsed.shape === 'spec') {
-    throw new Error(SPEC_SHAPE_WRITE_UNSUPPORTED);
-  }
 
-  let frontmatter: Record<string, unknown> = parsed.frontmatter as Record<string, unknown>;
-
-  if (opts.sortKeys) {
-    frontmatter = sortFrontmatterKeys(frontmatter);
-  }
+  let frontmatter: Record<string, unknown> = { ...parsed.frontmatter };
 
   // Normalize body: trim trailing whitespace per line, then trim trailing newlines from body
   const body = trimTrailingWhitespace(parsed.body).replace(/\n+$/, '');
 
-  // Update checksum if enabled
-  if (opts.updateChecksum && frontmatter.checksum) {
-    const checksumObj = frontmatter.checksum as Record<string, unknown>;
-    if (checksumObj && typeof checksumObj === 'object') {
-      const newHash = calculateChecksum(body);
-      frontmatter.checksum = { ...checksumObj, hash: newHash };
-    }
+  // Checksum block with the hash of the normalized body, when enabled
+  let checksum: Record<string, unknown> | undefined;
+  if (opts.updateChecksum && frontmatter.checksum && typeof frontmatter.checksum === 'object') {
+    checksum = {
+      ...(frontmatter.checksum as Record<string, unknown>),
+      hash: calculateChecksum(body),
+    };
   }
 
-  // Serialize frontmatter with controlled indentation
-  const jsonStr = JSON.stringify(frontmatter, null, opts.indent);
-
-  // Build the formatted output
-  let result = `---dossier\n${jsonStr}\n---\n${body}`;
+  let result: string;
+  if (parsed.shape === 'spec') {
+    // Re-serialize the on-disk object as it is — key order and every value's
+    // exact string — so only the checksum (when the body changed) can alter what
+    // a v3 signature covers. Re-encoding the logical view would change more.
+    const raw = checksum
+      ? withSpecField(parsed.rawFrontmatter, 'checksum', checksum)
+      : parsed.rawFrontmatter;
+    result = serializeSpecDossier(raw, body);
+  } else {
+    if (opts.sortKeys) {
+      frontmatter = sortFrontmatterKeys(frontmatter);
+    }
+    if (checksum) {
+      frontmatter.checksum = checksum;
+    }
+    if (opts.toSpec && !frontmatter.signature) {
+      result = renderSpecDossier(withSkillIdentity(frontmatter, opts.nameSource), body);
+    } else {
+      // Legacy layout: JSON with controlled indentation
+      const jsonStr = JSON.stringify(frontmatter, null, opts.indent);
+      result = `---dossier\n${jsonStr}\n---\n${body}`;
+    }
+  }
 
   // Ensure final newline
   result = ensureFinalNewline(result);

@@ -4,7 +4,8 @@ import { registerFromFileCommand } from '../../commands/from-file';
 import { createTestProgram } from '../helpers/test-utils';
 
 vi.mock('node:fs');
-vi.mock('@ai-dossier/core', () => ({
+vi.mock('@ai-dossier/core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@ai-dossier/core')>()),
   calculateChecksum: vi.fn().mockReturnValue('abc123hash'),
   Ed25519Signer: vi.fn().mockImplementation(() => ({
     sign: vi.fn().mockResolvedValue({
@@ -45,7 +46,7 @@ describe('from-file command', () => {
 
     expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
       expect.stringContaining('test-dossier.ds.md'),
-      expect.stringContaining('---dossier'),
+      expect.stringContaining("---\nname: 'test-dossier'\ndescription: 'Test objective'\n"),
       'utf8'
     );
   });
@@ -175,7 +176,7 @@ describe('from-file command', () => {
 
     expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
       expect.any(String),
-      expect.stringContaining('"version": "2.0.0"'),
+      expect.stringContaining("dossier.version: '2.0.0'"),
       'utf8'
     );
   });
@@ -204,7 +205,7 @@ describe('from-file command', () => {
 
     expect(mockedFs.writeFileSync).toHaveBeenCalledWith(
       expect.any(String),
-      expect.stringContaining('"version": "3.5.0"'),
+      expect.stringContaining("dossier.version: '3.5.0'"),
       'utf8'
     );
   });

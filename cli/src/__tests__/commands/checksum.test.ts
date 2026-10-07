@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import { buildVerificationPayload, parseDossierContent } from '@ai-dossier/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerChecksumCommand } from '../../commands/checksum';
 import { createTestProgram, makeDossier } from '../helpers/test-utils';
@@ -41,20 +42,87 @@ describe('checksum command', () => {
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Invalid dossier format'));
   });
 
-  it('refuses --update on a spec-shaped dossier and writes nothing', async () => {
+  it('--update keeps a spec-shaped dossier spec-shaped', async () => {
     mockedFs.existsSync.mockReturnValue(true);
     mockedFs.readFileSync.mockReturnValue(
-      '---\nname: x\ndescription: d\nmetadata:\n  dossier.title: T\n---\n# Body\n'
+      '---\nname: x\ndescription: d\nmetadata:\n  dossier.title: T\n  other.tool: kept\n---\n# Body\n'
     );
     const program = createTestProgram();
     registerChecksumCommand(program);
 
     await expect(
       program.parseAsync(['node', 'dossier', 'checksum', 'test.ds.md', '--update'])
-    ).rejects.toThrow();
+    ).rejects.toThrow('process.exit(0)');
 
-    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('spec-shaped'));
-    expect(mockedFs.writeFileSync).not.toHaveBeenCalled();
+    const written = mockedFs.writeFileSync.mock.calls[0][1] as string;
+    const parsed = parseDossierContent(written);
+    expect(parsed.shape).toBe('spec');
+    expect(parsed.frontmatter.title).toBe('T');
+    expect(parsed.frontmatter.checksum?.hash).toBe(
+      crypto.createHash('sha256').update('# Body\n').digest('hex')
+    );
+    expect((parsed.rawFrontmatter.metadata as Record<string, string>)['other.tool']).toBe('kept');
+  });
+
+  it('--update on a signed spec-shaped dossier leaves every other signed value as written', async () => {
+    const original = [
+      '---',
+      "name: 'x'",
+      "description: 'd'",
+      'metadata:',
+      '  dossier.title: T',
+      '  dossier.tags: \'["b", "a"]\'',
+      `  dossier.checksum: '{"algorithm":"sha256","hash":"${crypto.createHash('sha256').update('# Body\n').digest('hex')}"}'`,
+      '  dossier.signature: \'{"covers":"spec-frontmatter+body"}\'',
+      '---',
+      '# Body',
+      '',
+    ].join('\n');
+    mockedFs.existsSync.mockReturnValue(true);
+    mockedFs.readFileSync.mockReturnValue(original);
+    const program = createTestProgram();
+    registerChecksumCommand(program);
+
+    await expect(
+      program.parseAsync(['node', 'dossier', 'checksum', 'test.ds.md', '--update'])
+    ).rejects.toThrow('process.exit(0)');
+
+    const written = mockedFs.writeFileSync.mock.calls[0]?.[1] as string | undefined;
+    const after = written ? parseDossierContent(written) : parseDossierContent(original);
+    expect(buildVerificationPayload(after)).toBe(
+      buildVerificationPayload(parseDossierContent(original))
+    );
+  });
+
+  it('--update warns that a signature is stale when the body changed', async () => {
+    mockedFs.existsSync.mockReturnValue(true);
+    mockedFs.readFileSync.mockReturnValue(
+      makeDossier({
+        checksum: { algorithm: 'sha256', hash: 'old' },
+        signature: { covers: 'frontmatter+body' },
+      })
+    );
+    const program = createTestProgram();
+    registerChecksumCommand(program);
+
+    await expect(
+      program.parseAsync(['node', 'dossier', 'checksum', 'test.ds.md', '--update'])
+    ).rejects.toThrow('process.exit(0)');
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('no longer verifies'));
+  });
+
+  it('--update keeps a legacy dossier legacy', async () => {
+    mockedFs.existsSync.mockReturnValue(true);
+    mockedFs.readFileSync.mockReturnValue(makeDossier());
+    const program = createTestProgram();
+    registerChecksumCommand(program);
+
+    await expect(
+      program.parseAsync(['node', 'dossier', 'checksum', 'test.ds.md', '--update'])
+    ).rejects.toThrow('process.exit(0)');
+
+    const written = mockedFs.writeFileSync.mock.calls[0][1] as string;
+    expect(written.startsWith('---dossier\n')).toBe(true);
   });
 
   it('should display checksum for valid dossier', async () => {

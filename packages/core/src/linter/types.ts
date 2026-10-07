@@ -1,3 +1,4 @@
+import type { FrontmatterShape } from '../spec-shape';
 import type { DossierFrontmatter } from '../types';
 
 export type LintSeverity = 'error' | 'warning' | 'info';
@@ -13,6 +14,10 @@ export interface LintRuleContext {
   frontmatter: DossierFrontmatter;
   body: string;
   raw: string;
+  /** On-disk layout; absent when a caller builds a context by hand. */
+  shape?: FrontmatterShape;
+  /** Frontmatter exactly as it sits on disk (spec-shaped files keep `metadata`). */
+  rawFrontmatter?: Record<string, unknown>;
 }
 
 export interface LintRule {

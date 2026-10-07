@@ -10,7 +10,7 @@ export function formatDossierFile(
   options?: Partial<FormatOptions>
 ): FormatResult {
   const content = readFileSync(filePath, 'utf8');
-  const result = formatDossierContent(content, options);
+  const result = formatDossierContent(content, { nameSource: filePath, ...options });
 
   if (result.changed) {
     writeFileSync(filePath, result.formatted, 'utf8');

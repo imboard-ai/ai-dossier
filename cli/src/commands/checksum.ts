@@ -2,9 +2,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   type DossierFrontmatter,
+  type ParsedDossier,
   parseDossierContent,
-  SPEC_SHAPE_WRITE_UNSUPPORTED,
+  serializeSpecDossier,
   sha256Hex,
+  withSpecField,
 } from '@ai-dossier/core';
 import type { Command } from 'commander';
 
@@ -26,13 +28,11 @@ export function registerChecksumCommand(program: Command): void {
 
       const content = fs.readFileSync(dossierFile, 'utf8');
 
+      let parsed: ParsedDossier;
       let frontmatter: DossierFrontmatter;
       let body: string;
       try {
-        const parsed = parseDossierContent(content);
-        if (options.update && parsed.shape === 'spec') {
-          throw new Error(SPEC_SHAPE_WRITE_UNSUPPORTED);
-        }
+        parsed = parseDossierContent(content);
         frontmatter = parsed.frontmatter;
         body = parsed.body;
       } catch (err: unknown) {
@@ -77,7 +77,23 @@ export function registerChecksumCommand(program: Command): void {
           hash: calculatedHash,
         };
 
-        const updatedContent = `---dossier\n${JSON.stringify(frontmatter, null, 2)}\n---\n${body}`;
+        // Keep the file's layout: converting here would orphan a signature it
+        // carries ('sign' and 'format' are the commands that change layouts). A
+        // spec-shaped file gets only its checksum field replaced, so nothing else a
+        // v3 signature covers is re-encoded.
+        let updatedContent: string;
+        try {
+          updatedContent =
+            parsed.shape === 'spec'
+              ? serializeSpecDossier(
+                  withSpecField(parsed.rawFrontmatter, 'checksum', frontmatter.checksum),
+                  body
+                )
+              : `---dossier\n${JSON.stringify(frontmatter, null, 2)}\n---\n${body}`;
+        } catch (err: unknown) {
+          console.log(`❌ ${(err as Error).message}`);
+          process.exit(1);
+        }
         const fileChanged = updatedContent !== content;
         if (fileChanged) {
           fs.writeFileSync(dossierFile, updatedContent, 'utf8');
@@ -94,6 +110,11 @@ export function registerChecksumCommand(program: Command): void {
               console.log(`   SHA256: ${calculatedHash}`);
             }
           } else if (existingHash) {
+            if (frontmatter.signature) {
+              console.log(
+                "⚠️  The body changed since it was signed; the signature no longer verifies. Re-sign with 'ai-dossier sign'."
+              );
+            }
             console.log('✅ Checksum updated');
             console.log(`   Old: ${existingHash}`);
             console.log(`   New: ${calculatedHash}`);

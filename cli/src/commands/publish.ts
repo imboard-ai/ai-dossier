@@ -6,6 +6,7 @@ import {
   type EvidenceEntry,
   type EvidenceRecord,
   evidenceMatchesDossier,
+  type ParsedDossier,
   parseDossierContent,
   parseEvidence,
   sha256Hex,
@@ -220,10 +221,12 @@ export function registerPublishCommand(program: Command): void {
 
         let frontmatter: DossierFrontmatter;
         let body: string;
+        let shape: ParsedDossier['shape'];
         try {
           const parsed = parseDossierContent(content);
           frontmatter = parsed.frontmatter;
           body = parsed.body;
+          shape = parsed.shape;
         } catch (err: unknown) {
           console.error(`\n❌ ${(err as Error).message}\n`);
           process.exit(1);
@@ -237,6 +240,15 @@ export function registerPublishCommand(program: Command): void {
           }
           console.error('');
           process.exit(1);
+        }
+
+        // Published bytes are what runtimes install, so a legacy file installs as a
+        // re-rendered copy rather than a valid Agent Skill. Not blocking: it still
+        // verifies, and the registry serves both layouts.
+        if (shape === 'legacy' && !options.json) {
+          console.error(
+            "\n⚠️  Legacy frontmatter layout. 'ai-dossier sign' writes the Agent Skills layout (v3 signature); re-sign before publishing to ship a spec-valid skill."
+          );
         }
 
         const existingHash = frontmatter.checksum?.hash;

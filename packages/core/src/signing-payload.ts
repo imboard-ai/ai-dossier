@@ -27,7 +27,7 @@
  *    legacy ones, and an unrecognized `covers` value is refused, never guessed.
  */
 
-import { DOSSIER_METADATA_PREFIX, isSpecShapedFrontmatter } from './spec-shape';
+import { DOSSIER_METADATA_PREFIX, isSpecShapedFrontmatter, SpecShapeError } from './spec-shape';
 import type { ParsedDossier } from './types';
 import { stableStringify } from './utils/canonical-json';
 
@@ -40,6 +40,13 @@ const ED25519_RAW_KEY_BYTES = 32;
 export const SIGNATURE_COVERAGES = ['body', 'frontmatter+body', 'spec-frontmatter+body'] as const;
 
 export type SignatureCoverage = (typeof SIGNATURE_COVERAGES)[number];
+
+/**
+ * Scheme tags that open a signed payload. Being inside the signed bytes, they
+ * stop a signature made under one scheme from being replayed as another.
+ */
+export const SIGNATURE_PAYLOAD_TAG_V2 = 'dossier-signature-v2';
+export const SIGNATURE_PAYLOAD_TAG_V3 = 'dossier-signature-v3';
 
 /** Key of the signature block inside a spec-shaped `metadata` map. */
 const SPEC_SIGNATURE_KEY = `${DOSSIER_METADATA_PREFIX}signature`;
@@ -223,15 +230,12 @@ export function canonicalizeFrontmatter(frontmatter: Record<string, unknown>): s
  */
 export function canonicalizeSpecFrontmatter(frontmatter: Record<string, unknown>): string {
   if (!isSpecShapedFrontmatter(frontmatter)) {
-    throw new Error(
+    throw new SpecShapeError(
       'A v3 (spec-frontmatter+body) payload needs the on-disk spec-shaped frontmatter, not the logical view'
     );
   }
   const { metadata, ...rest } = frontmatter;
-  const { [SPEC_SIGNATURE_KEY]: _excluded, ...unsignedMetadata } = metadata as Record<
-    string,
-    unknown
-  >;
+  const { [SPEC_SIGNATURE_KEY]: _excluded, ...unsignedMetadata } = metadata;
   return stableStringify({ ...rest, metadata: unsignedMetadata });
 }
 
@@ -252,9 +256,9 @@ export function buildSignedPayload(
     return body;
   }
   if (coverage === 'spec-frontmatter+body') {
-    return `dossier-signature-v3\n${canonicalizeSpecFrontmatter(frontmatter)}\n${body}`;
+    return `${SIGNATURE_PAYLOAD_TAG_V3}\n${canonicalizeSpecFrontmatter(frontmatter)}\n${body}`;
   }
-  return `dossier-signature-v2\n${canonicalizeFrontmatter(frontmatter)}\n${body}`;
+  return `${SIGNATURE_PAYLOAD_TAG_V2}\n${canonicalizeFrontmatter(frontmatter)}\n${body}`;
 }
 
 /**

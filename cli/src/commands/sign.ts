@@ -3,11 +3,13 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   buildSignedPayload,
+  buildSpecFrontmatter,
   calculateChecksum,
   Ed25519Signer,
   KmsSigner,
   parseDossierContent,
-  SPEC_SHAPE_WRITE_UNSUPPORTED,
+  renderSpecDossier,
+  withSkillIdentity,
 } from '@ai-dossier/core';
 import type { Command } from 'commander';
 import { OFFICIAL_KMS_KEYS } from '../helpers';
@@ -63,11 +65,13 @@ export function registerSignCommand(program: Command): void {
           console.log(`\n❌ Failed to parse dossier: ${(err as Error).message}`);
           process.exit(1);
         }
-        if (parsed.shape === 'spec') {
-          console.log(`\n❌ ${SPEC_SHAPE_WRITE_UNSUPPORTED}`);
-          process.exit(1);
-        }
-        const { frontmatter, body } = parsed;
+        const { body } = parsed;
+
+        // The output is always the Agent Skills (spec) layout with a v3 signature,
+        // which covers the on-disk object — so build that object first and sign
+        // exactly it. Any old signature is dropped: it is being replaced.
+        const { signature: _replaced, ...unsigned } = parsed.frontmatter;
+        const frontmatter = withSkillIdentity(unsigned, dossierFile) as typeof parsed.frontmatter;
 
         // Calculate checksum
         const checksum = calculateChecksum(body);
@@ -77,6 +81,18 @@ export function registerSignCommand(program: Command): void {
           algorithm: 'sha256',
           hash: checksum,
         } as typeof frontmatter.checksum;
+
+        let payload: string;
+        try {
+          payload = buildSignedPayload(
+            buildSpecFrontmatter(frontmatter as unknown as Record<string, unknown>, parsed),
+            body,
+            'spec-frontmatter+body'
+          );
+        } catch (err: unknown) {
+          console.log(`\n❌ Cannot write the Agent Skills layout: ${(err as Error).message}`);
+          process.exit(1);
+        }
 
         if (options.method === 'kms') {
           const effectiveKeyId = options.keyId || 'alias/dossier-official-prod';
@@ -124,12 +140,10 @@ export function registerSignCommand(program: Command): void {
           try {
             const region = options.region || process.env.AWS_REGION || 'us-east-1';
             const signer = new KmsSigner(effectiveKeyId, region);
-            const sigResult = await signer.sign(
-              buildSignedPayload(frontmatter as unknown as Record<string, unknown>, body)
-            );
+            const sigResult = await signer.sign(payload);
             frontmatter.signature = {
               ...sigResult,
-              covers: 'frontmatter+body',
+              covers: 'spec-frontmatter+body',
               signed_by: options.signedBy || '(not specified)',
             } as typeof frontmatter.signature;
           } catch (err: unknown) {
@@ -174,12 +188,10 @@ export function registerSignCommand(program: Command): void {
 
           try {
             const signer = new Ed25519Signer(keyPath as string);
-            const sigResult = await signer.sign(
-              buildSignedPayload(frontmatter as unknown as Record<string, unknown>, body)
-            );
+            const sigResult = await signer.sign(payload);
             frontmatter.signature = {
               ...sigResult,
-              covers: 'frontmatter+body',
+              covers: 'spec-frontmatter+body',
               key_id: options.keyId || sigResult.key_id,
               signed_by: options.signedBy || '(not specified)',
             } as typeof frontmatter.signature;
@@ -198,7 +210,13 @@ export function registerSignCommand(program: Command): void {
         if (options.signedBy) console.log(`   Signed by: ${options.signedBy}`);
 
         // Write updated dossier
-        const updatedContent = `---dossier\n${JSON.stringify(frontmatter, null, 2)}\n---\n${body}`;
+        let updatedContent: string;
+        try {
+          updatedContent = renderSpecDossier(frontmatter, body, parsed);
+        } catch (err: unknown) {
+          console.log(`\n❌ Cannot write the Agent Skills layout: ${(err as Error).message}`);
+          process.exit(1);
+        }
         fs.writeFileSync(dossierFile, updatedContent, 'utf8');
 
         console.log('\n✅ Dossier signed successfully!');

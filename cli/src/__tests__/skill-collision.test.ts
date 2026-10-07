@@ -2,7 +2,13 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { checkSkillCollision, collisionMessage, readInstalledSource } from '../skill-collision';
+import {
+  checkSkillCollision,
+  collisionMessage,
+  readInstalledSource,
+  SOURCE_SIDECAR,
+  writeSourceSidecar,
+} from '../skill-collision';
 import { toSkillFrontmatter } from '../skill-frontmatter';
 
 const BODY = '# Thing\n\nDo the thing.\n';
@@ -52,6 +58,24 @@ describe('skill collision detection', () => {
     writeFileSync(file, dossier({ name: 'idea-to-prd' }));
     expect(readInstalledSource(file)).toBe('idea-to-prd');
     expect(checkSkillCollision(file, 'imboard-ai/pm/idea-to-prd').collides).toBe(false);
+  });
+
+  // A spec-shaped install is a verbatim copy; its registry path lives beside it.
+  it('reads provenance from the sidecar of a spec-shaped install', () => {
+    writeFileSync(
+      file,
+      "---\nname: 'idea-to-prd'\ndescription: 'd'\nmetadata:\n  dossier.title: 'T'\n---\n# B\n"
+    );
+    writeSourceSidecar(dir, 'imboard-ai/idea-to-prd');
+    expect(readInstalledSource(file)).toBe('imboard-ai/idea-to-prd');
+    expect(checkSkillCollision(file, 'imboard-ai/pm/idea-to-prd').collides).toBe(true);
+    expect(checkSkillCollision(file, 'imboard-ai/idea-to-prd').collides).toBe(false);
+  });
+
+  it('ignores a sidecar that does not hold one registry path', () => {
+    writeFileSync(file, dossier({ name: 'idea-to-prd' }));
+    writeFileSync(join(dir, SOURCE_SIDECAR), 'not a path\nimboard-ai/x\n');
+    expect(readInstalledSource(file)).toBe('idea-to-prd');
   });
 
   it('flags a legacy install of a different dossier', () => {
