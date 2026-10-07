@@ -29,9 +29,18 @@ Reports are untrusted; non-denied outcomes, malformed/missing reports, failed,
 timed-out or truncated commands cannot produce a passing input. Probe exceptions
 clean the session and throw a fixed, non-echoing error; there is no retry/fallback.
 
-After the last guest operation on that VM, call
-`finishBoundary(session, collector, runId)` with its evidence-runner
-`OutputCollector`. It scans all probe output plus **every** collector chunk,
+After the last guest operation on that VM, **await**
+`finishBoundary(session, collector, runId, { timeoutMs? })` with its evidence-runner
+`OutputCollector`. There is no synchronous finalization API. Finalization first
+awaits `adapter.destroy(vm)` for the VM bound by `probeBoundary`, so the guest
+cannot start another connection. It then crosses an event-loop poll phase with
+two `setImmediate` yields, checks each listener's native `getConnections()` count,
+and awaits both `server.close()` callbacks before snapshotting the counters.
+Quiescence and drain each have a controller-selected deadline (default 5000 ms).
+Errors or timeouts produce failed inputs with a fixed controller finalization
+reason, never a clean verdict; emergency cleanup remains retryable. The adapter's
+destroy contract must observe guest exit, rather than merely request termination.
+It scans all probe output plus **every** collector chunk,
 including consecutive chunks to detect split raw/hex/base64 canary encodings.
 Marker reports in every output channel (stdout, stderr, report buffers, file
 transfers and later collector output) can worsen the verdict; identical reports
@@ -56,7 +65,8 @@ creates `BoundaryEvidence`; shipping still requires the run's own clean held
 verdict. Neither the probe nor its artifacts issue shipping authorization.
 
 Always call `session.cleanup()` from the controller's outer `finally`, including
-when VM creation fails, and independently destroy any created VM. Successful
+when VM creation fails, and independently destroy any created VM on failure.
+Finalization itself destroys the successfully bound probe VM. Successful
 probing leaves listeners active until finish, to measure subsequent guest work.
 Cleanup closes listeners, unsets the unique environment variable and removes the
 temporary canary home. Partial setup failures clean everything already allocated.

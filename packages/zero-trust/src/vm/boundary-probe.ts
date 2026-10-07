@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { setImmediate as yieldEventLoop } from 'node:timers/promises';
 import { OutputCollector } from '../controller/output-collector';
 import { assertDirectoryAncestors, privateDir, publishPrivate } from '../durable-fs';
 import { assertSecretFree } from '../redaction';
@@ -70,7 +71,43 @@ export interface PlantedCanaries {
   readonly loopback: Listener;
   readonly lan: Listener;
   connections(): number;
+  /** Authoritative measurement requires this after guest quiescence. */
+  drain(): Promise<void>;
   cleanup(): void;
+}
+
+async function drainListener(listener: Listener): Promise<void> {
+  await yieldEventLoop();
+  // The first immediate may run in this iteration's check phase before poll.
+  // A second crosses a poll phase even when finalization started in a timer.
+  await yieldEventLoop();
+  const active = await new Promise<number>((resolve, reject) => {
+    listener.server.getConnections((error, count) => (error ? reject(error) : resolve(count)));
+  });
+  // The native count is an additional conservative observation, never subtract it.
+  listener.connections = Math.max(listener.connections, active);
+  await new Promise<void>((resolve, reject) => {
+    listener.server.close((error) => (error ? reject(error) : resolve()));
+  });
+}
+
+const FINALIZE_TIMEOUT_MS = 5000;
+async function boundedBoundary(work: () => Promise<void>, timeoutMs: number, stage: string) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      Promise.resolve().then(work),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new BoundaryOperationError(stage, 'timeout')), timeoutMs);
+      }),
+    ]);
+  } catch (error) {
+    throw error instanceof BoundaryOperationError
+      ? error
+      : new BoundaryOperationError(stage, 'unavailable');
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** Transactional setup: even a failed second listener leaves no first listener,
@@ -131,6 +168,11 @@ export async function plantCanaries(): Promise<PlantedCanaries> {
       loopback,
       lan,
       connections: () => listeners.reduce((n, listener) => n + listener.connections, 0),
+      async drain() {
+        const results = await Promise.allSettled(listeners.map(drainListener));
+        if (results.some((result) => result.status === 'rejected'))
+          throw new BoundaryOperationError('drain', 'unavailable');
+      },
       cleanup,
     };
   } catch {
@@ -201,6 +243,7 @@ interface SessionState {
   cleaned: boolean;
   finished: boolean;
   vm?: VmHandle;
+  adapter?: VmAdapter;
 }
 const SESSIONS = new WeakMap<BoundarySession, SessionState>();
 
@@ -333,6 +376,7 @@ export async function probeBoundary(
   }
   state.started = true;
   state.vm = { ...vm };
+  state.adapter = adapter;
   let stage = 'upload';
   async function upload(fixture: string) {
     stage = `upload-${fixture}`;
@@ -413,18 +457,35 @@ export async function probeBoundary(
   }
 }
 
-/** Finish AFTER the last guest output for this VM. Always cleans up, including
+/** Finish AFTER the last guest output for this VM. Destroys the probe VM before
+ * yielding, observing native connection counts and awaiting both listener closes.
+ * Always cleans up, including
  * collector truncation, wrong identity, secret detection and publication errors.
  * A failed/unstarted session produces failed evidence, never a clean verdict. */
-export function finishBoundary(
+export async function finishBoundary(
   session: BoundarySession,
   collector: OutputCollector,
-  runId: string
-): BoundaryInput {
+  runId: string,
+  options: { timeoutMs?: number } = {}
+): Promise<BoundaryInput> {
   const state = sessionState(session);
   try {
     if (state.finished) throw new Error('Boundary session already finished');
     state.finished = true;
+    let finalizationFailure: BoundaryOperationError | undefined;
+    try {
+      const timeoutMs = options.timeoutMs ?? FINALIZE_TIMEOUT_MS;
+      if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0)
+        throw new BoundaryOperationError('finalize', 'invalid_timeout');
+      if (!state.adapter || !state.vm || state.closed)
+        throw new BoundaryOperationError('quiesce', 'unavailable');
+      const adapter = state.adapter;
+      const vm = state.vm;
+      await boundedBoundary(() => adapter.destroy(vm), timeoutMs, 'quiesce');
+      await boundedBoundary(() => state.planted.drain(), timeoutMs, 'drain');
+    } catch (error) {
+      finalizationFailure = error as BoundaryOperationError;
+    }
     const outputs = [...state.output.outputs(), ...collector.outputs()];
     const markers = parseReports(outputs.join(''));
     const reports = [
@@ -432,6 +493,18 @@ export function finishBoundary(
         [...state.reports, ...markers.reports].map((report) => [JSON.stringify(report), report])
       ).values(),
     ];
+    if (finalizationFailure)
+      reports.push({
+        probe: 'controller',
+        phase: 'finalize',
+        records: [
+          {
+            category: 'host-loopback',
+            attempt: `${finalizationFailure.stage}/${finalizationFailure.code}`,
+            outcome: 'error',
+          },
+        ],
+      });
     // Also scan consecutive chunks: a guest can split an encoding between reads.
     const input: BoundaryInput = {
       reports,
@@ -441,6 +514,7 @@ export function finishBoundary(
       brokerChecks: state.brokerChecks,
       malformedReports:
         state.malformed +
+        (finalizationFailure ? 1 : 0) +
         markers.malformed +
         (!state.complete || state.closed || !runId || state.vm?.runId !== runId ? 1 : 0),
       runId,

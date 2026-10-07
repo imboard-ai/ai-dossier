@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
@@ -134,10 +135,157 @@ async function input(
 ) {
   const session = await prepared();
   await probeBoundary(session, fake, VM, profile);
-  return { input: finishBoundary(session, output, VM.runId), session, fake };
+  return { input: await finishBoundary(session, output, VM.runId), session, fake };
 }
 
 describe('production boundary lifecycle', () => {
+  it.each([1, 2])('records a queued child handshake before finalizing %i VM(s)', async (count) => {
+    const inputs: BoundaryInput[] = [];
+    for (let index = 0; index < count; index++) {
+      const fake = new ProbeFake();
+      const session = await prepared();
+      await probeBoundary(session, fake, VM, 'node');
+      if (index === count - 1) {
+        // Block the parent's event loop while the real child completes the handshake.
+        const child = spawnSync(
+          process.execPath,
+          [
+            '-e',
+            "const s=require('node:net').connect(Number(process.argv[1]),'127.0.0.1');s.on('connect',()=>{process.stdout.write('CONNECTED');s.destroy()});s.on('error',()=>process.exit(1));",
+            fake.targets.loopbackPort,
+          ],
+          { timeout: 3000 }
+        );
+        expect(child.status).toBe(0);
+        expect(child.stdout.toString()).toBe('CONNECTED');
+      }
+      const evidence = await finishBoundary(session, new OutputCollector(), VM.runId);
+      inputs.push(evidence);
+      if (index === count - 1) expect(evidence.listenerConnections).toBeGreaterThan(0);
+    }
+    expect(runBoundaryVerdict(inputs, VM.runId)).toMatchObject({ held: false, runId: VM.runId });
+  });
+
+  it('fails closed when listener close does not acknowledge shutdown', async () => {
+    const fake = new ProbeFake();
+    const session = await prepared();
+    await probeBoundary(session, fake, VM, 'node');
+    const original = net.Server.prototype.close;
+    vi.spyOn(net.Server.prototype, 'close').mockImplementation(function (this: net.Server) {
+      return original.call(this); // Actually release sockets, but withhold acknowledgement.
+    });
+    const evidence = await finishBoundary(session, new OutputCollector(), VM.runId, {
+      timeoutMs: 30,
+    });
+    expect(runBoundaryVerdict([evidence], VM.runId).held).toBe(false);
+  });
+
+  it.each([
+    'quiesce-error',
+    'quiesce-timeout',
+    'connections-error',
+    'connections-timeout',
+    'close-error',
+    'invalid-timeout',
+  ] as const)('fails closed with a controller reason on %s', async (fault) => {
+    const fake = new ProbeFake();
+    const session = await prepared();
+    await probeBoundary(session, fake, VM, 'node');
+    if (fault === 'quiesce-error')
+      vi.spyOn(fake, 'destroy').mockRejectedValue(new Error('untrusted failure'));
+    if (fault === 'quiesce-timeout')
+      vi.spyOn(fake, 'destroy').mockImplementation(() => new Promise(() => {}));
+    if (fault === 'connections-error')
+      vi.spyOn(net.Server.prototype, 'getConnections').mockImplementation(function (
+        this: net.Server,
+        callback
+      ) {
+        callback(new Error('untrusted failure'), 0);
+        return this;
+      });
+    if (fault === 'connections-timeout')
+      vi.spyOn(net.Server.prototype, 'getConnections').mockImplementation(function (
+        this: net.Server
+      ) {
+        return this;
+      });
+    if (fault === 'close-error') {
+      const original = net.Server.prototype.close;
+      vi.spyOn(net.Server.prototype, 'close').mockImplementation(function (
+        this: net.Server,
+        callback
+      ) {
+        return original.call(this, () => callback?.(new Error('untrusted failure')));
+      });
+    }
+    const evidence = await finishBoundary(session, new OutputCollector(), VM.runId, {
+      timeoutMs: fault === 'invalid-timeout' ? 0 : 30,
+    });
+    const verdict = runBoundaryVerdict([evidence], VM.runId);
+    expect(verdict.held).toBe(false);
+    expect(verdict.violations.join(' ')).toMatch(/controller\/finalize/);
+    expect(JSON.stringify(evidence)).not.toContain('untrusted failure');
+    expect(fs.existsSync(fake.targets.hostFile)).toBe(false);
+  });
+
+  it('awaits guest exit and both native counts and close acknowledgements before publication', async () => {
+    const fake = new ProbeFake();
+    const session = await prepared();
+    await probeBoundary(session, fake, VM, 'node');
+    const events: string[] = [];
+    let exit: () => void = () => {};
+    vi.spyOn(fake, 'destroy').mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          events.push('stop-request');
+          exit = () => {
+            events.push('exit');
+            resolve();
+          };
+        })
+    );
+    const getConnections = net.Server.prototype.getConnections;
+    vi.spyOn(net.Server.prototype, 'getConnections').mockImplementation(function (
+      this: net.Server,
+      callback
+    ) {
+      events.push('count');
+      return getConnections.call(this, callback);
+    });
+    const close = net.Server.prototype.close;
+    const acknowledgements: (() => void)[] = [];
+    vi.spyOn(net.Server.prototype, 'close').mockImplementation(function (
+      this: net.Server,
+      callback
+    ) {
+      events.push('close');
+      return close.call(this, (error) =>
+        acknowledgements.push(() => {
+          events.push('ack');
+          callback?.(error);
+        })
+      );
+    });
+    const finishing = finishBoundary(session, new OutputCollector(), VM.runId);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(events).toEqual(['stop-request']);
+    expect(fs.existsSync(session.artifactPath)).toBe(false);
+    exit();
+    for (let n = 0; n < 10 && acknowledgements.length < 2; n++)
+      await new Promise((resolve) => setImmediate(resolve));
+    expect(acknowledgements).toHaveLength(2);
+    expect(events.indexOf('count')).toBeGreaterThan(events.indexOf('exit'));
+    expect(fs.existsSync(session.artifactPath)).toBe(false);
+    acknowledgements[0]();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(fs.existsSync(session.artifactPath)).toBe(false);
+    acknowledgements[1]();
+    expect(runBoundaryVerdict([await finishing], VM.runId).held).toBe(true);
+    expect(fs.existsSync(session.artifactPath)).toBe(true);
+    expect(events.filter((event) => event === 'count')).toHaveLength(2);
+    expect(events.filter((event) => event === 'ack')).toHaveLength(2);
+  });
+
   it.each([
     'collector',
     'report-buffer',
@@ -218,7 +366,7 @@ describe('production boundary lifecycle', () => {
       if (fault === 'home' && name === hostHome && failing) throw new Error('remove denied');
       return originalRm(name, options);
     });
-    expect(() => finishBoundary(session, new OutputCollector(), VM.runId)).toThrow(
+    await expect(finishBoundary(session, new OutputCollector(), VM.runId)).rejects.toThrow(
       'resources_remaining'
     );
     expect(fs.existsSync(session.artifactPath)).toBe(false);
@@ -271,7 +419,7 @@ describe('production boundary lifecycle', () => {
     expect(fs.statSync(session.artifactPath).mode & 0o777).toBe(0o600);
     expect(fs.existsSync(fake.targets.hostFile)).toBe(false);
     expect(process.env[fake.targets.envName]).toBeUndefined();
-    expect(() => finishBoundary(session, new OutputCollector(), VM.runId)).toThrow(
+    await expect(finishBoundary(session, new OutputCollector(), VM.runId)).rejects.toThrow(
       'already finished'
     );
   });
@@ -297,7 +445,7 @@ describe('production boundary lifecycle', () => {
       collector.append(text.slice(0, 15));
       collector.append(text.slice(15));
     } else collector.append(text);
-    const evidence = finishBoundary(session, collector, VM.runId);
+    const evidence = await finishBoundary(session, collector, VM.runId);
     expect(runBoundaryVerdict([evidence], VM.runId).held).toBe(false);
     expect(runBoundaryVerdict([evidence, { ...evidence, runId: 'other' }], VM.runId).held).toBe(
       false
@@ -322,7 +470,7 @@ describe('production boundary lifecycle', () => {
       socket.on('error', reject);
       socket.on('close', () => resolve());
     });
-    const evidence = finishBoundary(session, new OutputCollector(), VM.runId);
+    const evidence = await finishBoundary(session, new OutputCollector(), VM.runId);
     expect(evidence.listenerConnections).toBe(1);
     expect(runBoundaryVerdict([evidence], VM.runId).held).toBe(false);
   });
@@ -372,7 +520,8 @@ describe('production boundary lifecycle', () => {
     );
     expect(Object.keys(process.env).filter((key) => key.startsWith('ZT_CANARY_'))).toEqual([]);
     expect(
-      runBoundaryVerdict([finishBoundary(session, new OutputCollector(), VM.runId)], VM.runId).held
+      runBoundaryVerdict([await finishBoundary(session, new OutputCollector(), VM.runId)], VM.runId)
+        .held
     ).toBe(false);
   });
 
@@ -385,7 +534,7 @@ describe('production boundary lifecycle', () => {
       collector.append(fault === 'secret' ? `ghp_${'x'.repeat(40)}` : 'hello');
       if (fault === 'storage')
         fs.writeFileSync(session.artifactPath, 'conflicting input', { mode: 0o600 });
-      expect(() => finishBoundary(session, collector, VM.runId)).toThrow();
+      await expect(finishBoundary(session, collector, VM.runId)).rejects.toThrow();
       expect(fs.existsSync(fake.targets.hostFile)).toBe(false);
       expect(process.env[fake.targets.envName]).toBeUndefined();
     }
@@ -396,7 +545,8 @@ describe('production boundary lifecycle', () => {
     const session = await prepared();
     await probeBoundary(session, fake, VM, 'node');
     expect(
-      runBoundaryVerdict([finishBoundary(session, new OutputCollector(), 'wrong')], VM.runId).held
+      runBoundaryVerdict([await finishBoundary(session, new OutputCollector(), 'wrong')], VM.runId)
+        .held
     ).toBe(false);
     await expect(probeBoundary(session, fake, VM, 'node')).rejects.toThrow('not probeable');
     for (const vm of [{ ...VM, scope: 'vm-root' as const }, VM]) {
@@ -407,17 +557,21 @@ describe('production boundary lifecycle', () => {
     }
     const unprobed = await prepared();
     expect(
-      runBoundaryVerdict([finishBoundary(unprobed, new OutputCollector(), VM.runId)], VM.runId).held
+      runBoundaryVerdict(
+        [await finishBoundary(unprobed, new OutputCollector(), VM.runId)],
+        VM.runId
+      ).held
     ).toBe(false);
     const closed = await prepared();
     await probeBoundary(closed, fake, VM, 'node');
     closed.cleanup();
     expect(
-      runBoundaryVerdict([finishBoundary(closed, new OutputCollector(), VM.runId)], VM.runId).held
+      runBoundaryVerdict([await finishBoundary(closed, new OutputCollector(), VM.runId)], VM.runId)
+        .held
     ).toBe(false);
-    expect(() =>
+    await expect(
       finishBoundary({ artifactPath: '', cleanup() {} }, new OutputCollector(), VM.runId)
-    ).toThrow('Unknown');
+    ).rejects.toThrow('Unknown');
   });
 
   it('does not let clean coverage mask an incomplete second VM or weaker categories', async () => {

@@ -257,7 +257,7 @@ describe.skipIf(!ENABLED)('execution profile gate (real VM)', () => {
         });
         await adapter.endProvisioning(vm);
         await probeBoundary(session, adapter, vm, 'python');
-        const input = finishBoundary(session, new OutputCollector(), runId);
+        const input = await finishBoundary(session, new OutputCollector(), runId);
         const verdict = runBoundaryVerdict([input], runId);
         expect(verdict.runId).toBe(runId);
         assertBoundaryHeld(verdict);
