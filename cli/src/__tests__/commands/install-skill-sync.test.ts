@@ -252,14 +252,24 @@ describe('install-skill --all / --outdated / --list', () => {
 
     it('--outdated still refreshes them, and the refresh records a sidecar', async () => {
       writeOldInstall('beta-skill', 'imboard-ai/skills/beta-skill', '1.0.0');
-      writeOldInstall('alpha-skill', 'imboard-ai/skills/alpha-skill', '1.0.0');
       const code = await run('--outdated', '--json');
       expect(code).toBe(0);
       const out = JSON.parse(logged().at(-1) as string);
-      expect(out.summary).toMatchObject({ ok: 1, skipped: 1, failed: 0 });
+      expect(out.summary).toMatchObject({ ok: 1, failed: 0 });
       expect(installedFm('beta-skill')).toContain('version: 2.0.0');
       expect(installedFm('beta-skill')).not.toContain('x_source');
       expect(installedSource('beta-skill')).toBe('imboard-ai/skills/beta-skill');
+    });
+
+    // Their frontmatter may not verify, so a current version is re-rendered once.
+    it('--outdated re-renders one at the current version, then leaves it alone', async () => {
+      writeOldInstall('alpha-skill', 'imboard-ai/skills/alpha-skill', '1.0.0');
+      await run('--outdated', '--json');
+      expect(JSON.parse(logged().at(-1) as string).summary).toMatchObject({ ok: 1, skipped: 0 });
+      expect(installedFm('alpha-skill')).not.toContain('x_source');
+
+      await run('--outdated', '--json');
+      expect(JSON.parse(logged().at(-1) as string).summary).toMatchObject({ ok: 0, skipped: 1 });
     });
   });
 
@@ -283,6 +293,9 @@ describe('install-skill --all / --outdated / --list', () => {
         version: '1.0.0',
         risk_level: 'low',
         objective: 'Do the signed thing.',
+        // Plain YAML 1.1 would read these back as dates, not the strings that were signed.
+        last_updated: '2026-09-29',
+        created_at: '2026-09-29T10:00:00Z',
         checksum: { algorithm: 'sha256', hash: calculateChecksum(BODY) },
         ...extra,
       };

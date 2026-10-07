@@ -121,6 +121,9 @@ describe('toSkillFrontmatter preserves verifiability', () => {
         name: 'pr-review',
         title: 'PR Review',
         version: '1.0.0',
+        last_updated: '2026-09-29',
+        created_at: '2026-09-29T10:00:00Z',
+        enabled: 'yes',
         checksum: { algorithm: 'sha256', hash: calculateChecksum(BODY) },
         ...extra,
       };
@@ -149,6 +152,13 @@ describe('toSkillFrontmatter preserves verifiability', () => {
       parsed.frontmatter.signature as never
     );
     expect(result.valid).toBe(true);
+  });
+
+  // A key YAML 1.1 reads as a merge (`<<`) cannot be rendered so it reads back the
+  // same; the dossier is installed unconverted rather than unverifiable.
+  it('leaves a dossier unconverted when no rendering reads back as the same object', () => {
+    const raw = dossier({ name: 'x', title: 'X', '<<': { risk_level: 'low' } });
+    expect(toSkillFrontmatter(raw)).toBe(raw);
   });
 
   it('still detects tampering after conversion', async () => {

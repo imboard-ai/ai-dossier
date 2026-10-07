@@ -28,7 +28,7 @@
  * unchanged.
  */
 
-import { parseDossierContent, signatureCoverage } from '@ai-dossier/core';
+import { canonicalizeFrontmatter, parseDossierContent, signatureCoverage } from '@ai-dossier/core';
 import YAML from 'yaml';
 
 /** Keys an agent runtime reads first; the rest follow in their existing order. */
@@ -90,6 +90,33 @@ export function toSkillFrontmatter(rawContent: string): string {
     if (!(key in ordered)) ordered[key] = fm[key];
   }
 
-  const yaml = YAML.stringify(ordered, { lineWidth: 0 });
-  return `---\n${yaml}---\n${parsed.body}`;
+  // The reader parses YAML 1.1, where a plain `2026-09-29` is a date, not the string
+  // the signature covered. Keep the first rendering that reads back as the same
+  // object; if none does, install the dossier unconverted rather than unverifiable.
+  const expected = frontmatterIdentity(ordered);
+  for (const options of RENDERINGS) {
+    const out = `---\n${YAML.stringify(ordered, options)}---\n${parsed.body}`;
+    if (readsBackAs(out, expected)) return out;
+  }
+  return rawContent;
+}
+
+/** Plain scalars where they read back unchanged, else every string double-quoted. */
+const RENDERINGS: (YAML.DocumentOptions & YAML.ToStringOptions)[] = [
+  { lineWidth: 0, version: '1.1' },
+  { lineWidth: 0, version: '1.1', defaultStringType: 'QUOTE_DOUBLE', defaultKeyType: 'PLAIN' },
+];
+
+/** The frontmatter as a signature sees it, plus the signature block itself. */
+function frontmatterIdentity(fm: Record<string, unknown>): string {
+  return `${canonicalizeFrontmatter(fm)}\n${JSON.stringify(fm.signature)}`;
+}
+
+function readsBackAs(rendered: string, expected: string): boolean {
+  try {
+    const fm = parseDossierContent(rendered).frontmatter as Record<string, unknown>;
+    return frontmatterIdentity(fm) === expected;
+  } catch {
+    return false;
+  }
 }
