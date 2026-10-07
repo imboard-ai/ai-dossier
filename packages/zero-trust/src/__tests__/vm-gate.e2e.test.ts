@@ -12,7 +12,14 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { OutputCollector } from '../controller/output-collector';
 import type { AcceleratorRequest, ContainerProfile, VmHandle } from '../vm/adapter';
+import {
+  finishBoundary,
+  prepareBoundary,
+  probeBoundary,
+  runBoundaryVerdict,
+} from '../vm/boundary-probe';
 import { validateRequest } from '../vm/broker';
 import {
   assertBoundaryHeld,
@@ -262,4 +269,35 @@ describe.skipIf(!ENABLED)('execution profile gate (real VM)', () => {
     expect(evidence.violations).toEqual([]);
     assertBoundaryHeld(evidence);
   });
+
+  it(
+    'gathers the production session after provisioning ends',
+    async () => {
+      const runId = `production-${hex(4)}`;
+      const session = await prepareBoundary(stateDir);
+      let vm: VmHandle | undefined;
+      try {
+        vm = await adapter.create({
+          runId,
+          limits: LIMITS,
+          scope: 'container',
+          phase: 'provisioning',
+          proxyTarget: { host: '127.0.0.1', port: 9 },
+        });
+        await adapter.endProvisioning(vm);
+        await probeBoundary(session, adapter, vm, 'python');
+        const input = finishBoundary(session, new OutputCollector(), runId);
+        const verdict = runBoundaryVerdict([input], runId);
+        expect(verdict.runId).toBe(runId);
+        assertBoundaryHeld(verdict);
+        expect(
+          runBoundaryVerdict([JSON.parse(fs.readFileSync(session.artifactPath, 'utf8'))], runId)
+        ).toEqual(verdict);
+      } finally {
+        session.cleanup();
+        if (vm) await adapter.destroy(vm);
+      }
+    },
+    3 * 3600_000
+  );
 });
