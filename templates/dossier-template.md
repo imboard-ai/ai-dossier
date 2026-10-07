@@ -175,6 +175,15 @@
 ---
 
 <!--
+  AUTHORING TIP: This template uses the legacy JSON layout on purpose, because it is the
+  easiest to fill in by hand. `ai-dossier sign` (or `ai-dossier format`, for an unsigned file)
+  converts it to the Agent Skills layout: `name` and `description` at the top level, every
+  other field under `metadata` as a `dossier.<field>` string. Signing fills `name` from the
+  file name and `description` from `objective` when you leave them out. Delete this tip.
+  See: docs/reference/spec-shape.md
+-->
+
+<!--
 🤖 LLM EXECUTION GUIDE
 
 This is a DOSSIER - a self-contained LLM automation workflow with security verification.

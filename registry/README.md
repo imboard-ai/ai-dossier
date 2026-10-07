@@ -34,6 +34,8 @@ This package (`@ai-dossier/registry`) is an npm workspace within the [ai-dossier
 
 **Production**: https://dossier-registry.vercel.app
 
+**Publishing and signatures.** `POST /api/v1/dossiers` accepts both frontmatter layouts, indexes the logical fields and stores the submitted content byte for byte. When the content is signed, the registry verifies the signature before storing it, using the v1/v2/v3 scheme-to-layout rules in [Spec-Shaped Dossiers and Signature v3](../docs/reference/spec-shape.md#at-publish-time). A bad signature is refused with `INVALID_SIGNATURE`. AWS KMS signatures get a structural check only (the registry holds no cloud credentials), and clients verify them on install. Unsigned dossiers are accepted. The 201 response carries `signature: null | { status: "verified" | "not-checked", covers }`.
+
 ### Error Responses
 
 All endpoints return errors in a consistent JSON format:
@@ -51,7 +53,8 @@ Common error codes:
 
 | Status | Code | Description |
 |--------|------|-------------|
-| 400 | `INVALID_CONTENT` | Missing/malformed frontmatter |
+| 400 | `INVALID_CONTENT` | Missing/malformed frontmatter, in either the legacy or the spec (Agent Skills) layout |
+| 400 | `INVALID_SIGNATURE` | Signature does not verify, its `covers` scheme is unknown or does not match the file's layout, or its key/algorithm is unsupported (e.g. a legacy minisign key) |
 | 400 | `INVALID_FIELD` | Invalid field value (e.g. changelog or evidence not a string) |
 | 400 | `INVALID_EVIDENCE` | Evidence field is not a parseable/valid evidence record |
 | 400 | `EVIDENCE_MISMATCH` | Evidence record's dossier/version/checksum does not match the published content |

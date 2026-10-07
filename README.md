@@ -63,7 +63,7 @@ flowchart LR
 
 **Status**: Protocol v1.0 (stable spec) | CLI v0.14.0 | 15+ example skills | Active development
 
-> **File conventions**: Dossiers use `.ds.md` (immutable instructions) and `.dsw.md` (mutable working files). Frontmatter uses `---dossier` (JSON) instead of `---` (YAML) to avoid parser conflicts. [Learn more](docs/explanation/faq.md#what-do-the-dsmd-and-dswmd-file-extensions-mean)
+> **File conventions**: Dossiers use `.ds.md` (immutable instructions) and `.dsw.md` (mutable working files). Signed dossiers use standard `---` YAML frontmatter in the [Agent Skills](https://agentskills.io/specification) layout, so each one is also a valid skill; hand-written ones can use the readable `---dossier` JSON layout, which `ai-dossier sign` converts. [Learn more](docs/explanation/faq.md#which-frontmatter-layout-does-a-dossier-use)
 
 ---
 
@@ -153,7 +153,7 @@ Then create a dossier:
 npx @ai-dossier/cli create my-workflow
 ```
 
-This scaffolds a `.ds.md` file you can edit. A dossier is just Markdown with a JSON frontmatter block:
+This scaffolds a `.ds.md` file you can edit. A dossier is just Markdown with a metadata block on top, which you can write as JSON:
 
 ```markdown
 ---dossier
@@ -176,6 +176,8 @@ This scaffolds a `.ds.md` file you can edit. A dossier is just Markdown with a J
 ## Validation
 - Expected outcome was achieved
 ```
+
+When you sign it, `ai-dossier sign` rewrites the header as standard `---` YAML in the [Agent Skills](https://agentskills.io/specification) layout (`name` and `description` at the top, the other fields under `metadata` as `dossier.*` strings) and adds a signature that covers it. The signed file passes `skills-ref validate` and installs into Claude Code as is. See [Spec-Shaped Dossiers](docs/reference/spec-shape.md) for the walkthrough.
 
 See the [Authoring Guide](docs/guides/authoring-guidelines.md) for the full spec, or browse the [Dossier Registry](https://ai-dossier.dev/registry/) for real-world examples.
 
@@ -211,7 +213,7 @@ graph TB
     end
 
     subgraph Inputs["Dossier Files"]
-        DS[".ds.md\nImmutable instructions\nJSON frontmatter + Markdown"]
+        DS[".ds.md\nImmutable instructions\nfrontmatter + Markdown"]
         DSW[".dsw.md\nMutable working files\nExecution state"]
     end
 

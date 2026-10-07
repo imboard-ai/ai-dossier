@@ -140,7 +140,7 @@ cat hello.txt
 ## What You Learned
 
 - Dossier files use the `.ds.md` extension
-- The `---dossier` frontmatter contains structured JSON metadata
+- The `---dossier` frontmatter contains structured JSON metadata; when you sign a dossier, `ai-dossier sign` rewrites it in the [Agent Skills layout](../reference/spec-shape.md) so the signed file is also a valid skill
 - The markdown body contains human-readable instructions for AI agents
 - The CLI can validate, checksum, and inspect dossiers
 - Any LLM can execute a dossier — no vendor lock-in

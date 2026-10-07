@@ -61,7 +61,9 @@ Isolated (hard to search/organize)  →    Integrated (tooling-ready)
 
 ### Frontmatter Structure
 
-Dossier Schema metadata is embedded at the **top of the Markdown file** using JSON in a YAML-style code fence:
+Dossier Schema metadata is embedded at the **top of the Markdown file**. This page documents the fields in the **legacy layout**, where every field sits at the top level as JSON, because that is the easiest way to read and write them. The CLI now writes signed dossiers in the **spec layout** (the [Agent Skills](https://agentskills.io/specification) format): `name` and `description` at the top level, and every field below stored under `metadata` as a `dossier.<field>` string, so `risk_level` becomes `metadata["dossier.risk_level"]` and `requires_approval: true` becomes `dossier.requires_approval: 'true'`. Both layouts parse to the same fields, and everything on this page applies to either. See [Spec-Shaped Dossiers and Signature v3](spec-shape.md) for the layout, the value encoding and the walkthrough.
+
+In the legacy layout, the frontmatter is JSON in a YAML-style code fence:
 
 ```markdown
 ---dossier
@@ -120,11 +122,12 @@ Dossier Schema metadata is embedded at the **top of the Markdown file** using JS
 
 ### Key Rules
 
-1. **Delimiter**: Use `---dossier` to open and `---` to close the frontmatter block
-2. **Format**: JSON only (not YAML or TOML)
+1. **Delimiter**: legacy layout: `---dossier` to open and `---` to close. Spec layout: `---` and `---`
+2. **Format**: legacy layout: JSON (YAML is also accepted; TOML and other front-matter languages are refused). Spec layout: block-style YAML with every value quoted as a string, following the [strict-YAML portability rules](spec-shape.md#strict-yaml-portability)
 3. **Position**: Must be the very first content in the file (before any Markdown)
-4. **Validation**: Must conform to `dossier-schema.json`
-5. **Required Fields**: `dossier_schema_version`, `title`, `version`, `protocol_version`, `status`, `objective`
+4. **Validation**: Must conform to `dossier-schema.json`, which selects the spec-layout rules (`definitions.specShape`) when `metadata` holds a `dossier.*` key and the legacy rules otherwise
+5. **Required Fields**: `dossier_schema_version`, `title`, `version`, `protocol_version`, `status`, `objective`, `checksum`, `risk_level`, `requires_approval`; the spec layout also requires top-level `name` and `description`
+6. **Converting**: `ai-dossier sign` writes the spec layout; `ai-dossier format` converts an unsigned legacy file. See [Migrating from the legacy layout](spec-shape.md#migrating-from-the-legacy-layout)
 
 ---
 
@@ -793,6 +796,7 @@ For LLM Agents:
 #### `license`
 - **Type**: String (SPDX identifier)
 - **Example**: `"MIT"`, `"Apache-2.0"`
+- **Spec layout**: an Agent Skills field, so it stays at the top level (`license: 'MIT'`), never under `metadata`
 
 #### `homepage`
 - **Type**: String (URL)
@@ -1171,6 +1175,7 @@ You may choose to remove the Markdown metadata sections (like `## Metadata`) sin
 - **Legacy Dossiers**: Dossiers without schema frontmatter are still valid and can be executed by LLMs
 - **Gradual Adoption**: Add schema to new Dossiers first; migrate old ones over time
 - **Dual Format**: You can keep both JSON frontmatter and Markdown metadata sections during transition
+- **Legacy layout**: JSON frontmatter in the legacy layout keeps parsing, and its v1/v2 signatures keep verifying; signing converts it to the spec layout ([details](spec-shape.md#migrating-from-the-legacy-layout))
 
 ---
 

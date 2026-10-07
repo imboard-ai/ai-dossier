@@ -77,7 +77,7 @@ Common issues and how to resolve them
 
 ## Dossier Schema (v1.0.0)
 
-Dossiers support **structured JSON metadata** via frontmatter, providing deterministic validation and tooling foundation.
+Dossiers support **structured metadata** via frontmatter, providing deterministic validation and tooling foundation. You can write it as JSON (the legacy layout shown above); `ai-dossier sign` stores the same fields in the [Agent Skills layout](../reference/spec-shape.md), under `metadata` as `dossier.<field>` strings, so the signed file is also a valid skill.
 
 ### Required Fields
 

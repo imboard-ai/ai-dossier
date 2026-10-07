@@ -12,7 +12,7 @@ A dossier is an agent skill with a version and a signature (a `.ds.md` file), so
 
 - **`.ds.md`** — dossier files (immutable instructions, checksummed)
 - **`.dsw.md`** — working files (mutable execution state, not verified)
-- **`---dossier`** — frontmatter delimiter holding JSON metadata (not YAML). See the [FAQ](../explanation/faq.md#what-do-the-dsmd-and-dswmd-file-extensions-mean).
+- **Frontmatter** — `ai-dossier sign` writes standard `---` YAML in the [Agent Skills](https://agentskills.io/specification) layout, so a signed dossier is also a valid skill. Hand-written dossiers often use the `---dossier` JSON layout, which the CLI reads and converts. See the [FAQ](../explanation/faq.md#which-frontmatter-layout-does-a-dossier-use).
 
 ---
 

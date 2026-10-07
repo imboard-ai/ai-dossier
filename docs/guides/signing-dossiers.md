@@ -171,25 +171,23 @@ ai-dossier verify path/to/your-dossier.ds.md
 
 ### What the Signing Command Does
 
-When signing with AWS KMS, `ai-dossier sign` performs these steps:
+With either method, `ai-dossier sign` (CLI 0.92.0 and later) performs these steps:
 
-1. **Reads the dossier file** and parses frontmatter + body
-2. **Calculates checksum** (SHA256 of body only, not frontmatter)
-3. **Signs with AWS KMS**:
-   - Hashes the body content: `SHA256(body)`
-   - Calls AWS KMS Sign API with `MessageType: 'DIGEST'`
-   - Receives ECDSA signature from KMS
-4. **Updates frontmatter** with:
-   - `checksum`: The SHA256 hash
-   - `signature`: Object containing signature, public key, key ID, timestamps
-5. **Writes the file** back with updated frontmatter
+1. **Reads the dossier file** and parses frontmatter + body, in either layout
+2. **Drops any existing signature** and fills `name` (from the file name) and `description` (from `objective`) when either is absent
+3. **Calculates the checksum** (SHA256 of the body)
+4. **Builds the spec-shaped frontmatter**: `name`/`description` at the top level, every other field under `metadata` as a `dossier.<field>` string ([Agent Skills layout](../reference/spec-shape.md))
+5. **Signs the v3 payload**: the `dossier-signature-v3` tag, the canonical JSON of that frontmatter without the signature entry, and the body. With KMS the payload is hashed (`SHA256(payload)`) and sent to the KMS Sign API with `MessageType: 'DIGEST'`; with Ed25519 the payload is signed directly
+6. **Writes the file** in the spec layout, with `metadata["dossier.checksum"]` and `metadata["dossier.signature"]` (`covers: "spec-frontmatter+body"`). It reparses the output first and refuses to write if it does not read back as the same object
+
+Signing converts a legacy JSON-fronted dossier to the spec layout. That is how you migrate a dossier, including one whose old signature `format` would not touch. See [Migrating from the legacy layout](../reference/spec-shape.md#migrating-from-the-legacy-layout).
 
 ### Important Notes
 
-**Checksum Calculation**:
-- ✅ Only the **body** (content after `---`) is hashed
-- ❌ Frontmatter is NOT included in checksum
-- This allows updating metadata without invalidating signatures
+**What is covered**:
+- The **checksum** covers the body only (content after the closing `---`)
+- The **signature** covers the frontmatter and the body. Under v3 that is every top-level field and every `metadata` entry as written (other tools' keys included), except the signature entry itself. Editing any of them, `risk_level` included, invalidates the signature: re-sign after every change
+- Older signatures stay verifiable: `covers` absent (v1, body only) and `frontmatter+body` (v2) on legacy-layout files. Each scheme is accepted only on its own layout, and an unknown `covers` is refused. See the [verification matrix](../reference/spec-shape.md#verification-matrix)
 
 **Message Type**:
 - Signing uses `MessageType: 'DIGEST'` (signs the hash, not raw content)
@@ -322,9 +320,9 @@ GitHub Actions uses OpenID Connect (OIDC) to get temporary AWS credentials:
 The `ai-dossier verify` command runs an integrity stage followed by a risk assessment:
 
 **Stage 1: Integrity Check (checksum + signature)**
-1. Parse dossier file (separate frontmatter and body)
+1. Parse dossier file (separate frontmatter and body; legacy or spec layout)
 2. Calculate checksum: `SHA256(body)` and compare with `checksum.hash` in frontmatter
-3. If a signature is present, verify it (Ed25519 / AWS KMS) and check the signer against your trusted keys (`~/.dossier/trusted-keys.txt`)
+3. If a signature is present, rebuild the payload its `covers` value names (v1, v2 or v3, which must match the file's layout), verify it (Ed25519 / AWS KMS) and check the signer against your trusted keys (`~/.dossier/trusted-keys.txt`)
 
 **Risk assessment**
 - Evaluate `risk_level`, `risk_factors`, and `destructive_operations` from frontmatter
@@ -337,9 +335,12 @@ The `ai-dossier verify` command runs an integrity stage followed by a risk asses
 **Critical Implementation Detail**: Verification must match signing process.
 
 #### Signing Process (`ai-dossier sign`, KMS method)
+
+`payload` is the signed payload for the dossier's scheme: the body alone for v1, or the scheme tag, canonical frontmatter and body for v2/v3.
+
 ```javascript
-// 1. Hash the body
-const hash = crypto.createHash('sha256').update(body, 'utf8').digest();
+// 1. Hash the signed payload
+const hash = crypto.createHash('sha256').update(payload, 'utf8').digest();
 
 // 2. Sign with KMS using DIGEST mode
 const signCommand = new SignCommand({
@@ -352,7 +353,7 @@ const signCommand = new SignCommand({
 
 #### Verification Process (packages/core/src/signature.ts)
 ```typescript
-// 1. Hash the body (MUST match signing)
+// 1. Hash the same payload (MUST match signing)
 const hash = createHash('sha256').update(content, 'utf8').digest();
 
 // 2. Verify with KMS using DIGEST mode
@@ -423,7 +424,17 @@ ai-dossier verify examples/authoring/create-dossier.ds.md --verbose
 
 4. **Content Modified After Signing**
    - Checksum will also fail if body changed
+   - A frontmatter edit fails the signature but not the checksum
    - Re-sign the dossier
+
+5. **Scheme and layout disagree, or `covers` is unknown**
+   - `Spec-shaped dossier carries a frontmatter+body signature`: the file was converted to the spec layout without re-signing (for example by hand). Re-sign it with `ai-dossier sign`
+   - `Unsupported signature coverage "…"`: the signature uses a scheme your CLI does not know. Upgrade `@ai-dossier/cli` (v3 needs 0.91.0 or later to verify)
+   - See the [verification matrix](../reference/spec-shape.md#verification-matrix)
+
+### Registry Rejects a Publish with `INVALID_SIGNATURE`
+
+The registry verifies a submitted signature before it stores the dossier, using the same scheme and layout rules as `ai-dossier verify`. A 400 `INVALID_SIGNATURE` means the signature does not match the content, its `covers` value is unknown or does not fit the file's layout, the algorithm is unsupported, or the key is a legacy minisign (`RWT…`) key. Re-sign with `ai-dossier sign` and publish again. AWS KMS signatures get a structural check only at publish time and are verified cryptographically by clients on install. Unsigned dossiers are accepted.
 
 ### Signing Tool Errors
 
@@ -571,10 +582,15 @@ echo "✅ All dossiers verified"
 - [Security Architecture](../../security/ARCHITECTURE.md) - Overall security design
 - [AWS KMS Choice Decision](../../security/decisions/004-aws-kms-choice.md) - Why AWS KMS
 - [Dual Signature System](../../security/decisions/001-dual-signature-system.md) - KMS + Minisign
+- [Spec-Shaped Dossiers and Signature v3](../reference/spec-shape.md) - The Agent Skills layout, v1/v2/v3 signature schemes, migration
 
 ---
 
 ## Changelog
+
+### 2026-10-07
+- `sign` writes the Agent Skills (spec) layout with a v3 (`spec-frontmatter+body`) signature
+- Documented the v1/v2/v3 scheme-to-layout binding and the registry's publish-time signature check
 
 ### 2025-11-24
 - Initial guide created

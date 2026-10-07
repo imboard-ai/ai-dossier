@@ -124,7 +124,7 @@ This protocol defines **standard execution guidelines** for all dossiers — the
 
 > **Note**: This applies to dossiers (`.ds.md`) only. Working files (`.dsw.md`) bypass verification as they are mutable state files. See [Working Files Protocol](#-working-files-protocol-dswmd) for details.
 
-1. **Extract checksum** from frontmatter `checksum.hash`
+1. **Extract checksum** from frontmatter `checksum.hash` (in a spec-shaped dossier this is the JSON string in `metadata["dossier.checksum"]`; see [Spec-Shaped Dossiers](spec-shape.md))
 2. **Calculate SHA256** of dossier body (content after `---` closing frontmatter)
 3. **Compare** calculated hash with frontmatter hash
 
@@ -151,8 +151,8 @@ Actions:
 
 **If dossier has `signature` field**:
 
-1. **Extract signature** from frontmatter
-2. **Verify signature** using public_key (Ed25519 or AWS KMS, via `ai-dossier verify`)
+1. **Extract signature** from frontmatter (`signature`, or `metadata["dossier.signature"]` in a spec-shaped dossier)
+2. **Verify signature** using public_key (Ed25519 or AWS KMS, via `ai-dossier verify`) over the payload its `covers` value names: body only (v1), `frontmatter+body` (v2, legacy layout only) or `spec-frontmatter+body` (v3, spec layout only). An unknown `covers`, or a scheme that does not match the layout, is **INVALID** ([verification matrix](spec-shape.md#verification-matrix))
 3. **Check trust level**:
    - Is `public_key` in user's `~/.dossier/trusted-keys.txt`? Compare **normalized** keys —
      the same Ed25519 key has several legal encodings, so a string match gives false negatives.

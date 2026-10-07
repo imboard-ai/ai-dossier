@@ -7,6 +7,7 @@ Technical specifications and reference material for the Dossier project.
 - [Protocol](protocol.md) - The dossier file format and verification protocol
 - [Schema](schema.md) - Dossier metadata schema and validation rules
 - [Specification](specification.md) - Complete formal specification
+- [Spec-Shaped Dossiers and Signature v3](spec-shape.md) - The Agent Skills frontmatter layout, value encoding, signature schemes v1/v2/v3, migration
 
 ## API & CLI Reference
 
@@ -16,7 +17,7 @@ Technical specifications and reference material for the Dossier project.
 
 ## File Formats
 
-- Dossier files (`.ds.md`) - Markdown with JSON frontmatter
+- Dossier files (`.ds.md`) - Markdown with frontmatter in the Agent Skills (spec) layout or the legacy JSON layout
 - Working files (`.dsw.md`) - Mutable execution state
 - Signature formats - Ed25519 and AWS KMS signatures
 - [Plan artifacts (`plan:v1`)](plan-artifact.md) - Canonical per-issue plan comments

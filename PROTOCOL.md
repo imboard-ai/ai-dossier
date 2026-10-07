@@ -92,7 +92,7 @@ Use `get_journey_status({ journey_id })` at any point to inspect:
 
 ## External Reference Handling
 
-A dossier's checksum covers the body text, and a `covers: frontmatter+body` signature additionally binds the frontmatter — including `risk_level`, `requires_approval`, and `external_references`. The **content at those URLs is still NOT covered** by either. This means a signed dossier can reference external resources that bypass the trust chain.
+A dossier's checksum covers the body text, and a `covers: frontmatter+body` (v2) or `covers: spec-frontmatter+body` (v3) signature additionally binds the frontmatter — including `risk_level`, `requires_approval`, and `external_references`. The **content at those URLs is still NOT covered** by either. This means a signed dossier can reference external resources that bypass the trust chain.
 
 > Signatures written before v0.8.7 omit `covers` and protect the body alone; their frontmatter — including the risk metadata the runner gates on — is unauthenticated. Re-sign to bind it.
 
@@ -104,7 +104,7 @@ A dossier's checksum covers the body text, and a `covers: frontmatter+body` sign
 > | `frontmatter+body` | v2 | `dossier-signature-v2` tag, canonical JSON of the flat frontmatter minus `signature`, the body |
 > | `spec-frontmatter+body` | v3 | `dossier-signature-v3` tag, canonical JSON of the **on-disk** spec-shaped frontmatter minus `metadata["dossier.signature"]`, the body |
 >
-> Each scheme is bound to a frontmatter shape: a spec-shaped dossier (Agent Skills fields at the top level, Dossier fields under `metadata` as `dossier.<field>` strings — see [#1088](https://github.com/imboard-ai/ai-dossier/issues/1088#issuecomment-6033169047)) verifies only under v3, and a legacy flat dossier only under v1 or v2. `@ai-dossier/core` 1.16.0 reads and verifies v3; nothing writes it yet.
+> Each scheme is bound to a frontmatter shape: a spec-shaped dossier (Agent Skills fields at the top level, Dossier fields under `metadata` as `dossier.<field>` strings) verifies only under v3, and a legacy flat dossier only under v1 or v2. `@ai-dossier/core` 1.16.0 reads and verifies v3; since `@ai-dossier/cli` 0.92.0 (core 1.17.0) `ai-dossier sign` writes the spec shape with a v3 signature, and the registry checks signatures at publish (400 `INVALID_SIGNATURE`). Layout, value encoding, verification matrix and migration: [Spec-Shaped Dossiers and Signature v3](docs/reference/spec-shape.md).
 
 ### Frontmatter Fields
 

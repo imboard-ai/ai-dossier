@@ -325,19 +325,42 @@ registry.register(myRule);
 
 ---
 
+## Spec Shape (Agent Skills layout)
+
+Read and write the spec-shaped layout: Agent Skills fields at the top level, every other Dossier field under `metadata` as a `dossier.<field>` string. The format, value encoding and strict-YAML rules are specified in [Spec-Shaped Dossiers and Signature v3](spec-shape.md).
+
+| Export | Description |
+|---|---|
+| `toSpecFrontmatter(logical)` | Flat logical frontmatter → spec-shaped object. Agent Skills fields must be strings; `metadata` is omitted when empty. Throws `SpecShapeError` for a value that cannot be encoded losslessly (`NaN`, `Infinity`, a `Date`) |
+| `fromSpecFrontmatter(spec)` | Spec-shaped object → flat logical frontmatter, rejecting a Dossier field at the top level, `dossier.<agent-skills-field>`, non-string values and duplicate fields. Non-`dossier.` metadata keys are skipped |
+| `encodeSpecValue(value)` / `decodeSpecValue(text)` | The lossless value encoding: a string stays as is unless it would parse as JSON (then it is JSON-quoted); anything else is canonical JSON. Decode is `JSON.parse` with a raw-string fallback |
+| `isSpecShapedFrontmatter(fm)` | Type guard: `metadata` is a map with at least one `dossier.*` key |
+| `SPEC_TOP_LEVEL_FIELDS`, `DOSSIER_METADATA_PREFIX` | `name`, `description`, `license`, `compatibility`, `allowed-tools`; `"dossier."` |
+| `SpecShapeError` | Thrown for an ambiguous spec-shaped frontmatter or a value that cannot be written portably |
+| `renderSpecDossier(logical, body, original?)` | File content in the spec layout for a logical frontmatter and body. Pass the parsed `original` to keep its non-`dossier.` metadata keys |
+| `serializeSpecDossier(spec, body)` | File content for an already spec-shaped object: block YAML, every value quoted, DEL/C1/NEL refused, unsafe keys quoted. Reparses the result and throws `SpecShapeError` if it does not round-trip |
+| `buildSpecFrontmatter(logical, original?)` | `toSpecFrontmatter` plus the original file's non-`dossier.` metadata keys. Sign this exact object: `buildSignedPayload(buildSpecFrontmatter(fm, parsed), body, 'spec-frontmatter+body')` |
+| `withSpecField(rawFrontmatter, field, value)` | The on-disk spec object with one `dossier.<field>` replaced and every other string untouched, so only that field changes what a v3 signature covers |
+| `withSkillIdentity(logical, nameSource?)` | Fills `name` (from a registry or file path, else the title) and `description` (from `objective`) when absent; present values are kept |
+| `deriveSkillName(source)` | Agent Skills `name` from a path or title: last segment, extension stripped, lowercased, other characters collapsed to `-`, at most 64 characters |
+| `foreignMetadata(rawFrontmatter)` | The `metadata` entries outside `dossier.*` |
+| `SPEC_SHAPE_WRITE_UNSUPPORTED` | Deprecated; nothing refuses spec-shaped input any more |
+
 ## Formatting
 
 ### `formatDossierContent(content: string, options?: Partial<FormatOptions>): FormatResult`
 
-Format dossier content — sort frontmatter keys and update checksum.
+Format dossier content — sort frontmatter keys and update checksum. Unsigned legacy input is converted to the spec layout by default (`toSpec`); signed legacy input stays legacy, because converting would orphan its signature. Spec-shaped input is re-serialized from its on-disk object, keeping every value's exact string; the body is still whitespace-normalized, and when that changes it the checksum is updated and a v3 signature no longer verifies.
 
 **Options (`FormatOptions`):**
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `indent` | `number` | `2` | JSON indentation spaces |
-| `sortKeys` | `boolean` | `true` | Sort frontmatter keys alphabetically |
+| `indent` | `number` | `2` | JSON indentation spaces (legacy output only) |
+| `sortKeys` | `boolean` | `true` | Sort frontmatter keys into the conventional order (unknown keys alphabetically, `checksum`/`signature` last); legacy input only |
 | `updateChecksum` | `boolean` | `true` | Recalculate and update checksum |
+| `toSpec` | `boolean` | `true` | Convert unsigned legacy input to the spec layout |
+| `nameSource` | `string` | — | Registry or file path to derive `name` from when absent |
 
 **Returns:** `FormatResult` — `{ formatted: string, changed: boolean }`
 
@@ -542,6 +565,8 @@ interface FormatOptions {
   indent: number;      // default: 2
   sortKeys: boolean;   // default: true
   updateChecksum: boolean; // default: true
+  toSpec: boolean;     // default: true
+  nameSource?: string;
 }
 
 interface FormatResult {

@@ -5,7 +5,7 @@
 - [Dossiers vs. Alternatives](#dossiers-vs-alternatives) — [Isn't a dossier just a skill?](#isnt-a-dossier-just-a-skill)
 - [Protocol & Governance](#protocol--governance)
 - [Security & Trust](#security--trust)
-- [Technical Concerns](#technical-concerns) (file extensions, `---dossier` delimiter, determinism)
+- [Technical Concerns](#technical-concerns) (file extensions, frontmatter layouts, determinism)
 - [Practical Usage](#practical-usage)
 
 ---
@@ -922,17 +922,16 @@ Dossier files use two extensions:
 
 **Why not just `.md`?** The `.ds.md` extension makes dossiers discoverable by tooling (CLI, MCP server, IDE plugins) without needing to parse every markdown file in a project.
 
-### Why does the frontmatter use `---dossier` instead of `---`?
+### Which frontmatter layout does a dossier use?
 
-Standard YAML frontmatter uses `---` as its delimiter. Dossier frontmatter uses `---dossier` intentionally:
+Dossiers can be written in two frontmatter layouts that mean the same thing:
 
-1. **Disambiguation** — Tools like Jekyll, Hugo, and VS Code treat `---` as YAML frontmatter. Since dossier frontmatter contains **JSON** (not YAML), using `---` would cause parsing errors or incorrect syntax highlighting in many editors.
-2. **Explicit identification** — `---dossier` signals to parsers that this block is a dossier metadata block, not generic frontmatter. This enables fast detection without reading the full file.
-3. **Coexistence** — A project can have both standard frontmatter files and dossier files without conflicts.
+- **Spec layout, `---`** (what `ai-dossier sign` writes since CLI 0.92.0). The file is a valid [Agent Skill](https://agentskills.io/specification): `name` and `description` at the top level, every other Dossier field under `metadata` as a `dossier.<field>` string, all in block-style YAML. Because it is standard `---` YAML frontmatter, Claude Code, opencode and the `skills-ref` validator read the signed file as is, with no conversion step.
+- **Legacy layout, `---dossier`**. Every field at the top level as JSON. `---dossier` keeps editors and site generators that treat `---` as YAML from misreading a JSON block, and it is still the easiest layout to write by hand, which is why the [authoring template](../../templates/dossier-template.md) uses it. `ai-dossier sign` (or `ai-dossier format`, for an unsigned file) converts it.
 
-**Tradeoff**: Some markdown previewers won't render the frontmatter as hidden metadata — they'll show it as text. This is expected. The frontmatter is meant for tooling (CLI, MCP server, registries), not for human reading in a previewer.
+The CLI, MCP server and registry read both layouts into the same fields. A signed spec-layout file uses signature v3, which covers the frontmatter as written, while legacy files keep their v1/v2 signatures. See [Spec-Shaped Dossiers and Signature v3](../reference/spec-shape.md).
 
-If your editor shows the JSON block as visible text, that's normal behavior and does not affect execution.
+**Tradeoff**: Some markdown previewers show a `---dossier` JSON block as visible text instead of hiding it as metadata. That is expected and does not affect execution.
 
 ### LLMs are non-deterministic. How can I rely on dossiers for production?
 
