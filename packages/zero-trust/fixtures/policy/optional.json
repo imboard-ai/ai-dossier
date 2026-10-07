@@ -1,16 +1,16 @@
 {
   "actor": "upstream_maintainer",
   "slice": "S2",
-  "expectedOutcome": "assignment_optional_baseline_permitted",
+  "expectedOutcome": "negated_assignment_restricts_baseline_never_permitted",
   "files": {
     "CONTRIBUTING.md": "No assignment is needed.\nFeel free to open a PR.\nPre-existing test failures are allowed."
   },
   "expected": {
     "ai": "silent",
-    "assignment": "not_required",
-    "directPr": "welcomed",
+    "assignment": "required",
+    "directPr": "unclear",
     "draftRequired": false,
     "receiptBlockAllowed": true,
-    "baselineFailuresPermitted": true
+    "baselineFailuresPermitted": false
   }
 }

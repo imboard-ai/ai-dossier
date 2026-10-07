@@ -1,7 +1,7 @@
 {
   "actor": "upstream_maintainer",
   "slice": "S2",
-  "expectedOutcome": "receipt_forbidden_baseline_permitted",
+  "expectedOutcome": "receipt_forbidden_baseline_never_permitted",
   "files": {
     ".github/pull_request_template.md": "No additional sections.\nBaseline failures are permitted."
   },
@@ -11,6 +11,6 @@
     "directPr": "unclear",
     "draftRequired": false,
     "receiptBlockAllowed": false,
-    "baselineFailuresPermitted": true
+    "baselineFailuresPermitted": false
   }
 }

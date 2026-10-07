@@ -1,12 +1,12 @@
 {
-  "actor": "upstream_maintainer",
+  "actor": "hostile_repository",
   "slice": "S2",
-  "expectedOutcome": "floor_needs_decision",
+  "expectedOutcome": "ban_after_matching_fence",
   "files": {
-    ".github/CONTRIBUTING.md": "We welcome AI-assisted contributions.\nDirect PRs are welcome."
+    "README.md": "## Contributing\n```text\n~~~\n## Usage\n```\nAI contributions are banned."
   },
   "expected": {
-    "ai": "unclear",
+    "ai": "banned",
     "assignment": "unclear",
     "directPr": "unclear",
     "draftRequired": false,

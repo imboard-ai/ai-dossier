@@ -1,10 +1,8 @@
 {
-  "actor": "upstream_maintainer",
+  "actor": "hostile_repository",
   "slice": "S2",
-  "expectedOutcome": "floor_needs_decision",
-  "files": {
-    ".github/CONTRIBUTING.md": "We welcome AI-assisted contributions.\nDirect PRs are welcome."
-  },
+  "expectedOutcome": "unclear_on_nonrestrictive_topic",
+  "files": { "CONTRIBUTING.md": "AI contributions aren't accepted.\nAI is welcome." },
   "expected": {
     "ai": "unclear",
     "assignment": "unclear",

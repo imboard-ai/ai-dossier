@@ -1,0 +1,14 @@
+{
+  "actor": "hostile_repository",
+  "slice": "S2",
+  "expectedOutcome": "never_permissive",
+  "files": { "CONTRIBUTING.md": "Baseline failures are allowed, only in examples." },
+  "expected": {
+    "ai": "silent",
+    "assignment": "unclear",
+    "directPr": "unclear",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": false
+  }
+}

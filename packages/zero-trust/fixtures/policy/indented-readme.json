@@ -1,0 +1,14 @@
+{
+  "actor": "hostile_repository",
+  "slice": "S2",
+  "expectedOutcome": "usage_excluded",
+  "files": { "README.md": "## Contributing\nRun tests.\n   ## Usage\nAI is welcome." },
+  "expected": {
+    "ai": "silent",
+    "assignment": "unclear",
+    "directPr": "unclear",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": false
+  }
+}

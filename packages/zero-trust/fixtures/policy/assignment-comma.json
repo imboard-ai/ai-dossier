@@ -1,0 +1,14 @@
+{
+  "actor": "hostile_repository",
+  "slice": "S2",
+  "expectedOutcome": "never_permissive",
+  "files": { "CONTRIBUTING.md": "Assignment is optional, except for new contributors." },
+  "expected": {
+    "ai": "silent",
+    "assignment": "unclear",
+    "directPr": "unclear",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": false
+  }
+}

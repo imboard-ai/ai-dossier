@@ -1,12 +1,12 @@
 {
-  "actor": "upstream_maintainer",
+  "actor": "hostile_repository",
   "slice": "S2",
-  "expectedOutcome": "floor_needs_decision",
+  "expectedOutcome": "never_permissive",
   "files": {
-    ".github/CONTRIBUTING.md": "We welcome AI-assisted contributions.\nDirect PRs are welcome."
+    "CONTRIBUTING.md": "Baseline failures are allowed and unrelated failures require committee approval."
   },
   "expected": {
-    "ai": "unclear",
+    "ai": "silent",
     "assignment": "unclear",
     "directPr": "unclear",
     "draftRequired": false,

@@ -1,0 +1,14 @@
+{
+  "actor": "hostile_repository",
+  "slice": "S2",
+  "expectedOutcome": "banned_with_citation",
+  "files": { "CONTRIBUTING.md": "We do not accept AI-generated or LLM contributions." },
+  "expected": {
+    "ai": "banned",
+    "assignment": "unclear",
+    "directPr": "unclear",
+    "draftRequired": false,
+    "receiptBlockAllowed": true,
+    "baselineFailuresPermitted": false
+  }
+}

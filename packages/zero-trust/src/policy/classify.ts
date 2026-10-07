@@ -2,12 +2,8 @@ import { createHash } from 'node:crypto';
 import { canonicalJson } from '../receipt/schema';
 import { assertNoSecrets } from '../redaction';
 import { type PolicyFile, validatePolicyFiles } from './discover';
-import {
-  POLICY_AI_MENTION,
-  POLICY_PERMISSION_CAVEAT,
-  POLICY_RULES,
-  type PolicyCategory,
-} from './rules';
+import { policyRegions } from './regions';
+import { POLICY_RULES, POLICY_TOPICS, type PolicyCategory, type PolicyDimension } from './rules';
 
 export interface PolicyCitation {
   readonly path: string;
@@ -32,23 +28,20 @@ export interface PolicyAssessment {
 }
 
 const RULES = POLICY_RULES.map((rule) => ({ ...rule, regex: new RegExp(rule.pattern, 'iu') }));
-const AI_MENTION = new RegExp(POLICY_AI_MENTION, 'iu');
-const CAVEAT = new RegExp(POLICY_PERMISSION_CAVEAT, 'iu');
+const TOPICS = POLICY_TOPICS.map((topic) => ({ ...topic, regex: new RegExp(topic.pattern, 'iu') }));
 const CITATION_LIMIT = 128;
 // Worst case: 128 * 200 six-byte JSON escapes, plus bounded paths/identities.
 const POLICY_JSON_LIMIT = 256 * 1024;
-const PERMISSIVE = new Set<PolicyCategory>([
-  'ai_welcome',
-  'assignment_optional',
-  'direct_pr',
-  'baseline_permitted',
-]);
-const AI_VALUES = {
-  ai_ban: 'banned',
-  ai_approval: 'requires_approval',
-  ai_disclosure: 'disclosure_required',
-  ai_welcome: 'welcomed',
-} as const;
+const CATEGORY_DIMENSION: Record<PolicyCategory, PolicyDimension> = {
+  ai_ban: 'ai',
+  ai_approval: 'ai',
+  ai_disclosure: 'ai',
+  assignment_required: 'assignment',
+  discussion_first: 'directPr',
+  draft_required: 'draft',
+  template_fixed: 'template',
+  baseline_forbidden: 'baseline',
+};
 
 function compare(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
@@ -57,32 +50,20 @@ function citationKey(c: PolicyCitation): string {
   return canonicalJson(c);
 }
 
-/** README prose contributes only inside contribution headings. Line numbers stay
- * those of the original blob. Nested headings stay within the enclosing section. */
-function policyLines(file: PolicyFile): { text: string; line: number }[] {
-  const lines = file.content.split(/\r\n|\n|\r/u);
-  let sectionDepth = 0;
-  let fenced = false;
-  return lines.flatMap((text, index) => {
-    if (file.path !== 'README.md') return [{ text, line: index + 1 }];
-    if (/^\s*(?:```|~~~)/u.test(text)) fenced = !fenced;
-    const heading = !fenced && /^(#{1,6})\s+(.+?)\s*#*\s*$/u.exec(text);
-    const setext =
-      !fenced && index + 1 < lines.length && /^\s*(?:={3,}|-{3,})\s*$/u.test(lines[index + 1]);
-    const depth = heading
-      ? heading[1].length
-      : setext
-        ? /^\s*=/u.test(lines[index + 1])
-          ? 1
-          : 2
-        : 0;
-    if (depth) {
-      if (/contribut/iu.test(heading ? heading[2] : text))
-        sectionDepth = sectionDepth ? Math.min(sectionDepth, depth) : depth;
-      else if (sectionDepth && depth <= sectionDepth) sectionDepth = 0;
-    }
-    return sectionDepth ? [{ text, line: index + 1 }] : [];
-  });
+/** A comma stays inside its sentence. Protect A.I. before punctuation splitting. */
+function units(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/[\u2018\u2019\u201b\u02bc]/gu, "'")
+    .replace(/[\u201c\u201d]/gu, '"')
+    .replace(/\bwon't\b/gu, 'will not')
+    .replace(/\bcan't\b/gu, 'cannot')
+    .replace(/n't\b/gu, ' not')
+    .replace(/\ba\.i\.(?=\W|$)/gu, 'ai')
+    .replace(/^\s*(?:[-+*]|\d{1,9}[.)])\s+/u, '')
+    .split(/[.!?;]/u)
+    .map((unit) => unit.replace(/\s+/gu, ' ').trim())
+    .filter(Boolean);
 }
 
 function excerpt(text: string): string {
@@ -97,103 +78,83 @@ function excerpt(text: string): string {
   }
 }
 
-/** Rules only. Conflicting dimensions and unrecognized AI prose require judgment.
+/** Deterministic restriction floor only: no permission can be inferred from text.
  * Citations retain the first occurrence of each rule per blob (at most 128 total).
  * Assessment still examines every line even once the evidence cap is reached. */
 export function classifyPolicy(files: readonly PolicyFile[]): PolicyAssessment {
   validatePolicyFiles(files);
-  const categories = new Set<PolicyCategory>();
   const citations: PolicyCitation[] = [];
-  let unknownAi = false;
-  let unknownAssignment = false;
-  let unknownDirect = false;
-  let unknownBaseline = false;
+  const dimensions = Object.fromEntries(
+    TOPICS.map(({ dimension }) => [
+      dimension,
+      {
+        seen: false,
+        unclear: false,
+        restrictions: new Set<PolicyCategory>(),
+      },
+    ])
+  ) as Record<
+    PolicyDimension,
+    { seen: boolean; unclear: boolean; restrictions: Set<PolicyCategory> }
+  >;
   for (const file of [...files].sort((a, b) => compare(a.path, b.path))) {
     const cited = new Set<string>();
-    for (const { text, line } of policyLines(file)) {
-      // Matching view only: normalize spacing and separate independent clauses.
-      // Original blob text/line remains the citation; no text is executed.
-      const clauses = text.replace(/\s+/gu, ' ').split(/[.!?;,]|\bbut\b/iu);
-      for (const clause of clauses) {
-        let matchedAi = false;
-        let matchedAssignment = false;
-        let matchedDirect = false;
-        let matchedBaseline = false;
-        for (const rule of RULES) {
-          if (!rule.regex.test(clause)) continue;
-          const caveatText =
-            rule.category === 'assignment_optional' ? clause.replace(rule.regex, '') : clause;
-          if (PERMISSIVE.has(rule.category) && CAVEAT.test(caveatText)) continue;
-          categories.add(rule.category);
-          if (rule.category.startsWith('ai_')) matchedAi = true;
-          if (rule.category.startsWith('assignment_')) matchedAssignment = true;
-          if (
-            rule.category === 'direct_pr' ||
-            rule.category === 'discussion_first' ||
-            rule.category === 'draft_required'
-          )
-            matchedDirect = true;
-          if (rule.category.startsWith('baseline_')) matchedBaseline = true;
-          if (!cited.has(rule.id) && citations.length < CITATION_LIMIT) {
-            citations.push(
-              Object.freeze({ path: file.path, line, ruleId: rule.id, excerpt: excerpt(text) })
+    function cite(ruleId: string, text: string, line: number): void {
+      if (!cited.has(ruleId) && citations.length < CITATION_LIMIT) {
+        citations.push(Object.freeze({ path: file.path, line, ruleId, excerpt: excerpt(text) }));
+        cited.add(ruleId);
+      }
+    }
+    for (const region of policyRegions(file)) {
+      for (const { text, line } of region.lines) {
+        for (const unit of units(text)) {
+          for (const topic of TOPICS) {
+            if (!topic.regex.test(unit)) continue;
+            const state = dimensions[topic.dimension];
+            state.seen = true;
+            const restrictions = RULES.filter(
+              (rule) =>
+                CATEGORY_DIMENSION[rule.category] === topic.dimension && rule.regex.test(unit)
             );
-            cited.add(rule.id);
+            if (region.ambiguous || !restrictions.length) {
+              state.unclear = true;
+              cite(
+                region.ambiguous ? `markdown-ambiguous-${topic.dimension}` : topic.id,
+                text,
+                line
+              );
+            }
+            for (const restriction of restrictions) {
+              state.restrictions.add(restriction.category);
+              cite(restriction.id, text, line);
+            }
           }
         }
-        if (
-          !matchedAi &&
-          AI_MENTION.test(clause) &&
-          !/^\s*#{1,6}\s+(?:AI|LLM)\s+policy\s*$/iu.test(clause)
-        )
-          unknownAi = true;
-        // A second unparsed AI assertion must not be swallowed by a recognized
-        // match's gap. Multiple mentions in one clause are conservative ambiguity.
-        if ((clause.match(new RegExp(POLICY_AI_MENTION, 'giu'))?.length ?? 0) > 1) unknownAi = true;
-        if (!matchedAssignment && /\bassign(?:ment|ed)\b/iu.test(clause)) unknownAssignment = true;
-        if (!matchedDirect && /\b(?:PRs?|pull requests?)\b/iu.test(clause)) unknownDirect = true;
-        if (
-          !matchedBaseline &&
-          /\b(?:baseline|pre[- ]existing|unrelated) (?:test )?failures\b/iu.test(clause)
-        )
-          unknownBaseline = true;
       }
     }
   }
-  const aiMatches = (Object.keys(AI_VALUES) as (keyof typeof AI_VALUES)[]).filter((category) =>
-    categories.has(category)
-  );
-  const ai =
-    unknownAi || aiMatches.length > 1
+  const ai = !dimensions.ai.seen
+    ? 'silent'
+    : dimensions.ai.unclear
       ? 'unclear'
-      : aiMatches.length === 1
-        ? AI_VALUES[aiMatches[0]]
-        : 'silent';
+      : dimensions.ai.restrictions.has('ai_ban')
+        ? 'banned'
+        : dimensions.ai.restrictions.has('ai_approval')
+          ? 'requires_approval'
+          : 'disclosure_required';
   const directPr =
-    unknownDirect || categories.has('direct_pr') === categories.has('discussion_first')
-      ? 'unclear'
-      : categories.has('direct_pr')
-        ? 'welcomed'
-        : 'discussion_first';
-  const assignment = unknownAssignment
-    ? 'unclear'
-    : categories.has('assignment_required')
-      ? categories.has('assignment_optional')
-        ? 'unclear'
-        : 'required'
-      : categories.has('assignment_optional') || directPr === 'welcomed'
-        ? 'not_required'
-        : 'unclear';
+    dimensions.directPr.seen && !dimensions.directPr.unclear ? 'discussion_first' : 'unclear';
+  // The legacy silence exception needs directPr=welcomed, which this floor
+  // cannot produce; assignment silence therefore remains unclear.
+  const assignment =
+    dimensions.assignment.seen && !dimensions.assignment.unclear ? 'required' : 'unclear';
   return Object.freeze({
     ai,
     assignment,
     directPr,
-    draftRequired: categories.has('draft_required'),
-    receiptBlockAllowed: !categories.has('template_fixed'),
-    baselineFailuresPermitted:
-      categories.has('baseline_permitted') &&
-      !categories.has('baseline_forbidden') &&
-      !unknownBaseline,
+    draftRequired: dimensions.draft.seen,
+    receiptBlockAllowed: !dimensions.template.seen,
+    baselineFailuresPermitted: false,
     citations: Object.freeze(citations.sort((a, b) => compare(citationKey(a), citationKey(b)))),
   });
 }

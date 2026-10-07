@@ -1,10 +1,8 @@
 {
   "actor": "upstream_maintainer",
   "slice": "S2",
-  "expectedOutcome": "floor_needs_decision",
-  "files": {
-    ".github/CONTRIBUTING.md": "We welcome AI-assisted contributions.\nDirect PRs are welcome."
-  },
+  "expectedOutcome": "decision_required",
+  "files": { "CONTRIBUTING.md": "AI contributions are welcome." },
   "expected": {
     "ai": "unclear",
     "assignment": "unclear",

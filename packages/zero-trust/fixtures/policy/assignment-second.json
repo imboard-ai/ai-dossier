@@ -1,9 +1,9 @@
 {
-  "actor": "upstream_maintainer",
+  "actor": "hostile_repository",
   "slice": "S2",
-  "expectedOutcome": "assignment_required",
+  "expectedOutcome": "restriction_wins_inside_one_unit",
   "files": {
-    "docs/CONTRIBUTING.md": "You must be assigned before contributing.\nDirect pull requests are welcome."
+    "CONTRIBUTING.md": "Assignment is optional and assignment requires committee approval."
   },
   "expected": {
     "ai": "silent",
