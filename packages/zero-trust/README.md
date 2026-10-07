@@ -361,6 +361,8 @@ flags, issue number/URL/state/lock/PR marker, author (login/URL), author associa
 labels, assignees (login/URL), creation time, normalized contributor, referenced
 PRs (number/URL/repository/state/merged/author) and assignment/connection events
 (nullable REST ID/time/actor and assignee or PR URL, plus update time when supplied).
+Reference events also retain `identityFields`, an immutable path-to-value map of every
+present identity field, preserving exact spelling for field-sensitive evidence digests.
 Cross-references without REST IDs use their complete normalized event/PR identity
 for duplicate detection; other retained events require numeric IDs. Ordinary accounts
 and GitHub App bots (`<app>[bot]`, type `Bot`, matching GitHub App profile URL) are
@@ -391,8 +393,12 @@ issue references and other event kinds do not judge prose. Current PR state is
 hydrated once per distinct parsed public GitHub identity via a fixed `/repos/.../pulls/...`
 path (including cross-repository references), never by fetching repository-provided
 URLs. Connected events without a resolvable source issue or subject identity are
-unknown. All supplied source number, HTML URL, PR marker URL and subject identities
-must agree, including source API URLs and marker/subject HTML URLs when supplied.
+unknown. A single identity helper requires every present number and URL identity in
+the event, source issue, subject and PR marker to agree on owner/repository/number
+with each other and the hydrated PR. This includes `url`, `html_url`, `diff_url` and
+`patch_url`; optional absent fields are fine, contradictory or malformed fields are
+unknown. Repository identity comparison ignores case, but exact supplied values are
+digest-bound. An invalid identity returns unknown without a digest or partial facts.
 Ordinary issue references require consistent non-PR identity. Duplicate
 relevant event identities and inconsistent merged/open state are unknown. Each page
 is synchronously validated/detached before PR hydration; later reader mutations cannot

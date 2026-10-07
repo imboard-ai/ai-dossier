@@ -28,6 +28,8 @@ export interface EligibilityEvent {
   readonly actor: EligibilityActor | null;
   readonly assignee?: EligibilityActor;
   readonly pullUrl?: string;
+  /** Exact present identity fields, detached before hydration and included in the digest. */
+  readonly identityFields?: Readonly<Record<string, string | number>>;
 }
 export interface EligibilityFacts {
   readonly repositoryId: number;
@@ -153,16 +155,18 @@ interface PullTarget {
   readonly repo: string;
   readonly number: number;
 }
-function pullTarget(value: unknown, kind: 'pull' | 'issue' = 'pull'): PullTarget {
+function pullTarget(value: unknown, kind: 'pull' | 'issue' | 'reference' = 'pull'): PullTarget {
   const match =
-    /^https:\/\/(?:api\.github\.com\/repos|github\.com)\/([^/]+)\/([^/]+)\/(pulls|pull|issues)\/([1-9]\d*)$/u.exec(
+    /^https:\/\/(?:api\.github\.com\/repos|github\.com)\/([^/]+)\/([^/]+)\/(pulls|pull|issues)\/([1-9]\d*)(?:\.(?:diff|patch))?$/u.exec(
       text(value)
     );
   if (
     !match ||
     !isGitHubLogin(match[1]) ||
     !isRepoName(match[2]) ||
-    (kind === 'issue' ? match[3] !== 'issues' : match[3] === 'issues')
+    (kind === 'issue' ? match[3] !== 'issues' : kind === 'pull' && match[3] === 'issues') ||
+    ((text(value).endsWith('.diff') || text(value).endsWith('.patch')) &&
+      (match[3] !== 'pull' || !text(value).startsWith('https://github.com/')))
   )
     throw new Error();
   return Object.freeze({
@@ -174,6 +178,46 @@ function pullTarget(value: unknown, kind: 'pull' | 'issue' = 'pull'): PullTarget
 
 function pullKey(binding: PullTarget): string {
   return `${binding.owner}/${binding.repo}/${binding.number}`;
+}
+
+/** One identity contract for event/source/subject/marker and hydrated REST objects. */
+function referenceIdentity(
+  value: Record<string, unknown>,
+  kind: 'pull' | 'issue',
+  expected?: PullTarget
+): { binding: PullTarget; fields: Readonly<Record<string, string | number>> } {
+  const fields: Record<string, string | number> = {};
+  const tuples: PullTarget[] = expected ? [expected] : [];
+  const numbers: number[] = [];
+  function visit(record: Record<string, unknown>, path: string): void {
+    for (const [key, raw] of Object.entries(record)) {
+      const field = path ? `${path}.${key}` : key;
+      if (key === 'number') {
+        const number = positive(raw);
+        numbers.push(number);
+        fields[field] = number;
+      } else if (['url', 'html_url', 'diff_url', 'patch_url'].includes(key)) {
+        const url = text(raw);
+        // GitHub represents source PRs through the issues API as well as pull URLs.
+        const binding = pullTarget(url, key === 'url' ? 'reference' : kind);
+        if (key === 'diff_url' && !url.endsWith('.diff')) throw new Error();
+        if (key === 'patch_url' && !url.endsWith('.patch')) throw new Error();
+        tuples.push(binding);
+        fields[field] = url;
+      } else if (['source', 'issue', 'subject', 'pull_request'].includes(key)) {
+        visit(object(raw), field);
+      }
+    }
+  }
+  visit(value, '');
+  const binding = tuples[0];
+  if (
+    !binding ||
+    tuples.some((tuple) => pullKey(tuple) !== pullKey(binding)) ||
+    numbers.some((number) => number !== binding.number)
+  )
+    throw new Error();
+  return { binding, fields: Object.freeze(fields) };
 }
 
 interface TimelineDescriptor {
@@ -210,45 +254,16 @@ function timelinePage(value: unknown): { count: number; entries: TimelineDescrip
     }
     const source = entry.source === undefined ? null : object(entry.source);
     const linked = source ? object(source.issue) : null;
-    const subject = entry.subject === undefined ? null : object(entry.subject);
     if (event === 'cross-referenced' && linked && !('pull_request' in linked)) {
-      const ordinary = pullTarget(linked.html_url, 'issue');
-      if (positive(linked.number) !== ordinary.number || subject !== null) throw new Error();
-      if (
-        linked.url !== undefined &&
-        pullKey(pullTarget(linked.url, 'issue')) !== pullKey(ordinary)
-      )
-        throw new Error();
+      referenceIdentity(entry, 'issue');
       continue;
     }
-    const identities: PullTarget[] = [];
-    if (linked) {
-      const identity = pullTarget(linked.html_url);
-      if (positive(linked.number) !== identity.number) throw new Error();
-      if (
-        linked.url !== undefined &&
-        pullKey(pullTarget(linked.url, 'issue')) !== pullKey(identity)
-      )
-        throw new Error();
-      const marker = object(linked.pull_request);
-      if (pullKey(pullTarget(marker.url)) !== pullKey(identity)) throw new Error();
-      if (
-        marker.html_url !== undefined &&
-        pullKey(pullTarget(marker.html_url)) !== pullKey(identity)
-      )
-        throw new Error();
-      identities.push(identity);
-    }
-    if (subject) {
-      identities.push(pullTarget(subject.url));
-      if (subject.html_url !== undefined) identities.push(pullTarget(subject.html_url));
-    }
-    if (
-      !identities.length ||
-      identities.some((identity) => pullKey(identity) !== pullKey(identities[0]))
-    )
-      throw new Error();
-    entries.push({ evidence: Object.freeze({ ...base, event }), binding: identities[0] });
+    if (linked) object(linked.pull_request);
+    const { binding, fields } = referenceIdentity(entry, 'pull');
+    entries.push({
+      evidence: Object.freeze({ ...base, event, identityFields: fields }),
+      binding,
+    });
   }
   return { count, entries };
 }
@@ -262,9 +277,9 @@ async function hydratePull(
       `/repos/${encodeURIComponent(binding.owner)}/${encodeURIComponent(binding.repo)}/pulls/${binding.number}`
     )
   );
-  const pullUrl = `https://github.com/${binding.owner}/${binding.repo}/pull/${binding.number}`;
-  if (positive(pr.number) !== binding.number || text(pr.html_url).toLowerCase() !== pullUrl)
-    throw new Error();
+  positive(pr.number);
+  pullTarget(pr.html_url);
+  referenceIdentity(pr, 'pull', binding);
   const merged = pr.merged_at === null ? false : Boolean(time(pr.merged_at));
   const pullState = state(pr.state);
   if (merged && pullState !== 'closed') throw new Error();

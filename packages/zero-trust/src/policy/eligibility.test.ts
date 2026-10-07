@@ -398,6 +398,137 @@ describe('fail-closed and bounded reads', () => {
 
 describe('binding and side-effect guarantees', () => {
   it.each([
+    'connected',
+    'cross-referenced',
+  ])('binds subject.number in %s events without requiring optional fields', async (event) => {
+    for (const withSource of [false, true]) {
+      const r = rig();
+      const { id: _id, source, ...base } = cross();
+      const subject = { number: 9, url: 'https://api.github.com/repos/upstream/fixture/pulls/8' };
+      r.pages[0] = [
+        {
+          ...base,
+          event,
+          ...(event === 'connected' ? { id: 12 } : {}),
+          ...(withSource ? { source } : {}),
+          subject,
+        },
+      ];
+      r.pr.state = 'closed';
+      expect(await r.assess()).toEqual({ kind: 'unknown' });
+      expect(r.calls.some((path) => path.includes('/pulls/'))).toBe(false);
+      subject.number = 8;
+      expect(await r.assess()).toMatchObject({ kind: 'eligible' });
+      Reflect.deleteProperty(subject, 'number');
+      expect(await r.assess()).toMatchObject({ kind: 'eligible' });
+    }
+  });
+
+  // Property matrix: discover every supplied identity leaf rather than maintaining
+  // a separate list of fields the implementation happens to check.
+  it.each([
+    'connected',
+    'cross-referenced',
+  ])('binds and digests each present identity field (%s)', async (event) => {
+    const identity = () => ({
+      number: 8,
+      url: 'https://api.github.com/repos/upstream/fixture/pulls/8',
+      html_url: 'https://github.com/upstream/fixture/pull/8',
+      diff_url: 'https://github.com/upstream/fixture/pull/8.diff',
+      patch_url: 'https://github.com/upstream/fixture/pull/8.patch',
+    });
+    const { id: _id, ...base } = cross();
+    const fixture = {
+      ...base,
+      ...identity(),
+      event,
+      ...(event === 'connected' ? { id: 12 } : {}),
+      subject: identity(),
+      source: {
+        ...identity(),
+        issue: {
+          ...identity(),
+          url: 'https://api.github.com/repos/upstream/fixture/issues/8',
+          pull_request: identity(),
+        },
+      },
+    };
+    const paths: string[][] = [];
+    function leaves(record: Record<string, unknown>, path: string[] = []): void {
+      for (const [key, value] of Object.entries(record)) {
+        if (['number', 'url', 'html_url', 'diff_url', 'patch_url'].includes(key))
+          paths.push([...path, key]);
+        else if (
+          ['source', 'issue', 'subject', 'pull_request'].includes(key) &&
+          value &&
+          typeof value === 'object'
+        )
+          leaves(value as Record<string, unknown>, [...path, key]);
+      }
+    }
+    leaves(fixture);
+    expect(paths).toHaveLength(25);
+    const r = rig();
+    r.pr.state = 'closed';
+    r.pages[0] = [fixture];
+    const original = await r.assess();
+    expect(original.kind).toBe('eligible');
+    if (original.kind === 'unknown') throw new Error();
+    for (const path of paths) {
+      for (const mutation of ['number', 'owner', 'repo', 'malformed', 'valid-case', 'absent']) {
+        const changed: Record<string, unknown> = structuredClone(fixture);
+        let parent = changed;
+        for (const key of path.slice(0, -1)) parent = parent[key] as Record<string, unknown>;
+        const key = path[path.length - 1];
+        const value = parent[key];
+        if (mutation === 'valid-case' && typeof value === 'number') continue;
+        if ((mutation === 'owner' || mutation === 'repo') && typeof value === 'number') continue;
+        if (mutation === 'absent') Reflect.deleteProperty(parent, key);
+        else if (mutation === 'malformed') parent[key] = null;
+        else if (typeof value === 'number') parent[key] = 9;
+        else {
+          const url = String(value);
+          parent[key] =
+            mutation === 'valid-case'
+              ? url.replace('upstream/fixture', 'UPSTREAM/FIXTURE')
+              : mutation === 'owner'
+                ? url.replace('upstream', 'elsewhere')
+                : mutation === 'repo'
+                  ? url.replace('fixture', 'project')
+                  : url.replace('/8', '/9');
+        }
+        r.pages[0] = [changed];
+        const result = await r.assess();
+        const context = `${path.join('.')} ${mutation}`;
+        if (mutation === 'valid-case' || mutation === 'absent') {
+          expect(result.kind, context).toBe('eligible');
+          if (result.kind === 'unknown') throw new Error(context);
+          expect(result.evidenceDigest, context).not.toBe(original.evidenceDigest);
+        } else {
+          expect(result, context).toEqual({ kind: 'unknown' });
+          expect('evidenceDigest' in result, context).toBe(false);
+        }
+      }
+    }
+  });
+
+  it.each([
+    'url',
+    'html_url',
+    'number',
+    'diff_url',
+    'patch_url',
+  ])('checks present hydrated identity fields: %s', async (key) => {
+    const r = rig();
+    r.pages[0] = [cross()];
+    r.pr[key] =
+      key === 'number'
+        ? 9
+        : `https://github.com/elsewhere/project/pull/9${key === 'diff_url' ? '.diff' : key === 'patch_url' ? '.patch' : ''}`;
+    expect(await r.assess()).toEqual({ kind: 'unknown' });
+  });
+
+  it.each([
     'source_api',
     'marker_html',
     'subject_html',
