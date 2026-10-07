@@ -498,6 +498,40 @@ if (eligibility.kind === 'eligible') {
 }
 ```
 
+## Credential-free source acquisition (#1093)
+
+`resolveBase(read, { owner, repo, defaultBranch })` reads the encoded branch REST
+path using a structural credential-free reader and returns a lowercase 40-hex head
+SHA. Failed or malformed reads throw non-echoing `CanonicalError('unavailable')`.
+`sourceUrl({ owner, repo })` builds only `https://github.com/<owner>/<repo>.git`;
+both names accept 1–100 ASCII letters, digits, dots, underscores and hyphens,
+excluding `.` and `..`. No repository-provided URL is followed.
+
+`acquireSource({ owner, repo, baseSha }, options?)` returns `{ pack, manifest }`
+after fetching into fresh trusted bare storage without credentials, tags, checkout
+or submodule recursion. Its fetch-only `TrustedGit.sourceFetch` option permits HTTPS
+while all other protocols remain denied; redirects are disabled, credential helpers
+empty and prompts disabled. This option refuses env, identity and config overrides.
+All other callers retain `protocol.allow=never`. Hooks, attributes filters and
+gitmodules are data, never executed. Temporary repositories are removed on all exits.
+
+Production first fetches with `--depth=1`. A root commit's pack imports strictly as
+is; commits with omitted parents fail `index-pack --strict` and trigger one fresh
+fetch without depth. This is a complete-history fallback, not a weaker importer.
+Both paths bound pack output to exported `MAX_PACK_BYTES` (128 MiB), refusing
+overflow with `limit_exceeded` before returning any artifact for the run store.
+Controllers map this source-size refusal to `unsupported_environment` with
+`source_too_large`. This primitive itself performs no run-store writes or transitions.
+
+`baseManifest(pack, baseSha)` imports with the same strict path as `createCandidate`
+and inspects raw trees. Unsupported modes (symlinks/gitlinks/special files), Git
+path aliases, collisions and malformed objects throw `unsupported`; source/pack
+limits remain `limit_exceeded`. No path or byte normalization occurs. The manifest
+has the existing immutable `SourceManifest` shape. Both APIs are package exports.
+Tests alone can pass `options.remoteUrlForTest`, a local `file:` URL accepted only
+when `process.env.VITEST` is set; only then is file transport permitted. Tests use no
+live network, and production must never set that option.
+
 ## Development commands
 
 ```sh

@@ -48,7 +48,7 @@ export interface CanonicalCandidate {
   /** Raw Git object data only; no refs, config, attributes, hooks or alternates. */
   readonly pack: Buffer;
 }
-const MAX_PACK_BYTES = 128 * 1024 * 1024;
+export const MAX_PACK_BYTES = 128 * 1024 * 1024;
 function oid(value: string): string {
   if (typeof value !== 'string' || !/^[a-f0-9]{40}$/u.test(value))
     throw new CanonicalError('invalid_manifest');
@@ -174,6 +174,20 @@ function baseTree(git: TrustedGit, base: string): string {
   const match = /^tree ([a-f0-9]{40})\n/u.exec(git.run(['cat-file', 'commit', base]).toString());
   if (!match) throw new CanonicalError('unsupported');
   return match[1] as string;
+}
+/** Validate the baseline through the same strict importer used by createCandidate. */
+export function baseManifest(pack: Buffer, baseSha: string): SourceManifest {
+  const base = oid(baseSha);
+  const git = new TrustedGit();
+  try {
+    importBase(git, pack, base);
+    return inspectTree(git, baseTree(git, base), {});
+  } catch (error) {
+    if (error instanceof CanonicalError && error.reason === 'limit_exceeded') throw error;
+    throw new CanonicalError('unsupported');
+  } finally {
+    git.close();
+  }
 }
 function buildTree(git: TrustedGit, manifest: SourceManifest): string {
   const directories = new Map<

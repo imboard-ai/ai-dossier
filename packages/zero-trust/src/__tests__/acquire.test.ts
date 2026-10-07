@@ -1,0 +1,320 @@
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { acquireSource, resolveBase, sourceUrl } from '../canonical/acquire';
+import { CanonicalError, exportSource } from '../canonical/export';
+import { baseManifest, createCandidate, MAX_PACK_BYTES } from '../canonical/reconstruct';
+import { TrustedGit } from '../canonical/trusted-git';
+
+const temps: string[] = [];
+const upstream = { owner: 'owner', repo: 'repo' };
+function temp(): string {
+  const root = fs.mkdtempSync(join(tmpdir(), 'acquire-test-'));
+  temps.push(root);
+  return root;
+}
+function git(root: string, args: string[], input?: string | Buffer): Buffer {
+  return execFileSync('/usr/bin/git', ['-C', root, ...args], {
+    input,
+    env: {
+      PATH: '/usr/bin:/bin',
+      HOME: root,
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_GLOBAL: '/dev/null',
+      GIT_TERMINAL_PROMPT: '0',
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+}
+function fixture(parent = true) {
+  const root = temp();
+  git(root, ['init', '--bare', '--template=', '.']);
+  const blob = git(root, ['hash-object', '-w', '--stdin'], 'raw\r\nbytes\u0000').toString().trim();
+  const tree = git(root, ['mktree'], `100755 blob ${blob}\tfile\n`).toString().trim();
+  const commit = (treeSha: string, previous?: string) =>
+    git(
+      root,
+      [
+        '-c',
+        'user.name=Fixture',
+        '-c',
+        'user.email=fixture@example.org',
+        'commit-tree',
+        treeSha,
+        ...(previous ? ['-p', previous] : []),
+      ],
+      'fixture\n'
+    )
+      .toString()
+      .trim();
+  const ancestor = commit(tree);
+  const baseSha = parent ? commit(tree, ancestor) : ancestor;
+  git(root, ['update-ref', 'refs/heads/main', baseSha]);
+  return { root, baseSha, blob, commit, url: pathToFileURL(root).href };
+}
+function acquire(f: ReturnType<typeof fixture>) {
+  return acquireSource({ ...upstream, baseSha: f.baseSha }, { remoteUrlForTest: f.url });
+}
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+  for (const root of temps.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+});
+
+describe('credential-free source acquisition', () => {
+  it.each([false, true])('returns a complete canonical pack with parent=%s', (parent) => {
+    const f = fixture(parent);
+    const fetch = vi.spyOn(TrustedGit.prototype, 'exec');
+    const result = acquire(f);
+    const source = temp();
+    fs.writeFileSync(join(source, 'file'), 'raw\r\nbytes\u0000', { mode: 0o755 });
+    expect(result.manifest).toEqual(exportSource(source));
+    expect(baseManifest(result.pack, f.baseSha)).toEqual(result.manifest);
+    const candidate = createCandidate(
+      result.manifest,
+      {
+        baseSha: f.baseSha,
+        author: {
+          login: 'contributor',
+          name: 'Contributor',
+          email: 'contributor@example.org',
+          timestamp: '2026-10-05T00:00:00Z',
+        },
+        committerTimestamp: '2026-10-05T00:01:00Z',
+        message: 'approved contribution\n',
+      },
+      result.pack
+    );
+    expect(candidate.record.baseSha).toBe(f.baseSha);
+    const fetches = fetch.mock.calls.filter(([args]) => args[0] === 'fetch');
+    expect(fetches).toHaveLength(parent ? 2 : 1);
+    expect(fetches[0]?.[0]).toContain('--depth=1');
+    if (parent) expect(fetches[1]?.[0]).not.toContain('--depth=1');
+  });
+  it.each([
+    '120000',
+    '160000',
+    '.git ',
+    'collision',
+    '060000',
+  ])('refuses unsupported baseline %s', (kind) => {
+    const f = fixture(false);
+    const names = kind === 'collision' ? ['A', 'a'] : [kind === '.git ' ? kind : 'bad'];
+    const mode = ['120000', '160000', '060000'].includes(kind) ? kind : '100644';
+    const raw = Buffer.concat(
+      names.map((name) =>
+        Buffer.concat([
+          Buffer.from(`${mode} ${name}\u0000`),
+          Buffer.from(mode === '160000' ? f.baseSha : f.blob, 'hex'),
+        ])
+      )
+    );
+    const tree = git(f.root, ['hash-object', '-w', '-t', 'tree', '--literally', '--stdin'], raw)
+      .toString()
+      .trim();
+    f.baseSha = f.commit(tree);
+    git(f.root, ['update-ref', 'refs/heads/main', f.baseSha]);
+    expect(() => acquire(f)).toThrow(new CanonicalError('unsupported'));
+  });
+  it('does not execute hooks, filters, gitmodules or inherited credentials; positive controls fire', () => {
+    const f = fixture();
+    const source = temp();
+    const hookSentinel = join(source, 'hook-sentinel');
+    const filterSentinel = join(source, 'filter-sentinel');
+    const credentials = join(source, 'credential-sentinel');
+    const hooks = join(source, 'hooks');
+    fs.mkdirSync(hooks);
+    fs.writeFileSync(join(hooks, 'post-checkout'), `#!/bin/sh\ntouch '${hookSentinel}'\n`, {
+      mode: 0o755,
+    });
+    const filter = join(source, 'filter');
+    fs.writeFileSync(filter, `#!/bin/sh\ntouch '${filterSentinel}'\ncat\n`, { mode: 0o755 });
+    const attributes = git(f.root, ['hash-object', '-w', '--stdin'], '* filter=evil\n')
+      .toString()
+      .trim();
+    const modules = git(
+      f.root,
+      ['hash-object', '-w', '--stdin'],
+      '[submodule "evil"]\n path=evil\n url=ext::touch forbidden\n'
+    )
+      .toString()
+      .trim();
+    const tree = git(
+      f.root,
+      ['mktree'],
+      `100644 blob ${attributes}\t.gitattributes\n100644 blob ${modules}\t.gitmodules\n100755 blob ${f.blob}\tfile\n`
+    )
+      .toString()
+      .trim();
+    f.baseSha = f.commit(tree, f.baseSha);
+    git(f.root, ['update-ref', 'refs/heads/main', f.baseSha]);
+    fs.mkdirSync(join(f.root, 'hooks'));
+    fs.copyFileSync(join(hooks, 'post-checkout'), join(f.root, 'hooks', 'post-checkout'));
+    const config = join(source, 'gitconfig');
+    fs.writeFileSync(
+      config,
+      `[core]\n hooksPath=${hooks}\n[filter "evil"]\n smudge=${filter}\n clean=${filter}\n required=true\n[credential]\n helper=!touch ${credentials}\n`
+    );
+    vi.stubEnv('GIT_CONFIG_GLOBAL', config);
+    vi.stubEnv('GIT_CONFIG_COUNT', '1');
+    vi.stubEnv('GIT_CONFIG_KEY_0', 'http.extraHeader');
+    vi.stubEnv('GIT_CONFIG_VALUE_0', 'Authorization: forbidden');
+    vi.stubEnv('GITHUB_TOKEN', 'forbidden');
+    const result = acquire(f);
+    expect(result.manifest.entries.map((e) => e.path)).toContain('.gitmodules');
+    expect(fs.existsSync(hookSentinel)).toBe(false);
+    expect(fs.existsSync(filterSentinel)).toBe(false);
+    expect(fs.existsSync(credentials)).toBe(false);
+    const checkout = temp();
+    git(checkout, ['clone', '--no-checkout', f.root, '.']);
+    git(checkout, [
+      '-c',
+      `core.hooksPath=${hooks}`,
+      '-c',
+      `filter.evil.smudge=${filter}`,
+      'checkout',
+      '--force',
+      'main',
+    ]);
+    expect(fs.existsSync(hookSentinel)).toBe(true);
+    expect(fs.existsSync(filterSentinel)).toBe(true);
+  });
+  it.each([
+    '/',
+    '..',
+    '%2f',
+    'a b',
+    'https://evil',
+    '',
+    '.',
+    'a'.repeat(101),
+  ])('rejects unsafe name %j in both positions', (value) => {
+    expect(() => sourceUrl({ owner: value, repo: 'repo' })).toThrow(CanonicalError);
+    expect(() => sourceUrl({ owner: 'owner', repo: value })).toThrow(CanonicalError);
+  });
+  it('only builds a GitHub HTTPS URL', () => {
+    expect(sourceUrl({ owner: 'owner._-1', repo: 'repo._-1' })).toBe(
+      'https://github.com/owner._-1/repo._-1.git'
+    );
+  });
+  it('resolves an encoded branch and rejects unreadable/malformed reads without retry', async () => {
+    const head = 'a'.repeat(40);
+    const read = vi.fn(async () => ({ status: 200, body: { commit: { sha: head } } }));
+    expect(await resolveBase(read, { ...upstream, defaultBranch: 'feature/a' })).toBe(head);
+    expect(read).toHaveBeenCalledWith('/repos/owner/repo/branches/feature%2Fa');
+    for (const body of [null, {}, { commit: {} }, { commit: { sha: 'bad' } }])
+      await expect(
+        resolveBase(async () => ({ status: 200, body }), { ...upstream, defaultBranch: 'main' })
+      ).rejects.toThrow(new CanonicalError('unavailable'));
+    await expect(
+      resolveBase(async () => ({ status: 404, body: {} }), { ...upstream, defaultBranch: 'main' })
+    ).rejects.toThrow(new CanonicalError('unavailable'));
+    await expect(
+      resolveBase(
+        async () => {
+          throw new Error('secret');
+        },
+        { ...upstream, defaultBranch: 'main' }
+      )
+    ).rejects.toThrow(new CanonicalError('unavailable'));
+    await expect(resolveBase(read, { ...upstream, defaultBranch: '' })).rejects.toThrow(
+      CanonicalError
+    );
+  });
+  it('test remote is refused outside Vitest and never accepts another transport', () => {
+    const f = fixture();
+    for (const url of [
+      'https://github.com/owner/repo.git',
+      'ssh://evil/repo',
+      'file://remote/repo',
+      `${f.url}?q=1`,
+      `${f.url}#fragment`,
+      'not a url',
+    ])
+      expect(() =>
+        acquireSource({ ...upstream, baseSha: f.baseSha }, { remoteUrlForTest: url })
+      ).toThrow(new CanonicalError('unsupported'));
+    vi.stubEnv('VITEST', '');
+    expect(() => acquire(f)).toThrow(new CanonicalError('unsupported'));
+  });
+  it('failed fetch is unavailable, never silently retried, and removes trusted storage', () => {
+    const f = fixture();
+    const exec = vi.spyOn(TrustedGit.prototype, 'exec');
+    expect(() =>
+      acquireSource({ ...upstream, baseSha: '0'.repeat(40) }, { remoteUrlForTest: f.url })
+    ).toThrow(new CanonicalError('unavailable'));
+    expect(exec.mock.calls.filter(([args]) => args[0] === 'fetch')).toHaveLength(1);
+    for (const context of exec.mock.contexts) expect(fs.existsSync(context.directory)).toBe(false);
+    expect(() => acquireSource({ ...upstream, baseSha: '--upload-pack=evil' })).toThrow(
+      CanonicalError
+    );
+  });
+  it('rejects oversize pack output before importing or exposing it to a store', () => {
+    const f = fixture();
+    const original = TrustedGit.prototype.exec;
+    let packed = false;
+    let imported = false;
+    vi.spyOn(TrustedGit.prototype, 'exec').mockImplementation(function (
+      this: TrustedGit,
+      args,
+      options
+    ) {
+      if (args[0] === 'pack-objects') {
+        packed = true;
+        expect(options?.maxOutputBytes).toBe(MAX_PACK_BYTES);
+        return { status: null, stdout: Buffer.alloc(0), outputLimitExceeded: true };
+      }
+      if (args[0] === 'index-pack') imported = true;
+      return original.call(this, args, options);
+    });
+    expect(() => acquire(f)).toThrow(new CanonicalError('limit_exceeded'));
+    expect(packed).toBe(true);
+    expect(imported).toBe(false);
+  });
+  it('real bounded subprocess reports output overflow', () => {
+    const f = fixture(false);
+    const trusted = new TrustedGit();
+    try {
+      trusted.exec(['fetch', '--no-tags', '--no-recurse-submodules', f.url, f.baseSha], {
+        sourceFetch: 'file-test',
+      });
+      const result = trusted.exec(['pack-objects', '--stdout', '--revs'], {
+        input: `${f.baseSha}\n`,
+        maxOutputBytes: 16,
+      });
+      expect(result.outputLimitExceeded).toBe(true);
+      expect(result.status).toBeNull();
+    } finally {
+      trusted.close();
+    }
+  });
+  it('source fetch config preserves defaults, disallows credentials and refuses non-HTTPS protocols', () => {
+    const f = fixture();
+    const trusted = new TrustedGit();
+    try {
+      expect(trusted.run(['config', '--get', 'protocol.allow']).toString().trim()).toBe('never');
+      for (const url of [
+        f.url,
+        'ssh://invalid/repo',
+        'git://invalid/repo',
+        'http://invalid/repo',
+        'ext::touch sentinel',
+      ])
+        expect(trusted.exec(['fetch', url, f.baseSha], { sourceFetch: 'https' }).status).not.toBe(
+          0
+        );
+      for (const extra of [{ env: {} }, { config: [] }, { identity: {} }])
+        expect(() => trusted.exec(['fetch', f.url], { sourceFetch: 'https', ...extra })).toThrow(
+          TypeError
+        );
+      expect(() => trusted.exec(['push', f.url], { sourceFetch: 'https' })).toThrow(TypeError);
+      vi.stubEnv('VITEST', '');
+      expect(() => trusted.exec(['fetch', f.url], { sourceFetch: 'file-test' })).toThrow(TypeError);
+    } finally {
+      trusted.close();
+    }
+  });
+});

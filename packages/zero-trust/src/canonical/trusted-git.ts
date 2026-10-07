@@ -28,11 +28,15 @@ export interface GitExecOptions {
   /** Extra `-c` entries, e.g. `protocol.file.allow=always` for a local test remote. */
   readonly config?: readonly string[];
   readonly timeoutMs?: number;
+  /** Credential-free source fetch only; never combine with env/config overrides. */
+  readonly sourceFetch?: 'https' | 'file-test';
+  readonly maxOutputBytes?: number;
 }
 export interface GitResult {
   /** Null when git was killed (timeout, abort) or could not start. */
   readonly status: number | null;
   readonly stdout: Buffer;
+  readonly outputLimitExceeded?: boolean;
 }
 
 /** Internal plumbing only. Never points Git at an artifact's repository/config. */
@@ -84,13 +88,14 @@ export class TrustedGit {
       cwd: this.directory,
       env,
       input: options.input,
-      maxBuffer: 128 * 1024 * 1024,
+      maxBuffer: options.maxOutputBytes ?? 128 * 1024 * 1024,
       timeout: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       shell: false,
     });
     return {
       status: result.error ? null : result.status,
       stdout: result.stdout ?? Buffer.alloc(0),
+      outputLimitExceeded: (result.error as NodeJS.ErrnoException | undefined)?.code === 'ENOBUFS',
     };
   }
   /** exec() for long network operations: the event loop stays free, so a revoked lease or
@@ -131,6 +136,17 @@ export class TrustedGit {
     options: GitExecOptions
   ): { argv: string[]; env: NodeJS.ProcessEnv } {
     const gitEnv = { ...this.env };
+    if (options.sourceFetch !== undefined) {
+      if (
+        args[0] !== 'fetch' ||
+        options.env !== undefined ||
+        options.config !== undefined ||
+        options.identity !== undefined ||
+        !['https', 'file-test'].includes(options.sourceFetch) ||
+        (options.sourceFetch === 'file-test' && !process.env.VITEST)
+      )
+        throw new TypeError('TrustedGit refuses unsafe source fetch options');
+    }
     for (const key of [
       'GIT_AUTHOR_NAME',
       'GIT_AUTHOR_EMAIL',
@@ -161,6 +177,14 @@ export class TrustedGit {
       'core.attributesFile=/dev/null',
       '-c',
       'protocol.allow=never',
+      ...(options.sourceFetch === undefined
+        ? []
+        : [
+            '-c',
+            `protocol.${options.sourceFetch === 'https' ? 'https' : 'file'}.allow=always`,
+            '-c',
+            'http.followRedirects=false',
+          ]),
       '-c',
       'commit.gpgSign=false',
       '-c',
