@@ -23,6 +23,8 @@ export interface ModelRequest {
   signal?: AbortSignal;
   /** Trusted controller authorization; metering reserves BOTH attempts before use. Default 1. */
   attempts?: 1 | 2;
+  /** Optional token likelihood evidence; never a model's self assessment. */
+  logprobs?: boolean;
 }
 
 export interface ModelUsage {
@@ -40,11 +42,13 @@ export type ModelResult = (
   | { kind: 'tool_calls'; calls: ModelToolCall[] }
   | { kind: 'text'; text: string }
   | { kind: 'malformed'; reason: MalformedReason }
-) & { usage: ModelUsage | null };
+) & { usage: ModelUsage | null; tokenLogprobs?: readonly number[] };
 
 export interface ModelAdapter {
   /** Pricing resource ID (the configured model name), never a credential. */
   readonly id: string;
+  /** Optional non-secret endpoint/profile fingerprint, never a credential. */
+  readonly cacheIdentity?: string;
   complete(request: ModelRequest): Promise<ModelResult>;
 }
 
@@ -71,7 +75,16 @@ export class ModelError extends Error {
 /** Detach the exact JSON data being estimated/sent; signal is never serialized. */
 export function snapshotModelRequest(request: ModelRequest): SnapshotModelRequest {
   try {
-    const { maxOutputTokens, timeoutMs, attempts = 1, system, messages, tools, signal } = request;
+    const {
+      maxOutputTokens,
+      timeoutMs,
+      attempts = 1,
+      system,
+      messages,
+      tools,
+      signal,
+      logprobs,
+    } = request;
     if (
       !Number.isSafeInteger(maxOutputTokens) ||
       maxOutputTokens < 1 ||
@@ -81,7 +94,8 @@ export function snapshotModelRequest(request: ModelRequest): SnapshotModelReques
       (attempts !== 1 && attempts !== 2) ||
       typeof system !== 'string' ||
       !Array.isArray(messages) ||
-      !Array.isArray(tools)
+      !Array.isArray(tools) ||
+      (logprobs !== undefined && typeof logprobs !== 'boolean')
     ) {
       throw new ModelError('invalid_request');
     }
@@ -95,6 +109,7 @@ export function snapshotModelRequest(request: ModelRequest): SnapshotModelReques
       timeoutMs,
       attempts,
       signal,
+      ...(logprobs === undefined ? {} : { logprobs }),
     };
   } catch {
     throw new ModelError('invalid_request');
@@ -109,6 +124,7 @@ export function modelRequestBody(id: string, request: ModelRequest): string {
     ...(request.tools.length ? { tools: request.tools } : {}),
     max_tokens: request.maxOutputTokens,
     stream: false,
+    ...(request.logprobs === undefined ? {} : { logprobs: request.logprobs }),
   });
 }
 

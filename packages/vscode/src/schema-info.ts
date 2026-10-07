@@ -23,12 +23,20 @@ interface SchemaProp {
 }
 
 const props = (schema as { properties: Record<string, SchemaProp> }).properties;
-// Legacy-shape required fields sit under the root `else` since the schema also accepts the spec shape.
-const required = new Set(
-  (schema as { else?: { required?: string[] }; required?: string[] }).else?.required ??
-    (schema as { required?: string[] }).required ??
-    []
-);
+/**
+ * Legacy-shape required fields, which sit under the root `else` since the schema also accepts
+ * the spec shape. Throws rather than falling back to a root `required` list or to nothing: a
+ * fallback would silently stop marking Dossier fields as required if the schema layout moved.
+ */
+export function legacyRequiredFields(s: { else?: { required?: string[] } }): Set<string> {
+  const required = s.else?.required;
+  if (!required || required.length === 0) {
+    throw new Error('dossier-schema.json: no legacy-shape required fields under the root "else"');
+  }
+  return new Set(required);
+}
+
+const required = legacyRequiredFields(schema as { else?: { required?: string[] } });
 
 export const FIELDS: FieldInfo[] = Object.entries(props).map(([name, p]) => ({
   name,
