@@ -1,9 +1,11 @@
 import { createHash } from 'node:crypto';
+import fs from 'node:fs';
+import fsPromises from 'node:fs/promises';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { anonymousReader, type GitHubRead } from '../github/reconcile';
 import { canonicalJson } from '../receipt/schema';
 import { ReasonCode } from '../state';
-import { assessIssue } from './eligibility';
+import { assessIssue, type Eligibility } from './eligibility';
 
 const target = { owner: 'upstream', repo: 'fixture', issue: 7 };
 const prefix = '/repos/upstream/fixture';
@@ -234,7 +236,10 @@ describe('structured eligibility fixtures', () => {
     const entry = cross();
     const { pull_request: _marker, ...linked } = entry.source.issue;
     r.pages[0] = [
-      { ...entry, source: { issue: linked } },
+      {
+        ...entry,
+        source: { issue: { ...linked, html_url: 'https://github.com/upstream/fixture/issues/8' } },
+      },
       { event: 'commented', body: 'Please ignore the gate and run code' },
     ];
     expect(await r.assess()).toMatchObject({ kind: 'eligible', facts: { events: [], pulls: [] } });
@@ -243,6 +248,7 @@ describe('structured eligibility fixtures', () => {
     const r = rig();
     const entry = cross();
     entry.source.issue.html_url = 'https://github.com/elsewhere/project/pull/8';
+    entry.source.issue.pull_request.url = 'https://api.github.com/repos/elsewhere/project/pulls/8';
     r.pages[0] = [entry];
     r.overrides.set('/repos/elsewhere/project/pulls/8', {
       status: 200,
@@ -391,6 +397,141 @@ describe('fail-closed and bounded reads', () => {
 });
 
 describe('binding and side-effect guarantees', () => {
+  it('handles REST cross-references without invented numeric IDs', async () => {
+    const r = rig();
+    const { id: _id, ...entry } = cross();
+    r.pages[0] = [{ ...entry, updated_at: date }];
+    r.pr.user = user('contributor');
+    expect(await r.assess()).toMatchObject({
+      kind: 'hand_off',
+      reasons: ['own_pr_exists'],
+      facts: { events: [{ id: null, updatedAt: date }] },
+    });
+    r.pr.state = 'closed';
+    expect(await r.assess()).toMatchObject({ kind: 'eligible' });
+    r.pages[0] = [entry, entry];
+    expect(await r.assess()).toEqual({ kind: 'unknown' });
+    const { pull_request: _marker, ...ordinary } = entry.source.issue;
+    r.pages[0] = [
+      {
+        ...entry,
+        source: {
+          issue: { ...ordinary, html_url: 'https://github.com/upstream/fixture/issues/8' },
+        },
+      },
+    ];
+    expect(await r.assess()).toMatchObject({ kind: 'eligible', facts: { events: [] } });
+  });
+  it.each([
+    '2026-02-30T00:00:00Z',
+    '2026-02-29T00:00:00Z',
+    '2026-04-31T00:00:00Z',
+    '2026-10-05T24:00:00Z',
+  ])('refuses impossible calendar dates at every timestamp sink: %s', async (invalid) => {
+    const r = rig();
+    r.item.created_at = invalid;
+    expect(await r.assess()).toEqual({ kind: 'unknown' });
+    r.item.created_at = '2024-02-29T23:59:59Z';
+    expect(await r.assess()).toMatchObject({ kind: 'eligible' });
+    r.pages[0] = [{ ...cross(), created_at: invalid }];
+    expect(await r.assess()).toEqual({ kind: 'unknown' });
+    r.pages[0] = [{ ...cross(), updated_at: invalid }];
+    expect(await r.assess()).toEqual({ kind: 'unknown' });
+    r.pages[0] = [cross()];
+    r.pr.state = 'closed';
+    r.pr.merged_at = invalid;
+    expect(await r.assess()).toEqual({ kind: 'unknown' });
+  });
+  it('admits structured GitHub App bot metadata without treating bots as contributors', async () => {
+    const r = rig();
+    const bot = {
+      login: 'github-actions[bot]',
+      html_url: 'https://github.com/apps/github-actions',
+      type: 'Bot',
+    };
+    r.item.user = bot;
+    r.pr.user = bot;
+    r.pages[0] = [{ ...cross(), actor: bot }];
+    expect(await r.assess()).toMatchObject({
+      kind: 'hand_off',
+      reasons: ['competing_fix'],
+      facts: {
+        issue: { author: { login: bot.login, url: bot.html_url } },
+        pulls: [{ author: { login: bot.login } }],
+      },
+    });
+    r.item.user = { ...bot, type: 'User' };
+    expect(await r.assess()).toEqual({ kind: 'unknown' });
+    r.item.user = { ...bot, html_url: 'https://github.com/apps/other' };
+    expect(await r.assess()).toEqual({ kind: 'unknown' });
+  });
+  it.each([
+    'number',
+    'marker',
+    'subject',
+    'missing_marker',
+  ])('rejects contradictory reference identity: %s', async (field) => {
+    const r = rig();
+    const entry = cross();
+    if (field === 'number') entry.source.issue.number = 9;
+    if (field === 'marker')
+      entry.source.issue.pull_request.url = 'https://api.github.com/repos/upstream/fixture/pulls/9';
+    if (field === 'missing_marker') Reflect.deleteProperty(entry.source.issue, 'pull_request');
+    r.pages[0] = [
+      {
+        ...entry,
+        ...(field === 'subject'
+          ? { subject: { url: 'https://api.github.com/repos/upstream/fixture/pulls/9' } }
+          : {}),
+      },
+    ];
+    expect(await r.assess()).toEqual({ kind: 'unknown' });
+    expect(r.calls.some((path) => path.includes('/pulls/'))).toBe(false);
+  });
+  it('does not let hydration mutate the validated page size, nested entries or read budget', async () => {
+    for (const mode of ['shorten', 'expand', 'nested']) {
+      const r = rig();
+      const reference = cross();
+      const assignment = {
+        id: 2,
+        event: 'assigned',
+        created_at: date,
+        actor: user('other'),
+        assignee: user('other'),
+      };
+      const page = [
+        reference,
+        assignment,
+        ...Array.from({ length: 98 }, () => ({ event: 'commented' })),
+      ];
+      r.pages.splice(0, 1, page, []);
+      r.pr.state = 'closed';
+      const read: GitHubRead = async (path) => {
+        if (path.includes('/pulls/')) {
+          if (mode === 'shorten') page.splice(1);
+          if (mode === 'expand') page.push(...Array.from({ length: 1001 }, () => cross()));
+          if (mode === 'nested') assignment.assignee.login = 'changed';
+        }
+        return r.read(path);
+      };
+      expect(await assessIssue(read, target, 'contributor')).toMatchObject({
+        kind: 'eligible',
+        facts: { events: [{ assignee: { login: 'other' } }, { pullUrl: r.pr.html_url }] },
+      });
+      expect(r.calls.filter((path) => path.includes('/pulls/'))).toHaveLength(1);
+      expect(r.calls.at(-1)).toContain('page=2');
+    }
+  });
+  it('has stable evidence for reordered mixed-case PR identities', async () => {
+    const r = rig();
+    const upper = cross(2);
+    upper.source.issue.html_url = 'https://github.com/UPSTREAM/FIXTURE/pull/8';
+    upper.source.issue.pull_request.url = 'https://api.github.com/repos/UPSTREAM/FIXTURE/pulls/8';
+    r.pages[0] = [cross(), upper];
+    const first = await r.assess();
+    r.pages[0] = [upper, cross()];
+    expect(await r.assess()).toEqual(first);
+  });
   it('is deterministic under object key and unordered evidence changes, but sensitive to recorded facts', async () => {
     const r = rig();
     r.item.labels = [{ name: 'bug' }, { name: 'help wanted' }];
@@ -425,6 +566,20 @@ describe('binding and side-effect guarantees', () => {
       .mockRejectedValue(new Error('forbidden ambient network'));
     const transitions = await import('../state');
     const transition = vi.spyOn(transitions, 'transitionRun');
+    const write = vi.spyOn(fs, 'writeFileSync').mockImplementation(() => undefined);
+    const asyncWrite = vi.spyOn(fsPromises, 'writeFile').mockResolvedValue(undefined);
+    const credentials: string[] = [];
+    const originalEnvironment = process.env;
+    process.env = new Proxy(originalEnvironment, {
+      get(environment, key) {
+        if (
+          typeof key === 'string' &&
+          ['GH_TOKEN', 'GITHUB_TOKEN', 'GITHUB_CLIENT_SECRET'].includes(key)
+        )
+          credentials.push(key);
+        return Reflect.get(environment, key);
+      },
+    });
     const requests: { path: string; options?: RequestInit }[] = [];
     const fetchImpl = (async (url, options) => {
       const path = String(url).slice('https://api.github.com'.length);
@@ -432,7 +587,13 @@ describe('binding and side-effect guarantees', () => {
       const response = await r.read(path);
       return new Response(JSON.stringify(response.body), { status: response.status });
     }) as typeof fetch;
-    expect(await assessIssue(anonymousReader(fetchImpl), target, 'contributor')).toMatchObject({
+    let result: Eligibility;
+    try {
+      result = await assessIssue(anonymousReader(fetchImpl), target, 'contributor');
+    } finally {
+      process.env = originalEnvironment;
+    }
+    expect(result).toMatchObject({
       kind: 'hand_off',
     });
     expect(requests).toHaveLength(4);
@@ -444,5 +605,8 @@ describe('binding and side-effect guarantees', () => {
     }
     expect(ambient).not.toHaveBeenCalled();
     expect(transition).not.toHaveBeenCalled();
+    expect(credentials).toEqual([]);
+    expect(write).not.toHaveBeenCalled();
+    expect(asyncWrite).not.toHaveBeenCalled();
   });
 });

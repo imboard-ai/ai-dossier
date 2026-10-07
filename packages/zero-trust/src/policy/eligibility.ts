@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { isGitHubLogin, isRepoName } from '../github/handoff';
 import type { GitHubRead } from '../github/reconcile';
 import { canonicalJson } from '../receipt/schema';
-import { ReasonCode } from '../state';
+import { isTimestamp, ReasonCode } from '../state';
 
 export const ELIGIBILITY_PAGE_LIMIT = 10;
 export const ELIGIBILITY_PAGE_SIZE = 100;
@@ -20,9 +20,11 @@ export interface EligibilityPull {
   readonly author: EligibilityActor;
 }
 export interface EligibilityEvent {
-  readonly id: number;
+  /** Cross-reference timeline records do not carry a numeric REST event ID. */
+  readonly id: number | null;
   readonly event: 'cross-referenced' | 'connected' | 'assigned' | 'unassigned';
   readonly createdAt: string;
+  readonly updatedAt?: string;
   readonly actor: EligibilityActor | null;
   readonly assignee?: EligibilityActor;
   readonly pullUrl?: string;
@@ -102,16 +104,31 @@ function state(value: unknown): 'open' | 'closed' {
 }
 function time(value: unknown): string {
   const result = text(value);
-  if (!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/u.test(result) || !Number.isFinite(Date.parse(result)))
+  if (
+    !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/u.test(result) ||
+    !isTimestamp(`${result.slice(0, -1)}.000Z`)
+  )
     throw new Error();
   return result;
 }
 function actor(value: unknown): EligibilityActor {
   const user = object(value);
   const login = text(user.login);
-  if (!isGitHubLogin(login)) throw new Error();
   const url = text(user.html_url);
-  if (url.toLowerCase() !== `https://github.com/${login}`.toLowerCase()) throw new Error();
+  const botName = login.endsWith('[bot]') ? login.slice(0, -5) : null;
+  if (botName !== null) {
+    if (
+      user.type !== 'Bot' ||
+      !isGitHubLogin(botName) ||
+      url.toLowerCase() !== `https://github.com/apps/${botName}`.toLowerCase()
+    )
+      throw new Error();
+  } else if (
+    !isGitHubLogin(login) ||
+    url.toLowerCase() !== `https://github.com/${login}`.toLowerCase()
+  ) {
+    throw new Error();
+  }
   return Object.freeze({ login, url });
 }
 function array(value: unknown, cap: number): unknown[] {
@@ -131,13 +148,116 @@ function sorted<T>(values: T[]): readonly T[] {
 }
 
 /** REST identities are parsed as data, never followed as URLs. */
-function pullTarget(value: unknown): { owner: string; repo: string; number: number } {
+interface PullTarget {
+  readonly owner: string;
+  readonly repo: string;
+  readonly number: number;
+}
+function pullTarget(value: unknown, kind: 'pull' | 'issue' = 'pull'): PullTarget {
   const match =
-    /^https:\/\/(?:api\.github\.com\/repos|github\.com)\/([^/]+)\/([^/]+)\/(?:pulls|pull|issues)\/([1-9]\d*)$/u.exec(
+    /^https:\/\/(?:api\.github\.com\/repos|github\.com)\/([^/]+)\/([^/]+)\/(pulls|pull|issues)\/([1-9]\d*)$/u.exec(
       text(value)
     );
-  if (!match || !isGitHubLogin(match[1]) || !isRepoName(match[2])) throw new Error();
-  return { owner: match[1], repo: match[2], number: positive(Number(match[3])) };
+  if (
+    !match ||
+    !isGitHubLogin(match[1]) ||
+    !isRepoName(match[2]) ||
+    (kind === 'issue' ? match[3] !== 'issues' : match[3] === 'issues')
+  )
+    throw new Error();
+  return Object.freeze({
+    owner: match[1].toLowerCase(),
+    repo: match[2].toLowerCase(),
+    number: positive(Number(match[4])),
+  });
+}
+
+function pullKey(binding: PullTarget): string {
+  return `${binding.owner}/${binding.repo}/${binding.number}`;
+}
+
+interface TimelineDescriptor {
+  readonly evidence: EligibilityEvent;
+  readonly binding?: PullTarget;
+}
+
+/** Validate and detach every relevant entry BEFORE any hydration await. */
+function timelinePage(value: unknown): { count: number; entries: TimelineDescriptor[] } {
+  const page = array(value, ELIGIBILITY_PAGE_SIZE);
+  const count = page.length;
+  const entries: TimelineDescriptor[] = [];
+  for (const value of page) {
+    const entry = object(value);
+    const event = text(entry.event);
+    if (
+      event !== 'cross-referenced' &&
+      event !== 'connected' &&
+      event !== 'assigned' &&
+      event !== 'unassigned'
+    )
+      continue;
+    const base = {
+      id: event === 'cross-referenced' && entry.id === undefined ? null : positive(entry.id),
+      createdAt: time(entry.created_at),
+      ...(entry.updated_at === undefined ? {} : { updatedAt: time(entry.updated_at) }),
+      actor: entry.actor === null ? null : actor(entry.actor),
+    };
+    if (event === 'assigned' || event === 'unassigned') {
+      entries.push({
+        evidence: Object.freeze({ ...base, event, assignee: actor(entry.assignee) }),
+      });
+      continue;
+    }
+    const source = entry.source === undefined ? null : object(entry.source);
+    const linked = source ? object(source.issue) : null;
+    const subject = entry.subject === undefined ? null : object(entry.subject);
+    if (event === 'cross-referenced' && linked && !('pull_request' in linked)) {
+      const ordinary = pullTarget(linked.html_url, 'issue');
+      if (positive(linked.number) !== ordinary.number || subject !== null) throw new Error();
+      continue;
+    }
+    const identities: PullTarget[] = [];
+    if (linked) {
+      const identity = pullTarget(linked.html_url);
+      if (positive(linked.number) !== identity.number) throw new Error();
+      const marker = object(linked.pull_request);
+      if (pullKey(pullTarget(marker.url)) !== pullKey(identity)) throw new Error();
+      identities.push(identity);
+    }
+    if (subject) identities.push(pullTarget(subject.url));
+    if (
+      !identities.length ||
+      identities.some((identity) => pullKey(identity) !== pullKey(identities[0]))
+    )
+      throw new Error();
+    entries.push({ evidence: Object.freeze({ ...base, event }), binding: identities[0] });
+  }
+  return { count, entries };
+}
+
+async function hydratePull(
+  get: (path: string) => Promise<unknown>,
+  binding: PullTarget
+): Promise<EligibilityPull> {
+  const pr = object(
+    await get(
+      `/repos/${encodeURIComponent(binding.owner)}/${encodeURIComponent(binding.repo)}/pulls/${binding.number}`
+    )
+  );
+  const pullUrl = `https://github.com/${binding.owner}/${binding.repo}/pull/${binding.number}`;
+  if (positive(pr.number) !== binding.number || text(pr.html_url).toLowerCase() !== pullUrl)
+    throw new Error();
+  const merged = pr.merged_at === null ? false : Boolean(time(pr.merged_at));
+  const pullState = state(pr.state);
+  if (merged && pullState !== 'closed') throw new Error();
+  return Object.freeze({
+    number: binding.number,
+    url: text(pr.html_url),
+    fullName: `${binding.owner}/${binding.repo}`,
+    state: pullState,
+    merged,
+    author: actor(pr.user),
+  });
 }
 
 /** Structured facts only. No prose interpretation, run transition, write or credential. */
@@ -193,73 +313,37 @@ export async function assessIssue(
     });
     const events: EligibilityEvent[] = [];
     const pulls = new Map<string, EligibilityPull>();
-    const ids = new Set<number>();
+    const ids = new Set<string>();
     let complete = false;
     for (let page = 1; page <= ELIGIBILITY_PAGE_LIMIT; page++) {
-      const entries = array(
+      const pageSnapshot = timelinePage(
         await get(
           `${prefix}/issues/${issue}/timeline?per_page=${ELIGIBILITY_PAGE_SIZE}&page=${page}`
-        ),
-        ELIGIBILITY_PAGE_SIZE
+        )
       );
-      for (const value of entries) {
-        const entry = object(value);
-        const event = text(entry.event);
-        if (!['cross-referenced', 'connected', 'assigned', 'unassigned'].includes(event)) continue;
-        const id = positive(entry.id);
+      for (const { evidence, binding } of pageSnapshot.entries) {
+        const id =
+          evidence.id === null ? canonicalJson({ evidence, binding }) : `id:${evidence.id}`;
         if (ids.has(id)) throw new Error();
         ids.add(id);
-        const base = {
-          id,
-          createdAt: time(entry.created_at),
-          actor: entry.actor === null ? null : actor(entry.actor),
-        };
-        if (event === 'assigned' || event === 'unassigned') {
-          events.push(Object.freeze({ ...base, event, assignee: actor(entry.assignee) }));
+        if (!binding) {
+          events.push(evidence);
           continue;
         }
-        const source = entry.source === undefined ? null : object(entry.source);
-        const linked = source ? object(source.issue) : null;
-        // Cross-referenced issues are not PRs; only the structural marker decides.
-        if (event === 'cross-referenced' && linked && !('pull_request' in linked)) continue;
-        const subject = entry.subject === undefined ? null : object(entry.subject);
-        const binding = pullTarget(linked?.html_url ?? subject?.url);
-        const key = `${binding.owner}/${binding.repo}/${binding.number}`.toLowerCase();
+        const key = pullKey(binding);
         let pull = pulls.get(key);
         if (!pull) {
-          const pr = object(
-            await get(
-              `/repos/${encodeURIComponent(binding.owner)}/${encodeURIComponent(binding.repo)}/pulls/${binding.number}`
-            )
-          );
-          const pullUrl = `https://github.com/${binding.owner}/${binding.repo}/pull/${binding.number}`;
-          if (
-            positive(pr.number) !== binding.number ||
-            text(pr.html_url).toLowerCase() !== pullUrl.toLowerCase()
-          )
-            throw new Error();
-          const merged = pr.merged_at === null ? false : Boolean(time(pr.merged_at));
-          const pullState = state(pr.state);
-          if (merged && pullState !== 'closed') throw new Error();
-          pull = Object.freeze({
-            number: binding.number,
-            url: text(pr.html_url),
-            fullName: `${binding.owner}/${binding.repo}`,
-            state: pullState,
-            merged,
-            author: actor(pr.user),
-          });
+          pull = await hydratePull(get, binding);
           pulls.set(key, pull);
         }
         events.push(
           Object.freeze({
-            ...base,
-            event: event as 'cross-referenced' | 'connected',
+            ...evidence,
             pullUrl: pull.url,
           })
         );
       }
-      if (entries.length < ELIGIBILITY_PAGE_SIZE) {
+      if (pageSnapshot.count < ELIGIBILITY_PAGE_SIZE) {
         complete = true;
         break;
       }

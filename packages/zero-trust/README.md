@@ -360,7 +360,12 @@ authoritative `repositoryId`, `fullName`, `defaultBranch`, public/archive/disabl
 flags, issue number/URL/state/lock/PR marker, author (login/URL), author association,
 labels, assignees (login/URL), creation time, normalized contributor, referenced
 PRs (number/URL/repository/state/merged/author) and assignment/connection events
-(ID/time/actor and assignee or PR URL). Labels, assignees, PRs and events are sorted
+(nullable REST ID/time/actor and assignee or PR URL, plus update time when supplied).
+Cross-references without REST IDs use their complete normalized event/PR identity
+for duplicate detection; other retained events require numeric IDs. Ordinary accounts
+and GitHub App bots (`<app>[bot]`, type `Bot`, matching GitHub App profile URL) are
+recorded; contributor and repository-owner validation still requires ordinary logins.
+Labels, assignees, PRs and events are sorted
 by canonical JSON; the digest is lowercase SHA-256 over canonical JSON of exactly
 `facts`, in UTF-8. It binds freshness inputs, not permission or authentication.
 
@@ -386,7 +391,13 @@ issue references and other event kinds do not judge prose. Current PR state is
 hydrated once per distinct parsed public GitHub identity via a fixed `/repos/.../pulls/...`
 path (including cross-repository references), never by fetching repository-provided
 URLs. Connected events without a resolvable source issue or subject identity are
-unknown. Duplicate relevant event IDs and inconsistent merged/open state are unknown.
+unknown. All supplied source number, HTML URL, PR marker URL and subject identities
+must agree. Ordinary issue references require consistent non-PR identity. Duplicate
+relevant event identities and inconsistent merged/open state are unknown. Each page
+is synchronously validated/detached before PR hydration; later reader mutations cannot
+change pagination or admitted entries. PR repository identity is normalized so mixed-case
+references cannot make the digest depend on reference order. Whole-second UTC timestamps
+must round-trip exactly, rejecting impossible calendar dates.
 The injected reader must deliver complete GitHub REST bodies; it owns transport
 deadlines. The bounded snapshot permits at most 1,000 relevant events/PR reads,
 100 labels and 100 assignees, bounded metadata strings and a 1-MiB canonical digest
