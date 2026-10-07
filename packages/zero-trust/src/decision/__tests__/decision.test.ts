@@ -763,6 +763,14 @@ describe('independent review regressions', () => {
     ).rejects.toMatchObject({ name: 'InvalidDecisionError', code: 'inputs' });
     expect(fake.complete).not.toHaveBeenCalled();
     expect(b.ledger.snapshot().reservations).toHaveLength(0);
+    Object.defineProperty(sparse, 'extra', { value: 'metadata', enumerable: true });
+    await expect(
+      decide(definition, sparse, { provider: fake.provider, budget: b })
+    ).rejects.toMatchObject({ name: 'InvalidDecisionError', code: 'inputs' });
+    const options = new Array<string>(2);
+    options[1] = 'ban';
+    Object.defineProperty(options, 'extra', { value: 'metadata', enumerable: true });
+    expect(() => createTypedQuestion({ ...definition, options })).toThrow('Invalid typed question');
   });
   it('budget admission identity and rates cannot move between passes', async () => {
     const b = budget();

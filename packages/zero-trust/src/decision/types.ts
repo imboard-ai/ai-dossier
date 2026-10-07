@@ -172,7 +172,9 @@ export function createTypedQuestion(raw: TypedQuestion): TypedQuestion {
         !Array.isArray(values) ||
         values.length < 2 ||
         values.length > MAX_DECISION_ANSWERS ||
-        values.some((v) => typeof v !== 'string' || !v.trim() || v === q.escalateValue) ||
+        Array.from(values).some(
+          (v) => typeof v !== 'string' || !v.trim() || v === q.escalateValue
+        ) ||
         new Set(values).size !== values.length ||
         Object.keys(values).length !== values.length
       )

@@ -80,7 +80,7 @@ function snapshotInputs(raw: readonly DecisionInput[]): readonly DecisionInput[]
   if (
     !Array.isArray(inputs) ||
     Object.keys(inputs).length !== inputs.length ||
-    inputs.some(
+    Array.from(inputs).some(
       (i) =>
         !isRecord(i) ||
         Object.keys(i).some((k) => !['sourceId', 'text'].includes(k)) ||
