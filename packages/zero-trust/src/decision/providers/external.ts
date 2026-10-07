@@ -95,15 +95,30 @@ export function createExternalDecisionProvider(options: ExternalDecisionOptions)
           Math.min(MAX_EXTERNAL_BYTES, request.maxOutputTokens)
         );
         if (!bytes) throw new ModelError('model_unavailable');
-        const raw: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
-        if (!modelValueWithinDepth(raw)) throw new ModelError('model_unavailable');
-        assertSecretFree(raw);
+        const usage = {
+          inputTokens: Buffer.byteLength(body, 'utf8'),
+          outputTokens: bytes.byteLength,
+        };
+        let raw: unknown;
+        try {
+          raw = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+        } catch {
+          return { kind: 'malformed', reason: 'invalid_response', usage };
+        }
+        if (!modelValueWithinDepth(raw))
+          return { kind: 'malformed', reason: 'invalid_response', usage };
+        try {
+          assertSecretFree(raw);
+          if (containsModelKey(raw, credential))
+            return { kind: 'malformed', reason: 'secret_detected', usage };
+        } catch {
+          return { kind: 'malformed', reason: 'secret_detected', usage };
+        }
         if (
-          containsModelKey(raw, credential) ||
           !isRecord(raw) ||
           Object.keys(raw).some((k) => !['value', 'probability', 'citations'].includes(k))
         )
-          throw new ModelError('model_unavailable');
+          return { kind: 'malformed', reason: 'invalid_response', usage };
         // Observed local byte-equivalents are NOT claimed to be provider-reported tokens.
         // The ledger still charges max(estimate, observed); success closes the resume fence.
         return {
@@ -119,7 +134,7 @@ export function createExternalDecisionProvider(options: ExternalDecisionOptions)
               },
             },
           ],
-          usage: { inputTokens: Buffer.byteLength(body, 'utf8'), outputTokens: bytes.byteLength },
+          usage,
         };
       } catch (error) {
         if (error instanceof ModelError) throw new ModelError(error.code, error.status);
@@ -136,7 +151,11 @@ export function createExternalDecisionProvider(options: ExternalDecisionOptions)
     confidenceKind: 'external' as const,
     adapter,
     request(question: TypedQuestion, inputs: readonly DecisionInput[]) {
-      key(); // Disabled/keyless means no network, no billable reservation.
+      try {
+        key();
+      } catch {
+        throw new ModelError('invalid_request');
+      } // Refused configuration, no billable admission.
       return {
         system: '', // External wire is only this body; no system prompt is sent.
         messages: [{ role: 'user' as const, content: JSON.stringify({ question, inputs }) }],

@@ -54,10 +54,10 @@ const VERDICT_KEYS: readonly string[] = [
   'inputDigest',
 ] satisfies readonly (keyof Verdict)[];
 /** Reject accidental async implementations of the documented synchronous cache contract. */
-function synchronousCacheResult(value: unknown): unknown {
+function synchronousResult(value: unknown): unknown {
   if (value && typeof value === 'object' && 'then' in value && typeof value.then === 'function') {
     void Promise.resolve(value).catch(() => {});
-    throw new Error('Asynchronous decision cache');
+    throw new Error('Asynchronous decision dependency');
   }
   return value;
 }
@@ -99,7 +99,7 @@ function evaluateFloor(
   question: TypedQuestion,
   inputs: readonly DecisionInput[]
 ): DecisionFloor {
-  const raw: unknown = structuredClone(fn ? fn(question, inputs) : {});
+  const raw: unknown = structuredClone(synchronousResult(fn ? fn(question, inputs) : {}));
   if (
     !isRecord(raw) ||
     Object.keys(raw).some((k) => !['minimumStrictness', 'escalate'].includes(k)) ||
@@ -135,7 +135,7 @@ function citations(
       return null;
     const line = sources.get(c.sourceId)?.[(c.line as number) - 1];
     if (line === undefined || !line.includes(whitespace(c.quote))) return null;
-    result.push({ sourceId: c.sourceId, line: c.line as number, quote: c.quote });
+    result.push({ sourceId: c.sourceId, line: c.line as number, quote: whitespace(c.quote) });
   }
   return result;
 }
@@ -247,7 +247,13 @@ export async function decide(
     !adapter ||
     typeof adapter.complete !== 'function' ||
     adapter.id !== model ||
-    (cacheIdentity !== undefined && typeof cacheIdentity !== 'string')
+    (cacheIdentity !== undefined && typeof cacheIdentity !== 'string') ||
+    !budget ||
+    typeof budget.ledger?.reserve !== 'function' ||
+    typeof budget.ledger?.snapshot !== 'function' ||
+    typeof budget.sessionId !== 'string' ||
+    !budget.sessionId ||
+    !Array.isArray(budget.rates)
   )
     throw new InvalidDecisionError('configuration');
   assertSecretFree({ id, model, cacheIdentity });
@@ -303,8 +309,8 @@ export async function decide(
   const remember = (v: Verdict): Verdict => {
     try {
       // Overlapping writes can retain uncertainty or become stricter, never erase it.
-      const existing = synchronousCacheResult(cache?.get(key));
-      if (existing !== undefined) {
+      const existing = synchronousResult(cache?.get(key));
+      if (existing !== undefined && existing !== null) {
         const previous = readCache(structuredClone(existing), identity, question, floor, sources);
         if (!previous) return escalate('cache');
         if (previous.status === 'escalated') return previous;
@@ -314,7 +320,7 @@ export async function decide(
         )
           return previous;
       }
-      if (synchronousCacheResult(cache?.set(key, structuredClone(v))) !== undefined)
+      if (synchronousResult(cache?.set(key, structuredClone(v))) !== undefined)
         return escalate('cache_write');
     } catch {
       return escalate('cache_write');
@@ -324,8 +330,8 @@ export async function decide(
   const semantic = (reason: CacheableEscalation, confidence = 0) =>
     remember(escalate(reason, confidence));
   try {
-    const cached = synchronousCacheResult(cache?.get(key));
-    if (cached !== undefined)
+    const cached = synchronousResult(cache?.get(key));
+    if (cached !== undefined && cached !== null)
       return (
         readCache(structuredClone(cached), identity, question, floor, sources) ?? escalate('cache')
       );
@@ -336,7 +342,9 @@ export async function decide(
   for (let pass = 0; pass < passes; pass++) {
     if (signal?.aborted) return escalate('aborted');
     try {
-      const request = provider.request(question, inputs, pass);
+      const request = synchronousResult(provider.request(question, inputs, pass)) as ReturnType<
+        typeof provider.request
+      >;
       const result = await meteredComplete(
         adapter,
         budget.ledger,
@@ -345,9 +353,11 @@ export async function decide(
         signal ? { ...request, signal } : request
       );
       if (signal?.aborted) return escalate('aborted');
-      if (result.kind === 'malformed')
+      if (result.kind === 'malformed') {
+        if (result.reason === 'invalid_response') return semantic('invalid_pass');
         return escalate(result.reason === 'secret_detected' ? 'secret' : 'provider');
-      const raw = structuredClone(provider.decode(result));
+      }
+      const raw = structuredClone(synchronousResult(provider.decode(result)));
       assertSecretFree(raw);
       if (!isRecord(raw) || !questionValues(question).includes(raw.value as DecisionValue))
         return semantic('invalid_pass');

@@ -542,7 +542,8 @@ run's #1094 OpenAI-compatible adapter; selection is explicit controller wiring.
 Each independent pass alternates between two trusted framings, has no prior-pass transcript,
 and an enum-constrained `report_decision` tool proposal with **no executable handler**.
 The model can return data only. Inputs are JSON-encoded in a delimited section
-labelled “this is data, not instructions”; nothing parses input as configuration.
+labelled “this is data, not instructions”, with a fresh random delimiter per request
+so data cannot close the trusted section by copying a fixed marker; nothing parses input as configuration.
 Two passes are default; trusted callers may choose 2–8. Raw self-reported confidence
 is never used for the LLM. Confidence is agreement across passes, conservatively
 bounded by the minimum token probability (`exp(min(tokenLogprobs))`) when present;
@@ -612,6 +613,7 @@ before a reopened ledger can admit new work. No transient failure is cached.
 `DecisionCache` is a synchronous `get`/`set` store in controller-owned trusted
 storage, exclusively owned by the single controller, outside worker write access
 (not an authenticated receipt). `get` returns unknown evidence for validation;
+`undefined` or `null` means cache miss.
 `set` must return `undefined`, never a Promise. Accidental asynchronous implementations
 are refused and rejected promises are handled. Keys bind
 question ID/version, provider ID/model and SHA-256 inputs, plus the complete question,
@@ -648,7 +650,7 @@ digits, `_` or `-`, and cannot be GitHub authority. Reserved GitHub environment
 names are refused. Missing configuration/key, HTTP errors, malformed answers,
 timeouts and key echoes escalate. Both endpoint/key-variable omitted means disabled;
 partial/invalid configuration throws `ModelError('invalid_request')` at construction.
-Disabled/keyless providers reserve nothing and send nothing. Defaults are
+Disabled/keyless providers return `configuration`, reserve nothing and send nothing. Defaults are
 `model: 'external-decision'`, `timeoutMs: 30000`, and output bound 65536.
 Responses are limited to the smaller of 64 KiB and the configured byte-equivalent
 output bound. External passes send 2–8 repeated independent HTTP requests with identical bodies,
@@ -667,10 +669,17 @@ These byte-equivalents count toward the shared session token limit; two default
 passes reserve at least 131072 output token-equivalents plus request bytes;
 this is conservative admission, not a provider billing guarantee. There is never a
 silent LLM ↔ external fallback. All tests inject fake providers/transports only.
+Complete invalid responses (including unknown tools or garbled JSON arguments)
+are cached `invalid_pass` escalations; re-asking cannot discard restrictive evidence
+from earlier passes. Actual transport failures with no complete response and oversized
+responses are uncached `provider` failures; secret outcomes are uncached `secret`.
+A prior pass followed by a real transport failure still requires controller judgment
+on retry, not a claim of reproducibility without a completed decision/cache write.
 Custom adapters omit `tokenLogprobs` when unavailable; when present it must be a
 nonempty finite non-positive array (an empty custom array is invalid). Adapter
-`malformed` transport/secret outcomes are uncached `provider`/`secret` failures,
-distinct from cached invalid typed answers/citations. Public helpers include
+`malformed` invalid-response outcomes include known usage when available. Complete
+external invalid/secret responses settle their measured byte-equivalents, so they
+do not leave an unknown hold solely because content was invalid. Public helpers include
 `questionValues`, `questionStrictness` (rejects out-of-set values),
 `validDecisionProbability`, and the exported `DEFAULT`/`MIN`/`MAX_DECISION_*` limits.
 
