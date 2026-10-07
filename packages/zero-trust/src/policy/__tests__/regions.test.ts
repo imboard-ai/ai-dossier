@@ -146,10 +146,7 @@ describe('CommonMark subset policy regions', () => {
   ])('does not reinterpret consecutive thematic breaks as setext: %s', (marker) => {
     expect(classifyPolicy([file(`## Contributing\nNo AI.\n${marker}\n---`)]).ai).toBe('banned');
   });
-  it.each([
-    '<custom',
-    '<!doctype html>',
-  ])('does not manufacture an HTML block from %s', (prefix) => {
+  it.each(['<custom'])('does not manufacture an HTML block from %s', (prefix) => {
     expect(
       classifyPolicy([file(`${prefix}\n## Contributing\nNo AI.\nDraft required.\nNo templates.`)])
     ).toMatchObject({ ai: 'banned', draftRequired: true, receiptBlockAllowed: false });
@@ -215,5 +212,26 @@ describe('CommonMark subset policy regions', () => {
       expect(() => classifyPolicy([file(text)])).toThrow(PolicyInputError);
       expect(() => classifyPolicy([file(text, 'CONTRIBUTING.md')])).toThrow(PolicyInputError);
     }
+  });
+  it.each([
+    '<!doctype',
+    '<!note',
+    '<!doctype html>',
+    '<span>\u00a0',
+    '<span title="x"\u00a0>',
+    '<span a\u00a0="b">',
+  ])('refuses unsupported whole HTML start syntax: %s', (prefix) => {
+    for (const container of ['', '- ']) {
+      expect(() =>
+        classifyPolicy([
+          file(
+            `${container}${prefix}\n  ## Contributing\n  No AI.\n  Draft required.\n  No templates.`
+          ),
+        ])
+      ).toThrow(PolicyInputError);
+    }
+    expect(classifyPolicy([file(`## Contributing\n\`\`\`\n${prefix}\n\`\`\`\nNo AI.`)]).ai).toBe(
+      'banned'
+    );
   });
 });

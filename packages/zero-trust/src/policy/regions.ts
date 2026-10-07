@@ -13,8 +13,13 @@ const parserOptions = { html: true, maxNesting: MAX_NESTING };
 const markdown = new MarkdownIt('commonmark', parserOptions);
 
 function assertHtmlSeparator(text: string): void {
-  const separator = /^ {0,3}<\/?[a-z][a-z0-9-]*(\s)/iu.exec(text)?.[1];
-  if (separator && ![' ', '\t', '\r', '\n'].includes(separator)) throw new PolicyInputError();
+  const opener = text.split(/\r\n|\n|\r/u, 1)[0];
+  // Refuse parser/CommonMark disagreements before trusting scope. The parser
+  // accepts lowercase declarations and JS whitespace throughout type-7 start
+  // syntax. This bounded profile admits only horizontal ASCII whitespace on
+  // HTML opener lines, including attribute values and trailing text.
+  if (/^ {0,3}<![a-z]/u.test(opener) || (/^ {0,3}</u.test(opener) && /[^\S \t]/u.test(opener)))
+    throw new PolicyInputError();
 }
 
 /** Apply the policy subset to CommonMark's block/source maps. This avoids

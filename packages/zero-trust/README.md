@@ -276,7 +276,10 @@ Source evidence includes all non-fenced lines, including link-reference definiti
 that have no block-token map. Reaching the parser nesting boundary (token level
 19 under its 20-level block cap) raises non-echoing `PolicyInputError` rather than
 treating omitted content as silence. Unsupported non-space/tab whitespace after
-an HTML tag prefix is likewise refused; excluded fenced text is not examined.
+an HTML opener line (including attributes or trailing text) is likewise refused,
+as are lowercase declaration-like openers (`<!doctype`, `<!note`). These are
+closed refusals for parser/CommonMark disagreements; excluded fenced text is not
+examined. Guards inspect both original lines and container-stripped HTML openers.
 Active HTML blocks cannot open Markdown fences or manufacture heading boundaries;
 comments, raw tags, declarations, processing instructions and CDATA terminate
 on their appropriate markers, other HTML blocks at a blank line. README setext
