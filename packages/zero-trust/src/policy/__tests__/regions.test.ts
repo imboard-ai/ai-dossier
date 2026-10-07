@@ -204,4 +204,16 @@ describe('CommonMark subset policy regions', () => {
       classifyPolicy([file(`## Contributing\n\`\`\`\n<script${space}\n\`\`\`\nNo AI.`)]).ai
     ).toBe('banned');
   });
+  it.each([
+    '- ',
+    '> ',
+    '- > ',
+    '- item\n  - ',
+  ])('validates container-stripped HTML openers behind %s', (prefix) => {
+    for (const space of ['\u000b', '\u000c', '\u00a0', '\u2003']) {
+      const text = `${prefix}<script${space}\n  ## Contributing\n  No AI.\n  Draft required.\n  No templates.`;
+      expect(() => classifyPolicy([file(text)])).toThrow(PolicyInputError);
+      expect(() => classifyPolicy([file(text, 'CONTRIBUTING.md')])).toThrow(PolicyInputError);
+    }
+  });
 });

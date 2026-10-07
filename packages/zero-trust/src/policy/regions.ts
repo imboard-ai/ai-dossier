@@ -12,6 +12,11 @@ const MAX_NESTING = 20;
 const parserOptions = { html: true, maxNesting: MAX_NESTING };
 const markdown = new MarkdownIt('commonmark', parserOptions);
 
+function assertHtmlSeparator(text: string): void {
+  const separator = /^ {0,3}<\/?[a-z][a-z0-9-]*(\s)/iu.exec(text)?.[1];
+  if (separator && ![' ', '\t', '\r', '\n'].includes(separator)) throw new PolicyInputError();
+}
+
 /** Apply the policy subset to CommonMark's block/source maps. This avoids
  * mistaking HTML contents/thematic breaks for fences, ATX or setext headings.
  * Unsupported setext/HTML taints the entire selected README contribution region. */
@@ -29,6 +34,9 @@ export function policyRegions(file: PolicyFile): readonly PolicyRegion[] {
   const ambiguous = new Set<number>();
   const headings = new Map<number, RegExpExecArray>();
   for (const token of tokens) {
+    // Validate the container-stripped opener too: raw lines can retain list/quote
+    // prefixes that hide an unsupported separator from the source-line guard.
+    if (token.type === 'html_block') assertHtmlSeparator(token.content);
     if (!token.map) continue;
     const [start, end] = token.map;
     if (token.type === 'fence') {
@@ -49,8 +57,7 @@ export function policyRegions(file: PolicyFile): readonly PolicyRegion[] {
     if (excluded.has(index)) continue;
     // markdown-it's HTML opener uses broader JS whitespace than CommonMark.
     // Unsupported non-horizontal whitespace is a closed refusal, not silence.
-    const separator = /^ {0,3}<\/?[a-z][a-z0-9-]*(\s)/iu.exec(lines[index])?.[1];
-    if (separator && separator !== ' ' && separator !== '\t') throw new PolicyInputError();
+    assertHtmlSeparator(lines[index]);
     const atx = headings.get(index);
     if (atx) {
       const level = atx[1].length;
