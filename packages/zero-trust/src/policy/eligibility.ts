@@ -214,17 +214,35 @@ function timelinePage(value: unknown): { count: number; entries: TimelineDescrip
     if (event === 'cross-referenced' && linked && !('pull_request' in linked)) {
       const ordinary = pullTarget(linked.html_url, 'issue');
       if (positive(linked.number) !== ordinary.number || subject !== null) throw new Error();
+      if (
+        linked.url !== undefined &&
+        pullKey(pullTarget(linked.url, 'issue')) !== pullKey(ordinary)
+      )
+        throw new Error();
       continue;
     }
     const identities: PullTarget[] = [];
     if (linked) {
       const identity = pullTarget(linked.html_url);
       if (positive(linked.number) !== identity.number) throw new Error();
+      if (
+        linked.url !== undefined &&
+        pullKey(pullTarget(linked.url, 'issue')) !== pullKey(identity)
+      )
+        throw new Error();
       const marker = object(linked.pull_request);
       if (pullKey(pullTarget(marker.url)) !== pullKey(identity)) throw new Error();
+      if (
+        marker.html_url !== undefined &&
+        pullKey(pullTarget(marker.html_url)) !== pullKey(identity)
+      )
+        throw new Error();
       identities.push(identity);
     }
-    if (subject) identities.push(pullTarget(subject.url));
+    if (subject) {
+      identities.push(pullTarget(subject.url));
+      if (subject.html_url !== undefined) identities.push(pullTarget(subject.html_url));
+    }
     if (
       !identities.length ||
       identities.some((identity) => pullKey(identity) !== pullKey(identities[0]))

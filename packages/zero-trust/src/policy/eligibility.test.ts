@@ -397,6 +397,45 @@ describe('fail-closed and bounded reads', () => {
 });
 
 describe('binding and side-effect guarantees', () => {
+  it.each([
+    'source_api',
+    'marker_html',
+    'subject_html',
+  ])('rejects additional REST identity contradictions: %s', async (field) => {
+    const r = rig();
+    const entry = cross();
+    const linked = {
+      ...entry.source.issue,
+      url: `https://api.github.com/repos/${field === 'source_api' ? 'elsewhere/other' : 'upstream/fixture'}/issues/8`,
+      pull_request: {
+        ...entry.source.issue.pull_request,
+        html_url: `https://github.com/${field === 'marker_html' ? 'elsewhere/other' : 'upstream/fixture'}/pull/8`,
+      },
+    };
+    r.pages[0] = [
+      {
+        ...entry,
+        source: { issue: linked },
+        subject: {
+          url: 'https://api.github.com/repos/upstream/fixture/pulls/8',
+          html_url: `https://github.com/${field === 'subject_html' ? 'elsewhere/other' : 'upstream/fixture'}/pull/8`,
+        },
+      },
+    ];
+    r.pr.state = 'closed';
+    expect(await r.assess()).toEqual({ kind: 'unknown' });
+    expect(r.calls.some((path) => path.includes('/pulls/'))).toBe(false);
+    linked.url = 'https://api.github.com/repos/upstream/fixture/issues/8';
+    linked.pull_request.html_url = 'https://github.com/upstream/fixture/pull/8';
+    r.pages[0] = [{ ...entry, source: { issue: linked } }];
+    expect(await r.assess()).toMatchObject({ kind: 'eligible' });
+    const { pull_request: _pr, ...ordinary } = linked;
+    ordinary.html_url = 'https://github.com/upstream/fixture/issues/8';
+    r.pages[0] = [{ ...entry, source: { issue: ordinary } }];
+    expect(await r.assess()).toMatchObject({ kind: 'eligible' });
+    ordinary.url = 'https://api.github.com/repos/elsewhere/other/issues/8';
+    expect(await r.assess()).toEqual({ kind: 'unknown' });
+  });
   it('handles REST cross-references without invented numeric IDs', async () => {
     const r = rig();
     const { id: _id, ...entry } = cross();

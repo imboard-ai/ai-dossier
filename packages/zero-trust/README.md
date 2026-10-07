@@ -392,7 +392,8 @@ hydrated once per distinct parsed public GitHub identity via a fixed `/repos/...
 path (including cross-repository references), never by fetching repository-provided
 URLs. Connected events without a resolvable source issue or subject identity are
 unknown. All supplied source number, HTML URL, PR marker URL and subject identities
-must agree. Ordinary issue references require consistent non-PR identity. Duplicate
+must agree, including source API URLs and marker/subject HTML URLs when supplied.
+Ordinary issue references require consistent non-PR identity. Duplicate
 relevant event identities and inconsistent merged/open state are unknown. Each page
 is synchronously validated/detached before PR hydration; later reader mutations cannot
 change pagination or admitted entries. PR repository identity is normalized so mixed-case
