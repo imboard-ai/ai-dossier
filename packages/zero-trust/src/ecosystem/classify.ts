@@ -11,21 +11,53 @@ export type CommandOutcome =
   | {
       readonly kind: 'exited';
       readonly exitCode: number;
-      /** Parsed test report; `null` when missing or unreadable. */
-      readonly report: { readonly suites: number } | null;
+      /** Parsed test report; `null` when missing or unreadable. The case counts are
+       * optional; when any is given, all must be valid and agree with the exit status. */
+      readonly report: {
+        readonly suites: number;
+        readonly tests?: number;
+        readonly failures?: number;
+        readonly skipped?: number;
+      } | null;
     };
 
 /** `failed` needs a readable report with at least one suite: a non-zero exit with
  * no report, or with zero discovered suites, could equally be a crashed or
- * misconfigured runner, so it stays inconclusive. */
+ * misconfigured runner, so it stays inconclusive. When the report carries case
+ * counts they must agree with the exit status: exit 0 with a failing case or with no
+ * executed case, or a non-zero exit with no failing case, is not a test result. */
 export function classifyOutcome(outcome: CommandOutcome): CommandStatus {
   if (outcome.kind !== 'exited') return 'inconclusive';
-  const suites = outcome.report?.suites;
+  const report = outcome.report;
+  const suites = report?.suites;
   if (suites === undefined || !Number.isSafeInteger(suites) || suites <= 0) return 'inconclusive';
+  const { tests, failures, skipped } = report as NonNullable<typeof report>;
+  if (tests !== undefined || failures !== undefined || skipped !== undefined) {
+    if (!isCount(tests) || !isCount(failures) || !isCount(skipped)) return 'inconclusive';
+    const agrees = outcome.exitCode === 0 ? failures === 0 && tests - skipped > 0 : failures > 0;
+    if (!agrees) return 'inconclusive';
+  }
   return outcome.exitCode === 0 ? 'passed' : 'failed';
 }
 
-/** Maps an outcome to the receipt's command evidence (status, exit code, suites). */
+function isCount(value: number | undefined): value is number {
+  return value !== undefined && Number.isSafeInteger(value) && value >= 0;
+}
+
+/** A command's status. Test commands (`captureReport`) are classified from their
+ * report; a setup step has none, so its exit status is the result, and a timeout or a
+ * signal is still never a pass. */
+export function classifyCommand(
+  command: Pick<PlannedCommand, 'captureReport'>,
+  outcome: CommandOutcome
+): CommandStatus {
+  if (command.captureReport) return classifyOutcome(outcome);
+  if (outcome.kind !== 'exited') return 'inconclusive';
+  return outcome.exitCode === 0 ? 'passed' : 'failed';
+}
+
+/** Maps an outcome to the receipt's command evidence (status from `classifyCommand`,
+ * exit code, suites). */
 export function commandEvidence(
   command: PlannedCommand,
   outcome: CommandOutcome,
@@ -36,7 +68,7 @@ export function commandEvidence(
     id: command.id,
     command: command.argv.join(' '),
     required: command.required,
-    status: classifyOutcome(outcome),
+    status: classifyCommand(command, outcome),
     exitStatus:
       exited &&
       Number.isInteger(outcome.exitCode) &&

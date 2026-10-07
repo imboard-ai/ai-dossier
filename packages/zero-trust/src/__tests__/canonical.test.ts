@@ -12,6 +12,7 @@ import {
   createCandidate,
   createManifest,
   exportSource,
+  parentPaths,
   reconstructCandidate,
   type SourceEntry,
   sha256,
@@ -746,5 +747,12 @@ describe('canonical Git reconstruction', () => {
     } finally {
       git.close();
     }
+  });
+});
+
+describe('parentPaths', () => {
+  it('lists ancestor directories outermost first', () => {
+    expect(parentPaths('a/b/c.txt')).toEqual(['a', 'a/b']);
+    expect(parentPaths('top.txt')).toEqual([]);
   });
 });

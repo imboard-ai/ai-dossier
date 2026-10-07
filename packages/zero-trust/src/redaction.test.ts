@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { assertNoSecrets, SECRET_PATTERNS, SecretRedactionError } from './redaction';
+import {
+  assertNoSecrets,
+  REDACTED,
+  redactedExcerpt,
+  SECRET_PATTERNS,
+  SecretRedactionError,
+} from './redaction';
 
 describe('shared credential rejection policy', () => {
   it.each([
@@ -77,5 +83,18 @@ describe('shared credential rejection policy', () => {
     expect(Object.isFrozen(SECRET_PATTERNS)).toBe(true);
     expect(() => assertNoSecrets('authorization '.repeat(100000))).not.toThrow();
     expect(() => assertNoSecrets('\\'.repeat(100000))).not.toThrow();
+  });
+});
+
+describe('redactedExcerpt', () => {
+  const cut = (text: string) => text.slice(0, 4);
+  it('returns the cut when nothing matches', () => {
+    expect(redactedExcerpt('plain text', cut)).toEqual({ excerpt: 'plai', redacted: false });
+  });
+  it('redacts when the whole text matches even if the cut would hide it', () => {
+    expect(redactedExcerpt(`ok ${'ghp_'}${'a'.repeat(36)}`, cut)).toEqual({
+      excerpt: REDACTED,
+      redacted: true,
+    });
   });
 });

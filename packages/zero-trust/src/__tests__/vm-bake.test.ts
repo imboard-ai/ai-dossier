@@ -202,6 +202,46 @@ describe('ensureBaseImage', () => {
     }
   });
 
+  it('leaves no part file when the abort lands before the output file has opened', async () => {
+    // createWriteStream opens its file asynchronously. Hold the open back so the
+    // idle abort arrives while it is still pending: cleanup must wait for the
+    // stream to close, or the file shows up after it has already been removed.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const realOpen = fs.open;
+    const turn = () => new Promise<void>((resolve) => setImmediate(resolve));
+    vi.spyOn(fs, 'open').mockImplementation(((...args: unknown[]) => {
+      let turns = 0;
+      const wait = () =>
+        turns++ < 200 ? setImmediate(wait) : (realOpen as (...a: unknown[]) => void)(...args);
+      setImmediate(wait);
+    }) as unknown as typeof fs.open);
+    try {
+      const fetchImpl = vi.fn(
+        async (_url: unknown, init?: RequestInit) =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              pull: () =>
+                new Promise<void>((_resolve, reject) =>
+                  init?.signal?.addEventListener('abort', () =>
+                    reject(new DOMException('aborted', 'AbortError'))
+                  )
+                ),
+            })
+          )
+      ) as unknown as typeof fetch;
+      const result = ensureBaseImage(cacheDir, fetchImpl).catch((e: unknown) => e as Error);
+      await vi.advanceTimersByTimeAsync(120_000);
+      const error = await result;
+      expect(error.message).toContain('stalled for 120 s');
+      // Let a late open finish, then check nothing was left behind.
+      for (let i = 0; i < 400; i++) await turn();
+      expect(fs.readdirSync(cacheDir)).toEqual([]);
+    } finally {
+      vi.restoreAllMocks();
+      vi.useRealTimers();
+    }
+  });
+
   it('uses the global fetch by default', async () => {
     const spy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(BASE_BYTES));
     try {

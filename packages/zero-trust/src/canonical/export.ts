@@ -86,6 +86,11 @@ export function comparePaths(a: string, b: string): number {
 function manifestDigest(entries: readonly SourceEntry[], totalBytes: number): string {
   return sha256(JSON.stringify({ version: 1, entries, totalBytes }));
 }
+/** The ancestor directories of a manifest path, outermost first (`a/b/c` → `a`, `a/b`). */
+export function parentPaths(path: string): string[] {
+  const parts = path.split('/');
+  return parts.slice(1).map((_, depth) => parts.slice(0, depth + 1).join('/'));
+}
 /** Revalidate persisted/untrusted JSON; returns a new deep-frozen primitive snapshot. */
 export function validateManifest(
   raw: SourceManifest,

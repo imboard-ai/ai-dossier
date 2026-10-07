@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { Citation, DecisionReason, Verdict } from '../decision/types';
 import { canonicalJson } from '../receipt/schema';
-import { assertNoSecrets, assertSecretFree } from '../redaction';
+import { assertSecretFree, redactedExcerpt } from '../redaction';
 import { type PolicyFile, validatePolicyFiles } from './discover';
 import { type PolicyRegion, policyRegions } from './regions';
 import { POLICY_RULES, POLICY_TOPICS, type PolicyCategory, type PolicyDimension } from './rules';
@@ -98,15 +98,7 @@ function units(text: string): string[] {
 }
 
 export function policyExcerpt(text: string): string {
-  try {
-    // Scan the entire line first: slicing can hide a secret prefix at the edge.
-    assertNoSecrets(text);
-    const value = Array.from(text).slice(0, 200).join('');
-    assertNoSecrets(value);
-    return value;
-  } catch {
-    return '[redacted]';
-  }
+  return redactedExcerpt(text, (value) => Array.from(value).slice(0, 200).join('')).excerpt;
 }
 
 /** Deterministic restriction floor only: no permission can be inferred from text.

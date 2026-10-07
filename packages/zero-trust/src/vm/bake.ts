@@ -95,8 +95,17 @@ export async function ensureBaseImage(
     clearTimeout(idle);
     // Destroying a stream with a write still queued emits ERR_STREAM_DESTROYED; the
     // download already failed or finished, so that late error carries nothing.
-    out?.on('error', () => undefined);
-    out?.destroy();
+    if (out) {
+      const stream = out;
+      stream.on('error', () => undefined);
+      // The file opens asynchronously: wait for the close, or an open still in
+      // flight creates the part file after the rmSync below has run.
+      if (!stream.closed)
+        await new Promise<void>((resolve) => {
+          stream.once('close', () => resolve());
+          stream.destroy();
+        });
+    }
     fs.rmSync(part, { force: true });
   }
   return file;
