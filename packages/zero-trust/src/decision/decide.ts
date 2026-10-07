@@ -95,7 +95,7 @@ function snapshotInputs(raw: readonly DecisionInput[]): readonly DecisionInput[]
     inputs.map((i: DecisionInput) => Object.freeze({ sourceId: i.sourceId, text: i.text }))
   );
 }
-function evaluateFloor(
+export function evaluateDecisionFloor(
   fn: DecisionDeps['floor'],
   question: TypedQuestion,
   inputs: readonly DecisionInput[]
@@ -119,7 +119,8 @@ function evaluateFloor(
 function citations(
   raw: unknown,
   sources: Sources,
-  max = MAX_DECISION_CITATIONS
+  max = MAX_DECISION_CITATIONS,
+  verbatim = false
 ): Citation[] | null {
   if (!Array.isArray(raw) || raw.length > max) return null;
   const result: Citation[] = [];
@@ -136,8 +137,9 @@ function citations(
     )
       return null;
     const line = sources.get(c.sourceId)?.[(c.line as number) - 1];
-    if (line === undefined || !line.includes(whitespace(c.quote))) return null;
-    result.push({ sourceId: c.sourceId, line: c.line as number, quote: whitespace(c.quote) });
+    const quote = verbatim ? c.quote : whitespace(c.quote);
+    if (line === undefined || !line.includes(quote)) return null;
+    result.push({ sourceId: c.sourceId, line: c.line as number, quote });
   }
   return result;
 }
@@ -178,7 +180,8 @@ function readCache(
   identity: Pick<Verdict, 'provider' | 'model' | 'questionVersion' | 'inputDigest'>,
   question: TypedQuestion,
   floor: DecisionFloor,
-  sources: Sources
+  sources: Sources,
+  verbatim = false
 ): Verdict | null {
   assertSecretFree(v);
   if (
@@ -188,7 +191,12 @@ function readCache(
     !validDecisionProbability(v.confidence)
   )
     return null;
-  const evidence = citations(v.citations, sources, MAX_DECISION_CITATIONS * MAX_DECISION_PASSES);
+  const evidence = citations(
+    v.citations,
+    sources,
+    MAX_DECISION_CITATIONS * MAX_DECISION_PASSES,
+    verbatim
+  );
   if (evidence === null) return null;
   if (
     v.status === 'accepted' &&
@@ -237,9 +245,11 @@ export async function decide(
     floor: floorFn,
     passes = DEFAULT_DECISION_PASSES,
     signal,
+    citationMode = 'normalized',
   } = deps;
   const { id, model, confidenceKind, adapter, cacheIdentity } = provider;
   if (
+    !['normalized', 'verbatim'].includes(citationMode) ||
     !Number.isSafeInteger(passes) ||
     passes < MIN_DECISION_PASSES ||
     passes > MAX_DECISION_PASSES ||
@@ -286,8 +296,14 @@ export async function decide(
   )
     return escalate('input');
   if (signal?.aborted) return escalate('aborted');
+  const verbatim = citationMode === 'verbatim';
   const sources: Sources = new Map(
-    inputs.map((i) => [i.sourceId, i.text.split(/\r\n|[\n\r\u0085\u2028\u2029]/u).map(whitespace)])
+    inputs.map((i) => [
+      i.sourceId,
+      verbatim
+        ? i.text.split(/\r\n|\n|\r/u)
+        : i.text.split(/\r\n|[\n\r\u0085\u2028\u2029]/u).map(whitespace),
+    ])
   );
   try {
     assertSecretFree(inputs);
@@ -298,7 +314,7 @@ export async function decide(
   }
   let floor: DecisionFloor;
   try {
-    floor = evaluateFloor(floorFn, question, inputs);
+    floor = evaluateDecisionFloor(floorFn, question, inputs);
   } catch {
     return escalate('configuration');
   }
@@ -314,6 +330,7 @@ export async function decide(
     cacheIdentity,
     passes,
     floor,
+    citationMode,
   ]);
   const remember = (v: Verdict): Verdict => {
     let existing: unknown;
@@ -327,7 +344,14 @@ export async function decide(
       if (existing !== undefined && existing !== null) {
         let previous: Verdict | null;
         try {
-          previous = readCache(structuredClone(existing), identity, question, floor, sources);
+          previous = readCache(
+            structuredClone(existing),
+            identity,
+            question,
+            floor,
+            sources,
+            verbatim
+          );
         } catch {
           return escalate('cache');
         }
@@ -352,7 +376,8 @@ export async function decide(
     const cached = synchronousResult(cache?.get(key));
     if (cached !== undefined && cached !== null)
       return (
-        readCache(structuredClone(cached), identity, question, floor, sources) ?? escalate('cache')
+        readCache(structuredClone(cached), identity, question, floor, sources, verbatim) ??
+        escalate('cache')
       );
   } catch {
     return escalate('cache');
@@ -401,7 +426,7 @@ export async function decide(
       assertSecretFree(raw);
       if (!isRecord(raw) || !questionValues(question).includes(raw.value as DecisionValue))
         return semantic('invalid_pass');
-      const evidence = citations(raw.citations, sources);
+      const evidence = citations(raw.citations, sources, MAX_DECISION_CITATIONS, verbatim);
       assertSecretFree(evidence);
       const confidence = passConfidence(confidenceKind, raw, result);
       if (evidence === null || confidence === null) return semantic('invalid_pass');

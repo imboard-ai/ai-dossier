@@ -102,6 +102,8 @@ export interface DecisionDeps {
   /** Independent calls with alternating trusted framings. Default two, maximum eight. */
   passes?: number;
   signal?: AbortSignal;
+  /** Strict consumers preserve raw quotes and CR/LF file line coordinates. */
+  citationMode?: 'normalized' | 'verbatim';
 }
 export class InvalidDecisionError extends Error {
   constructor(readonly code: 'configuration' | 'inputs') {

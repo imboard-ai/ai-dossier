@@ -327,7 +327,7 @@ assessment change does. Content is bound by the supplied GitHub blob identity;
 callers must use discovered snapshots, not fabricate SHA/content pairs. A digest
 is a freshness binding, not authorization or proof that contributions are permitted.
 Files are validated; assessment semantic validity remains caller-owned: use
-`classifyPolicy` output. Canonical serialization rejects unsupported JSON or secrets
+`classifyPolicy` or `assessPolicy` output. Canonical serialization rejects unsupported JSON or secrets
 with `ReceiptError('invalid_json')`/`SecretRedactionError`. Policy serialization uses
 a 256-KiB escaped-JSON budget; receipt callers retain their 128-KiB default.
 `canonicalJson(input, maxBytes?)` permits a positive safe-integer budget up to 1 MiB;
@@ -366,8 +366,11 @@ failures forbidden. Permissive thresholds are 0.95; restrictive boolean threshol
 are 0.6. Choice thresholds decrease by 0.1 per strictness rank.
 
 Every decision uses the deterministic floor, intersected with any caller floor.
-Explicit AI restrictions in an otherwise unclear floor still prevent a permissive
-answer. Ambiguous Markdown escalates before dispatch. Boolean topic-presence floors
+Uncapped restriction metadata from `analyzePolicyFloor` binds all dimensions even
+when the displayed citations reach their cap or a dimension is unclear. A ban plus
+unresolved AI prose always escalates (including a mixed ban/welcome); deterministic
+negation rules remain conservative, so "AI is not banned" cannot yield permission.
+Any ambiguous Markdown region escalates all dimensions before dispatch. Boolean topic-presence floors
 remain conservative: draft topics require drafts, template topics forbid the receipt,
 and baseline failures stay forbidden even if a model proposes permission. Shared
 decision validation enforces independent agreement, confidence and metered budgets;
@@ -375,15 +378,28 @@ missing/invalid provider configuration and every escalation are hand-offs, never
 weaker fallback. This API does not authorize publication or perform GitHub writes.
 
 Accepted answers require at least one citation and literal source spans in admitted
-lines (in addition to shared whitespace-normalized validation). Policy citations
+lines, enforced by the shared decision's `citationMode: 'verbatim'` on both fresh
+and cached verdicts. Quotes retain raw whitespace and file line coordinates split
+on CR/LF; Unicode paragraph separators within a source line do not renumber it. Policy citations
 use `decision:<questionId>@<version>`, original path/line, and the existing full-line
-secret redaction and 200-code-point excerpt cap. The combined evidence cap is 128.
+secret redaction and 200-code-point excerpt cap (`policyExcerpt`). The combined
+evidence cap is 128 (`POLICY_CITATION_LIMIT`): up to 122 deterministic citations
+plus the first controlling citation for each accepted dimension. Permission never
+depends on this display cap. `PolicyDecisionDeps` describes the trusted dependencies;
+`PolicyDecisionEvidence` describes the retained verdict metadata.
 `PolicyAssessment.decisions` retains each dimension's status/reason/value, confidence
-as a deterministic decimal string, provider/model IDs, question version and input
+as a deterministic decimal string, provider/model IDs, question version, a hash of
+the frozen question definition, and input
 digest. `policyDigest` binds this evidence along with final values and citations;
 changing a model or question version changes it, while reversing input order does
 not. Confidence is a string because receipt canonical JSON accepts integer numbers
-only. Gate/freshness consumer wiring remains in their respective slices.
+only. Evidence `value` is the question answer/sentinel, not the final boolean field;
+`policy-non-draft=true` means `draftRequired=false`. Missing configuration is
+`reason=configuration`, IDs `unconfigured` and an empty input digest; invalid
+citations are `invalid_pass`. AI-topic absence returns the offline defaults for all
+dimensions without semantic calls. Otherwise uncertain draft/receipt permission
+uses restrictive escalation defaults, which may tighten the offline defaults.
+Gate/freshness consumer wiring remains in their respective slices.
 
 ## Issue eligibility (#1092)
 
@@ -762,6 +778,14 @@ non-echoing `InvalidQuestionError` before any call:
 - `choice`: 2–64 distinct nonempty `options`, and exact finite numeric `strictness`
   keys. Higher is stricter; equal ranks are allowed.
 - `score`: 2–64 distinct nonempty `scale` labels, least-to-most strict.
+
+Policy consumers can select `citationMode: 'verbatim'` to require raw, literal quote
+spans and preserve CR/LF source-file line numbers, including on cache reads. The
+default `normalized` mode retains whitespace-normalized citations and the existing
+Unicode line splitting. Citation mode is part of the decision cache identity.
+`evaluateDecisionFloor` is the shared synchronous floor validator used when trusted
+consumers compose restrictions: thenables, unknown keys and malformed values
+escalate instead of being sanitized away.
 
 Strictly more permissive answers require strictly higher thresholds. The trusted
 question must encode the domain's ordering; untrusted text cannot choose it.

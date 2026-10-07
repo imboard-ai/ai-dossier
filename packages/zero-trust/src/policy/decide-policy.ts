@@ -1,4 +1,5 @@
-import { decide } from '../decision/decide';
+import { createHash } from 'node:crypto';
+import { decide, evaluateDecisionFloor } from '../decision/decide';
 import {
   createTypedQuestion,
   type DecisionDeps,
@@ -8,15 +9,23 @@ import {
   type Verdict,
 } from '../decision/types';
 import {
-  classifyPolicy,
+  analyzePolicyFloor,
+  comparePolicyText,
+  POLICY_CITATION_LIMIT,
   type PolicyAssessment,
   type PolicyDecisionEvidence,
+  type PolicyFloor,
+  policyCitationKey,
   policyExcerpt,
 } from './classify';
 import { type PolicyFile, validatePolicyFiles } from './discover';
-import { policyRegions } from './regions';
 
-const AI_RANK = { welcomed: 0, disclosure_required: 1, requires_approval: 2, banned: 3 };
+const AI_RANK = {
+  welcomed: 0,
+  disclosure_required: 1,
+  requires_approval: 2,
+  banned: 3,
+} as const satisfies Record<Exclude<PolicyAssessment['ai'], 'silent' | 'unclear'>, number>;
 const choice = (id: string, prompt: string, strictness: Record<string, number>) =>
   createTypedQuestion({
     id,
@@ -78,16 +87,17 @@ export type PolicyDecisionDeps = Omit<DecisionDeps, 'provider'> & {
   readonly provider?: DecisionDeps['provider'];
 };
 
-function floorFor(dimension: Dimension, floor: PolicyAssessment): DecisionFloor {
+function floorFor(dimension: Dimension, analysis: PolicyFloor): DecisionFloor {
+  const { assessment: floor, restrictions } = analysis;
   if (dimension === 'ai') {
     // Even an unclear floor retains explicit restriction evidence. Model prose
     // understanding cannot erase a ban merely because another line welcomes AI.
-    const ranks = floor.citations.map(({ ruleId }) =>
-      ruleId.startsWith('ai-ban')
+    const ranks = restrictions.ai.map((category) =>
+      category === 'ai_ban'
         ? 3
-        : ruleId.startsWith('ai-approval')
+        : category === 'ai_approval'
           ? 2
-          : ruleId.startsWith('ai-disclosure')
+          : category === 'ai_disclosure'
             ? 1
             : 0
     );
@@ -97,12 +107,15 @@ function floorFor(dimension: Dimension, floor: PolicyAssessment): DecisionFloor 
         ...ranks,
         floor.ai in AI_RANK ? AI_RANK[floor.ai as keyof typeof AI_RANK] : 0
       ),
+      // A ban plus unresolved topical text is conflicting/ambiguous policy,
+      // not an invitation to choose whichever literal the model prefers.
+      escalate: floor.ai === 'unclear' && restrictions.ai.includes('ai_ban'),
     };
   }
   if (dimension === 'assignment')
-    return { minimumStrictness: floor.assignment === 'required' ? 1 : 0 };
+    return { minimumStrictness: restrictions.assignment.includes('assignment_required') ? 1 : 0 };
   if (dimension === 'directPr')
-    return { minimumStrictness: floor.directPr === 'discussion_first' ? 1 : 0 };
+    return { minimumStrictness: restrictions.directPr.includes('discussion_first') ? 1 : 0 };
   const restricted = dimension === 'draftRequired' ? floor.draftRequired : !floor[dimension];
   return { minimumStrictness: restricted ? 1 : 0 };
 }
@@ -115,15 +128,16 @@ export async function assessPolicy(
   validatePolicyFiles(files);
   const snapshot = files
     .map(({ path, sha, content }) => Object.freeze({ path, sha, content }))
-    .sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-  const floor = classifyPolicy(snapshot);
+    .sort((a, b) => comparePolicyText(a.path, b.path));
+  const analysis = analyzePolicyFloor(snapshot);
+  const floor = analysis.assessment;
   // A project with no AI topic is silent, not a paid permission inference.
   if (floor.ai === 'silent') return floor;
   const admitted = new Map<string, Map<number, string>>();
   let ambiguous = false;
   const inputs: DecisionInput[] = snapshot.map((file) => {
     const lines = new Map<number, string>();
-    for (const region of policyRegions(file)) {
+    for (const region of analysis.regions.get(file.path) ?? []) {
       ambiguous ||= region.ambiguous;
       for (const { line, text } of region.lines) lines.set(line, text);
     }
@@ -137,24 +151,27 @@ export async function assessPolicy(
   });
   const result = { ...floor };
   const evidence: Record<string, PolicyDecisionEvidence> = {};
-  const citations = [...floor.citations];
-  for (const dimension of Object.keys(POLICY_QUESTIONS) as Dimension[]) {
+  // One reserved controlling citation per dimension, independent of floor cap.
+  const dimensions = Object.keys(POLICY_QUESTIONS) as Dimension[];
+  const citations = floor.citations.slice(0, POLICY_CITATION_LIMIT - dimensions.length);
+  for (const dimension of dimensions) {
     const question = POLICY_QUESTIONS[dimension];
-    const builtin = floorFor(dimension, floor);
+    const builtin = floorFor(dimension, analysis);
     let verdict: Verdict | undefined;
     try {
       if (deps?.provider)
         verdict = await decide(question, inputs, {
           ...deps,
           provider: deps.provider,
+          citationMode: 'verbatim',
           floor: (q: TypedQuestion, source: readonly DecisionInput[]) => {
-            const extra = deps.floor?.(q, source);
+            const extra = evaluateDecisionFloor(deps.floor, q, source);
             return {
               minimumStrictness: Math.max(
                 builtin.minimumStrictness ?? 0,
                 extra?.minimumStrictness ?? 0
               ),
-              escalate: ambiguous || extra?.escalate === true,
+              escalate: ambiguous || builtin.escalate === true || extra.escalate === true,
             };
           },
         });
@@ -189,10 +206,11 @@ export async function assessPolicy(
       provider: verdict?.provider ?? 'unconfigured',
       model: verdict?.model ?? 'unconfigured',
       questionVersion: question.version,
+      questionDigest: createHash('sha256').update(JSON.stringify(question)).digest('hex'),
       inputDigest: verdict?.inputDigest ?? '',
     });
     if (accepted && verdict)
-      for (const citation of verdict.citations) {
+      for (const citation of verdict.citations.slice(0, 1)) {
         const excerpt = policyExcerpt(admitted.get(citation.sourceId)?.get(citation.line) ?? '');
         const item = {
           path: citation.sourceId,
@@ -201,7 +219,7 @@ export async function assessPolicy(
           excerpt,
         };
         if (
-          citations.length < 128 &&
+          citations.length < POLICY_CITATION_LIMIT &&
           !citations.some(
             (c) => c.path === item.path && c.line === item.line && c.ruleId === item.ruleId
           )
@@ -211,7 +229,9 @@ export async function assessPolicy(
   }
   return Object.freeze({
     ...result,
-    citations: Object.freeze(citations),
+    citations: Object.freeze(
+      citations.sort((a, b) => comparePolicyText(policyCitationKey(a), policyCitationKey(b)))
+    ),
     decisions: Object.freeze(evidence),
   });
 }
