@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import os from 'node:os';
 import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { importGraph } from '../../__tests__/import-graph';
@@ -7,6 +9,23 @@ const MODEL = path.join(SRC, 'model');
 const { sources, reaches, resolve, specifier } = importGraph(SRC);
 const vm = sources(path.join(SRC, 'vm'));
 describe('VM cannot reach model credentials, including transitive and type imports', () => {
+  it('fails closed on unresolved and computed import paths', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'import-isolation-'));
+    const entry = path.join(dir, 'entry.ts');
+    try {
+      for (const text of [
+        "import type { X } from './missing'",
+        // biome-ignore lint/suspicious/noTemplateCurlyInString: Literal source of a hostile computed import for the scanner self-check.
+        "await import(`./model/${'adapter'}`)",
+        'await import(target)',
+      ]) {
+        fs.writeFileSync(entry, text);
+        expect(() => reaches(entry)).toThrow(/cannot prove isolation/iu);
+      }
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
   it('scans every VM entry point, never an empty table', () => {
     expect(vm.length).toBeGreaterThan(5);
     expect(vm).toContain(path.join(SRC, 'vm/broker.ts'));

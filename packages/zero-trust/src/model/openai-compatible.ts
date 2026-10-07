@@ -218,9 +218,7 @@ export class OpenAICompatibleAdapter implements ModelAdapter {
   private key(): string {
     const key = process.env[this.apiKeyEnv];
     // Validate the exact header value; header normalization must not evade echo detection.
-    // biome-ignore lint/suspicious/noControlCharactersInRegex: Refuse HTTP control/whitespace bytes in credentials before header normalization.
-    if (!key || key !== key.trim() || /[\u0000-\u0020\u007f]/u.test(key))
-      throw new ModelError('model_unavailable');
+    if (!key || !/^[\x21-\x7e]+$/u.test(key)) throw new ModelError('model_unavailable');
     // Defense in depth against a controller profile accidentally selecting GitHub authority.
     if (/^(?:gh[pousr]_|github_pat_)/u.test(key)) throw new ModelError('model_unavailable');
     return key;

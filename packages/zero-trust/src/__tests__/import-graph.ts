@@ -29,8 +29,19 @@ export function importGraph(root: string) {
       const file = stack.pop() as string;
       if (seen.has(file)) continue;
       seen.add(file);
-      for (const match of fs.readFileSync(file, 'utf8').matchAll(specifier)) {
+      const text = fs.readFileSync(file, 'utf8');
+      if (
+        /\b(?:import|require)\s*\(\s*(?!['"`\s])/u.test(text) ||
+        /\b(?:import|require)\s*\(\s*`[^`]*\$\{/u.test(text)
+      )
+        throw new Error('Computed imports cannot prove isolation');
+      for (const match of text.matchAll(specifier)) {
         const target = resolve(file, match[2] as string);
+        if (
+          !target &&
+          (match[2]?.startsWith('.') || match[2]?.startsWith('@ai-dossier/zero-trust'))
+        )
+          throw new Error('Unresolved internal import cannot prove isolation');
         if (target) stack.push(target);
       }
     }

@@ -148,6 +148,9 @@ describe('OpenAI-compatible untrusted responses and transport', () => {
     '\n',
     '\t',
     '\u0001',
+    '\u00a0',
+    '\u00e9',
+    '\u200b',
   ])('refuses padded/control-bearing key before any fetch %#', async (suffix) => {
     vi.stubEnv('MODEL_TEST_KEY', KEY + suffix);
     const fetcher = vi.fn<typeof fetch>();

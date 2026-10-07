@@ -454,7 +454,7 @@ secret-pattern guards. Reserved GitHub-authority variables (`ZTFC_*`, `GIT_*`,
 are refused by the adapter; no credential-module import is needed for this fence.
 Response and parsed-argument nesting beyond 256 levels is `invalid_response`.
 Invalid options give `invalid_request`; absent/empty keys
-give `model_unavailable`, as do whitespace/control-bearing keys (the exact value
+give `model_unavailable`, as do keys outside visible ASCII (the exact value
 must match what the Authorization header sends). Local servers should use a long
 dummy key: even a short placeholder is rejected if echoed in ordinary output.
 There is no logging, credential field or raw provider error. Echoed keys and credential
