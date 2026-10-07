@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { classifyPolicy } from '../classify';
+import { PolicyInputError } from '../discover';
 import { policyRegions } from '../regions';
 
 const file = (content: string, path = 'README.md') => ({ content, path, sha: 'a'.repeat(40) });
@@ -166,5 +167,41 @@ describe('CommonMark subset policy regions', () => {
     expect(classifyPolicy([file('## Contributing\n<script>\n</script   >\nNo AI.')]).ai).toBe(
       'unclear'
     );
+  });
+  it.each([
+    'CONTRIBUTING.md',
+    'README.md',
+  ])('keeps policy text in reference definitions for %s', (path) => {
+    const text =
+      '[Read policy][policy]\n\n[policy]: /rules "No AI. Draft required. Do not modify the template."';
+    expect(
+      classifyPolicy([file(path === 'README.md' ? `## Contributing\n${text}` : text, path)])
+    ).toMatchObject({ ai: 'banned', draftRequired: true, receiptBlockAllowed: false });
+  });
+  it('refuses nesting exhaustion instead of dropping restrictions', () => {
+    expect(classifyPolicy([file(`${'> '.repeat(17)}No AI.`, 'CONTRIBUTING.md')]).ai).toBe('banned');
+    for (const depth of [18, 19, 20, 21, 100]) {
+      expect(() =>
+        classifyPolicy([
+          file(
+            `${'> '.repeat(depth)}No AI.\n${'> '.repeat(depth)}Draft required.`,
+            'CONTRIBUTING.md'
+          ),
+        ])
+      ).toThrow(PolicyInputError);
+    }
+  });
+  it.each([
+    '\u000b',
+    '\u000c',
+    '\u00a0',
+    '\u2003',
+  ])('refuses unsupported HTML whitespace %s, but ignores it inside excluded fences', (space) => {
+    expect(() => classifyPolicy([file(`<script${space}\n## Contributing\nNo AI.`)])).toThrow(
+      PolicyInputError
+    );
+    expect(
+      classifyPolicy([file(`## Contributing\n\`\`\`\n<script${space}\n\`\`\`\nNo AI.`)]).ai
+    ).toBe('banned');
   });
 });

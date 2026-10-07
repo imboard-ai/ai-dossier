@@ -272,6 +272,11 @@ Block structure is parsed with `markdown-it` in CommonMark mode (parse only,
 no rendering/plugins/linkification or resource reads); controller code applies
 the supported policy-region subset to source maps. This distinguishes HTML blocks
 from incomplete tags/inline HTML and setext paragraphs from thematic breaks.
+Source evidence includes all non-fenced lines, including link-reference definitions
+that have no block-token map. Reaching the parser nesting boundary (token level
+19 under its 20-level block cap) raises non-echoing `PolicyInputError` rather than
+treating omitted content as silence. Unsupported non-space/tab whitespace after
+an HTML tag prefix is likewise refused; excluded fenced text is not examined.
 Active HTML blocks cannot open Markdown fences or manufacture heading boundaries;
 comments, raw tags, declarations, processing instructions and CDATA terminate
 on their appropriate markers, other HTML blocks at a blank line. README setext
