@@ -4,6 +4,8 @@ export * from './budget-types';
 export * from './canonical/export';
 export * from './canonical/reconstruct';
 export * from './controller/config';
+export * from './controller/evidence-runner';
+export * from './controller/output-collector';
 export * from './controller/run-store';
 export * from './controller/status';
 export * from './decision/decide';

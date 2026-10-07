@@ -17,15 +17,21 @@ import os from 'node:os';
 import path from 'node:path';
 import { Ed25519Signer } from '@ai-dossier/core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { exportSource, sha256 } from '../canonical/export';
+import { createManifest, exportSource, type SourceManifest, sha256 } from '../canonical/export';
 import {
-  applyProvisioning,
-  applyVerification,
-  type CommandOutcome,
-  classifyOutcome,
-  classifyRegression,
-  commandEvidence,
-} from '../ecosystem/classify';
+  baselineEvidence,
+  type CommandRecord,
+  ProvisioningFailedError,
+  provisionWorkspace,
+  type RunLifecycle,
+  regressionEvidence,
+  releaseWorkspace,
+  runPlanned,
+  type WorkspaceEvidence,
+  type WorkspaceOptions,
+} from '../controller/evidence-runner';
+import { OutputCollector } from '../controller/output-collector';
+import { applyVerification, classifyRegression } from '../ecosystem/classify';
 import { buildCommandPlan, type PlannedCommand, REPORT_PATH } from '../ecosystem/commands';
 import {
   detectEcosystem,
@@ -35,6 +41,7 @@ import {
 } from '../ecosystem/detect';
 import {
   PROFILE_MANIFEST,
+  type ProfileRecord,
   profileManifestDigest,
   profileReceiptBinding,
   recordProfileSelection,
@@ -47,7 +54,6 @@ import {
   PROXY_POLICY,
   parseSquidAccessLog,
 } from '../ecosystem/proxy';
-import { parseJunitReport } from '../ecosystem/report';
 import { issueReceipt } from '../receipt/issue';
 import type { CommandStatus } from '../receipt/schema';
 import { canonicalJson } from '../receipt/schema';
@@ -69,7 +75,6 @@ import {
   E2E_LIMITS as LIMITS,
   type PlantedCanaries,
   plantCanaries,
-  rejectedByBroker,
   rootProbeArgv,
   timer,
 } from './vm-e2e-harness';
@@ -109,23 +114,8 @@ interface Endpoints {
   images: Record<string, string>;
 }
 
-interface CommandRecord {
-  fixture: string;
-  commit: string;
-  sha: string;
-  id: string;
-  phase: string;
-  network: string;
-  argv: string;
-  exitCode: number | null;
-  timedOut: boolean;
-  suites: number | null;
-  tests: number | null;
-  failures: number | null;
-  status: CommandStatus;
-  durationMs: number;
-  captureReport: boolean;
-}
+/** A production command record plus which fixture commit it ran on. */
+type FixtureRecord = CommandRecord & { fixture: string; commit: string; sha: string };
 
 function git(args: string[], cwd: string): Buffer {
   const r = spawnSync('git', ['-c', 'core.hooksPath=/dev/null', ...args], {
@@ -169,6 +159,39 @@ function commitTree(dir: string, sha: string): { path: string; bytes: Buffer; ex
     });
 }
 
+/** One exact commit as the canonical manifest the runner provisions from. */
+function commitManifest(dir: string, sha: string): SourceManifest {
+  const files = commitTree(dir, sha);
+  const directories = new Set<string>();
+  for (const file of files) {
+    const parts = file.path.split('/');
+    for (let depth = 1; depth < parts.length; depth++)
+      directories.add(parts.slice(0, depth).join('/'));
+  }
+  return createManifest([
+    ...[...directories].map((p) => ({
+      path: p,
+      mode: '040000' as const,
+      bytes: '',
+      sha256: sha256(Buffer.alloc(0)),
+    })),
+    ...files.map((f) => ({
+      path: f.path,
+      mode: f.exec ? ('100755' as const) : ('100644' as const),
+      bytes: f.bytes.toString('base64'),
+      sha256: sha256(f.bytes),
+    })),
+  ]);
+}
+
+/** Files the regression commit added or changed: the test files only. */
+function testFilesOf(repo: { dir: string; shas: Record<string, string> }): string[] {
+  return git(['diff', '--name-only', repo.shas.base, repo.shas.regression], repo.dir)
+    .toString()
+    .split('\n')
+    .filter(Boolean);
+}
+
 /** What detection and profile selection say about a fixture: its lockfile, the worker
  * image ecosystem, and the selection the receipt binds. Detection is the source. */
 function fixtureInfo(manager: PackageManager) {
@@ -186,7 +209,7 @@ function fixtureInfo(manager: PackageManager) {
 
 describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
   const timings: Record<string, number> = {};
-  const commands: CommandRecord[] = [];
+  const commands: FixtureRecord[] = [];
   const fixtures: Record<string, unknown> = {};
   const tamper: Record<string, unknown>[] = [];
   const inconclusive: Record<string, unknown>[] = [];
@@ -266,6 +289,7 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
             unsupported,
             boundary: boundary ?? null,
             listenerConnections: planted?.connections() ?? 0,
+            collected: { bytes: collector.bytes, truncated: collector.truncated },
             brokerChecks,
           },
           null,
@@ -280,7 +304,6 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
       if (dir) fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  const profileOf = (manager: PackageManager): ContainerProfile => fixtureInfo(manager).profile;
   const mirrorOf = (manager: PackageManager) =>
     manager === 'npm' ? endpoints.npm : endpoints.pypi;
 
@@ -300,104 +323,69 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
     for (const file of files) await adapter.putFile(vm, file.path, file.bytes, file.exec);
   }
 
-  /** Runs one planned command under its phase's network and classifies it from what the
-   * supervisor observed: exit status and the report it read back itself. */
-  async function runPlanned(
-    vm: VmHandle,
-    manager: PackageManager,
-    command: PlannedCommand,
-    meta: { fixture: string; commit: string; sha: string },
-    timeoutMs?: number
-  ): Promise<CommandRecord> {
-    const result = await adapter.exec(vm, {
-      profile: profileOf(manager),
-      argv: command.argv,
-      env: command.env,
-      network: command.network,
-      report: command.captureReport,
-      timeoutMs: timeoutMs ?? command.timeoutMs,
-    });
-    const summary = command.captureReport ? parseJunitReport(result.report) : null;
-    let status: CommandStatus;
-    if (command.captureReport) {
-      const outcome: CommandOutcome = result.timedOut
-        ? { kind: 'timeout' }
-        : result.exitCode === null
-          ? { kind: 'signal', signal: 'unknown' }
-          : {
-              kind: 'exited',
-              exitCode: result.exitCode,
-              report: summary ? { suites: summary.suites } : null,
-            };
-      status = classifyOutcome(outcome);
-    } else status = !result.timedOut && result.exitCode === 0 ? 'passed' : 'failed';
-    const record: CommandRecord = {
-      ...meta,
-      id: command.id,
-      phase: command.phase,
-      network: command.network,
-      argv: command.argv.join(' '),
-      exitCode: result.exitCode,
-      timedOut: result.timedOut,
-      suites: summary?.suites ?? null,
-      tests: summary?.tests ?? null,
-      failures: summary?.failures ?? null,
-      status,
-      durationMs: result.durationMs,
-      captureReport: command.captureReport,
-    };
-    commands.push(record);
-    if (status !== 'passed' && process.env.ZT_PROXY_DEBUG === '1')
-      console.error(`${meta.fixture}/${meta.commit}/${command.id}:\n${result.stderr.slice(-3000)}`);
+  const collector = new OutputCollector();
+  const profileRecords = new Map<PackageManager, ProfileRecord>();
+  function profileRecordOf(manager: PackageManager): ProfileRecord {
+    let record = profileRecords.get(manager);
+    if (!record) {
+      record = recordProfileSelection(
+        recordDir,
+        `profile-${manager}`,
+        fixtureInfo(manager).selection
+      );
+      profileRecords.set(manager, record);
+    }
     return record;
   }
+  function implementingRun(runId: string): RunRecord {
+    return [R.GatePassed, R.PlanApproved].reduce(
+      (r, reason) => transitionRun(r, reason, TIME),
+      createRun(
+        { runId, upstreamIssue: 'https://github.com/o/r/issues/1', contributor: 'ztfc' },
+        TIME
+      )
+    );
+  }
+  /** The production runner's inputs for one fixture: the real adapter, the fixture's
+   * mirror, its recorded profile and a run to fail into. */
+  function workspaceOptions(manager: PackageManager, label: string): WorkspaceOptions {
+    const runId = `proxy-${hex(4)}`;
+    const lifecycle: RunLifecycle = { run: implementingRun(runId), now: () => new Date() };
+    return {
+      adapter,
+      runId,
+      limits: LIMITS,
+      profileRecord: profileRecordOf(manager),
+      proxyTarget: mirrorOf(manager),
+      collector,
+      lifecycle: {
+        ...lifecycle,
+        observeRun: (run) => {
+          if (process.env.ZT_PROXY_DEBUG === '1') console.error(`${label}: run ${run.state}`);
+        },
+      },
+    };
+  }
 
-  /** One exact commit: a fresh VM provisions it through the proxy, then restarts with no
-   * network and runs the verification commands. */
-  async function proveCommit(
-    manager: PackageManager,
-    repo: ReturnType<typeof buildCommits>,
-    commit: string,
-    testTargets?: string[]
-  ): Promise<CommandRecord[]> {
-    const sha = repo.shas[commit];
-    const meta = { fixture: manager, commit, sha };
-    const plan = buildCommandPlan(manager, RELAY_ENDPOINTS, { testTargets });
-    const label = `${manager}.${commit}`;
-    const vm = await provisioningVm(manager, label);
-    try {
-      await upload(vm, commitTree(repo.dir, sha));
-      await timed(`${label}.provisionMs`, async () => {
-        for (const command of plan.provisioning) {
-          const record = await runPlanned(vm, manager, command, meta);
-          expect(record.status, `${label} ${command.id}`).toBe('passed');
-        }
-      });
-      await timed(`${label}.phaseSwitchMs`, () => adapter.endProvisioning(vm));
-      // The forward is gone: the package proxy network is refused before the guest.
-      brokerChecks.push({
-        attempt: `${label}:package-proxy-after-provisioning`,
-        rejected: await rejectedByBroker(() =>
-          adapter.exec(vm, {
-            profile: profileOf(manager),
-            argv: ['true'],
-            network: 'package_proxy',
-          })
-        ),
-      });
-      return await timed(`${label}.verifyMs`, async () => {
-        const out: CommandRecord[] = [];
-        for (const command of plan.verification)
-          out.push(await runPlanned(vm, manager, command, meta));
-        return out;
-      });
-    } finally {
-      await adapter.destroy(vm);
-    }
+  /** Records the runner's evidence for one fixture commit, with its phase-switch check. */
+  function keep(
+    meta: { fixture: string; commit: string; sha: string },
+    evidence: WorkspaceEvidence
+  ): FixtureRecord[] {
+    brokerChecks.push({
+      attempt: `${meta.fixture}.${meta.commit}:${evidence.phaseSwitch.attempt}`,
+      rejected: evidence.phaseSwitch.rejected,
+    });
+    const records = [...evidence.provisioning, ...evidence.records].map((r) => ({ ...meta, ...r }));
+    commands.push(...records);
+    for (const r of records)
+      if (r.status !== 'passed' && process.env.ZT_PROXY_DEBUG === '1')
+        console.error(`${meta.fixture}/${meta.commit}/${r.id}:\n${r.log.excerpt}`);
+    return records.filter((r) => r.phase === 'verification');
   }
 
   /** The supervised test commands (the ones classified from a report). */
-  const testStatus = (records: CommandRecord[]) => records.filter((r) => r.captureReport);
+  const testStatus = (records: FixtureRecord[]) => records.filter((r) => r.captureReport);
 
   for (const manager of MANAGERS)
     it(
@@ -409,11 +397,47 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
           buildLockIndex(manager, fs.readFileSync(path.join(repo.dir, lockfile), 'utf8'))
         );
         try {
-          const baseline = await proveCommit(manager, repo, 'base');
-          const onBase = await proveCommit(manager, repo, 'regression', REGRESSION[manager]);
-          const onFix = await proveCommit(manager, repo, 'fix', REGRESSION[manager]);
-          const fixSuite = await proveCommit(manager, repo, 'fix');
-          const status = (records: CommandRecord[]): CommandStatus => {
+          const plan = buildCommandPlan(manager, RELAY_ENDPOINTS);
+          const manifests = {
+            base: commitManifest(repo.dir, repo.shas.base),
+            fix: commitManifest(repo.dir, repo.shas.fix),
+          };
+          const meta = (commit: string) => ({ fixture: manager, commit, sha: repo.shas[commit] });
+          const baseline = keep(
+            meta('base'),
+            await timed(`${manager}.baseMs`, () =>
+              baselineEvidence({
+                ...workspaceOptions(manager, `${manager}.base`),
+                manifest: manifests.base,
+                plan,
+              })
+            )
+          );
+          // Base plus only the regression commit's test files, then the candidate.
+          const regression = await timed(`${manager}.regressionMs`, () =>
+            regressionEvidence({
+              ...workspaceOptions(manager, `${manager}.regression`),
+              baseManifest: manifests.base,
+              testFiles: testFilesOf(repo),
+              candidateManifest: manifests.fix,
+              regressionTargets: REGRESSION[manager],
+              endpoints: RELAY_ENDPOINTS,
+            })
+          );
+          const onBase = keep(meta('regression'), regression.base);
+          if (!regression.candidate) throw new Error(`regression proof ${regression.proof}`);
+          const onFix = keep(meta('fix'), regression.candidate);
+          const fixSuite = keep(
+            meta('fix'),
+            await timed(`${manager}.fixSuiteMs`, () =>
+              baselineEvidence({
+                ...workspaceOptions(manager, `${manager}.fix`),
+                manifest: manifests.fix,
+                plan,
+              })
+            )
+          );
+          const status = (records: FixtureRecord[]): CommandStatus => {
             const [test] = testStatus(records);
             if (!test) throw new Error('no supervised test command ran');
             return test.status;
@@ -427,30 +451,18 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
           expect(status(fixSuite), 'suite on fix').toBe('passed');
           const proof = classifyRegression(status(onBase), status(onFix));
           expect(proof).toBe('reproduced_and_fixed');
-          // Receipt (#1008) for the candidate: the supervised test commands.
+          expect(regression.proof).toBe(proof);
+          // Receipt (#1008) for the candidate: the supervised test commands, with the
+          // runner's evidence (log digests included).
           const runId = `proxy-${manager}-${hex(4)}`;
           const record = recordProfileSelection(recordDir, runId, selection);
           const binding = profileReceiptBinding(record, adapter.accelerator);
-          const testCommand = (testTargets?: string[]) =>
-            buildCommandPlan(manager, RELAY_ENDPOINTS, { testTargets }).verification.find(
-              (c) => c.captureReport
-            ) as PlannedCommand;
           const evidence = (
             [
-              ['regression', testStatus(onFix)[0], testCommand(REGRESSION[manager])],
-              ['suite', testStatus(fixSuite)[0], testCommand()],
+              ['regression', testStatus(onFix)[0]],
+              ['suite', testStatus(fixSuite)[0]],
             ] as const
-          ).map(([label, r, command]) =>
-            commandEvidence(
-              { ...command, id: `${command.id}-${label}` },
-              {
-                kind: 'exited',
-                exitCode: r.exitCode ?? 255,
-                report: r.suites === null ? null : { suites: r.suites },
-              },
-              sha256(canonicalJson(r))
-            )
-          );
+          ).map(([label, r]) => ({ ...r.evidence, id: `${r.id}-${label}` }));
           const signed = await issueReceipt(
             {
               contributionId: runId,
@@ -527,42 +539,31 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
           git(['commit', '-q', '-am', 'tamper lockfile'], repo.dir);
           const sha = git(['rev-parse', 'HEAD'], repo.dir).toString().trim();
           const plan = buildCommandPlan(manager, RELAY_ENDPOINTS);
-          const vm = await provisioningVm(manager, `${manager}.tamper`);
+          const options = workspaceOptions(manager, `${manager}.tamper`);
           let failedAt: string | null = null;
+          let after: RunRecord = options.lifecycle.run;
           try {
-            await upload(vm, commitTree(repo.dir, sha));
-            for (const command of plan.provisioning) {
-              const record = await runPlanned(vm, manager, command, {
+            // Provisioning must fail; a workspace that comes back is released at once.
+            const workspace = await provisionWorkspace({
+              ...options,
+              manifest: commitManifest(repo.dir, sha),
+              plan,
+            });
+            await releaseWorkspace(adapter, workspace, options.lifecycle);
+          } catch (error) {
+            if (!(error instanceof ProvisioningFailedError)) throw error;
+            failedAt = error.failedAt;
+            after = error.run;
+            commands.push(
+              ...error.records.map((r) => ({
                 fixture: manager,
                 commit: 'tampered-lock',
                 sha,
-              });
-              if (record.status !== 'passed') {
-                failedAt = command.id;
-                break;
-              }
-            }
-          } finally {
-            await adapter.destroy(vm);
+                ...r,
+              }))
+            );
           }
           expect(failedAt, `${manager} provisioning with a tampered lock must fail`).not.toBeNull();
-          const run = transitionRun(
-            transitionRun(
-              createRun(
-                {
-                  runId: `tamper-${manager}`,
-                  upstreamIssue: 'https://github.com/o/r/issues/1',
-                  contributor: 'ztfc',
-                },
-                TIME
-              ),
-              R.GatePassed,
-              TIME
-            ),
-            R.PlanApproved,
-            TIME
-          );
-          const after = applyProvisioning(run, 'failed', TIME);
           // The controller-side check flags the same bytes against the tampered lock.
           const index = buildLockIndex(manager, tampered);
           const audit = cachedArtifacts(manager).map((a) => checkArtifact(index, a.url, a.bytes));
@@ -718,39 +719,39 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
     'classifies a timeout and a missing or unreadable report as inconclusive; the repair cap holds',
     async () => {
       const repo = buildCommits('npm');
-      const vm = await provisioningVm('npm', 'inconclusive');
+      const options = workspaceOptions('npm', 'inconclusive');
+      const meta = { fixture: 'npm', commit: 'fix', sha: repo.shas.fix };
+      const plan = buildCommandPlan('npm', RELAY_ENDPOINTS);
+      const workspace = await provisionWorkspace({
+        ...options,
+        manifest: commitManifest(repo.dir, repo.shas.fix),
+        plan,
+      });
       try {
-        await upload(vm, commitTree(repo.dir, repo.shas.fix));
-        for (const command of buildCommandPlan('npm', RELAY_ENDPOINTS).provisioning)
-          await runPlanned(vm, 'npm', command, {
-            fixture: 'npm',
-            commit: 'fix',
-            sha: repo.shas.fix,
-          });
-        await adapter.endProvisioning(vm);
-        const base = buildCommandPlan('npm', RELAY_ENDPOINTS).verification.find(
-          (c) => c.id === 'npm-test'
-        ) as PlannedCommand;
-        const cases: [string, PlannedCommand, number | undefined][] = [
-          ['timeout', { ...base, argv: ['node', '-e', 'setTimeout(() => {}, 600000)'] }, 2000],
-          ['no-report', { ...base, env: { ...base.env, NODE_OPTIONS: '' } }, undefined],
+        commands.push(...workspace.provisioning.map((r) => ({ ...meta, ...r })));
+        const base = plan.verification.find((c) => c.id === 'npm-test') as PlannedCommand;
+        const cases: [string, PlannedCommand][] = [
+          [
+            'timeout',
+            { ...base, argv: ['node', '-e', 'setTimeout(() => {}, 600000)'], timeoutMs: 2000 },
+          ],
+          ['no-report', { ...base, env: { ...base.env, NODE_OPTIONS: '' } }],
           [
             'unreadable-report',
             {
               ...base,
               argv: ['sh', '-c', `echo "<testsuites><testcase" > ${REPORT_PATH}`],
             },
-            undefined,
           ],
         ];
-        for (const [label, command, timeoutMs] of cases) {
+        for (const [label, command] of cases) {
           const record = await runPlanned(
-            vm,
-            'npm',
+            adapter,
+            workspace,
             { ...command, id: `npm-test-${label}` },
-            { fixture: 'npm', commit: 'fix', sha: repo.shas.fix },
-            timeoutMs
+            collector
           );
+          commands.push({ ...meta, ...record });
           inconclusive.push({
             case: label,
             exitCode: record.exitCode,
@@ -760,7 +761,7 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
           expect(record.status, label).toBe('inconclusive');
         }
       } finally {
-        await adapter.destroy(vm);
+        await releaseWorkspace(adapter, workspace, options.lifecycle);
         fs.rmSync(repo.dir, { recursive: true, force: true });
       }
       // Scenario 7: the inconclusive verdicts feed the cap: two repairs, then failed.

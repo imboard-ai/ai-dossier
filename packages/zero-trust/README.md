@@ -1172,6 +1172,63 @@ Design, evidence and verdict:
 Fixtures with known bugs live in `fixtures/ecosystem/`. CI self-checks them
 (`scripts/zero-trust-fixtures-selfcheck.mjs`); that is the only host-side install/test run.
 
+## Evidence runner (#1095)
+
+`src/controller/evidence-runner.ts` is the production form of the gate-2 pipeline (PRD §5.5,
+§5.6 steps 1, 2, 4 and 7; scenarios 6 and 7). Every function drives a `VmAdapter`; nothing
+is installed or run on the host. The env-gated `vm-proxy.e2e.test.ts` proof calls these
+functions, so the real-VM suite exercises this code.
+
+- `provisionWorkspace({ adapter, runId, limits, manifest, profileRecord, proxyTarget, plan,
+  collector, lifecycle, artifactsDir? })` checks the plan, the manifest and that the profile
+  is baked, creates a `provisioning` VM (container scope) forwarded to the one mirror,
+  uploads exactly the manifest's files (exec bit from mode `100755`), runs the provisioning
+  commands, calls `endProvisioning`, and then requires the broker to refuse `package_proxy`
+  (`ProvisioningNotClosedError` otherwise). A provisioning command that does not pass
+  destroys the VM, then makes `lifecycle.run` `unsupported_environment` through
+  `applyProvisioning` and throws `ProvisioningFailedError` with that run.
+- `runPlanned(adapter, workspace, command, collector, options?)` runs one verification
+  command and returns a `CommandRecord`. Test commands (`captureReport`) are classified by
+  `parseJunitReport` and `classifyOutcome`: a timeout, a signal, a missing or unreadable
+  report, and zero or unknown suites are `inconclusive`, never `passed`. A setup command
+  (no report) passes on exit 0, fails on another exit, and is `inconclusive` on a timeout
+  or signal.
+- `baselineEvidence({ ...workspace options, manifest, plan })` runs the plan's verification
+  commands on the base in a fresh VM and returns `{ provisioning, records, status,
+  phaseSwitch }`. `workspaceStatus` makes the status `inconclusive` when a setup step did
+  not pass and otherwise rolls the test commands up with `overallStatus`.
+- `regressionEvidence({ ..., baseManifest, testFiles, candidateManifest, regressionTargets,
+  endpoints, planOptions? })` runs the regression targets on the base plus only the
+  candidate's `testFiles` (`reproductionManifest`), which must be `failed`, and then on the
+  candidate, which must be `passed`, each in its own fresh VM. It returns
+  `classifyRegression`'s proof. When the base does not fail, no candidate VM boots
+  (`candidate: null`); `not_reproduced` is a hand-off before patching.
+- Network by phase: `assertPlanNetworks` refuses, before any VM is created or any command
+  runs, a provisioning command that is not on `package_proxy` or a verification command
+  that is not on `none`. `runPlanned` refuses a provisioning command.
+- Teardown on every path: each workspace VM is released through `teardownVm`, including
+  when a command, an upload or the phase switch throws. Three failed deletions make the run
+  `blocked_cleanup` (passed to `lifecycle.observeRun`) and throw `VmCleanupError`; this
+  wins over a provisioning failure because `unsupported` has no cleanup edge. A `create`
+  that throws returns no handle; the adapter cleans up after its own failed create.
+- Logs: every command's stdout and stderr become a `LogArtifact`: the SHA-256 of the whole
+  log, a tail excerpt of at most `MAX_LOG_EXCERPT_CHARS` (4096) characters, and
+  `[redacted]` instead of the excerpt when the log or the excerpt matches
+  `assertNoSecrets`. Evidence references the log by `log.digest`
+  (`evidence.sanitizedLogDigest`). Each record is checked with `assertSecretFree`. With
+  `artifactsDir` (e.g. `RunStore.storeDirectory('artifacts')`) the artifact is written
+  once as a private `<digest>.log.json`.
+- `OutputCollector` (`src/controller/output-collector.ts`) keeps every byte the guests
+  returned (stdout, stderr, reports read back) up to a cap (64 MiB by default) for the
+  run's boundary evidence. Past the cap it sets `truncated`, and callers must treat the
+  collection as incomplete.
+
+`src/__tests__/fake-vm.ts` has `FakeVmAdapter`, an in-memory adapter for controller tests:
+exec results scripted per argv (`on`) or by a function that sees the VM's uploaded files,
+the real adapter's phase rules (`package_proxy` only while provisioning, one
+`endProvisioning`, destroyed VMs refuse everything), `failDestroy` and `failCreate`
+switches, and a call log.
+
 ## Local VM execution profile (gate 1)
 
 `src/vm/` runs untrusted code in a disposable local QEMU VM; Linux x86_64 hosts only. Design,
