@@ -41,6 +41,22 @@ describe('checksum command', () => {
     expect(console.log).toHaveBeenCalledWith(expect.stringContaining('Invalid dossier format'));
   });
 
+  it('refuses --update on a spec-shaped dossier and writes nothing', async () => {
+    mockedFs.existsSync.mockReturnValue(true);
+    mockedFs.readFileSync.mockReturnValue(
+      '---\nname: x\ndescription: d\nmetadata:\n  dossier.title: T\n---\n# Body\n'
+    );
+    const program = createTestProgram();
+    registerChecksumCommand(program);
+
+    await expect(
+      program.parseAsync(['node', 'dossier', 'checksum', 'test.ds.md', '--update'])
+    ).rejects.toThrow();
+
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('spec-shaped'));
+    expect(mockedFs.writeFileSync).not.toHaveBeenCalled();
+  });
+
   it('should display checksum for valid dossier', async () => {
     const content = makeDossier();
     mockedFs.existsSync.mockReturnValue(true);

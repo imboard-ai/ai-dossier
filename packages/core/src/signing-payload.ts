@@ -18,21 +18,51 @@
  *    on. v2 payloads cover the frontmatter (minus the signature block itself)
  *    together with the body. `signature.covers` records which scheme was used;
  *    absent means the legacy body-only scheme.
+ *
+ *    v3 (`spec-frontmatter+body`) is the scheme for spec-shaped dossiers (#1088):
+ *    it covers the frontmatter exactly as it sits on disk — Agent Skills fields at
+ *    the top level, Dossier fields as `metadata["dossier.*"]` strings — not the
+ *    logical flat view, because a signature should cover what is actually shipped.
+ *    Each scheme is bound to one shape: v3 only on spec-shaped files, v1/v2 only on
+ *    legacy ones, and an unrecognized `covers` value is refused, never guessed.
  */
+
+import { DOSSIER_METADATA_PREFIX, isSpecShapedFrontmatter } from './spec-shape';
+import type { ParsedDossier } from './types';
+import { stableStringify } from './utils/canonical-json';
 
 /** SPKI DER prefix for an Ed25519 public key: 12 bytes, then the raw 32-byte key. */
 const ED25519_SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 
 const ED25519_RAW_KEY_BYTES = 32;
 
-export type SignatureCoverage = 'body' | 'frontmatter+body';
+/** Every `signature.covers` scheme a verifier accepts: v1, v2, v3. */
+export const SIGNATURE_COVERAGES = ['body', 'frontmatter+body', 'spec-frontmatter+body'] as const;
+
+export type SignatureCoverage = (typeof SIGNATURE_COVERAGES)[number];
+
+/** Key of the signature block inside a spec-shaped `metadata` map. */
+const SPEC_SIGNATURE_KEY = `${DOSSIER_METADATA_PREFIX}signature`;
 
 /**
  * Coverage of a signature block, defaulting to the legacy body-only scheme when
  * the field is absent.
+ *
+ * An unrecognized `covers` throws. Falling back to body-only would let anyone
+ * relabel a signature into the weakest scheme, and a scheme this code does not
+ * know cannot be verified correctly anyway — refusing is the only safe answer.
  */
-export function signatureCoverage(signature: { covers?: string } | undefined): SignatureCoverage {
-  return signature?.covers === 'frontmatter+body' ? 'frontmatter+body' : 'body';
+export function signatureCoverage(signature: { covers?: unknown } | undefined): SignatureCoverage {
+  const covers = signature?.covers;
+  if (covers === undefined) {
+    return 'body';
+  }
+  if (typeof covers === 'string' && (SIGNATURE_COVERAGES as readonly string[]).includes(covers)) {
+    return covers as SignatureCoverage;
+  }
+  throw new Error(
+    `Unsupported signature coverage ${JSON.stringify(covers)}; refusing to verify (this dossier may need a newer ai-dossier CLI or VS Code extension)`
+  );
 }
 
 /**
@@ -179,27 +209,6 @@ export function publicKeysMatch(a: string | undefined, b: string | undefined): b
 }
 
 /**
- * Deterministic JSON: object keys sorted recursively, no insignificant whitespace.
- * Array order is meaningful and is preserved.
- */
-function stableStringify(value: unknown): string {
-  if (value === null || typeof value !== 'object') {
-    return JSON.stringify(value) ?? 'null';
-  }
-
-  if (Array.isArray(value)) {
-    return `[${value.map(stableStringify).join(',')}]`;
-  }
-
-  const entries = Object.entries(value as Record<string, unknown>)
-    .filter(([, v]) => v !== undefined)
-    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-    .map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`);
-
-  return `{${entries.join(',')}}`;
-}
-
-/**
  * Canonical form of the frontmatter for signing: every field except the
  * signature block, serialized deterministically.
  */
@@ -209,10 +218,30 @@ export function canonicalizeFrontmatter(frontmatter: Record<string, unknown>): s
 }
 
 /**
- * The exact bytes a v2 signature covers.
+ * Canonical form of on-disk spec-shaped frontmatter for v3 signing: everything
+ * as written except `metadata["dossier.signature"]`, serialized deterministically.
+ */
+export function canonicalizeSpecFrontmatter(frontmatter: Record<string, unknown>): string {
+  if (!isSpecShapedFrontmatter(frontmatter)) {
+    throw new Error(
+      'A v3 (spec-frontmatter+body) payload needs the on-disk spec-shaped frontmatter, not the logical view'
+    );
+  }
+  const { metadata, ...rest } = frontmatter;
+  const { [SPEC_SIGNATURE_KEY]: _excluded, ...unsignedMetadata } = metadata as Record<
+    string,
+    unknown
+  >;
+  return stableStringify({ ...rest, metadata: unsignedMetadata });
+}
+
+/**
+ * The exact bytes a signature covers.
  *
- * The version tag is inside the signed payload on purpose: it stops a v2
- * signature from being replayed as a v1 body-only signature, or the reverse.
+ * v2 takes the flat frontmatter; v3 takes the on-disk spec-shaped frontmatter
+ * (`ParsedDossier.rawFrontmatter`). The version tag is inside the signed payload
+ * on purpose: it stops a signature made under one scheme from being replayed as
+ * another.
  */
 export function buildSignedPayload(
   frontmatter: Record<string, unknown>,
@@ -222,5 +251,44 @@ export function buildSignedPayload(
   if (coverage === 'body') {
     return body;
   }
+  if (coverage === 'spec-frontmatter+body') {
+    return `dossier-signature-v3\n${canonicalizeSpecFrontmatter(frontmatter)}\n${body}`;
+  }
   return `dossier-signature-v2\n${canonicalizeFrontmatter(frontmatter)}\n${body}`;
+}
+
+/**
+ * The payload a parsed dossier's signature must verify against.
+ *
+ * Selects v1/v2/v3 from `signature.covers` and binds each scheme to the shape it
+ * was defined for: a spec-shaped file verifies only under v3, a legacy file only
+ * under v1 or v2. Without the binding, a legacy v2 signature could be carried
+ * onto a spec-shaped rewrite (same logical fields, so the v2 payload matches)
+ * and vouch for on-disk bytes it never covered. Throws when the dossier is
+ * unsigned, `covers` is unrecognized, or scheme and shape disagree.
+ */
+export function buildVerificationPayload(
+  parsed: Pick<ParsedDossier, 'frontmatter' | 'body' | 'rawFrontmatter' | 'shape'>
+): string {
+  const signature = parsed.frontmatter.signature;
+  if (!signature) {
+    throw new Error('Dossier is not signed');
+  }
+
+  const coverage = signatureCoverage(signature);
+  if (parsed.shape === 'spec') {
+    if (coverage !== 'spec-frontmatter+body') {
+      throw new Error(
+        `Spec-shaped dossier carries a ${coverage} signature; only spec-frontmatter+body (v3) covers this shape`
+      );
+    }
+    return buildSignedPayload(parsed.rawFrontmatter, parsed.body, coverage);
+  }
+
+  if (coverage === 'spec-frontmatter+body') {
+    throw new Error(
+      'Legacy-shaped dossier carries a spec-frontmatter+body (v3) signature, which only covers the spec shape'
+    );
+  }
+  return buildSignedPayload(parsed.frontmatter, parsed.body, coverage);
 }

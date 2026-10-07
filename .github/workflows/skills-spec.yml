@@ -1,0 +1,82 @@
+name: Skills Spec
+
+# Validate shipped example dossiers, rendered as installed skills, against the
+# Agent Skills reference validator (https://agentskills.io/specification).
+# Tracked in #1088. The check is REPORT-ONLY until the frontmatter alignment
+# lands (every dossier fails today on non-spec top-level keys); then drop
+# `continue-on-error` below to make it required.
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'examples/**'
+      - 'cli/src/skill-frontmatter.ts'
+      - 'packages/core/**'
+      - 'scripts/validate-skills-spec.mjs'
+      - '.github/workflows/skills-spec.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'examples/**'
+      - 'cli/src/skill-frontmatter.ts'
+      - 'packages/core/**'
+      - 'scripts/validate-skills-spec.mjs'
+      - '.github/workflows/skills-spec.yml'
+  workflow_dispatch: {}
+
+concurrency:
+  group: skills-spec-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Reference validator, pinned to a commit so a change upstream cannot
+  # silently change what this job enforces. Bump deliberately.
+  SKILLS_REF_SHA: 69ef37e9424c0a7ea9dd2293b559e43ec8176379
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: make build-all
+
+      - name: Install skills-ref
+        run: |
+          python3 -m venv "$RUNNER_TEMP/skills-ref-venv"
+          "$RUNNER_TEMP/skills-ref-venv/bin/pip" install --quiet \
+            "git+https://github.com/agentskills/agentskills.git@${SKILLS_REF_SHA}#subdirectory=skills-ref"
+
+      - name: Validate example dossiers as skills
+        # Report-only (#1088): flip to required once the v3 alignment ships.
+        continue-on-error: true
+        env:
+          SKILLS_REF_BIN: ${{ runner.temp }}/skills-ref-venv/bin/skills-ref
+        run: |
+          set -o pipefail
+          status=0
+          node scripts/validate-skills-spec.mjs | tee "$RUNNER_TEMP/skills-spec.txt" || status=$?
+          {
+            echo '### skills-ref validate (report-only, #1088)'
+            echo '```'
+            cat "$RUNNER_TEMP/skills-spec.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $status

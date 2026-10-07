@@ -121,7 +121,7 @@
     "package": "node scripts/build.mjs && vsce package --no-dependencies --out dist/ai-dossier-vscode.vsix"
   },
   "devDependencies": {
-    "@ai-dossier/core": "^1.12.0",
+    "@ai-dossier/core": "^1.16.0",
     "@types/node": "^24.10.0",
     "@types/vscode": "^1.85.0",
     "@vitest/coverage-v8": "^4.0.9",

@@ -318,3 +318,30 @@ describe('validateFrontmatter', () => {
     expect(errors).toHaveLength(0);
   });
 });
+
+describe('parseDossierContent front-matter languages', () => {
+  it.each([
+    '---js',
+    '---javascript',
+    '---coffee',
+    '---toml',
+  ])('refuses a %s opening line without handing it to a parser', (opening) => {
+    const g = globalThis as { __parserSentinel?: boolean };
+    delete g.__parserSentinel;
+    const content = `${opening}\n(globalThis.__parserSentinel = true, { title: "T" })\n---\nbody\n`;
+    expect(() => parseDossierContent(content)).toThrow(/Unsupported front-matter opening/);
+    expect(g.__parserSentinel).toBeUndefined();
+  });
+
+  it('still accepts ---yaml and a bare --- with trailing whitespace', () => {
+    expect(parseDossierContent('---yaml\ntitle: T\n---\nbody\n').frontmatter.title).toBe('T');
+    expect(parseDossierContent('---  \r\ntitle: T\r\n---\r\nbody\r\n').frontmatter.title).toBe('T');
+  });
+
+  it('returns a fresh frontmatter object on every parse of identical content', () => {
+    const content = '---\ntitle: T\nrisk_level: high\n---\nbody\n';
+    const first = parseDossierContent(content);
+    first.frontmatter.risk_level = 'low';
+    expect(parseDossierContent(content).frontmatter.risk_level).toBe('high');
+  });
+});

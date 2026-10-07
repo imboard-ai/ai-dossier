@@ -1,7 +1,7 @@
 /**
  * Locating a dossier's frontmatter block and the lines of its keys.
  *
- * Real dossiers use two shapes (see `parseDossierContent` in @ai-dossier/core):
+ * Real dossiers use two delimiter styles (see `parseDossierContent` in @ai-dossier/core):
  *   ---dossier          (or ---json)          ---
  *   { "title": ... }                          title: ...
  *   ---                                       ---

@@ -11,20 +11,21 @@ import https from 'node:https';
 import type {
   ChecksumStatus,
   DossierFrontmatter,
+  ParsedDossier,
   SignatureResult,
   SignatureStatus,
   VerificationRiskResult,
 } from '@ai-dossier/core';
 import {
   assessVerificationRisk,
-  buildSignedPayload,
+  buildVerificationPayload,
   findTrustedIdentifier,
+  getErrorMessage,
   isKmsKeyIdentifier,
   isSupportedPublicKey,
   loadTrustedKeys,
   normalizePublicKey,
   parseDossierContent,
-  signatureCoverage,
   verifyIntegrity,
   verifySignature,
 } from '@ai-dossier/core';
@@ -125,10 +126,14 @@ export interface SignatureCheckResult {
   message: string;
 }
 
+/**
+ * Check a parsed dossier's signature. Takes the on-disk frontmatter and shape
+ * along with the logical view because a v3 signature covers the former.
+ */
 export async function checkSignature(
-  body: string,
-  frontmatter: DossierFrontmatter
+  parsed: Pick<ParsedDossier, 'frontmatter' | 'body' | 'rawFrontmatter' | 'shape'>
 ): Promise<SignatureCheckResult> {
+  const { frontmatter } = parsed;
   if (!frontmatter.signature) {
     return {
       present: false,
@@ -145,13 +150,20 @@ export async function checkSignature(
   const trustedName = findTrustedIdentifier(loadTrustedKeys(), signature);
   const isTrusted = trustedName !== undefined;
 
-  // Legacy signatures cover the body alone; v2 covers frontmatter + body.
-  const coverage = signatureCoverage(signature as { covers?: string });
-  const signedPayload = buildSignedPayload(
-    frontmatter as unknown as Record<string, unknown>,
-    body,
-    coverage
-  );
+  // Core picks the scheme from `covers` (v1 body-only, v2 frontmatter+body, v3
+  // spec-shaped on-disk frontmatter) and refuses an unknown one or a scheme that
+  // does not match the file's shape — reported as a failed check, not a crash.
+  let signedPayload: string;
+  try {
+    signedPayload = buildVerificationPayload(parsed);
+  } catch (err) {
+    return {
+      present: true,
+      verified: false,
+      trusted: false,
+      message: `Verification error: ${getErrorMessage(err)}`,
+    };
+  }
 
   const result = await verifySignature(signedPayload, signature as SignatureResult);
 
@@ -292,7 +304,7 @@ export async function verifyDossier(input: string, options: VerifyOptions): Prom
 
     // Verify signature
     console.log(`\n${colors.bright}\uD83D\uDD0F Authenticity Check:${colors.reset}`);
-    const signatureResult = await checkSignature(body, frontmatter);
+    const signatureResult = await checkSignature(parsed);
 
     if (signatureResult.present) {
       if (signatureResult.verified && signatureResult.trusted) {

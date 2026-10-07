@@ -125,13 +125,13 @@ describe('parseDossierMetadataFromContent', () => {
 
   it('should return error for content without frontmatter', () => {
     const result = parseDossierMetadataFromContent('# Just markdown', '/test.ds.md');
-    expect(result.error).toBe('Invalid frontmatter');
+    expect(result.error).toMatch(/^Invalid frontmatter: /);
   });
 
   it('should return error for invalid frontmatter', () => {
     const content = '---dossier\nkey: [invalid\n---\n\nBody';
     const result = parseDossierMetadataFromContent(content, '/test.ds.md');
-    expect(result.error).toBe('Invalid frontmatter');
+    expect(result.error).toMatch(/^Invalid frontmatter: /);
   });
 
   it('should handle array categories', () => {

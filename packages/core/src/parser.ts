@@ -7,6 +7,12 @@
  */
 
 import matter from 'gray-matter';
+import {
+  fromSpecFrontmatter,
+  hasYamlMergeKey,
+  isSpecShapedFrontmatter,
+  SpecShapeError,
+} from './spec-shape';
 import type { DossierFrontmatter, ParsedDossier } from './types';
 import { getErrorMessage } from './utils/errors';
 import { readFileIfExists } from './utils/fs';
@@ -23,34 +29,57 @@ export const VALID_STATUSES = ['Draft', 'Stable', 'Deprecated', 'Experimental'] 
 /** Valid values for the risk_level field. */
 export const VALID_RISK_LEVELS = ['low', 'medium', 'high', 'critical'] as const;
 
+function refuseEngine(): never {
+  throw new Error('Only YAML/JSON front matter is supported');
+}
+
+/** YAML only; gray-matter's code-evaluating engines are replaced with a refusal. */
+const MATTER_OPTIONS = {
+  language: 'yaml',
+  engines: {
+    js: refuseEngine,
+    javascript: refuseEngine,
+    coffee: refuseEngine,
+    coffeescript: refuseEngine,
+  },
+};
+
 /**
  * Parse dossier content into frontmatter and body.
  *
- * Accepts both `---dossier` (JSON/YAML) and standard `---` (YAML) frontmatter.
+ * Accepts both `---dossier` (JSON/YAML) and standard `---` (YAML) frontmatter,
+ * in either the legacy flat shape or the spec shape (see `spec-shape.ts`).
  */
 export function parseDossierContent(content: string): ParsedDossier {
   if (!content || typeof content !== 'string') {
     throw new Error('Invalid dossier format. Content must be a non-empty string.');
   }
 
-  // Normalize dossier-specific delimiters to standard --- for gray-matter
+  // Normalize dossier-specific delimiters to standard --- for gray-matter.
+  // Only YAML (and JSON, which is YAML) is accepted: gray-matter reads a
+  // language name off the opening fence and has engines that evaluate code, so
+  // any other opening line is refused rather than handed to it.
+  const firstNewline = content.indexOf('\n');
+  const openingLine = (firstNewline >= 0 ? content.slice(0, firstNewline) : content).trimEnd();
   let normalized = content;
-  if (content.startsWith('---dossier')) {
-    // Strip "---dossier" and any trailing text on the same line, keep the newline
-    const firstNewline = content.indexOf('\n');
+  if (content.startsWith('---dossier') || content.startsWith('---json')) {
+    // Strip the opening line and any trailing text on it, keep the newline
     normalized = `---\n${firstNewline >= 0 ? content.slice(firstNewline + 1) : ''}`;
-  } else if (content.startsWith('---json')) {
-    const firstNewline = content.indexOf('\n');
-    normalized = `---\n${firstNewline >= 0 ? content.slice(firstNewline + 1) : ''}`;
-  } else if (!content.startsWith('---')) {
+  } else if (openingLine !== '---' && openingLine !== '---yaml') {
     throw new Error(
-      'Invalid dossier format. Expected:\n---dossier\n{...}\n---\n[body]\nor standard YAML frontmatter (---)'
+      content.startsWith('---')
+        ? `Unsupported front-matter opening "${openingLine.slice(0, 40)}". Only YAML (---) or JSON (---dossier / ---json) front matter is accepted.`
+        : 'Invalid dossier format. Expected:\n---dossier\n{...}\n---\n[body]\nor standard YAML frontmatter (---)'
     );
+  } else if (openingLine === '---yaml') {
+    normalized = `---\n${firstNewline >= 0 ? content.slice(firstNewline + 1) : ''}`;
   }
 
   let parsed: matter.GrayMatterFile<string>;
   try {
-    parsed = matter(normalized);
+    // Passing options also bypasses gray-matter's content-keyed cache, which
+    // would otherwise hand every caller the same mutable data object.
+    parsed = matter(normalized, MATTER_OPTIONS);
   } catch (err) {
     throw new Error(`Failed to parse frontmatter: ${getErrorMessage(err)}`);
   }
@@ -66,10 +95,31 @@ export function parseDossierContent(content: string): ParsedDossier {
     }
   }
 
+  // Spec-shaped files (Agent Skills layout, #1088) are read into the same flat
+  // logical object as legacy ones, so no consumer needs to know the shape. The
+  // on-disk object is kept alongside for v3 signature verification.
+  const rawFrontmatter = parsed.data as Record<string, unknown>;
+  const shape = isSpecShapedFrontmatter(rawFrontmatter) ? 'spec' : 'legacy';
+  let frontmatter = rawFrontmatter as DossierFrontmatter;
+  if (shape === 'spec') {
+    try {
+      if (hasYamlMergeKey(parsed.matter)) {
+        throw new SpecShapeError('YAML merge keys (<<) are not allowed');
+      }
+      frontmatter = fromSpecFrontmatter(rawFrontmatter) as DossierFrontmatter;
+    } catch (err) {
+      throw new SpecShapeError(`Invalid spec-shaped frontmatter: ${getErrorMessage(err)}`, {
+        cause: err,
+      });
+    }
+  }
+
   return {
-    frontmatter: parsed.data as DossierFrontmatter,
+    frontmatter,
     body: parsed.content,
     raw: content,
+    rawFrontmatter,
+    shape,
   };
 }
 

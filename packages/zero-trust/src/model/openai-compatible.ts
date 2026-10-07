@@ -1,0 +1,262 @@
+import { createHash } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
+import { assertNoSecrets, assertSecretFree } from '../redaction';
+import { isRecord } from '../state';
+import {
+  MAX_TOOL_ARGUMENT_BYTES,
+  type ModelAdapter,
+  ModelError,
+  type ModelRequest,
+  type ModelResult,
+  type ModelToolCall,
+  type ModelUsage,
+  modelRequestBody,
+  type SnapshotModelRequest,
+  snapshotModelRequest,
+  withModelDeadline,
+} from './adapter';
+import {
+  assertModelKeyEnv,
+  modelValueWithinDepth as boundedDepth,
+  containsModelKey as containsKey,
+  modelEndpoint,
+  readBoundedModelBody,
+  readModelKey,
+} from './transport';
+
+export const MAX_MODEL_RESPONSE_BYTES = 1024 * 1024;
+const RETRY_DELAY_MS = 50;
+const count = (value: unknown): value is number =>
+  Number.isSafeInteger(value) && (value as number) >= 0;
+const malformed = (
+  reason: 'invalid_response' | 'response_too_large' | 'secret_detected',
+  usage: ModelUsage | null = null
+): ModelResult => ({ kind: 'malformed', reason, usage });
+function usage(raw: unknown): ModelUsage | null {
+  if (!isRecord(raw) || !count(raw.prompt_tokens) || !count(raw.completion_tokens)) return null;
+  return { inputTokens: raw.prompt_tokens, outputTokens: raw.completion_tokens };
+}
+function parseCall(call: unknown, names: Set<string>, ids: Set<string>): ModelToolCall | null {
+  if (
+    !isRecord(call) ||
+    typeof call.id !== 'string' ||
+    !call.id ||
+    ids.has(call.id) ||
+    call.type !== 'function' ||
+    !isRecord(call.function)
+  )
+    return null;
+  const fn = call.function;
+  if (
+    typeof fn.name !== 'string' ||
+    !names.has(fn.name) ||
+    typeof fn.arguments !== 'string' ||
+    Buffer.byteLength(fn.arguments, 'utf8') > MAX_TOOL_ARGUMENT_BYTES
+  )
+    return null;
+  try {
+    const argumentsValue: unknown = JSON.parse(fn.arguments);
+    ids.add(call.id);
+    return { id: call.id, name: fn.name, arguments: argumentsValue };
+  } catch {
+    return null;
+  }
+}
+function parse(raw: unknown, request: ModelRequest, reported: ModelUsage | null): ModelResult {
+  if (
+    !isRecord(raw) ||
+    !Array.isArray(raw.choices) ||
+    raw.choices.length !== 1 ||
+    !isRecord(raw.choices[0]) ||
+    !isRecord(raw.choices[0].message)
+  )
+    return malformed('invalid_response', reported);
+  const choice = raw.choices[0];
+  const message = choice.message as Record<string, unknown>;
+  if (
+    choice.finish_reason === 'tool_calls' &&
+    Array.isArray(message.tool_calls) &&
+    message.tool_calls.length > 0
+  ) {
+    const names = new Set(request.tools.map((tool) => tool.function.name));
+    const ids = new Set<string>();
+    const calls: ModelToolCall[] = [];
+    for (const rawCall of message.tool_calls) {
+      const call = parseCall(rawCall, names, ids);
+      if (!call) return malformed('invalid_response', reported);
+      calls.push(call);
+    }
+    return { kind: 'tool_calls', calls, usage: reported };
+  }
+  const noCalls =
+    message.tool_calls === undefined ||
+    message.tool_calls === null ||
+    (Array.isArray(message.tool_calls) && message.tool_calls.length === 0);
+  if (choice.finish_reason === 'stop' && typeof message.content === 'string' && noCalls)
+    return { kind: 'text', text: message.content, usage: reported };
+  return malformed('invalid_response', reported);
+}
+function decode(bytes: Uint8Array, key: string, request: ModelRequest): ModelResult {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  } catch {
+    return malformed('invalid_response');
+  }
+  const reported = isRecord(raw) ? usage(raw.usage) : null;
+  if (!boundedDepth(raw)) return malformed('invalid_response', reported);
+  try {
+    if (containsKey(raw, key)) return malformed('secret_detected', reported);
+    assertSecretFree(raw);
+  } catch {
+    return malformed('secret_detected', reported);
+  }
+  let result: ModelResult;
+  try {
+    result = parse(raw, request, reported);
+    if (request.logprobs && result.kind !== 'malformed') {
+      const choice = (raw as { choices: { logprobs?: unknown }[] }).choices[0];
+      if (choice.logprobs !== undefined && choice.logprobs !== null) {
+        if (!isRecord(choice.logprobs)) return malformed('invalid_response', reported);
+        const content = choice.logprobs.content;
+        if (
+          content !== undefined &&
+          content !== null &&
+          (!Array.isArray(content) ||
+            content.some(
+              (item: unknown) =>
+                !isRecord(item) ||
+                typeof item.logprob !== 'number' ||
+                !Number.isFinite(item.logprob) ||
+                item.logprob > 0
+            ))
+        )
+          return malformed('invalid_response', reported);
+        if (Array.isArray(content) && content.length)
+          result = {
+            ...result,
+            tokenLogprobs: content.map((item: { logprob: number }) => item.logprob),
+          };
+      }
+    }
+  } catch {
+    return malformed('invalid_response', reported);
+  }
+  try {
+    if (!boundedDepth(result)) return malformed('invalid_response', reported);
+    if (containsKey(result, key)) return malformed('secret_detected', reported);
+    assertSecretFree(result);
+  } catch {
+    return malformed('secret_detected', reported);
+  }
+  return result;
+}
+function retryDelay(response: Response, timeoutMs: number): number {
+  const raw = response.headers.get('retry-after');
+  if (!raw) return Math.min(RETRY_DELAY_MS, timeoutMs);
+  const seconds = Number(raw);
+  const ms =
+    Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : Date.parse(raw) - Date.now();
+  // An excessive backoff cannot widen the admitted duration; refuse the retry.
+  if (Number.isFinite(ms) && ms >= timeoutMs) throw new ModelError('model_http', response.status);
+  return Number.isFinite(ms) ? Math.max(0, Math.ceil(ms)) : Math.min(RETRY_DELAY_MS, timeoutMs);
+}
+export interface OpenAICompatibleOptions {
+  model: string;
+  /** API base URL, e.g. https://provider.example/v1; localhost HTTP is allowed. */
+  endpoint: string;
+  apiKeyEnv: string;
+  fetch: typeof fetch;
+}
+/** Contains no credential field. The key is read only at startup check and call time. */
+export class OpenAICompatibleAdapter implements ModelAdapter {
+  readonly id: string;
+  readonly cacheIdentity: string;
+  private readonly url: string;
+  private readonly apiKeyEnv: string;
+  private readonly fetcher: typeof fetch;
+  constructor(options: OpenAICompatibleOptions) {
+    try {
+      const { model, endpoint, apiKeyEnv, fetch: fetcher } = options;
+      const url = modelEndpoint(endpoint, true);
+      assertModelKeyEnv(apiKeyEnv);
+      if (typeof model !== 'string' || !model || typeof fetcher !== 'function')
+        throw new ModelError('invalid_request');
+      assertNoSecrets(model);
+      this.id = model;
+      this.url = `${url.href.replace(/\/$/u, '')}/chat/completions`;
+      this.cacheIdentity = createHash('sha256').update(this.url).digest('hex');
+      this.apiKeyEnv = apiKeyEnv;
+      this.fetcher = fetcher;
+    } catch {
+      throw new ModelError('invalid_request');
+    }
+    this.key();
+  }
+  private key(): string {
+    return readModelKey(this.apiKeyEnv);
+  }
+  private async post(
+    request: SnapshotModelRequest,
+    key: string,
+    signal: AbortSignal
+  ): Promise<Response> {
+    signal.throwIfAborted();
+    const response = await this.fetcher(this.url, {
+      method: 'POST',
+      redirect: 'error',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
+      body: modelRequestBody(this.id, request),
+      signal,
+    });
+    signal.throwIfAborted();
+    return response;
+  }
+  async complete(input: ModelRequest): Promise<ModelResult> {
+    const request = snapshotModelRequest(input);
+    const key = this.key();
+    let backoff = 0;
+    try {
+      for (let attempt = 0; ; attempt++) {
+        const outcome = await withModelDeadline<{ retry: number } | { result: ModelResult }>(
+          request,
+          async (signal) => {
+            if (backoff) await delay(backoff, undefined, { signal });
+            const response = await this.post(request, key, signal);
+            if (!response.ok) {
+              // A tee'd/injected body can keep cancellation pending forever.
+              void response.body?.cancel().catch(() => {});
+              if (
+                attempt === 0 &&
+                request.attempts === 2 &&
+                (response.status === 429 || (response.status >= 500 && response.status <= 599))
+              )
+                return { retry: retryDelay(response, request.timeoutMs) };
+              throw new ModelError('model_http', response.status);
+            }
+            const bytes = await readBoundedModelBody(response, signal, MAX_MODEL_RESPONSE_BYTES);
+            return {
+              result: bytes
+                ? decode(bytes, key, request)
+                : malformed(response.body ? 'response_too_large' : 'invalid_response'),
+            };
+          }
+        );
+        if ('retry' in outcome) {
+          backoff = outcome.retry;
+          continue;
+        }
+        return attempt > 0 ? { ...outcome.result, usage: null } : outcome.result;
+      }
+    } catch (error) {
+      if (
+        error instanceof ModelError &&
+        ['model_http', 'model_timeout', 'model_aborted'].includes(error.code) &&
+        (error.status === undefined ||
+          (Number.isInteger(error.status) && error.status >= 100 && error.status <= 599))
+      )
+        throw new ModelError(error.code, error.status);
+      throw new ModelError('model_unavailable');
+    }
+  }
+}

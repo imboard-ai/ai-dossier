@@ -10,14 +10,14 @@ npm install @ai-dossier/core
 
 ### `parseDossierContent(content: string): ParsedDossier`
 
-Parse a dossier content string into structured data. Supports both `---dossier` (JSON/YAML) and standard `---` (YAML) frontmatter delimiters.
+Parse a dossier content string into structured data. Supports both `---dossier` (JSON/YAML) and standard `---` (YAML) frontmatter delimiters, and both frontmatter shapes: legacy (every Dossier field flat at the top level) and spec (Agent Skills fields `name`, `description`, `license`, `compatibility`, `allowed-tools` at the top level, every other field under `metadata` as `dossier.<field>` strings). `frontmatter` is always the flat logical object.
 
 **Parameters:**
 - `content` — Raw dossier file content as a string
 
-**Returns:** `ParsedDossier` — `{ frontmatter, body, raw }`
+**Returns:** `ParsedDossier` — `{ frontmatter, body, raw, rawFrontmatter, shape }`; `rawFrontmatter` is the frontmatter as it sits on disk and `shape` is `'legacy'` or `'spec'`.
 
-**Throws:** `Error` if content is empty, not a string, or has no valid frontmatter delimiters.
+**Throws:** `Error` if content is empty, not a string, or has no valid frontmatter delimiters; `SpecShapeError` (message prefixed `Invalid spec-shaped frontmatter:`) when a spec-shaped frontmatter is ambiguous — a Dossier field at the top level, `dossier.<agent-skills-field>`, a non-string metadata value, or a YAML merge key.
 
 ```typescript
 import { parseDossierContent } from '@ai-dossier/core';
@@ -138,13 +138,20 @@ Verify a signature using the built-in verifier registry. Automatically selects t
 **Returns:** `Promise<VerifyResult>` — `{ valid: boolean, error?: string }`
 
 ```typescript
-import { verifySignature } from '@ai-dossier/core';
+import { buildVerificationPayload, parseDossierContent, verifySignature } from '@ai-dossier/core';
 
-const result = await verifySignature(body, frontmatter.signature);
+const parsed = parseDossierContent(content);
+const result = await verifySignature(buildVerificationPayload(parsed), parsed.frontmatter.signature);
 if (result.valid) {
   console.log('Signature verified');
 }
 ```
+
+### `buildVerificationPayload(parsed): string`
+
+The bytes a parsed dossier's signature must verify against. Picks the scheme from `signature.covers` — absent: v1 (body only); `frontmatter+body`: v2; `spec-frontmatter+body`: v3 (on-disk spec-shaped frontmatter) — and binds it to the file's shape: spec-shaped files verify only under v3, legacy files only under v1/v2. See the scheme table in [PROTOCOL.md](../../PROTOCOL.md#external-reference-handling).
+
+**Throws:** `Error` on an unsigned dossier, an unknown `covers` value, or a scheme that does not match the file's shape. Treat a throw as a failed verification.
 
 ### `verifyWithEd25519(content: string, signature: string, publicKey: string): VerifyResult`
 
@@ -417,9 +424,11 @@ interface DossierFrontmatter {
 }
 
 interface ParsedDossier {
-  frontmatter: DossierFrontmatter;
+  frontmatter: DossierFrontmatter; // flat logical view, whichever shape the file uses
   body: string;
   raw: string;
+  rawFrontmatter: Record<string, unknown>; // on-disk frontmatter (what a v3 signature covers)
+  shape: 'legacy' | 'spec';
 }
 
 type DossierStatus = 'Draft' | 'Stable' | 'Deprecated' | 'Experimental';

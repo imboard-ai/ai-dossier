@@ -96,6 +96,16 @@ A dossier's checksum covers the body text, and a `covers: frontmatter+body` sign
 
 > Signatures written before v0.8.7 omit `covers` and protect the body alone; their frontmatter — including the risk metadata the runner gates on — is unauthenticated. Re-sign to bind it.
 
+> **Signature schemes.** `signature.covers` selects what the signature covers, and verifiers refuse a value they do not recognise rather than falling back to a weaker scheme:
+>
+> | `covers` | Scheme | Payload |
+> |---|---|---|
+> | absent | v1 | the body |
+> | `frontmatter+body` | v2 | `dossier-signature-v2` tag, canonical JSON of the flat frontmatter minus `signature`, the body |
+> | `spec-frontmatter+body` | v3 | `dossier-signature-v3` tag, canonical JSON of the **on-disk** spec-shaped frontmatter minus `metadata["dossier.signature"]`, the body |
+>
+> Each scheme is bound to a frontmatter shape: a spec-shaped dossier (Agent Skills fields at the top level, Dossier fields under `metadata` as `dossier.<field>` strings — see [#1088](https://github.com/imboard-ai/ai-dossier/issues/1088#issuecomment-6033169047)) verifies only under v3, and a legacy flat dossier only under v1 or v2. `@ai-dossier/core` 1.16.0 reads and verifies v3; nothing writes it yet.
+
 ### Frontmatter Fields
 
 - **`content_scope`**: `"self-contained"` (no external fetches) or `"references-external"` (contains external URLs)

@@ -4,17 +4,38 @@
   "title": "Dossier Schema",
   "description": "JSON Schema for Dossier frontmatter metadata, providing deterministic structure for LLM agent automation",
   "type": "object",
-  "required": [
-    "dossier_schema_version",
-    "title",
-    "version",
-    "protocol_version",
-    "status",
-    "objective",
-    "checksum",
-    "risk_level",
-    "requires_approval"
-  ],
+  "if": {
+    "description": "Spec shape (Agent Skills layout, #1088): a metadata map carrying at least one \"dossier.\" key",
+    "required": ["metadata"],
+    "properties": {
+      "metadata": {
+        "type": "object",
+        "not": {
+          "propertyNames": {
+            "not": {
+              "pattern": "^dossier\\."
+            }
+          }
+        }
+      }
+    }
+  },
+  "then": {
+    "$ref": "#/definitions/specShape"
+  },
+  "else": {
+    "required": [
+      "dossier_schema_version",
+      "title",
+      "version",
+      "protocol_version",
+      "status",
+      "objective",
+      "checksum",
+      "risk_level",
+      "requires_approval"
+    ]
+  },
   "properties": {
     "dossier_schema_version": {
       "type": "string",
@@ -272,8 +293,8 @@
             },
             "covers": {
               "type": "string",
-              "description": "Which bytes the signature covers. 'frontmatter+body' binds the security metadata (risk_level, requires_approval, destructive_operations) to the signature. Absent means the legacy body-only scheme, under which frontmatter is unprotected.",
-              "enum": ["body", "frontmatter+body"],
+              "description": "Which bytes the signature covers. 'frontmatter+body' (v2) binds the security metadata (risk_level, requires_approval, destructive_operations) to the signature. 'spec-frontmatter+body' (v3) covers a spec-shaped file's on-disk frontmatter (metadata[\"dossier.*\"] strings) and body. Absent means the legacy body-only scheme, under which frontmatter is unprotected.",
+              "enum": ["body", "frontmatter+body", "spec-frontmatter+body"],
               "default": "body"
             },
             "signed_by": {
@@ -315,8 +336,8 @@
             },
             "covers": {
               "type": "string",
-              "description": "Which bytes the signature covers. 'frontmatter+body' binds the security metadata (risk_level, requires_approval, destructive_operations) to the signature. Absent means the legacy body-only scheme, under which frontmatter is unprotected.",
-              "enum": ["body", "frontmatter+body"],
+              "description": "Which bytes the signature covers. 'frontmatter+body' (v2) binds the security metadata (risk_level, requires_approval, destructive_operations) to the signature. 'spec-frontmatter+body' (v3) covers a spec-shaped file's on-disk frontmatter (metadata[\"dossier.*\"] strings) and body. Absent means the legacy body-only scheme, under which frontmatter is unprotected.",
+              "enum": ["body", "frontmatter+body", "spec-frontmatter+body"],
               "default": "body"
             },
             "key_id": {
@@ -818,6 +839,72 @@
           "items": {
             "type": "string"
           }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "specShape": {
+      "description": "Spec-shaped dossier: only the Agent Skills fields at the top level; every other Dossier field under metadata as \"dossier.<field>\", its value a string (JSON text for non-string values, and for strings that would themselves parse as JSON).",
+      "type": "object",
+      "required": ["name", "description", "metadata"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Agent Skills name: lowercase letters, digits and single hyphens",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+        },
+        "description": {
+          "type": "string",
+          "description": "What the skill does and when to use it",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "license": {
+          "type": "string",
+          "description": "License identifier (SPDX format recommended)"
+        },
+        "compatibility": {
+          "type": "string",
+          "description": "Environment requirements",
+          "maxLength": 500
+        },
+        "allowed-tools": {
+          "type": "string",
+          "description": "Space-delimited list of pre-approved tools"
+        },
+        "metadata": {
+          "type": "object",
+          "description": "String-to-string map. Dossier fields are keyed \"dossier.<field>\"; other keys belong to other tools.",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "propertyNames": {
+            "not": {
+              "enum": [
+                "dossier.",
+                "dossier.name",
+                "dossier.description",
+                "dossier.license",
+                "dossier.compatibility",
+                "dossier.allowed-tools"
+              ]
+            }
+          },
+          "required": [
+            "dossier.dossier_schema_version",
+            "dossier.title",
+            "dossier.version",
+            "dossier.protocol_version",
+            "dossier.status",
+            "dossier.objective",
+            "dossier.checksum",
+            "dossier.risk_level",
+            "dossier.requires_approval"
+          ]
         }
       }
     }
