@@ -350,14 +350,14 @@ Read and write the spec-shaped layout: Agent Skills fields at the top level, eve
 
 ### `formatDossierContent(content: string, options?: Partial<FormatOptions>): FormatResult`
 
-Format dossier content — sort frontmatter keys and update checksum. Unsigned legacy input is converted to the spec layout by default (`toSpec`); signed legacy input stays legacy, because converting would orphan its signature. Spec-shaped input is re-serialized from its on-disk object, keeping every value's exact string, so only the checksum can change what a v3 signature covers.
+Format dossier content — sort frontmatter keys and update checksum. Unsigned legacy input is converted to the spec layout by default (`toSpec`); signed legacy input stays legacy, because converting would orphan its signature. Spec-shaped input is re-serialized from its on-disk object, keeping every value's exact string; the body is still whitespace-normalized, and when that changes it the checksum is updated and a v3 signature no longer verifies.
 
 **Options (`FormatOptions`):**
 
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `indent` | `number` | `2` | JSON indentation spaces (legacy output only) |
-| `sortKeys` | `boolean` | `true` | Sort frontmatter keys alphabetically (legacy input only) |
+| `sortKeys` | `boolean` | `true` | Sort frontmatter keys into the conventional order (unknown keys alphabetically, `checksum`/`signature` last); legacy input only |
 | `updateChecksum` | `boolean` | `true` | Recalculate and update checksum |
 | `toSpec` | `boolean` | `true` | Convert unsigned legacy input to the spec layout |
 | `nameSource` | `string` | — | Registry or file path to derive `name` from when absent |

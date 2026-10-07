@@ -391,7 +391,7 @@ ai-dossier lint my-skill.ds.md                                   # `spec-shape` 
 | Command | Legacy input | Spec-shaped input |
 |---|---|---|
 | `sign` | converts to the spec layout, signs under v3; fills `name` (file name) and `description` (`objective`) when absent | re-signs under v3 |
-| `format` | unsigned: converts to the spec layout. Signed: stays legacy (converting would orphan the signature). `--keep-legacy` always stays legacy | re-serializes as block YAML, keeping every value's exact string; a v3 signature still verifies unless the body changed |
+| `format` | unsigned: converts to the spec layout. Signed: stays legacy (converting would orphan the signature). `--keep-legacy` always stays legacy | re-serializes as block YAML, keeping every value's exact string; it also trims trailing whitespace from the body, and if that changes the body the checksum is updated and the file must be re-signed |
 | `checksum --update` | keeps the legacy layout | replaces only `dossier.checksum`; warns when a signed body changed |
 | `lint` | `legacy-layout` (info): notes the old layout and any `name`/`description` that would fail once converted | `spec-shape` (error): name pattern, description length, string-only `metadata`, required `dossier.*` keys, block-style YAML |
 | `publish` | uploads as written, with a note to re-sign | uploads as written |
@@ -416,7 +416,7 @@ ai-dossier install-skill org/skills/my-skill --fresh --force
 ai-dossier install-skill --remove my-skill
 ```
 
-A spec-shaped dossier is copied byte for byte (a `---dossier`/`---json`/`---yaml` fence becomes `---`, which parses the same), so its v3 signature still verifies in `~/.claude/skills/` and `skills-ref validate ~/.claude/skills/<name>` accepts it. A legacy dossier's JSON frontmatter is rendered as YAML, with its registry path recorded as `x_source`. Every install also writes the registry path to a `.dossier-source` file next to `SKILL.md`. A spec-shaped copy cannot carry `x_source`, because v3 covers every frontmatter field, so the collision check and `sync-skills` read `.dossier-source` instead. It is ignored unless it holds exactly one registry path.
+A spec-shaped dossier is copied byte for byte (a `---dossier`/`---json`/`---yaml` fence becomes `---`, which parses the same), so its v3 signature still verifies in `~/.claude/skills/` and `skills-ref validate ~/.claude/skills/<name>` accepts it. A legacy dossier's JSON frontmatter is rendered as YAML, with its registry path recorded as `x_source`. Every install also writes the registry path to a `.dossier-source` file next to `SKILL.md`. A spec-shaped copy cannot carry `x_source`, because v3 covers every frontmatter field, so the collision check and `install-skill --list`/`--all`/`--outdated` read `.dossier-source` instead. It is ignored unless it holds exactly one registry path.
 
 Restart Claude Code (or start a new session) to pick up a newly installed skill. At run time the skill calls `ai-dossier run <registry-path>`, which fetches and verifies the dossier on demand — so you don't need to install the dossier separately.
 

@@ -134,7 +134,7 @@ The rest of this page specifies each piece.
 | Other Dossier fields | top level | `metadata["dossier.<field>"]`, one string per field |
 | Checksum and signature | top-level `checksum`, `signature` | `metadata["dossier.checksum"]`, `metadata["dossier.signature"]` |
 | Signature schemes | v1 (body only) and v2 (`frontmatter+body`) | v3 (`spec-frontmatter+body`) only |
-| Written by | nothing by default (`format --keep-legacy`, `checksum --update` on a legacy file) | `sign`, `from-file`, `format`, `skill-export` |
+| Written by | nothing, for unsigned input with default options. `format` keeps a signed legacy file legacy; `format --keep-legacy` and `checksum --update` keep any legacy file legacy | `sign`, `from-file`, `format`, `skill-export` |
 
 A file is spec-shaped when its frontmatter has a `metadata` map with at least one key
 starting with `dossier.`. A legacy file never has one. `parseDossierContent` reads both into
@@ -167,7 +167,7 @@ The Agent Skills layout limits also apply, checked by the `spec-shape` lint rule
 
 | Field | Rule |
 |---|---|
-| `name` | required; lowercase letters, digits and single hyphens (`^[a-z0-9]+(-[a-z0-9]+)*$`), at most 64 characters; must match the skill's directory name when installed |
+| `name` | required; lowercase letters, digits and single hyphens (`^[a-z0-9]+(-[a-z0-9]+)*$`), at most 64 characters. The Agent Skills spec also requires it to match the skill's directory name, which `skills-ref validate` checks (lint and the schema do not); `install-skill` names the directory after the last segment of the registry path |
 | `description` | required; 1–1024 characters |
 | `compatibility` | at most 500 characters |
 | `metadata` | required; string → string; must hold `dossier.dossier_schema_version`, `dossier.title`, `dossier.version`, `dossier.protocol_version`, `dossier.status`, `dossier.objective`, `dossier.checksum`, `dossier.risk_level`, `dossier.requires_approval` |
@@ -214,7 +214,7 @@ loads skills, including the reference validator (strictyaml) and Python runtimes
 1. **Block style only.** No flow collections (`{…}`, `[…]`) anywhere in the frontmatter, and
    so no empty `{}` or `[]` either. The `spec-shape` lint rule reports flow style as an error.
    `ai-dossier format` rewrites flow or JSON frontmatter as block YAML without changing what
-   the signature covers.
+   the signature covers, provided the body has no trailing whitespace for it to trim.
 2. **Quote every value.** Unquoted `true`, `1.0` or `2026-10-07` reads as a boolean, number or
    date, which the parser rejects as a non-string `metadata` value. The writer single-quotes
    every value and switches to double quotes with an explicit `\n` when a value contains a
@@ -226,8 +226,8 @@ loads skills, including the reference validator (strictyaml) and Python runtimes
    back differently. The writer refuses them.
 5. **Keys are plain only when safe.** A key is written unquoted only if it matches
    `^[A-Za-z0-9_.\-/]+$` and is not a word a YAML 1.1 reader turns into a boolean or null
-   (`yes`, `no`, `on`, `off`, `y`, `n`, `true`, `false`, `null`, `~` in any of their
-   capitalizations). Any other key is quoted.
+   (`yes`, `no`, `on`, `off`, `y`, `n`, `true`, `false`, `null`, `~`, in lowercase,
+   Capitalized or UPPERCASE form). Any other key is quoted.
 6. **No merge keys**, as above.
 
 A writer's own round-trip check proves nothing about strict readers, because it reparses with
@@ -242,7 +242,7 @@ Python YAML reader against the file.
 
 | `covers` | Scheme | Signed payload |
 |---|---|---|
-| absent | v1 | the body |
+| absent (or `body`) | v1 | the body |
 | `frontmatter+body` | v2 | `dossier-signature-v2`, newline, canonical JSON of the logical frontmatter without `signature`, newline, the body |
 | `spec-frontmatter+body` | v3 | `dossier-signature-v3`, newline, canonical JSON of the **on-disk** spec-shaped frontmatter without `metadata["dossier.signature"]`, newline, the body |
 
@@ -257,7 +257,7 @@ cover what is actually shipped. In practice that means:
 - YAML formatting outside the values (quote style, indentation, key order, block or flow
   style) is not covered, because the payload is built from the parsed object, not the bytes.
   `format` can therefore turn flow frontmatter into block YAML and the signature still
-  verifies.
+  verifies (unless it also trims trailing whitespace from the body, which changes the body).
 
 The scheme tag is inside the signed bytes, so a v3 signature cannot be replayed as v2 or v1,
 or the other way round.
@@ -268,11 +268,11 @@ A verifier picks the scheme from `covers` and requires it to match the file's la
 
 | File layout | `covers` | Result |
 |---|---|---|
-| legacy | absent | verified under v1 (body only) |
+| legacy | absent or `body` | verified under v1 (body only) |
 | legacy | `frontmatter+body` | verified under v2 |
 | legacy | `spec-frontmatter+body` | **refused**: v3 covers only the spec layout |
 | spec | `spec-frontmatter+body` | verified under v3 |
-| spec | absent or `frontmatter+body` | **refused**: only v3 covers this layout |
+| spec | absent, `body` or `frontmatter+body` | **refused**: only v3 covers this layout |
 | either | any other value | **refused**: unknown scheme |
 
 Binding scheme to layout closes a downgrade: a spec-shaped rewrite of a legacy file decodes to
@@ -309,12 +309,12 @@ It never re-serializes, which would break a v3 signature.
 |---|---|---|
 | `sign` | converts to the spec layout and signs under v3 | re-signs under v3, keeping other tools' `metadata` keys |
 | `from-file` | builds a new dossier from a Markdown file in the spec layout, signed under v3 with `--sign` | — |
-| `format` | **unsigned:** converts to the spec layout. **Signed:** stays legacy, since converting would orphan the signature. `--keep-legacy` always stays legacy | re-serializes the on-disk object, keeping key order and each value's exact string. Only `dossier.checksum` can change, and only when the body changed |
+| `format` | **unsigned:** converts to the spec layout. **Signed:** stays legacy, since converting would orphan the signature. `--keep-legacy` always stays legacy | re-serializes the on-disk object, keeping key order and each value's exact string. It also trims trailing whitespace and extra trailing blank lines from the body; if that changes the body, `dossier.checksum` is updated and a v3 signature must be redone. Otherwise the signature still verifies |
 | `checksum --update` | keeps the legacy layout | replaces only `dossier.checksum`; warns when a signed body changed |
 | `verify` | v1 or v2 | v3 |
 | `lint` | `legacy-layout` (info) | `spec-shape` (error) |
 | `publish` | uploads as written, with a note that `sign` writes the spec layout | uploads as written |
-| `install-skill` | renders JSON frontmatter as YAML (the signed object is unchanged), records `x_source` in it and writes `.dossier-source` | copies the file byte for byte (a `---dossier`, `---json` or `---yaml` fence becomes `---`, which parses the same) and writes `.dossier-source` beside `SKILL.md` |
+| `install-skill` | a `---dossier` file is rendered as YAML with `x_source` (and `description` from `objective` when absent) added, so a v2 signature does not verify on the installed copy; other legacy fences are copied as is. Writes `.dossier-source` | copies the file byte for byte (a `---dossier`, `---json` or `---yaml` fence becomes `---`, which parses the same) and writes `.dossier-source` beside `SKILL.md` |
 | `skill-export` | converts to the spec layout when it bumps the version or the skill is unsigned | publishes byte for byte with `--no-bump`; converts when it bumps the version |
 
 **Lint rules.**
@@ -330,7 +330,8 @@ It never re-serializes, which would break a v3 signature.
 **`.dossier-source`.** A legacy install records its registry path as `x_source` in the
 rendered frontmatter. A spec-shaped install cannot, because v3 covers every frontmatter field,
 so `install-skill` writes the registry path to a `.dossier-source` file next to `SKILL.md`
-(it writes one for legacy installs too). The collision check and `sync-skills` read it, and it is ignored unless it holds exactly one
+(it writes one for legacy installs too). The collision check and `install-skill --list`,
+`--all` and `--outdated` read it, and it is ignored unless it holds exactly one
 registry path (`namespace/…/name`).
 
 **`signatureDropped`.** When `skill-export` rewrites a signed skill (a version bump changes

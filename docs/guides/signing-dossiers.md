@@ -174,7 +174,7 @@ ai-dossier verify path/to/your-dossier.ds.md
 With either method, `ai-dossier sign` (CLI 0.92.0 and later) performs these steps:
 
 1. **Reads the dossier file** and parses frontmatter + body, in either layout
-2. **Drops any existing signature** and fills `name` (from the file name) and `description` (from `objective`) when the dossier declares neither
+2. **Drops any existing signature** and fills `name` (from the file name) and `description` (from `objective`) when either is absent
 3. **Calculates the checksum** (SHA256 of the body)
 4. **Builds the spec-shaped frontmatter**: `name`/`description` at the top level, every other field under `metadata` as a `dossier.<field>` string ([Agent Skills layout](../reference/spec-shape.md))
 5. **Signs the v3 payload**: the `dossier-signature-v3` tag, the canonical JSON of that frontmatter without the signature entry, and the body. With KMS the payload is hashed (`SHA256(payload)`) and sent to the KMS Sign API with `MessageType: 'DIGEST'`; with Ed25519 the payload is signed directly
