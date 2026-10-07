@@ -25,6 +25,7 @@ export * from './model/metered';
 export * from './model/openai-compatible';
 export * from './policy/classify';
 export * from './policy/discover';
+export * from './policy/eligibility';
 export * from './policy/rules';
 export * from './receipt/issue';
 export * from './receipt/nonces';

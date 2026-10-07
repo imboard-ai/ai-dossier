@@ -346,6 +346,79 @@ if (discovery.kind === 'known') {
 }
 ```
 
+## Issue eligibility (#1092)
+
+`assessIssue(read: GitHubRead, { owner, repo, issue }, contributor)` reads structured
+repository, issue and timeline facts without credentials, writes or lifecycle
+transitions. Supply `anonymousReader()` or an offline fake. This is deterministic
+metadata assessment only: it does not judge issue/comment prose or invoke typed
+decisions. The engagement gate owns any semantic judgment and run transition.
+
+`Eligibility.kind` is `eligible`, `ineligible`, `hand_off` or `unknown`. Complete
+results expose immutable `facts`, `reasons` and `evidenceDigest`. Facts include
+authoritative `repositoryId`, `fullName`, `defaultBranch`, public/archive/disable
+flags, issue number/URL/state/lock/PR marker, author (login/URL), author association,
+labels, assignees (login/URL), creation time, normalized contributor, referenced
+PRs (number/URL/repository/state/merged/author) and assignment/connection events
+(nullable REST ID/time/actor and assignee or PR URL, plus update time when supplied).
+Reference events also retain `identityFields`, an immutable path-to-value map of every
+present identity field, preserving exact spelling for field-sensitive evidence digests.
+Cross-references without REST IDs use their complete normalized event/PR identity
+for duplicate detection; other retained events require numeric IDs. Ordinary accounts
+and GitHub App bots (`<app>[bot]`, type `Bot`, matching GitHub App profile URL) are
+recorded; contributor and repository-owner validation still requires ordinary logins.
+Labels, assignees, PRs and events are sorted
+by canonical JSON; the digest is lowercase SHA-256 over canonical JSON of exactly
+`facts`, in UTF-8. It binds freshness inputs, not permission or authentication.
+
+- Private, archived or disabled repositories, closed/locked issues and PR URLs are
+  `ineligible`, with corresponding reasons (`private_repository`, `archived_repository`,
+  `disabled_repository`, `closed_issue`, `locked_issue`, `pull_request`) and
+  `reasonCode: ReasonCode.PolicyBlocked`; the module never applies that transition.
+- Explicit enhancement/feature/question/discussion/documentation labels without
+  bug/defect/regression yield `hand_off` / `not_a_bug`. Other labels do not infer a
+  prose classification. Unlabelled eligible issues record `bug_unlabeled`.
+- A current assignee other than the contributor yields `competing_assignee`.
+  An open referenced PR by another author yields `competing_fix`; an open own PR
+  yields `own_pr_exists` for reconciliation to own. Login comparison ignores case.
+  Closed/merged PRs are recorded but do not compete.
+- Every failed, malformed, ambiguous or truncated read yields only `{ kind: 'unknown' }`,
+  with no partial evidence, retry or weaker fallback. The gate must hand off unknown
+  and hand_off results. Missing accounts/URLs likewise cannot be treated as permission.
+
+Timeline GETs use at most `ELIGIBILITY_PAGE_LIMIT` (10) pages of
+`ELIGIBILITY_PAGE_SIZE` (100). A full tenth page is unknown even if it happens to
+be the last page. Cross-referenced PRs and connected events are collected; ordinary
+issue references and other event kinds do not judge prose. Current PR state is
+hydrated once per distinct parsed public GitHub identity via a fixed `/repos/.../pulls/...`
+path (including cross-repository references), never by fetching repository-provided
+URLs. Connected events without a resolvable source issue or subject identity are
+unknown. A single identity helper requires every present number and URL identity in
+the event, source issue, subject and PR marker to agree on owner/repository/number
+with each other and the hydrated PR. This includes `url`, `html_url`, `diff_url` and
+`patch_url`; optional absent fields are fine, contradictory or malformed fields are
+unknown. Repository identity comparison ignores case, but exact supplied values are
+digest-bound. An invalid identity returns unknown without a digest or partial facts.
+Ordinary issue references require consistent non-PR identity. Duplicate
+relevant event identities and inconsistent merged/open state are unknown. Each page
+is synchronously validated/detached before PR hydration; later reader mutations cannot
+change pagination or admitted entries. PR repository identity is normalized so mixed-case
+references cannot make the digest depend on reference order. Whole-second UTC timestamps
+must round-trip exactly, rejecting impossible calendar dates.
+The injected reader must deliver complete GitHub REST bodies; it owns transport
+deadlines. The bounded snapshot permits at most 1,000 relevant events/PR reads,
+100 labels and 100 assignees, bounded metadata strings and a 1-MiB canonical digest
+input. Repository and issue response identities must match the supplied target;
+renamed/redirected targets require explicit controller reconciliation.
+
+```ts
+const eligibility = await assessIssue(anonymousReader(), { owner, repo, issue: 7 }, contributor);
+if (eligibility.kind === 'eligible') {
+  // Persist eligibility.facts.repositoryId and eligibility.evidenceDigest.
+  // The engagement gate still decides whether work is permitted.
+}
+```
+
 ## Development commands
 
 ```sh
