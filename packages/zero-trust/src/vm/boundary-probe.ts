@@ -8,7 +8,7 @@ import { OutputCollector } from '../controller/output-collector';
 import { assertDirectoryAncestors, privateDir, publishPrivate } from '../durable-fs';
 import { assertSecretFree } from '../redaction';
 import { BrokerError, type ContainerProfile, type VmAdapter, type VmHandle } from './adapter';
-import { validateRequest } from './broker';
+import { MAX_FILE_BYTES, validateRequest } from './broker';
 import { type BoundaryInput, evaluateBoundary, parseReport, parseReports } from './evidence';
 
 export const HOST_ENFORCED = new Set([
@@ -21,6 +21,17 @@ export const HOST_ENFORCED = new Set([
   'dns',
 ]);
 export const hex = (n: number) => randomBytes(n).toString('hex');
+
+/** Controller-defined context only: never an underlying guest/OS error message. */
+export class BoundaryOperationError extends Error {
+  constructor(
+    readonly stage: string,
+    readonly code: string
+  ) {
+    super(`Boundary operation failed (${stage}/${code})`);
+    this.name = 'BoundaryOperationError';
+  }
+}
 
 export interface Listener {
   readonly server: net.Server;
@@ -72,10 +83,21 @@ export async function plantCanaries(): Promise<PlantedCanaries> {
   let loopback: Listener | undefined;
   let lan: Listener | undefined;
   const cleanup = () => {
-    loopback?.server.close();
-    lan?.server.close();
+    let failed = false;
+    for (const listener of [loopback, lan]) {
+      try {
+        if (listener?.server.listening) listener.server.close();
+      } catch {
+        failed = true;
+      }
+    }
     delete process.env[envName];
-    if (hostHome) fs.rmSync(hostHome, { recursive: true, force: true });
+    try {
+      if (hostHome) fs.rmSync(hostHome, { recursive: true, force: true });
+    } catch {
+      failed = true;
+    }
+    if (failed) throw new BoundaryOperationError('cleanup', 'resources_remaining');
   };
   try {
     process.env[envName] = envCanary;
@@ -117,11 +139,26 @@ export async function plantCanaries(): Promise<PlantedCanaries> {
   }
 }
 
-export async function rejectedByBroker(work: () => unknown): Promise<boolean> {
+const HOST_REJECTIONS = [
+  'invalid_op',
+  'invalid_path',
+  'invalid_data',
+  'invalid_profile',
+  'invalid_argv',
+];
+export async function rejectedByBroker(
+  work: () => unknown,
+  expectedCode?: string
+): Promise<boolean> {
   try {
     await work();
   } catch (error) {
-    return error instanceof BrokerError;
+    return (
+      error instanceof BrokerError &&
+      (expectedCode === undefined
+        ? HOST_REJECTIONS.includes(error.code)
+        : error.code === expectedCode)
+    );
   }
   return false;
 }
@@ -161,6 +198,7 @@ interface SessionState {
   started: boolean;
   complete: boolean;
   closed: boolean;
+  cleaned: boolean;
   finished: boolean;
   vm?: VmHandle;
 }
@@ -184,14 +222,16 @@ export async function prepareBoundary(artifactsDir?: string): Promise<BoundarySe
       started: false,
       complete: false,
       closed: false,
+      cleaned: false,
       finished: false,
     };
     const session: BoundarySession = Object.freeze({
       artifactPath: path.join(directory, `boundary-${hex(16)}.json`),
       cleanup() {
-        if (!state.closed) {
-          state.closed = true;
+        state.closed = true;
+        if (!state.cleaned) {
           planted.cleanup();
+          state.cleaned = true;
         }
       },
     });
@@ -210,10 +250,68 @@ function sessionState(session: BoundarySession): SessionState {
 }
 
 const FIXTURES = path.join(__dirname, '..', '..', 'fixtures', 'hostile');
-const PHASES: Record<string, readonly string[]> = {
+export const BOUNDARY_PHASES: Record<string, readonly string[]> = {
   'npm-lifecycle': ['node-preinstall', 'node-postinstall', 'node-test'],
   'pip-setup': ['python-install', 'python-test'],
 };
+
+/** Shared by production and the assumed-escape gate, from trusted fixture files. */
+export async function uploadBoundaryFixture(
+  adapter: VmAdapter,
+  vm: VmHandle,
+  fixture: string,
+  targets: Record<string, unknown>
+) {
+  if (!Object.hasOwn(BOUNDARY_PHASES, fixture))
+    throw new BoundaryOperationError('upload', 'unknown_fixture');
+  for (const name of fs.readdirSync(path.join(FIXTURES, fixture)))
+    await adapter.putFile(
+      vm,
+      `${fixture}/${name}`,
+      fs.readFileSync(path.join(FIXTURES, fixture, name))
+    );
+  await adapter.putFile(vm, `${fixture}/targets.json`, Buffer.from(JSON.stringify(targets)));
+}
+
+const BROKER_ATTEMPTS = [
+  'op-outside-set',
+  'put-traversal',
+  'put-absolute',
+  'put-oversize',
+  'get-traversal',
+  'exec-unknown-profile',
+  'exec-oversize-argv',
+];
+
+/** Host refusal must have the exact validation code; guest/transport errors fail. */
+export async function boundaryBrokerChecks(
+  adapter: VmAdapter,
+  vm: VmHandle,
+  capture: (value: unknown) => void = () => {}
+) {
+  const attempts: [string, () => unknown][] = [
+    ['invalid_op', () => validateRequest({ op: 'shell' } as never)],
+    ['invalid_path', () => adapter.putFile(vm, '../escape', Buffer.from('x'))],
+    ['invalid_path', () => adapter.putFile(vm, '/etc/passwd', Buffer.from('x'))],
+    ['invalid_data', () => adapter.putFile(vm, 'big.bin', Buffer.alloc(MAX_FILE_BYTES + 1))],
+    ['invalid_path', () => adapter.getFile(vm, '../../etc/shadow')],
+    [
+      'invalid_profile',
+      () => adapter.exec(vm, { profile: 'host' as ContainerProfile, argv: ['true'] }),
+    ],
+    [
+      'invalid_argv',
+      () => adapter.exec(vm, { profile: 'node', argv: Array(9).fill('a'.repeat(8000)) }),
+    ],
+  ];
+  const checks: { attempt: string; rejected: boolean }[] = [];
+  for (const [index, [code, work]] of attempts.entries())
+    checks.push({
+      attempt: BROKER_ATTEMPTS[index],
+      rejected: await rejectedByBroker(async () => capture(await work()), code),
+    });
+  return checks;
+}
 
 /** Execute only after endProvisioning. Every command explicitly has no network.
  * The adapter independently refuses package-proxy use after that transition. */
@@ -235,20 +333,13 @@ export async function probeBoundary(
   }
   state.started = true;
   state.vm = { ...vm };
+  let stage = 'upload';
   async function upload(fixture: string) {
-    for (const name of fs.readdirSync(path.join(FIXTURES, fixture)))
-      await adapter.putFile(
-        vm,
-        `${fixture}/${name}`,
-        fs.readFileSync(path.join(FIXTURES, fixture, name))
-      );
-    await adapter.putFile(
-      vm,
-      `${fixture}/targets.json`,
-      Buffer.from(JSON.stringify(state.planted.targets))
-    );
+    stage = `upload-${fixture}`;
+    await uploadBoundaryFixture(adapter, vm, fixture, state.planted.targets);
   }
   async function run(container: ContainerProfile, fixture: string, argv: string[]) {
+    stage = `exec-${fixture}`;
     const result = await adapter.exec(vm, {
       profile: container,
       argv,
@@ -258,14 +349,15 @@ export async function probeBoundary(
     state.output.append(result.stdout);
     state.output.append(result.stderr);
     state.output.append(result.report);
-    const parsed = parseReports(`${result.stdout}\n${result.stderr}`);
-    state.malformed += parsed.malformed;
-    state.reports.push(...parsed.reports);
     if (result.exitCode !== 0 || result.timedOut || result.truncated)
-      throw new Error('Boundary probe incomplete');
+      throw new BoundaryOperationError(
+        stage,
+        result.truncated ? 'truncated' : result.timedOut ? 'timeout' : 'command_failed'
+      );
   }
   async function collect(fixture: string, probe: string) {
-    for (const phase of PHASES[fixture]) {
+    stage = `collect-${fixture}`;
+    for (const phase of BOUNDARY_PHASES[fixture]) {
       const bytes = await adapter.getFile(vm, `${fixture}/results/${phase}.json`);
       state.output.append(bytes);
       try {
@@ -278,20 +370,14 @@ export async function probeBoundary(
       }
     }
   }
-  async function rejected(attempt: string, work: () => unknown) {
-    state.brokerChecks.push({
-      attempt,
-      rejected: await rejectedByBroker(async () => {
-        const value = await work();
-        if (Buffer.isBuffer(value)) state.output.append(value);
-        else if (value && typeof value === 'object' && 'stdout' in value && 'stderr' in value) {
-          const result = value as Awaited<ReturnType<VmAdapter['exec']>>;
-          state.output.append(result.stdout);
-          state.output.append(result.stderr);
-          state.output.append(result.report);
-        }
-      }),
-    });
+  function capture(value: unknown) {
+    if (Buffer.isBuffer(value)) state.output.append(value);
+    else if (value && typeof value === 'object' && 'stdout' in value && 'stderr' in value) {
+      const result = value as Awaited<ReturnType<VmAdapter['exec']>>;
+      state.output.append(result.stdout);
+      state.output.append(result.stderr);
+      state.output.append(result.report);
+    }
   }
   try {
     await upload('npm-lifecycle');
@@ -315,24 +401,15 @@ export async function probeBoundary(
       await run('python', 'pip-setup', ['python3', '-m', 'unittest', '-v', 'test_witness']);
       await collect('pip-setup', 'python');
     }
-    await rejected('op-outside-set', () => validateRequest({ op: 'shell' } as never));
-    await rejected('put-traversal', () => adapter.putFile(vm, '../escape', Buffer.from('x')));
-    await rejected('put-absolute', () => adapter.putFile(vm, '/etc/passwd', Buffer.from('x')));
-    await rejected('put-oversize', () =>
-      adapter.putFile(vm, 'big.bin', Buffer.alloc(1024 * 1024 + 1))
-    );
-    await rejected('get-traversal', () => adapter.getFile(vm, '../../etc/shadow'));
-    await rejected('exec-unknown-profile', () =>
-      adapter.exec(vm, { profile: 'host' as ContainerProfile, argv: ['true'] })
-    );
-    await rejected('exec-oversize-argv', () =>
-      adapter.exec(vm, { profile: 'node', argv: Array(9).fill('a'.repeat(8000)) })
-    );
+    stage = 'broker';
+    state.brokerChecks = await boundaryBrokerChecks(adapter, vm, capture);
     state.complete = true;
-  } catch {
+  } catch (error) {
     state.malformed++;
     session.cleanup();
-    throw new Error('Boundary probe failed');
+    throw error instanceof BoundaryOperationError
+      ? error
+      : new BoundaryOperationError(stage, 'unavailable');
   }
 }
 
@@ -349,15 +426,22 @@ export function finishBoundary(
     if (state.finished) throw new Error('Boundary session already finished');
     state.finished = true;
     const outputs = [...state.output.outputs(), ...collector.outputs()];
+    const markers = parseReports(outputs.join(''));
+    const reports = [
+      ...new Map(
+        [...state.reports, ...markers.reports].map((report) => [JSON.stringify(report), report])
+      ).values(),
+    ];
     // Also scan consecutive chunks: a guest can split an encoding between reads.
     const input: BoundaryInput = {
-      reports: state.reports,
+      reports,
       guestOutputs: [...outputs, outputs.join('')],
       canaries: state.planted.canaries,
       listenerConnections: state.planted.connections(),
       brokerChecks: state.brokerChecks,
       malformedReports:
         state.malformed +
+        markers.malformed +
         (!state.complete || state.closed || !runId || state.vm?.runId !== runId ? 1 : 0),
       runId,
     };
@@ -365,6 +449,8 @@ export function finishBoundary(
     // cannot be persisted; the controller must block rather than lose bytes.
     assertSecretFree(input);
     const bytes = Buffer.from(`${JSON.stringify(input)}\n`);
+    // No clean authoritative artifact exists until all host resources are removed.
+    session.cleanup();
     publishPrivate(session.artifactPath, bytes);
     return JSON.parse(bytes.toString('utf8')) as BoundaryInput;
   } finally {
@@ -384,9 +470,23 @@ export function runBoundaryVerdict(inputs: readonly BoundaryInput[], runId: stri
     malformedReports: inputs.reduce(
       (n, input) =>
         n +
-        input.malformedReports +
+        (Number.isSafeInteger(input.malformedReports) && input.malformedReports >= 0
+          ? input.malformedReports
+          : 1) +
         (input.runId !== runId ||
         !runId ||
+        input.canaries.length !== 2 ||
+        input.canaries.some((canary) => canary.length < 16) ||
+        new Set(input.canaries).size !== 2 ||
+        input.brokerChecks.length !== BROKER_ATTEMPTS.length ||
+        BROKER_ATTEMPTS.some(
+          (attempt) =>
+            input.brokerChecks.filter(
+              (check) => check.attempt === attempt && check.rejected === true
+            ).length !== 1
+        ) ||
+        !Number.isSafeInteger(input.listenerConnections) ||
+        input.listenerConnections < 0 ||
         !evaluateBoundary({ ...input, requiredCategories: undefined }).held
           ? 1
           : 0),

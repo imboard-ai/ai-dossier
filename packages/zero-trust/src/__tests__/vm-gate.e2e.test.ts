@@ -15,12 +15,14 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { OutputCollector } from '../controller/output-collector';
 import type { AcceleratorRequest, ContainerProfile, VmHandle } from '../vm/adapter';
 import {
+  BOUNDARY_PHASES,
+  boundaryBrokerChecks,
   finishBoundary,
   prepareBoundary,
   probeBoundary,
   runBoundaryVerdict,
+  uploadBoundaryFixture,
 } from '../vm/boundary-probe';
-import { validateRequest } from '../vm/broker';
 import {
   assertBoundaryHeld,
   type BoundaryEvidence,
@@ -36,18 +38,13 @@ import {
   E2E_LIMITS as LIMITS,
   type PlantedCanaries,
   plantCanaries,
-  rejectedByBroker,
   rootProbeArgv,
   timer,
 } from './vm-e2e-harness';
 
 const ENABLED = process.env.ZT_VM_E2E === '1';
-const FIXTURES = path.join(__dirname, '..', '..', 'fixtures', 'hostile');
 /** Every report the fixtures must produce, as results/<probe>-<phase>.json. */
-const CONTAINER_PHASES: Record<string, string[]> = {
-  'npm-lifecycle': ['node-preinstall', 'node-postinstall', 'node-test'],
-  'pip-setup': ['python-install', 'python-test'],
-};
+const CONTAINER_PHASES = BOUNDARY_PHASES;
 
 describe.skipIf(!ENABLED)('execution profile gate (real VM)', () => {
   const guestOutputs: string[] = [];
@@ -105,17 +102,7 @@ describe.skipIf(!ENABLED)('execution profile gate (real VM)', () => {
   });
 
   async function upload(vm: VmHandle, fixture: string): Promise<void> {
-    for (const name of fs.readdirSync(path.join(FIXTURES, fixture)))
-      await adapter.putFile(
-        vm,
-        `${fixture}/${name}`,
-        fs.readFileSync(path.join(FIXTURES, fixture, name))
-      );
-    await adapter.putFile(
-      vm,
-      `${fixture}/targets.json`,
-      Buffer.from(JSON.stringify(planted.targets))
-    );
+    await uploadBoundaryFixture(adapter, vm, fixture, planted.targets);
   }
 
   async function run(
@@ -152,10 +139,6 @@ describe.skipIf(!ENABLED)('execution profile gate (real VM)', () => {
     }
   }
 
-  async function rejected(attempt: string, work: () => unknown): Promise<void> {
-    brokerChecks.push({ attempt, rejected: await rejectedByBroker(work) });
-  }
-
   it(
     'denies every attack category in the worker container',
     async () => {
@@ -166,19 +149,7 @@ describe.skipIf(!ENABLED)('execution profile gate (real VM)', () => {
       try {
         // Broker abuse from the controller side: nothing outside the fixed
         // operation set or the size caps may reach the guest.
-        await rejected('op-outside-set', () => validateRequest({ op: 'shell' } as never));
-        await rejected('put-traversal', () => adapter.putFile(vm, '../escape', Buffer.from('x')));
-        await rejected('put-absolute', () => adapter.putFile(vm, '/etc/passwd', Buffer.from('x')));
-        await rejected('put-oversize', () =>
-          adapter.putFile(vm, 'big.bin', Buffer.alloc(1024 * 1024 + 1))
-        );
-        await rejected('get-traversal', () => adapter.getFile(vm, '../../etc/shadow'));
-        await rejected('exec-unknown-profile', () =>
-          adapter.exec(vm, { profile: 'host' as ContainerProfile, argv: ['true'] })
-        );
-        await rejected('exec-oversize-argv', () =>
-          adapter.exec(vm, { profile: 'node', argv: Array(9).fill('a'.repeat(8000)) })
-        );
+        brokerChecks.push(...(await boundaryBrokerChecks(adapter, vm)));
         await upload(vm, 'npm-lifecycle');
         await upload(vm, 'pip-setup');
         await run(
@@ -294,8 +265,11 @@ describe.skipIf(!ENABLED)('execution profile gate (real VM)', () => {
           runBoundaryVerdict([JSON.parse(fs.readFileSync(session.artifactPath, 'utf8'))], runId)
         ).toEqual(verdict);
       } finally {
-        session.cleanup();
-        if (vm) await adapter.destroy(vm);
+        try {
+          session.cleanup();
+        } finally {
+          if (vm) await adapter.destroy(vm);
+        }
       }
     },
     3 * 3600_000

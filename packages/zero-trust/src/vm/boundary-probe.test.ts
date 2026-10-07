@@ -2,10 +2,19 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { Duplex } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { OutputCollector } from '../controller/output-collector';
-import type { ContainerProfile, ExecRequest, ExecResult, VmAdapter, VmHandle } from './adapter';
 import {
+  BrokerError,
+  type ContainerProfile,
+  type ExecRequest,
+  type ExecResult,
+  type VmAdapter,
+  type VmHandle,
+} from './adapter';
+import {
+  boundaryBrokerChecks,
   finishBoundary,
   lanAddress,
   listen,
@@ -15,8 +24,15 @@ import {
   rejectedByBroker,
   rootProbeArgv,
   runBoundaryVerdict,
+  uploadBoundaryFixture,
 } from './boundary-probe';
-import { assertWorkspacePath, validateExecArgv, validateRequest } from './broker';
+import {
+  assertWorkspacePath,
+  BROKER_PROTOCOL,
+  BrokerClient,
+  validateExecArgv,
+  validateRequest,
+} from './broker';
 import {
   ATTACK_CATEGORIES,
   type BoundaryInput,
@@ -122,6 +138,119 @@ async function input(
 }
 
 describe('production boundary lifecycle', () => {
+  it.each([
+    'collector',
+    'report-buffer',
+    'split-collector',
+  ] as const)('parses malformed and adverse markers from %s', async (channel) => {
+    for (const bad of [
+      '{bad',
+      JSON.stringify({
+        ...report(),
+        records: [{ category: 'lan', attempt: 'connect', outcome: 'succeeded' }],
+      }),
+    ]) {
+      const fake = new ProbeFake();
+      const collector = new OutputCollector();
+      const marker = `${REPORT_MARKER}${bad}\n`;
+      if (channel === 'report-buffer') Object.assign(fake.result, { report: Buffer.from(marker) });
+      else if (channel === 'split-collector') {
+        collector.append(marker.slice(0, 9));
+        collector.append(marker.slice(9));
+      } else collector.append(marker);
+      expect(
+        runBoundaryVerdict([(await input(fake, 'node', collector)).input], VM.runId).held
+      ).toBe(false);
+    }
+    const collector = new OutputCollector();
+    collector.append(`${REPORT_MARKER}${JSON.stringify(report())}\n`);
+    expect(
+      runBoundaryVerdict([(await input(new ProbeFake(), 'node', collector)).input], VM.runId).held
+    ).toBe(true);
+  });
+
+  it('refuses guest-origin broker errors after observable forbidden forwarding', async () => {
+    const fake = new ProbeFake();
+    const forwarded: string[] = [];
+    vi.spyOn(fake, 'putFile').mockImplementation(async (_vm, name, bytes) => {
+      try {
+        validateRequest({
+          op: 'put',
+          path: name,
+          data: bytes.toString('base64'),
+          executable: false,
+        });
+      } catch {
+        forwarded.push(name);
+        throw new BrokerError('guest_invalid_path');
+      }
+    });
+    const checks = await boundaryBrokerChecks(fake, VM);
+    expect(forwarded).toHaveLength(3);
+    expect(checks.filter((check) => !check.rejected).map((check) => check.attempt)).toEqual([
+      'put-traversal',
+      'put-absolute',
+      'put-oversize',
+    ]);
+  });
+
+  it.each([
+    'home',
+    'listener',
+  ] as const)('attempts all cleanup resources and retries failed %s removal without publishing a pass', async (fault) => {
+    const fake = new ProbeFake();
+    const session = await prepared();
+    await probeBoundary(session, fake, VM, 'node');
+    const originalRm = fs.rmSync;
+    const originalClose = net.Server.prototype.close;
+    const hostHome = path.dirname(fake.targets.hostFile);
+    let failing = true;
+    const attemptedCloses: net.Server[] = [];
+    const close = vi.spyOn(net.Server.prototype, 'close').mockImplementation(function (
+      this: net.Server,
+      ...args: Parameters<net.Server['close']>
+    ) {
+      attemptedCloses.push(this);
+      if (fault === 'listener' && failing) throw new Error('close denied');
+      return originalClose.apply(this, args);
+    });
+    const rm = vi.spyOn(fs, 'rmSync').mockImplementation((name, options) => {
+      if (fault === 'home' && name === hostHome && failing) throw new Error('remove denied');
+      return originalRm(name, options);
+    });
+    expect(() => finishBoundary(session, new OutputCollector(), VM.runId)).toThrow(
+      'resources_remaining'
+    );
+    expect(fs.existsSync(session.artifactPath)).toBe(false);
+    expect(process.env[fake.targets.envName]).toBeUndefined();
+    expect(new Set(attemptedCloses).size).toBe(2);
+    if (fault === 'home') expect(fs.existsSync(fake.targets.hostFile)).toBe(true);
+    else expect(fs.existsSync(fake.targets.hostFile)).toBe(false);
+    failing = false;
+    session.cleanup();
+    expect(fs.existsSync(fake.targets.hostFile)).toBe(false);
+    expect(attemptedCloses.every((server) => !server.listening)).toBe(true);
+    close.mockRestore();
+    rm.mockRestore();
+  });
+
+  it('requires both distinct canaries and the entire unique host-check set when recomputing', async () => {
+    const clean = (await input()).input;
+    const corruptions: BoundaryInput[] = [
+      { ...clean, canaries: [] },
+      { ...clean, canaries: ['short', 'short'] },
+      { ...clean, canaries: [clean.canaries[0], clean.canaries[0]] },
+      { ...clean, brokerChecks: [] },
+      { ...clean, brokerChecks: clean.brokerChecks.slice(1) },
+      { ...clean, brokerChecks: clean.brokerChecks.map(() => clean.brokerChecks[0]) },
+      { ...clean, malformedReports: -1 },
+      { ...clean, malformedReports: Number.NaN },
+      { ...clean, listenerConnections: -1 },
+    ];
+    for (const corrupted of corruptions)
+      expect(runBoundaryVerdict([clean, corrupted], VM.runId).held).toBe(false);
+  });
+
   it.each([
     'node',
     'python',
@@ -238,7 +367,9 @@ describe('production boundary lifecycle', () => {
     if (fault === 'file') vi.spyOn(fake, 'getFile').mockRejectedValue(new Error('guest failure'));
     if (fault === 'upload') vi.spyOn(fake, 'putFile').mockRejectedValue(new Error('guest failure'));
     const session = await prepared();
-    await expect(probeBoundary(session, fake, VM, 'node')).rejects.toThrow('Boundary probe failed');
+    await expect(probeBoundary(session, fake, VM, 'node')).rejects.toThrow(
+      'Boundary operation failed'
+    );
     expect(Object.keys(process.env).filter((key) => key.startsWith('ZT_CANARY_'))).toEqual([]);
     expect(
       runBoundaryVerdict([finishBoundary(session, new OutputCollector(), VM.runId)], VM.runId).held
@@ -299,6 +430,57 @@ describe('production boundary lifecycle', () => {
 });
 
 describe('host helpers', () => {
+  it('refuses an unrecognized fixture rather than reading an arbitrary path', async () => {
+    await expect(uploadBoundaryFixture(new ProbeFake(), VM, '../escape', {})).rejects.toThrow(
+      'unknown_fixture'
+    );
+  });
+
+  it('records zero guest frames for all real broker rejections, with forwarded positive controls', async () => {
+    const frames: Record<string, unknown>[] = [];
+    const stream = new Duplex({
+      read() {},
+      write(chunk, _encoding, callback) {
+        const frame = JSON.parse(String(chunk)) as Record<string, unknown>;
+        frames.push(frame);
+        if (frame.op === 'hello')
+          this.push(
+            `${JSON.stringify({ v: 1, id: 0, hello: BROKER_PROTOCOL, scope: 'container', phase: 'verification' })}\n`
+          );
+        else
+          this.push(
+            `${JSON.stringify({ v: 1, id: frame.id, ok: false, error: 'invalid_path' })}\n`
+          );
+        callback();
+      },
+    });
+    const client = new BrokerClient(stream);
+    try {
+      await client.waitReady(1000);
+      frames.length = 0;
+      const wire: VmAdapter = {
+        ...new ProbeFake(),
+        create: async () => VM,
+        destroy: async () => {},
+        endProvisioning: async () => {},
+        listByRun: async () => [],
+        putFile: async (_vm, name, bytes) => client.put(name, bytes, false, 1000),
+        getFile: async (_vm, name) => client.get(name, 1000),
+        exec: async (_vm, request) => client.exec({ ...request, timeoutMs: 1000 }, 0),
+      };
+      expect((await boundaryBrokerChecks(wire, VM)).every((check) => check.rejected)).toBe(true);
+      expect(frames).toEqual([]);
+      // The transport and guest-origin prefix are real, not fabricated constants.
+      expect(await rejectedByBroker(() => client.get('valid-file', 1000))).toBe(false);
+      expect(frames).toHaveLength(1);
+      client.taint('stream_error');
+      expect(
+        (await boundaryBrokerChecks(wire, VM)).filter((check) => !check.rejected).length
+      ).toBeGreaterThan(0);
+    } finally {
+      client.close();
+    }
+  });
   it('plants fresh secrets without including their values in targets', async () => {
     const planted = await plantCanaries();
     sessions.push(planted);
