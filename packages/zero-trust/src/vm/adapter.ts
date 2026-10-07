@@ -117,6 +117,9 @@ export interface VmAdapter {
    * provisioning is refused. */
   endProvisioning(handle: VmHandle): Promise<void>;
   /** One deletion attempt; throws VmCleanupError with what is left behind. */
+  /** Successful resolution requires observed guest exit, not just a termination
+   * request. Reject if exit cannot be established: boundary finalization relies
+   * on this promise as its quiescence barrier. */
   destroy(handle: Pick<VmHandle, 'vmId' | 'runId'>): Promise<void>;
   listByRun(runId: string): Promise<VmListing[]>;
 }

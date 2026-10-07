@@ -17,6 +17,7 @@ import type { AcceleratorRequest, ContainerProfile, VmHandle } from '../vm/adapt
 import {
   BOUNDARY_PHASES,
   boundaryBrokerChecks,
+  boundaryCommands,
   finishBoundary,
   prepareBoundary,
   probeBoundary,
@@ -152,32 +153,8 @@ describe.skipIf(!ENABLED)('execution profile gate (real VM)', () => {
         brokerChecks.push(...(await boundaryBrokerChecks(adapter, vm)));
         await upload(vm, 'npm-lifecycle');
         await upload(vm, 'pip-setup');
-        await run(
-          'npmInstallMs',
-          vm,
-          'node',
-          ['npm', 'install', '--offline', '--no-audit', '--no-fund', '--foreground-scripts'],
-          'npm-lifecycle'
-        );
-        await run('npmTestMs', vm, 'node', ['npm', 'test'], 'npm-lifecycle');
-        await run(
-          'pipInstallMs',
-          vm,
-          'python',
-          [
-            'sh',
-            '-c',
-            'python3 -m venv --system-site-packages /tmp/venv && /tmp/venv/bin/pip install -v --no-index --no-deps --no-build-isolation .',
-          ],
-          'pip-setup'
-        );
-        await run(
-          'pipTestMs',
-          vm,
-          'python',
-          ['python3', '-m', 'unittest', '-v', 'test_witness'],
-          'pip-setup'
-        );
+        for (const command of boundaryCommands('python'))
+          await run(command.timing, vm, command.profile, command.argv, command.fixture);
         await collect(vm, 'npm-lifecycle');
         await collect(vm, 'pip-setup');
       } finally {

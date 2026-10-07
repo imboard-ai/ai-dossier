@@ -16,6 +16,7 @@ import {
 } from './adapter';
 import {
   boundaryBrokerChecks,
+  boundaryCommands,
   finishBoundary,
   lanAddress,
   listen,
@@ -139,6 +140,35 @@ async function input(
 }
 
 describe('production boundary lifecycle', () => {
+  it('retains indexed per-VM diagnostics even when another VM masks missing coverage', async () => {
+    const clean = (await input()).input;
+    const incomplete = {
+      ...clean,
+      reports: clean.reports.map((report) => ({
+        ...report,
+        records: report.records.filter((record) => record.category !== 'dns'),
+      })),
+    };
+    const verdict = runBoundaryVerdict([clean, incomplete], VM.runId);
+    expect(verdict.held).toBe(false);
+    expect(verdict.violations.join(' ')).toContain('input-1: missing coverage: dns');
+    expect(
+      runBoundaryVerdict([clean, { ...clean, runId: 'other' }], VM.runId).violations.join(' ')
+    ).toContain('input-1: wrong run identity');
+  });
+
+  it('returns detached trusted command descriptors for the gate and both profiles', () => {
+    const node = boundaryCommands('node');
+    expect(node.map((command) => command.timing)).toEqual(['npmInstallMs', 'npmTestMs']);
+    node[0].argv[0] = 'mutated';
+    expect(boundaryCommands('node')[0].argv[0]).toBe('npm');
+    expect(boundaryCommands('python').map((command) => command.timing)).toEqual([
+      'npmInstallMs',
+      'npmTestMs',
+      'pipInstallMs',
+      'pipTestMs',
+    ]);
+  });
   it.each([1, 2])('records a queued child handshake before finalizing %i VM(s)', async (count) => {
     const inputs: BoundaryInput[] = [];
     for (let index = 0; index < count; index++) {

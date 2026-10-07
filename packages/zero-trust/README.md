@@ -59,6 +59,8 @@ session returns a failed input; finishing twice is refused.
 inputs, with per-VM full-category checks so another VM cannot cover a missing
 category. It also requires both distinct meaningful canaries, the complete unique
 seven-check host measurement set, valid counters and matching run identity.
+Controller-defined indexed failure records retain each VM's failed requirements
+when another VM supplies its missing category coverage.
 A breach, incomplete VM or wrong-run input fails the whole run. Read
 each session's private artifact to recompute this verdict. Only this evaluator
 creates `BoundaryEvidence`; shipping still requires the run's own clean held
@@ -74,7 +76,11 @@ temporary canary home. Partial setup failures clean everything already allocated
 The gate harness re-exports `plantCanaries`, `listen`, `lanAddress`,
 `rejectedByBroker`, `rootProbeArgv`, `HOST_ENFORCED` and `hex` from production.
 `plantCanaries()` returns the canaries, target descriptor, both `Listener`s and
-count/cleanup methods. `listen(host)` counts and drops every accepted connection;
+count/cleanup methods plus `await drain()`. Call drain only after observed guest
+quiescence: it awaits both listener closes before authoritative measurement but
+leaves the environment/file canaries in place, so `cleanup()` is still required.
+The raw helper has no deadline; prefer deadline-controlled `finishBoundary` for
+sessions. `listen(host)` counts and drops every accepted connection;
 `lanAddress()` requires a non-internal IPv4 interface. `rejectedByBroker(work, expectedCode?)`
 counts only controller-validation `BrokerError` codes as a rejection; session
 checks require each attempt's exact expected code. Guest errors, transport and
@@ -82,6 +88,8 @@ readiness failures never prove host-side refusal. `boundaryBrokerChecks(adapter,
 vm, capture?)` shares that seven-attempt sequence with the gate and optionally
 captures unexpected returned data. `uploadBoundaryFixture(adapter, vm, fixture,
 targets)` uploads only a fixture named in the shared `BOUNDARY_PHASES` table.
+`boundaryCommands(profile)` returns fresh trusted fixture/profile/argv descriptors
+shared by production and the gate, including the gate's independent timing labels.
 `BoundaryOperationError` carries fixed controller-defined `stage`/`code` fields,
 allowing upload, exec, report-read and cleanup failures to be diagnosed without
 echoing guest text or OS paths. `rootProbeArgv(phase)` retains the fixed
