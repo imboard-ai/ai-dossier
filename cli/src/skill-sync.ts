@@ -29,6 +29,11 @@ export interface InstalledSkill {
   /** Registry path recorded at install time; undefined for legacy installs. */
   source?: string;
   version?: string;
+  /**
+   * Rendered by a CLI that wrote `x_source` into the frontmatter (before #1136), which
+   * breaks a v2 signature; `--outdated` reinstalls it even when the version is current.
+   */
+  rerender?: boolean;
 }
 
 export type SkillStatus = 'current' | 'behind' | 'ahead' | 'not-installed' | 'unknown-source';
@@ -88,9 +93,12 @@ export function readInstalledSkills(skillsDir: string): InstalledSkill[] {
         unknown
       >;
       // Only a full registry path is provenance; a bare `name` (pre-x_source install) is not.
+      // Installs before #1136 may record it only as `x_source` in the frontmatter.
       const source =
-        typeof fm.x_source === 'string' ? fm.x_source : readSourceSidecar(path.dirname(file));
+        readSourceSidecar(path.dirname(file)) ??
+        (typeof fm.x_source === 'string' ? fm.x_source : undefined);
       if (source?.includes('/')) skill.source = source;
+      if (fm.x_source !== undefined) skill.rerender = true;
       if (fm.version != null) skill.version = String(fm.version);
     } catch {
       // unreadable frontmatter -> treated as unknown source
@@ -186,7 +194,8 @@ export function planSync(opts: PlanOptions): PlanItem[] {
 
     if (outdated) {
       const status = classify(inst?.version, c.version);
-      if (status !== 'behind' && status !== 'not-installed') {
+      const rerender = status === 'current' && inst?.rerender;
+      if (status !== 'behind' && status !== 'not-installed' && !rerender) {
         item.action = 'skip';
         item.reason = status === 'ahead' ? 'installed is newer than registry' : 'up to date';
       }
