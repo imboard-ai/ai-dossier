@@ -382,6 +382,17 @@ decision validation enforces independent agreement, confidence and metered budge
 missing/invalid provider configuration and every escalation are hand-offs, never a
 weaker fallback. This API does not authorize publication or perform GitHub writes.
 
+Budget refusal is assessment-wide and all-or-nothing. Any dimension's `budget`
+escalation stops subsequent decision dispatch. After the last dimension, the API
+rechecks eligibility read-only using the same `isBudgetSessionExhausted` predicate
+as `decide`, including fully cached assessments. Exhaustion returns the exact
+deterministic floor values and display citations for every dimension, with
+`reason: 'budget'`; a failed final ledger read similarly returns the floor with
+`reason: 'ledger'`. Retained decision records are marked escalated with that reason
+and the floor value, while validated earlier citations remain audit evidence.
+The reason and refused verdict metadata are bound in `policyDigest`, distinguishing
+this fallback from a decided assessment. Silent inputs still make no model calls.
+
 Accepted answers require at least one citation and literal source spans in admitted
 lines, enforced by the shared decision's `citationMode: 'verbatim'` on both fresh
 and cached verdicts. Quotes retain raw whitespace and file line coordinates split

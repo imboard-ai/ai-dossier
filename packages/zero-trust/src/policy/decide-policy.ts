@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { isBudgetSessionExhausted } from '../budget';
 import { decide, evaluateDecisionFloor } from '../decision/decide';
 import {
   createTypedQuestion,
@@ -142,13 +143,26 @@ export async function assessPolicy(
     .sort((a, b) => comparePolicyText(a.path, b.path));
   const analysis = analyzePolicyFloor(snapshot);
   const floor = analysis.assessment;
+  const budgetFailure = (): 'budget' | 'ledger' | undefined => {
+    if (!deps?.budget) return undefined;
+    try {
+      return isBudgetSessionExhausted(deps.budget.ledger.snapshot(), deps.budget.sessionId)
+        ? 'budget'
+        : undefined;
+    } catch {
+      return 'ledger';
+    }
+  };
   // A project with no AI topic is silent, not a paid permission inference.
-  if (floor.ai === 'silent')
+  if (floor.ai === 'silent') {
+    const reason = budgetFailure();
+    if (reason) return Object.freeze({ ...floor, reason });
     return Object.freeze({
       ...floor,
       assignment: analysis.contradictions.assignment ? 'unclear' : floor.assignment,
       directPr: analysis.contradictions.directPr ? 'unclear' : floor.directPr,
     });
+  }
   const admitted = new Map<string, Map<number, string>>();
   let ambiguous = false;
   const inputs: DecisionInput[] = snapshot.map((file) => {
@@ -167,6 +181,7 @@ export async function assessPolicy(
   });
   const result = { ...floor };
   const evidence: Record<string, PolicyDecisionEvidence> = {};
+  let refusal: 'budget' | 'ledger' | undefined;
   // One reserved controlling citation per dimension, independent of floor cap.
   const dimensions = Object.keys(POLICY_QUESTIONS) as Dimension[];
   const citations = floor.citations.slice(0, POLICY_CITATION_LIMIT - dimensions.length);
@@ -175,7 +190,7 @@ export async function assessPolicy(
     const builtin = floorFor(dimension, analysis);
     let verdict: Verdict | undefined;
     try {
-      if (deps?.provider)
+      if (!refusal && deps?.provider)
         verdict = await decide(question, inputs, {
           ...deps,
           provider: deps.provider,
@@ -194,6 +209,7 @@ export async function assessPolicy(
     } catch {
       // Invalid/unconfigured dependencies are a hand-off, never permission.
     }
+    if (verdict?.reason === 'budget') refusal = 'budget';
     const literal =
       verdict?.citations.every(({ sourceId, line, quote }) =>
         admitted.get(sourceId)?.get(line)?.includes(quote)
@@ -219,7 +235,7 @@ export async function assessPolicy(
         ? 'accepted'
         : verdict?.status === 'accepted'
           ? 'invalid_pass'
-          : (verdict?.reason ?? 'configuration'),
+          : (refusal ?? verdict?.reason ?? 'configuration'),
       value,
       confidence: String(verdict?.confidence ?? 0),
       provider: verdict?.provider ?? 'unconfigured',
@@ -268,6 +284,27 @@ export async function assessPolicy(
       }
     }
   }
+  // Permission is atomic across dimensions. A later decision (or concurrent
+  // ledger consumption after a cache read) must revoke earlier permissions.
+  refusal ??= budgetFailure();
+  if (refusal)
+    return Object.freeze({
+      ...floor,
+      reason: refusal,
+      decisions: Object.freeze(
+        Object.fromEntries(
+          dimensions.map((dimension) => [
+            dimension,
+            Object.freeze({
+              ...evidence[dimension],
+              status: 'escalated' as const,
+              reason: refusal,
+              value: floor[dimension],
+            }),
+          ])
+        )
+      ),
+    });
   return Object.freeze({
     ...result,
     citations: Object.freeze(

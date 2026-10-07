@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { BudgetLedger, budgetTotals } from '../../budget';
+import { BudgetLedger, budgetTotals, isBudgetSessionExhausted } from '../../budget';
 import type { BudgetRate } from '../../budget-types';
 import { createLlmDecisionProvider } from '../../decision/providers/llm';
 import type { DecisionInput, TypedQuestion, Verdict } from '../../decision/types';
@@ -117,6 +117,130 @@ function noWeaker(a: PolicyAssessment, floor: PolicyAssessment, files: readonly 
   if (restrictions.directPr.includes('discussion_first')) expect(a.directPr).not.toBe('welcomed');
 }
 describe('typed policy assessment', () => {
+  const axes = ['money', 'tokens', 'time'] as const;
+  function exhaust(deps: ReturnType<typeof fake>, axis: (typeof axes)[number]) {
+    const state = deps.budget.ledger.snapshot();
+    const session = state.sessions.find((s) => s.id === deps.budget.sessionId);
+    if (!session) throw new Error('missing test session');
+    const totals = budgetTotals(state, session.id);
+    deps.budget.ledger.reserve(session.id, {
+      money: {
+        currency: 'USD',
+        minor: axis === 'money' ? session.ceiling.minor - totals.spent - totals.reserved : 0,
+      },
+      tokens: axis === 'tokens' ? session.tokenLimit - totals.tokens : 1,
+      timeMs: axis === 'time' ? session.timeLimitMs - totals.timeMs : 1,
+      rates: deps.budget.rates,
+    });
+  }
+  function expectFloor(a: PolicyAssessment, files: readonly PolicyFile[]) {
+    const { decisions, reason, ...values } = a;
+    expect(values).toEqual(classifyPolicy(files));
+    expect(reason).toBe('budget');
+    for (const [dimension, evidence] of Object.entries(decisions ?? {})) {
+      expect(evidence).toMatchObject({
+        status: 'escalated',
+        reason: 'budget',
+        value: classifyPolicy(files)[dimension as keyof typeof POLICY_QUESTIONS],
+      });
+    }
+  }
+  it.each(
+    axes.flatMap((axis) => [0, 2, 5].map((dimension) => [axis, dimension] as const))
+  )('atomically drops permissions on %s exhaustion at dimension %s, fresh and warm', async (axis, dimension) => {
+    // Restrictive floor literals must survive, rather than becoming all unclear.
+    const files = [
+      file('AI is welcome.\nAssignment is required.\nDiscuss changes first before PRs.'),
+    ];
+    for (const warm of [false, true]) {
+      const deps = fake(permissive);
+      const entries = new Map<string, Verdict>();
+      const cache = {
+        get: vi.fn((key: string) => entries.get(key)),
+        set: vi.fn((key: string, verdict: Verdict): undefined => {
+          entries.set(key, verdict);
+        }),
+      };
+      const decided = await assessPolicy(files, { ...deps, cache });
+      expect(decided.ai).toBe('welcomed');
+      deps.request.mockClear();
+      deps.complete.mockClear();
+      cache.get.mockClear();
+      cache.set.mockClear();
+      if (warm) {
+        cache.get.mockImplementation((key) => {
+          if (cache.get.mock.calls.length === dimension + 1) exhaust(deps, axis);
+          return entries.get(key);
+        });
+      } else {
+        const settle = deps.budget.ledger.settle.bind(deps.budget.ledger);
+        let settled = 0;
+        vi.spyOn(deps.budget.ledger, 'settle').mockImplementation((...args) => {
+          const result = settle(...args);
+          if (++settled === 2 * (dimension + 1)) exhaust(deps, axis);
+          return result;
+        });
+      }
+      const a = await assessPolicy(files, { ...deps, cache: warm ? cache : undefined });
+      expectFloor(a, files);
+      expect(isBudgetSessionExhausted(deps.budget.ledger.snapshot(), 's1')).toBe(true);
+      expect(deps.complete.mock.calls).toHaveLength(warm ? 0 : 2 * (dimension + 1));
+      if (warm) expect(cache.get.mock.calls).toHaveLength(dimension + 1);
+      if (dimension > 0) expect(a.decisions?.ai?.citations.length).toBeGreaterThan(0);
+      expect(policyDigest(a, files)).not.toBe(policyDigest(decided, files));
+      vi.restoreAllMocks();
+    }
+  });
+  it.each(axes)('rechecks %s read-only after the last cached verdict', async (axis) => {
+    const files = [file('AI is welcome.')];
+    const deps = fake(permissive);
+    const entries = new Map<string, Verdict>();
+    const cache = {
+      get: (key: string) => entries.get(key),
+      set: (key: string, v: Verdict): undefined => {
+        entries.set(key, v);
+      },
+    };
+    await assessPolicy(files, { ...deps, cache });
+    const snapshot = deps.budget.ledger.snapshot.bind(deps.budget.ledger);
+    let reads = 0;
+    vi.spyOn(deps.budget.ledger, 'snapshot').mockImplementation(() => {
+      const state = snapshot();
+      // Two checks per cache verdict. Simulate another controller consuming the
+      // remainder just after the last decide() check saw an eligible snapshot.
+      if (++reads === 12) exhaust(deps, axis);
+      return state;
+    });
+    deps.complete.mockClear();
+    const a = await assessPolicy(files, { ...deps, cache });
+    expectFloor(a, files);
+    expect(deps.complete.mock.calls).toEqual([]);
+    expect(a.decisions?.ai?.citations.length).toBeGreaterThan(0);
+  });
+  it('returns either an eligible decided assessment or the exact floor across budget boundaries', async () => {
+    // Deterministic generated cases: varied capacity, restrictions, axis and
+    // exhaustion boundary, with eligible controls for the same inputs.
+    for (let seed = 0; seed < 24; seed++) {
+      const files = [file(`AI is welcome.${seed % 2 ? '\nAssignment is required.' : ''}`)];
+      const deps = fake(permissive);
+      const eligible = await assessPolicy(files, deps);
+      expect(eligible.ai).toBe('welcomed');
+      const settle = deps.budget.ledger.settle.bind(deps.budget.ledger);
+      let settled = 0;
+      vi.spyOn(deps.budget.ledger, 'settle').mockImplementation((...args) => {
+        const result = settle(...args);
+        if (++settled === 2 * ((seed % 6) + 1) && seed % 4 !== 0) exhaust(deps, axes[seed % 3]);
+        return result;
+      });
+      const a = await assessPolicy(files, deps);
+      if (isBudgetSessionExhausted(deps.budget.ledger.snapshot(), 's1')) expectFloor(a, files);
+      else {
+        expect(a.ai).toBe(eligible.ai);
+        expect(a.reason).toBeUndefined();
+      }
+      vi.restoreAllMocks();
+    }
+  }, 60_000);
   it.each([
     ['AI is banned, and AI output is rejected.', 'banned'],
     ['AI use must be disclosed: AI disclosure is required.', 'disclosure_required'],
@@ -160,7 +284,11 @@ describe('typed policy assessment', () => {
     expect(a.ai).toBe('unclear');
     expect(Object.values(a.decisions ?? {}).every((v) => v.reason === 'budget')).toBe(true);
     expect(set.mock.calls).toEqual([]);
-    measure.budget.ledger.startSession({ ...bounds, id: 'surplus', tokenLimit: ai.tokens + 1 });
+    measure.budget.ledger.startSession({
+      ...bounds,
+      id: 'surplus',
+      tokenLimit: budgetTotals(state, 's1').tokens + 1,
+    });
     expect(
       (
         await assessPolicy(files, {
@@ -243,14 +371,7 @@ describe('typed policy assessment', () => {
     cache.set.mockClear();
     for (const suppliedCache of [cache, undefined]) {
       const a = await assessPolicy(files, { ...deps, cache: suppliedCache });
-      expect(a).toMatchObject({
-        ai: 'unclear',
-        assignment: 'unclear',
-        directPr: 'unclear',
-        draftRequired: true,
-        receiptBlockAllowed: false,
-        baselineFailuresPermitted: false,
-      });
+      expectFloor(a, files);
       expect(Object.values(a.decisions ?? {}).every((v) => v.reason === 'budget')).toBe(true);
     }
     expect(cache.get.mock.calls).toEqual([]);
@@ -401,6 +522,10 @@ describe('typed policy assessment', () => {
       await assessPolicy(files),
       await assessPolicy(files, { ...deps, passes: 1 }),
     ]) {
+      if (a.reason === 'budget') {
+        expectFloor(a, files);
+        continue;
+      }
       expect(a).toMatchObject({
         ai: 'unclear',
         assignment: 'unclear',

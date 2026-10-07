@@ -34,6 +34,8 @@ export interface PolicyAssessment {
   readonly receiptBlockAllowed: boolean;
   readonly baselineFailuresPermitted: boolean;
   readonly citations: readonly PolicyCitation[];
+  /** Assessment-wide refusal; dimension evidence remains available for audit. */
+  readonly reason?: 'budget' | 'ledger';
   readonly decisions?: Readonly<Partial<Record<PolicyAssessmentDimension, PolicyDecisionEvidence>>>;
 }
 
