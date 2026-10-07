@@ -487,7 +487,45 @@ describe('OpenAI-compatible untrusted responses and transport', () => {
         request
       );
     } catch (error) {
-      outputs.push(String(error), JSON.stringify(error));
+      outputs.push(
+        String(error),
+        JSON.stringify(error),
+        error instanceof Error ? error.stack : null
+      );
+    }
+    const broken = new ReadableStream({
+      start(controller) {
+        controller.error(new Error(KEY));
+      },
+    });
+    for (const fetcher of [
+      vi.fn<typeof fetch>().mockResolvedValue(new Response(broken)),
+      vi.fn<typeof fetch>().mockResolvedValue(new Response(KEY, { status: 500 })),
+      vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(new Response(KEY, { status: 429, headers: { 'Retry-After': '999' } })),
+    ]) {
+      try {
+        await meteredComplete(adapter(fetcher), store, 's1', rates, { ...request, attempts: 2 });
+      } catch (error) {
+        outputs.push(
+          String(error),
+          JSON.stringify(error),
+          error instanceof Error ? error.stack : null
+        );
+      }
+    }
+    try {
+      await meteredComplete(adapter(vi.fn<typeof fetch>()), store, 's1', rates, {
+        ...request,
+        signal: AbortSignal.abort(KEY),
+      });
+    } catch (error) {
+      outputs.push(
+        String(error),
+        JSON.stringify(error),
+        error instanceof Error ? error.stack : null
+      );
     }
     const files = (dir: string): string[] =>
       fs.readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
