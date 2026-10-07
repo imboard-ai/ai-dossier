@@ -314,7 +314,7 @@ exception requires `directPr=welcomed`, which the floor cannot produce. Booleans
 need no prose interpretation: draft topic ⇒ true, template topic ⇒ receipt false,
 baseline permission ⇒ always false. With no draft/template topics their defaults
 are false/true. `unknown` is blocked; `unclear` needs a decision, not necessarily a
-human. Typed decision wiring is owned by #1120, not invoked here. Repository text
+human. Typed decision wiring is provided by `assessPolicy` below, not invoked here. Repository text
 is never executed or interpreted as controller instructions.
 
 `policyDigest(assessment, files)` hashes canonical sorted-key JSON containing the
@@ -345,6 +345,45 @@ if (discovery.kind === 'known') {
   // Persist the binding; the controller still decides block/hand-off/permission.
 }
 ```
+
+### Typed policy assessment (#1120)
+
+`await assessPolicy(files, decisionDeps?)` is the full controller-side policy
+assessment API for gate/freshness consumers. `classifyPolicy` remains offline and
+floor-only. Files are validated and detached before any await; admitted Markdown
+regions are passed as data under their original path `sourceId`, with excluded
+lines blank to retain original line coordinates. Inputs are sorted by path.
+AI silence returns the floor without provider calls or budget effects.
+
+`POLICY_QUESTIONS` contains frozen version-1 questions for all six dimensions.
+AI strictness is `banned > requires_approval > disclosure_required > welcomed`;
+assignment is `required > not_required`; direct PR is `discussion_first > welcomed`.
+The three choice escalation values are `unclear`. Boolean true in the shared typed
+decision API always means permission: the draft question asks whether a **non-draft**
+PR is permitted, and its accepted answer is inverted into `draftRequired`.
+Boolean escalation sentinels map to draft required, receipt forbidden and baseline
+failures forbidden. Permissive thresholds are 0.95; restrictive boolean thresholds
+are 0.6. Choice thresholds decrease by 0.1 per strictness rank.
+
+Every decision uses the deterministic floor, intersected with any caller floor.
+Explicit AI restrictions in an otherwise unclear floor still prevent a permissive
+answer. Ambiguous Markdown escalates before dispatch. Boolean topic-presence floors
+remain conservative: draft topics require drafts, template topics forbid the receipt,
+and baseline failures stay forbidden even if a model proposes permission. Shared
+decision validation enforces independent agreement, confidence and metered budgets;
+missing/invalid provider configuration and every escalation are hand-offs, never a
+weaker fallback. This API does not authorize publication or perform GitHub writes.
+
+Accepted answers require at least one citation and literal source spans in admitted
+lines (in addition to shared whitespace-normalized validation). Policy citations
+use `decision:<questionId>@<version>`, original path/line, and the existing full-line
+secret redaction and 200-code-point excerpt cap. The combined evidence cap is 128.
+`PolicyAssessment.decisions` retains each dimension's status/reason/value, confidence
+as a deterministic decimal string, provider/model IDs, question version and input
+digest. `policyDigest` binds this evidence along with final values and citations;
+changing a model or question version changes it, while reversing input order does
+not. Confidence is a string because receipt canonical JSON accepts integer numbers
+only. Gate/freshness consumer wiring remains in their respective slices.
 
 ## Issue eligibility (#1092)
 

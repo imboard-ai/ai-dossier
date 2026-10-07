@@ -25,6 +25,18 @@ export interface PolicyAssessment {
   readonly receiptBlockAllowed: boolean;
   readonly baselineFailuresPermitted: boolean;
   readonly citations: readonly PolicyCitation[];
+  readonly decisions?: Readonly<Record<string, PolicyDecisionEvidence>>;
+}
+
+export interface PolicyDecisionEvidence {
+  readonly status: string;
+  readonly reason: string;
+  readonly value: string | boolean;
+  readonly confidence: string;
+  readonly provider: string;
+  readonly model: string;
+  readonly questionVersion: string;
+  readonly inputDigest: string;
 }
 
 const RULES = POLICY_RULES.map((rule) => ({ ...rule, regex: new RegExp(rule.pattern, 'iu') }));
@@ -66,7 +78,7 @@ function units(text: string): string[] {
     .filter(Boolean);
 }
 
-function excerpt(text: string): string {
+export function policyExcerpt(text: string): string {
   try {
     // Scan the entire line first: slicing can hide a secret prefix at the edge.
     assertNoSecrets(text);
@@ -101,7 +113,9 @@ export function classifyPolicy(files: readonly PolicyFile[]): PolicyAssessment {
     const cited = new Set<string>();
     function cite(ruleId: string, text: string, line: number): void {
       if (!cited.has(ruleId) && citations.length < CITATION_LIMIT) {
-        citations.push(Object.freeze({ path: file.path, line, ruleId, excerpt: excerpt(text) }));
+        citations.push(
+          Object.freeze({ path: file.path, line, ruleId, excerpt: policyExcerpt(text) })
+        );
         cited.add(ruleId);
       }
     }

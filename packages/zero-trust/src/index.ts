@@ -24,6 +24,7 @@ export * from './model/adapter';
 export * from './model/metered';
 export * from './model/openai-compatible';
 export * from './policy/classify';
+export * from './policy/decide-policy';
 export * from './policy/discover';
 export * from './policy/eligibility';
 export * from './policy/rules';
