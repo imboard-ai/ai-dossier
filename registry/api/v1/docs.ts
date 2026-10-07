@@ -119,7 +119,8 @@ const publishDossierEndpoint = {
       content: {
         type: 'string',
         required: true,
-        description: 'Full .ds.md file content with YAML frontmatter',
+        description:
+          'Full .ds.md file content with YAML frontmatter, in the legacy (flat) or the spec (Agent Skills: name/description at the top level, Dossier fields under metadata as "dossier.*") shape. Stored byte-exact. A signature, when present, must verify (v1 body, v2 frontmatter+body, v3 spec-frontmatter+body; each scheme only on the shape it covers); signatures that cannot verify, including legacy minisign keys, are refused with INVALID_SIGNATURE.',
         example:
           '---\nname: my-dossier\ntitle: My Dossier\nversion: 1.0.0\n---\n\n# Instructions\n...',
       },
@@ -147,10 +148,12 @@ const publishDossierEndpoint = {
     published_at: 'string - ISO timestamp',
     published_by:
       'string | null - GitHub login of the authenticated publisher (from the verified token); null only if the token subject is empty after sanitizing',
+    signature:
+      'object | null - null when unsigned; otherwise { status: "verified" | "not-checked", covers }. "not-checked" means AWS KMS, which clients verify (`ai-dossier verify`)',
     evidence_url: 'string - CDN URL to the evidence sidecar (present only when evidence was sent)',
   },
   errors: {
-    400: 'MISSING_FIELD, INVALID_FIELD, INVALID_NAMESPACE, INVALID_CONTENT, CHANGELOG_TOO_LONG, INVALID_EVIDENCE, EVIDENCE_MISMATCH',
+    400: 'MISSING_FIELD, INVALID_FIELD, INVALID_NAMESPACE, INVALID_CONTENT, INVALID_SIGNATURE, CHANGELOG_TOO_LONG, INVALID_EVIDENCE, EVIDENCE_MISMATCH',
     401: 'MISSING_TOKEN, INVALID_TOKEN, TOKEN_EXPIRED',
     403: 'FORBIDDEN - Cannot publish to this namespace (includes `namespace` field)',
     413: 'CONTENT_TOO_LARGE - Max 1MB; EVIDENCE_TOO_LARGE - Max 256KB',

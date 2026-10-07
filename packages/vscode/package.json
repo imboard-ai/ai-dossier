@@ -2,7 +2,7 @@
   "name": "ai-dossier-vscode",
   "displayName": "AI Dossier",
   "description": "Diagnostics, completion, hover docs, verify and dry-run preview for AI Dossier (*.ds.md) files: signed, versioned agent skills for model-driven orchestration.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "publisher": "imboard-ai",
   "license": "AGPL-3.0-only",
