@@ -7,6 +7,11 @@
  *   [ZT_ACCEL=auto|kvm|tcg] [ZT_PROXY_FIXTURES=npm,pip,uv] [ZT_PROXY_FULL=0|1] \
  *   [ZT_EVIDENCE_OUT=evidence.json] npx vitest run src/__tests__/vm-proxy.e2e.test.ts
  *
+ * Since #1095 the fixture proofs, the tampered-lock case and the inconclusive cases call
+ * the production evidence runner (`src/controller/evidence-runner.ts`) against the real
+ * adapter, so this suite exercises that code; timings stay per VM label (bootMs,
+ * provisionMs, phaseSwitchMs, verifyMs) through a timing wrapper around the adapter.
+ *
  * ZT_PROXY_FULL=0 runs only the fixture proofs (the TCG timing job). Everything the
  * guest says about itself is untrusted; verdicts come from exit codes, supervisor-read
  * reports, Squid's own access log, the mirror caches and host-side measurements. */
@@ -17,13 +22,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { Ed25519Signer } from '@ai-dossier/core';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createManifest, exportSource, type SourceManifest, sha256 } from '../canonical/export';
+import { exportSource, type SourceManifest, sha256 } from '../canonical/export';
 import {
   baselineEvidence,
   type CommandRecord,
   ProvisioningFailedError,
   provisionWorkspace,
-  type RunLifecycle,
   regressionEvidence,
   releaseWorkspace,
   runPlanned,
@@ -58,7 +62,7 @@ import { issueReceipt } from '../receipt/issue';
 import type { CommandStatus } from '../receipt/schema';
 import { canonicalJson } from '../receipt/schema';
 import { createRun, ReasonCode as R, type RunRecord, transitionRun } from '../state';
-import type { AcceleratorRequest, ContainerProfile, VmHandle } from '../vm/adapter';
+import type { AcceleratorRequest, ContainerProfile, VmAdapter, VmHandle } from '../vm/adapter';
 import {
   assertBoundaryHeld,
   type BoundaryEvidence,
@@ -159,29 +163,19 @@ function commitTree(dir: string, sha: string): { path: string; bytes: Buffer; ex
     });
 }
 
-/** One exact commit as the canonical manifest the runner provisions from. */
+/** One exact commit as the canonical manifest the runner provisions from: the commit's
+ * tree, extracted by git itself, exported like any source. */
 function commitManifest(dir: string, sha: string): SourceManifest {
-  const files = commitTree(dir, sha);
-  const directories = new Set<string>();
-  for (const file of files) {
-    const parts = file.path.split('/');
-    for (let depth = 1; depth < parts.length; depth++)
-      directories.add(parts.slice(0, depth).join('/'));
+  const tree = fs.mkdtempSync(path.join(os.tmpdir(), 'ztfc-commit-'));
+  try {
+    const extracted = spawnSync('tar', ['-x', '-C', tree], {
+      input: git(['archive', '--format=tar', sha], dir),
+    });
+    if (extracted.status !== 0) throw new Error(`tar -x failed: ${extracted.stderr}`);
+    return exportSource(tree);
+  } finally {
+    fs.rmSync(tree, { recursive: true, force: true });
   }
-  return createManifest([
-    ...[...directories].map((p) => ({
-      path: p,
-      mode: '040000' as const,
-      bytes: '',
-      sha256: sha256(Buffer.alloc(0)),
-    })),
-    ...files.map((f) => ({
-      path: f.path,
-      mode: f.exec ? ('100755' as const) : ('100644' as const),
-      bytes: f.bytes.toString('base64'),
-      sha256: sha256(f.bytes),
-    })),
-  ]);
 }
 
 /** Files the regression commit added or changed: the test files only. */
@@ -346,20 +340,55 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
       )
     );
   }
-  /** The production runner's inputs for one fixture: the real adapter, the fixture's
-   * mirror, its recorded profile and a run to fail into. */
-  function workspaceOptions(manager: PackageManager, label: string): WorkspaceOptions {
-    const runId = `proxy-${hex(4)}`;
-    const lifecycle: RunLifecycle = { run: implementingRun(runId), now: () => new Date() };
+  /** The real adapter, timing each VM it creates under the next of `labels`: boot,
+   * provisioning (upload and commands), phase switch, and verification up to destroy. */
+  function timedAdapter(labels: string[]): VmAdapter {
+    const marks = new Map<string, { label: string; at: number }>();
+    const since = (vmId: string, key: string) => {
+      const mark = marks.get(vmId);
+      if (!mark) return undefined;
+      timings[`${mark.label}.${key}`] = Date.now() - mark.at;
+      return mark;
+    };
     return {
-      adapter,
+      create: async (spec) => {
+        const label = labels.shift() ?? `vm-${hex(2)}`;
+        const vm = await timed(`${label}.bootMs`, () => adapter.create(spec));
+        marks.set(vm.vmId, { label, at: Date.now() });
+        return vm;
+      },
+      exec: (vm, request) => adapter.exec(vm, request),
+      putFile: (vm, file, bytes, executable) => adapter.putFile(vm, file, bytes, executable),
+      getFile: (vm, file) => adapter.getFile(vm, file),
+      endProvisioning: async (vm) => {
+        const mark = since(vm.vmId, 'provisionMs');
+        await timed(`${mark?.label ?? vm.vmId}.phaseSwitchMs`, () => adapter.endProvisioning(vm));
+        if (mark) mark.at = Date.now();
+      },
+      destroy: async (vm) => {
+        since(vm.vmId, 'verifyMs');
+        marks.delete(vm.vmId);
+        await adapter.destroy(vm);
+      },
+      listByRun: (runId) => adapter.listByRun(runId),
+    };
+  }
+
+  /** The production runner's inputs for one fixture: the real adapter (timed per VM
+   * label), the fixture's mirror, its recorded profile and a run to fail into. */
+  function workspaceOptions(manager: PackageManager, labels: string[]): WorkspaceOptions {
+    const runId = `proxy-${hex(4)}`;
+    const label = labels.join('+');
+    return {
+      adapter: timedAdapter([...labels]),
       runId,
       limits: LIMITS,
       profileRecord: profileRecordOf(manager),
       proxyTarget: mirrorOf(manager),
       collector,
       lifecycle: {
-        ...lifecycle,
+        run: implementingRun(runId),
+        now: () => new Date(),
         observeRun: (run) => {
           if (process.env.ZT_PROXY_DEBUG === '1') console.error(`${label}: run ${run.state}`);
         },
@@ -374,7 +403,7 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
   ): FixtureRecord[] {
     brokerChecks.push({
       attempt: `${meta.fixture}.${meta.commit}:${evidence.phaseSwitch.attempt}`,
-      rejected: evidence.phaseSwitch.rejected,
+      rejected: evidence.phaseSwitch.refusedWith === 'network_not_allowed',
     });
     const records = [...evidence.provisioning, ...evidence.records].map((r) => ({ ...meta, ...r }));
     commands.push(...records);
@@ -407,7 +436,7 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
             meta('base'),
             await timed(`${manager}.baseMs`, () =>
               baselineEvidence({
-                ...workspaceOptions(manager, `${manager}.base`),
+                ...workspaceOptions(manager, [`${manager}.base`]),
                 manifest: manifests.base,
                 plan,
               })
@@ -416,7 +445,7 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
           // Base plus only the regression commit's test files, then the candidate.
           const regression = await timed(`${manager}.regressionMs`, () =>
             regressionEvidence({
-              ...workspaceOptions(manager, `${manager}.regression`),
+              ...workspaceOptions(manager, [`${manager}.regression`, `${manager}.fix`]),
               baseManifest: manifests.base,
               testFiles: testFilesOf(repo),
               candidateManifest: manifests.fix,
@@ -431,7 +460,7 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
             meta('fix'),
             await timed(`${manager}.fixSuiteMs`, () =>
               baselineEvidence({
-                ...workspaceOptions(manager, `${manager}.fix`),
+                ...workspaceOptions(manager, [`${manager}.fixSuite`]),
                 manifest: manifests.fix,
                 plan,
               })
@@ -539,7 +568,7 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
           git(['commit', '-q', '-am', 'tamper lockfile'], repo.dir);
           const sha = git(['rev-parse', 'HEAD'], repo.dir).toString().trim();
           const plan = buildCommandPlan(manager, RELAY_ENDPOINTS);
-          const options = workspaceOptions(manager, `${manager}.tamper`);
+          const options = workspaceOptions(manager, [`${manager}.tamper`]);
           let failedAt: string | null = null;
           let after: RunRecord = options.lifecycle.run;
           try {
@@ -719,7 +748,7 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
     'classifies a timeout and a missing or unreadable report as inconclusive; the repair cap holds',
     async () => {
       const repo = buildCommits('npm');
-      const options = workspaceOptions('npm', 'inconclusive');
+      const options = workspaceOptions('npm', ['inconclusive']);
       const meta = { fixture: 'npm', commit: 'fix', sha: repo.shas.fix };
       const plan = buildCommandPlan('npm', RELAY_ENDPOINTS);
       const workspace = await provisionWorkspace({
@@ -916,7 +945,9 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
       }
       boundary = evaluateBoundary({
         reports,
-        guestOutputs,
+        // The probes' own output plus everything the runner collected from the fixture
+        // runs; a collection past its cap throws here rather than scan partially.
+        guestOutputs: [...guestOutputs, ...collector.outputs()],
         canaries: planted.canaries,
         listenerConnections: planted.connections(),
         brokerChecks,

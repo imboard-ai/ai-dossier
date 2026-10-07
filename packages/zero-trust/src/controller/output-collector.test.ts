@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_OUTPUT_CAP_BYTES, OutputCollector } from './output-collector';
+import {
+  DEFAULT_OUTPUT_CAP_BYTES,
+  OutputCollector,
+  OutputTruncatedError,
+} from './output-collector';
 
 describe('OutputCollector', () => {
   it('keeps strings and buffers in arrival order and skips empty output', () => {
@@ -15,14 +19,14 @@ describe('OutputCollector', () => {
     expect(collector.capBytes).toBe(DEFAULT_OUTPUT_CAP_BYTES);
   });
 
-  it('stops at the cap and marks the collection truncated', () => {
+  it('stops at the cap, marks the collection truncated and refuses to hand it over', () => {
     const collector = new OutputCollector(8);
     collector.append('12345');
     collector.append('67890');
     collector.append('more');
-    expect(collector.outputs()).toEqual(['12345', '678']);
     expect(collector.bytes).toBe(8);
     expect(collector.truncated).toBe(true);
+    expect(() => collector.outputs()).toThrow(OutputTruncatedError);
   });
 
   it('a chunk that exactly fills the cap is not truncation', () => {

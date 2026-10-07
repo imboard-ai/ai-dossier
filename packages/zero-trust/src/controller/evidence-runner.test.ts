@@ -12,6 +12,7 @@ import {
   sourceFilesFromManifest,
 } from '../ecosystem/detect';
 import { type ProfileRecord, recordProfileSelection, selectProfile } from '../ecosystem/profiles';
+import { Journal } from '../journal';
 import { SecretRedactionError } from '../redaction';
 import { createRun, ReasonCode as R, type RunRecord, transitionRun } from '../state';
 import { BrokerError, type ExecRequest, VmCleanupError } from '../vm/adapter';
@@ -128,7 +129,7 @@ describe('baselineEvidence and regressionEvidence (scenario 6)', () => {
     expect(result.records.map((r) => r.status)).toEqual(['passed', 'passed']);
     expect(result.phaseSwitch).toEqual({
       attempt: 'package-proxy-after-provisioning',
-      rejected: true,
+      refusedWith: 'network_not_allowed',
     });
     for (const call of adapter.execs()) {
       const network = call.request.network ?? 'none';
@@ -210,14 +211,15 @@ describe('baselineEvidence and regressionEvidence (scenario 6)', () => {
   });
 
   it('a setup step that does not pass makes the workspace inconclusive', async () => {
-    const { options } = setup(
-      new FakeVmAdapter((r, vm) =>
-        r.argv[1] === 'rebuild' ? { exitCode: 1 } : fixtureScript(r, vm)
-      )
-    );
+    const { adapter, options } = setup();
+    const setupStep = PLAN.verification.find((c) => !c.captureReport) as PlannedCommand;
+    adapter.on(setupStep.argv, { exitCode: 1 });
     const result = await baselineEvidence({ ...options, manifest: BASE, plan: PLAN });
-    expect(result.records[0].status).toBe('failed');
+    expect(result.records.find((r) => r.id === setupStep.id)?.status).toBe('failed');
     expect(result.status).toBe('inconclusive');
+  });
+
+  it('a workspace with no test command record is inconclusive', () => {
     expect(workspaceStatus([])).toBe('inconclusive');
   });
 });
@@ -249,6 +251,15 @@ describe('runPlanned classification (scenario 7)', () => {
     ['missing report', { exitCode: 0, report: null }],
     ['zero suites', { exitCode: 0, report: '<testsuites></testsuites>' }],
     ['unreadable report', { exitCode: 0, report: '<testsuites><testcase' }],
+    ['exit 0 with a failing case', { exitCode: 0, report: junit(1, true) }],
+    ['a failure exit with no failing case', { exitCode: 1, report: junit(1) }],
+    [
+      'exit 0 with every case skipped',
+      {
+        exitCode: 0,
+        report: '<testsuites><testsuite><testcase><skipped/></testcase></testsuite></testsuites>',
+      },
+    ],
   ])('%s is inconclusive, never passed', async (_label, script) => {
     const record = await classify(script);
     expect(record.status).toBe('inconclusive');
@@ -476,7 +487,7 @@ describe('sanitized evidence', () => {
     expect(JSON.stringify(result)).not.toContain(TOKEN);
     for (const r of [...result.provisioning, ...result.records])
       expect(r.log.excerpt.length).toBeLessThanOrEqual(MAX_LOG_EXCERPT_CHARS);
-    const file = path.join(artifactsDir, `${record?.log.digest}.log.json`);
+    const file = path.join(artifactsDir, `${record?.log.digest}.complete.log.json`);
     expect(fs.statSync(file).mode & 0o777).toBe(0o600);
     expect(JSON.parse(fs.readFileSync(file, 'utf8'))).toEqual(record?.log);
     expect(fs.readFileSync(file, 'utf8')).not.toContain(TOKEN);
@@ -493,6 +504,99 @@ describe('sanitized evidence', () => {
     ).rejects.toBeInstanceOf(SecretRedactionError);
     await releaseWorkspace(adapter, workspace, options.lifecycle);
     expect(adapter.liveVms()).toEqual([]);
+  });
+});
+
+describe('workspace guard, causes and journal', () => {
+  it('runPlanned refuses a workspace provisionWorkspace did not return, or one already released', async () => {
+    const { adapter, options, collector } = setup();
+    const workspace = await provisionWorkspace({ ...options, manifest: BASE, plan: PLAN });
+    const forged = { ...workspace };
+    const before = adapter.execs().length;
+    await expect(runPlanned(adapter, forged, testCommand(), collector)).rejects.toMatchObject({
+      code: 'workspace_unproven',
+    });
+    await releaseWorkspace(adapter, workspace, options.lifecycle);
+    await expect(runPlanned(adapter, workspace, testCommand(), collector)).rejects.toMatchObject({
+      code: 'workspace_unproven',
+    });
+    expect(adapter.execs()).toHaveLength(before);
+  });
+
+  it('a blocked cleanup keeps the failure that led to it as its cause', async () => {
+    const thrown = setup(
+      new FakeVmAdapter((request, vm) => {
+        if (request.report) throw new BrokerError('guest_error');
+        return fixtureScript(request, vm);
+      })
+    );
+    thrown.adapter.failDestroy = 3;
+    const error = await baselineEvidence({ ...thrown.options, manifest: BASE, plan: PLAN }).catch(
+      (e) => e
+    );
+    expect(error).toBeInstanceOf(VmCleanupError);
+    expect(error.cause).toBeInstanceOf(BrokerError);
+    const failed = setup();
+    failed.adapter.on(PLAN.provisioning[0].argv, { exitCode: 1 });
+    failed.adapter.failDestroy = 3;
+    const blocked = await provisionWorkspace({
+      ...failed.options,
+      manifest: BASE,
+      plan: PLAN,
+    }).catch((e) => e);
+    expect(blocked.cause).toMatchObject({ failedAt: PLAN.provisioning[0].id });
+    expect(blocked.cause.records).toHaveLength(1);
+  });
+
+  it('journals the stage, command and error class of an aborted workspace', async () => {
+    const journal = new Journal(tempDir('zt-runner-journal-'));
+    const { options } = setup(
+      new FakeVmAdapter((request, vm) => {
+        if (request.report) throw new BrokerError('guest_error');
+        return fixtureScript(request, vm);
+      })
+    );
+    await expect(
+      baselineEvidence({
+        ...options,
+        lifecycle: { ...options.lifecycle, journal },
+        manifest: BASE,
+        plan: PLAN,
+      })
+    ).rejects.toBeInstanceOf(BrokerError);
+    expect(journal.read()).toContainEqual(
+      expect.objectContaining({
+        type: 'evidence_workspace_aborted',
+        stage: 'verification',
+        commandId: testCommand().id,
+        cause: 'BrokerError',
+      })
+    );
+  });
+
+  it('names the offending command, never repository text, in a plan refusal', () => {
+    const plan = {
+      ...PLAN,
+      verification: [{ ...testCommand(), network: 'package_proxy' as const }],
+    };
+    expect(() => assertPlanNetworks(plan)).toThrow(`${testCommand().id} in verification`);
+    expect(() => reproductionManifest(BASE, CANDIDATE, ['test/secret-name.js'])).toThrow(
+      'test file #0'
+    );
+  });
+
+  it('keeps one artifact per log and truncation flag', async () => {
+    const { adapter, options } = setup();
+    const artifactsDir = tempDir('zt-runner-artifacts-');
+    adapter.on(PLAN.provisioning[0].argv, { stdout: 'same', truncated: true });
+    const setupStep = PLAN.verification.find((c) => !c.captureReport) as PlannedCommand;
+    adapter.on(setupStep.argv, { stdout: 'same' });
+    await baselineEvidence({ ...options, artifactsDir, manifest: BASE, plan: PLAN });
+    const names = fs.readdirSync(artifactsDir);
+    const digest = logArtifact('same', '', false).digest;
+    expect(names).toEqual(
+      expect.arrayContaining([`${digest}.truncated.log.json`, `${digest}.complete.log.json`])
+    );
   });
 });
 

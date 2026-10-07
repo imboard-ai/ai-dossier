@@ -6,6 +6,7 @@
 import path from 'node:path';
 import {
   createManifest,
+  parentPaths,
   type SourceEntry,
   type SourceManifest,
   sha256,
@@ -15,7 +16,6 @@ import { privateDir, publishPrivate } from '../durable-fs';
 import {
   applyProvisioning,
   type CommandOutcome,
-  classifyOutcome,
   classifyRegression,
   commandEvidence,
   overallStatus,
@@ -30,14 +30,16 @@ import {
   type ProxyEndpoints,
 } from '../ecosystem/commands';
 import type { ProfileRecord } from '../ecosystem/profiles';
-import { parseJunitReport } from '../ecosystem/report';
+import { type JunitSummary, parseJunitReport } from '../ecosystem/report';
 import type { Journal } from '../journal';
 import type { CommandEvidence, CommandStatus } from '../receipt/schema';
-import { assertNoSecrets, assertSecretFree } from '../redaction';
+import { assertSecretFree, REDACTED, redactedExcerpt } from '../redaction';
 import type { RunRecord } from '../state';
 import {
+  appendVmEvent,
   BrokerError,
   type ContainerProfile,
+  type ExecResult,
   type ProxyTarget,
   type VmAdapter,
   VmCleanupError,
@@ -48,16 +50,21 @@ import { assertProfileBaked } from '../vm/profile';
 import { teardownVm } from '../vm/teardown';
 import type { OutputCollector } from './output-collector';
 
-/** Cap on the log excerpt kept in evidence, in characters (the tail of the log). */
+/** Cap on the log excerpt kept in evidence, in UTF-16 code units (the tail of the log). */
 export const MAX_LOG_EXCERPT_CHARS = 4096;
 /** Replaces an excerpt that matched a credential pattern. */
-export const REDACTED_EXCERPT = '[redacted]';
+export const REDACTED_EXCERPT = REDACTED;
 /** Separates stdout from stderr in the log a digest is taken over. */
 const LOG_SEPARATOR = '\n--- stderr ---\n';
-const NETWORK_OF: Readonly<Record<CommandPhase, PlannedCommand['network']>> = Object.freeze({
+/** The one network each command phase may use. */
+const PHASE_NETWORK: Readonly<Record<CommandPhase, PlannedCommand['network']>> = Object.freeze({
   provisioning: 'package_proxy',
   verification: 'none',
 });
+/** The broker code the phase switch must produce for a `package_proxy` request. */
+const PROXY_REFUSED = 'network_not_allowed';
+const MANIFEST_DIRECTORY: SourceEntry['mode'] = '040000';
+const MANIFEST_EXECUTABLE: SourceEntry['mode'] = '100755';
 
 export type EvidencePlanErrorCode =
   | 'network_mismatch'
@@ -65,12 +72,18 @@ export type EvidencePlanErrorCode =
   | 'no_test_command'
   | 'no_regression_targets'
   | 'no_test_files'
-  | 'test_file_missing';
+  | 'test_file_missing'
+  | 'workspace_unproven';
 
-/** The plan or its inputs were refused before any VM was created or command ran. */
+/** The plan or its inputs were refused before any VM was created or command ran.
+ * `detail` holds controller data only (a command id and phase, a test-file index),
+ * never repository-supplied text. */
 export class EvidencePlanError extends Error {
-  constructor(readonly code: EvidencePlanErrorCode) {
-    super(`Evidence plan refused (${code})`);
+  constructor(
+    readonly code: EvidencePlanErrorCode,
+    readonly detail?: string
+  ) {
+    super(`Evidence plan refused (${code})${detail ? `: ${detail}` : ''}`);
     this.name = 'EvidencePlanError';
   }
 }
@@ -104,8 +117,8 @@ export interface RunLifecycle {
   readonly run: RunRecord;
   readonly now: () => Date;
   /** Persists a changed run where the admission fence reads it (e.g. `IntentDriver.observeRun`). */
-  readonly observeRun?: (run: RunRecord) => void;
-  /** Dedicated VM event journal for teardown attempts. */
+  readonly observeRun: (run: RunRecord) => void;
+  /** Dedicated VM event journal: teardown attempts and aborted workspaces. */
   readonly journal?: Journal;
   readonly retryDelayMs?: number;
   readonly sleep?: (ms: number) => Promise<void>;
@@ -115,11 +128,14 @@ export interface RunLifecycle {
 export interface LogArtifact {
   /** SHA-256 (hex) of stdout, a fixed separator and stderr. */
   readonly digest: string;
+  /** UTF-8 byte length of the digested log. */
   readonly bytes: number;
-  /** The last `MAX_LOG_EXCERPT_CHARS` characters, or `[redacted]`. */
+  /** The last `MAX_LOG_EXCERPT_CHARS` code units, or `[redacted]`. */
   readonly excerpt: string;
+  /** The log was longer than the excerpt. */
   readonly excerptTruncated: boolean;
-  /** The log matched a credential pattern; only the digest is kept. */
+  /** The log or the excerpt matched a credential pattern: the excerpt is replaced;
+   * the digest and the sizes are kept. */
   readonly redacted: boolean;
   /** The broker capped the command's output before the controller saw it. */
   readonly outputTruncated: boolean;
@@ -129,9 +145,11 @@ export interface CommandRecord {
   readonly id: string;
   readonly phase: CommandPhase;
   readonly network: PlannedCommand['network'];
+  /** argv joined by spaces (display only). */
   readonly argv: string;
   readonly exitCode: number | null;
   readonly timedOut: boolean;
+  /** From the supervisor-read junit report; null for a setup command or an unreadable report. */
   readonly suites: number | null;
   readonly tests: number | null;
   readonly failures: number | null;
@@ -144,8 +162,8 @@ export interface CommandRecord {
 }
 
 export interface RunPlannedOptions {
-  /** Private directory for sanitized log artifacts (`<digest>.log.json`, write-once),
-   * e.g. `RunStore.storeDirectory('artifacts')`. */
+  /** Private directory for sanitized log artifacts, written once as
+   * `<digest>.<complete|truncated>.log.json` (e.g. `RunStore.storeDirectory('artifacts')`). */
   readonly artifactsDir?: string;
 }
 
@@ -165,13 +183,27 @@ export interface ProvisionOptions extends WorkspaceOptions {
   readonly plan: CommandPlan;
 }
 
-/** A provisioned VM in the verification phase: no network path exists any more. */
+export type BaselineOptions = ProvisionOptions;
+
+export interface RegressionOptions extends WorkspaceOptions {
+  readonly baseManifest: SourceManifest;
+  /** Paths, taken from the candidate, that make up the regression test. */
+  readonly testFiles: readonly string[];
+  readonly candidateManifest: SourceManifest;
+  readonly regressionTargets: readonly string[];
+  readonly endpoints: ProxyEndpoints;
+  readonly planOptions?: Omit<PlanOptions, 'testTargets'>;
+}
+
+/** A provisioned VM in the verification phase: no network path exists any more. Only
+ * `provisionWorkspace` makes one, and `runPlanned` accepts nothing else. */
 export interface ProvisionedWorkspace {
   readonly vm: VmHandle;
   readonly profile: ContainerProfile;
   readonly provisioning: readonly CommandRecord[];
-  /** The host-side check after the phase switch: `package_proxy` was refused. */
-  readonly phaseSwitch: { readonly attempt: string; readonly rejected: true };
+  /** The host-side check after the phase switch: the broker code that refused
+   * `package_proxy`. */
+  readonly phaseSwitch: { readonly attempt: string; readonly refusedWith: string };
 }
 
 export interface WorkspaceEvidence {
@@ -190,6 +222,9 @@ export interface RegressionRunEvidence {
   readonly candidate: WorkspaceEvidence | null;
 }
 
+/** Workspaces that passed the phase-switch check and are not yet released. */
+const PROVEN = new WeakSet<ProvisionedWorkspace>();
+
 /** Refuses any command whose phase or network is not its phase's one network:
  * provisioning only on the package proxy, verification only with none. */
 export function assertPlanNetworks(plan: CommandPlan): void {
@@ -201,41 +236,44 @@ export function assertPlanNetworks(plan: CommandPlan): void {
 }
 
 function assertCommandPhase(command: PlannedCommand, phase: CommandPhase): void {
-  if (command.phase !== phase || command.network !== NETWORK_OF[phase])
-    throw new EvidencePlanError('network_mismatch');
+  if (command.phase !== phase || command.network !== PHASE_NETWORK[phase])
+    throw new EvidencePlanError('network_mismatch', `${command.id} in ${phase}`);
+}
+
+/** The last `MAX_LOG_EXCERPT_CHARS` code units, never starting inside a surrogate pair. */
+function logTail(text: string): string {
+  if (text.length <= MAX_LOG_EXCERPT_CHARS) return text;
+  const tail = text.slice(-MAX_LOG_EXCERPT_CHARS);
+  return /^[\uDC00-\uDFFF]/.test(tail) ? tail.slice(1) : tail;
 }
 
 /** Sanitized log artifact: the digest covers every byte; the excerpt is a bounded tail
  * and becomes `[redacted]` when the log or the excerpt matches a credential pattern. */
 export function logArtifact(stdout: string, stderr: string, outputTruncated: boolean): LogArtifact {
-  const log = Buffer.from(`${stdout}${LOG_SEPARATOR}${stderr}`, 'utf8');
-  const text = log.toString('utf8');
-  const excerptTruncated = text.length > MAX_LOG_EXCERPT_CHARS;
-  let excerpt = excerptTruncated ? text.slice(-MAX_LOG_EXCERPT_CHARS) : text;
-  let redacted = false;
-  try {
-    assertNoSecrets(text);
-    assertNoSecrets(excerpt);
-  } catch {
-    excerpt = REDACTED_EXCERPT;
-    redacted = true;
-  }
+  const text = `${stdout}${LOG_SEPARATOR}${stderr}`;
+  const log = Buffer.from(text, 'utf8');
+  const { excerpt, redacted } = redactedExcerpt(text, logTail);
   return Object.freeze({
     digest: sha256(log),
     bytes: log.length,
     excerpt,
-    excerptTruncated,
+    excerptTruncated: text.length > MAX_LOG_EXCERPT_CHARS,
     redacted,
     outputTruncated,
   });
 }
 
+/** Write-once: the name carries everything the content depends on beyond the log bytes. */
 function persistLog(directory: string, artifact: LogArtifact): void {
   privateDir(directory);
-  publishPrivate(
-    path.join(directory, `${artifact.digest}.log.json`),
-    Buffer.from(`${JSON.stringify(artifact)}\n`, 'utf8')
-  );
+  const name = `${artifact.digest}.${artifact.outputTruncated ? 'truncated' : 'complete'}.log.json`;
+  publishPrivate(path.join(directory, name), Buffer.from(`${JSON.stringify(artifact)}\n`, 'utf8'));
+}
+
+function outcomeOf(result: ExecResult, summary: JunitSummary | null): CommandOutcome {
+  if (result.timedOut) return { kind: 'timeout' };
+  if (result.exitCode === null) return { kind: 'signal', signal: 'unknown' };
+  return { kind: 'exited', exitCode: result.exitCode, report: summary };
 }
 
 async function execute(
@@ -258,25 +296,9 @@ async function execute(
   collector.append(result.stderr);
   if (command.captureReport) collector.append(result.report);
   const summary = command.captureReport ? parseJunitReport(result.report) : null;
-  const outcome: CommandOutcome = result.timedOut
-    ? { kind: 'timeout' }
-    : result.exitCode === null
-      ? { kind: 'signal', signal: 'unknown' }
-      : {
-          kind: 'exited',
-          exitCode: result.exitCode,
-          report: summary ? { suites: summary.suites } : null,
-        };
-  // A setup step has no report: its exit status is the result, and a timeout or a
-  // signal is still never a pass.
-  const status: CommandStatus = command.captureReport
-    ? classifyOutcome(outcome)
-    : outcome.kind !== 'exited'
-      ? 'inconclusive'
-      : outcome.exitCode === 0
-        ? 'passed'
-        : 'failed';
+  const outcome = outcomeOf(result, summary);
   const log = logArtifact(result.stdout, result.stderr, result.truncated);
+  const evidence = commandEvidence(command, outcome, log.digest);
   const record: CommandRecord = {
     id: command.id,
     phase: command.phase,
@@ -287,47 +309,89 @@ async function execute(
     suites: summary?.suites ?? null,
     tests: summary?.tests ?? null,
     failures: summary?.failures ?? null,
-    status,
+    status: evidence.status,
     durationMs: result.durationMs,
     captureReport: command.captureReport,
     log,
-    evidence: { ...commandEvidence(command, outcome, log.digest), status },
+    evidence,
   };
   assertSecretFree(record);
   if (options.artifactsDir) persistLog(options.artifactsDir, log);
   return record;
 }
 
-/** Runs one verification command in a provisioned workspace with no network and
- * classifies it from the exit status and the report the supervisor read back. A
- * timeout, a signal, a missing report or zero or unknown suites is `inconclusive`. */
+/** Runs one verification command in a workspace `provisionWorkspace` returned and has
+ * not released, with no network, and classifies it from the exit status and the report
+ * the supervisor read back (`classifyCommand`). A timeout, a signal, a missing report,
+ * zero or unknown suites, or case counts that contradict the exit are `inconclusive`. */
 export async function runPlanned(
   adapter: VmAdapter,
-  workspace: Pick<ProvisionedWorkspace, 'vm' | 'profile'>,
+  workspace: ProvisionedWorkspace,
   command: PlannedCommand,
   collector: OutputCollector,
   options: RunPlannedOptions = {}
 ): Promise<CommandRecord> {
+  if (!PROVEN.has(workspace)) throw new EvidencePlanError('workspace_unproven');
   assertCommandPhase(command, 'verification');
   return execute(adapter, workspace.vm, workspace.profile, command, collector, options);
 }
 
-/** Destroys the workspace VM with the bounded teardown. Three failed deletions put the
- * run in `blocked_cleanup` (`observeRun` sees it) and throw `VmCleanupError`. */
-export async function releaseWorkspace(
+/** One bounded teardown; a blocked one throws `VmCleanupError` with `cause` set to the
+ * failure that led here, if any. */
+async function destroyVm(
   adapter: Pick<VmAdapter, 'destroy'>,
-  workspace: { readonly vm: Pick<VmHandle, 'vmId' | 'runId'> },
-  lifecycle: RunLifecycle
+  vm: Pick<VmHandle, 'vmId' | 'runId'>,
+  lifecycle: RunLifecycle,
+  cause?: unknown
 ): Promise<void> {
-  const outcome = await teardownVm(adapter, workspace.vm, lifecycle.run, {
+  const outcome = await teardownVm(adapter, vm, lifecycle.run, {
     journal: lifecycle.journal,
     observeRun: lifecycle.observeRun,
     now: lifecycle.now,
     retryDelayMs: lifecycle.retryDelayMs,
     sleep: lifecycle.sleep,
   });
-  if (outcome.kind === 'blocked_cleanup')
-    throw new VmCleanupError(outcome.leftoverPids, outcome.leftoverPaths, workspace.vm.vmId);
+  if (outcome.kind === 'blocked_cleanup') {
+    const error = new VmCleanupError(outcome.leftoverPids, outcome.leftoverPaths, vm.vmId);
+    if (cause !== undefined) error.cause = cause;
+    throw error;
+  }
+}
+
+/** Destroys the workspace VM with the bounded teardown; the workspace can no longer run
+ * commands. Three failed deletions put the run in `blocked_cleanup` (`observeRun` sees
+ * it) and throw `VmCleanupError` (with `cause` when one is given). */
+export async function releaseWorkspace(
+  adapter: Pick<VmAdapter, 'destroy'>,
+  workspace: ProvisionedWorkspace,
+  lifecycle: RunLifecycle,
+  cause?: unknown
+): Promise<void> {
+  PROVEN.delete(workspace);
+  await destroyVm(adapter, workspace.vm, lifecycle, cause);
+}
+
+interface Progress {
+  stage: 'upload' | 'provisioning' | 'phase_switch' | 'verification';
+  commandId?: string;
+}
+
+/** Records where a workspace failed: the stage, the command and the error class only
+ * (messages can carry guest text). */
+function journalAbort(
+  lifecycle: RunLifecycle,
+  vm: VmHandle,
+  progress: Progress,
+  error: unknown
+): void {
+  appendVmEvent(lifecycle.journal, lifecycle.now(), {
+    type: 'evidence_workspace_aborted',
+    runId: vm.runId,
+    vmId: vm.vmId,
+    stage: progress.stage,
+    ...(progress.commandId ? { commandId: progress.commandId } : {}),
+    cause: error instanceof Error ? error.name : typeof error,
+  });
 }
 
 /** The phase switch must hold before anything runs: the broker refuses the proxy network. */
@@ -335,14 +399,46 @@ async function assertProxyClosed(
   adapter: VmAdapter,
   vm: VmHandle,
   profile: ContainerProfile
-): Promise<void> {
+): Promise<string> {
   try {
     await adapter.exec(vm, { profile, argv: ['true'], network: 'package_proxy' });
   } catch (error) {
-    if (error instanceof BrokerError && error.code === 'network_not_allowed') return;
+    if (error instanceof BrokerError && error.code === PROXY_REFUSED) return error.code;
     throw error;
   }
   throw new ProvisioningNotClosedError(vm.vmId);
+}
+
+async function uploadManifest(
+  adapter: VmAdapter,
+  vm: VmHandle,
+  manifest: SourceManifest
+): Promise<void> {
+  for (const entry of manifest.entries)
+    if (entry.mode !== MANIFEST_DIRECTORY)
+      await adapter.putFile(
+        vm,
+        entry.path,
+        Buffer.from(entry.bytes, 'base64'),
+        entry.mode === MANIFEST_EXECUTABLE
+      );
+}
+
+/** Runs provisioning commands in order until one does not pass. */
+async function runProvisioning(
+  options: ProvisionOptions,
+  vm: VmHandle,
+  profile: ContainerProfile,
+  progress: Progress
+): Promise<{ records: CommandRecord[]; failed?: CommandRecord }> {
+  const records: CommandRecord[] = [];
+  for (const command of options.plan.provisioning) {
+    progress.commandId = command.id;
+    const record = await execute(options.adapter, vm, profile, command, options.collector, options);
+    records.push(record);
+    if (record.status !== 'passed') return { records, failed: record };
+  }
+  return { records };
 }
 
 /** Provisions a fresh VM from `manifest`: uploads exactly its files, runs the plan's
@@ -351,10 +447,13 @@ async function assertProxyClosed(
  * `unsupported_environment` (`ProvisioningFailedError`). On any failure the VM is
  * destroyed before the error is rethrown. */
 export async function provisionWorkspace(options: ProvisionOptions): Promise<ProvisionedWorkspace> {
-  const { adapter, profileRecord, collector, lifecycle } = options;
+  const { adapter, profileRecord, lifecycle } = options;
   assertPlanNetworks(options.plan);
   if (options.plan.manager !== profileRecord.manager)
-    throw new EvidencePlanError('manager_mismatch');
+    throw new EvidencePlanError(
+      'manager_mismatch',
+      `${options.plan.manager} plan, ${profileRecord.manager} profile`
+    );
   const manifest = validateManifest(options.manifest);
   const profile: ContainerProfile = profileRecord.profile.ecosystem;
   assertProfileBaked(profile, profileRecord.profile.id);
@@ -365,51 +464,42 @@ export async function provisionWorkspace(options: ProvisionOptions): Promise<Pro
     phase: 'provisioning',
     proxyTarget: options.proxyTarget,
   });
-  const records: CommandRecord[] = [];
-  let failed: CommandRecord | undefined;
+  const progress: Progress = { stage: 'upload' };
+  let provisioned: { records: CommandRecord[]; failed?: CommandRecord };
   try {
-    for (const entry of manifest.entries)
-      if (entry.mode !== '040000')
-        await adapter.putFile(
-          vm,
-          entry.path,
-          Buffer.from(entry.bytes, 'base64'),
-          entry.mode === '100755'
-        );
-    for (const command of options.plan.provisioning) {
-      const record = await execute(adapter, vm, profile, command, collector, options);
-      records.push(record);
-      if (record.status !== 'passed') {
-        failed = record;
-        break;
-      }
-    }
-    if (!failed) {
+    await uploadManifest(adapter, vm, manifest);
+    progress.stage = 'provisioning';
+    provisioned = await runProvisioning(options, vm, profile, progress);
+    if (!provisioned.failed) {
+      progress.stage = 'phase_switch';
+      progress.commandId = undefined;
       await adapter.endProvisioning(vm);
-      await assertProxyClosed(adapter, vm, profile);
-      return Object.freeze({
+      const refusedWith = await assertProxyClosed(adapter, vm, profile);
+      const workspace: ProvisionedWorkspace = Object.freeze({
         vm,
         profile,
-        provisioning: Object.freeze(records),
-        phaseSwitch: Object.freeze({
-          attempt: 'package-proxy-after-provisioning',
-          rejected: true as const,
-        }),
+        provisioning: Object.freeze(provisioned.records),
+        phaseSwitch: Object.freeze({ attempt: 'package-proxy-after-provisioning', refusedWith }),
       });
+      PROVEN.add(workspace);
+      return workspace;
     }
   } catch (error) {
-    await releaseWorkspace(adapter, { vm }, lifecycle);
+    journalAbort(lifecycle, vm, progress, error);
+    await destroyVm(adapter, vm, lifecycle, error);
     throw error;
   }
+  const { records, failed } = provisioned;
   // Teardown first: `unsupported` is terminal, so a blocked cleanup must win.
-  await releaseWorkspace(adapter, { vm }, lifecycle);
+  await destroyVm(adapter, vm, lifecycle, { failedAt: failed.id, records });
   const run = applyProvisioning(lifecycle.run, failed.status, lifecycle.now().toISOString());
-  lifecycle.observeRun?.(run);
+  lifecycle.observeRun(run);
   throw new ProvisioningFailedError(run, Object.freeze(records), failed.id);
 }
 
 /** One workspace's verdict: a setup step (no report) that did not pass makes it
- * `inconclusive`; otherwise the report-classified commands roll up with `overallStatus`. */
+ * `inconclusive`; otherwise the report-classified commands roll up with `overallStatus`
+ * (no test command at all is `inconclusive`). */
 export function workspaceStatus(records: readonly CommandRecord[]): CommandStatus {
   if (records.some((r) => !r.captureReport && r.status !== 'passed')) return 'inconclusive';
   return overallStatus(records.filter((r) => r.captureReport).map((r) => r.status));
@@ -420,22 +510,27 @@ async function workspaceEvidence(
   manifest: SourceManifest,
   plan: CommandPlan
 ): Promise<WorkspaceEvidence> {
+  const { adapter, lifecycle } = options;
   const workspace = await provisionWorkspace({ ...options, manifest, plan });
+  const records: CommandRecord[] = [];
+  const progress: Progress = { stage: 'verification' };
   try {
-    const records: CommandRecord[] = [];
-    for (const command of plan.verification)
-      records.push(
-        await runPlanned(options.adapter, workspace, command, options.collector, options)
-      );
-    return Object.freeze({
-      provisioning: workspace.provisioning,
-      records: Object.freeze(records),
-      status: workspaceStatus(records),
-      phaseSwitch: workspace.phaseSwitch,
-    });
-  } finally {
-    await releaseWorkspace(options.adapter, workspace, options.lifecycle);
+    for (const command of plan.verification) {
+      progress.commandId = command.id;
+      records.push(await runPlanned(adapter, workspace, command, options.collector, options));
+    }
+  } catch (error) {
+    journalAbort(lifecycle, workspace.vm, progress, error);
+    await releaseWorkspace(adapter, workspace, lifecycle, error);
+    throw error;
   }
+  await releaseWorkspace(adapter, workspace, lifecycle);
+  return Object.freeze({
+    provisioning: workspace.provisioning,
+    records: Object.freeze(records),
+    status: workspaceStatus(records),
+    phaseSwitch: workspace.phaseSwitch,
+  });
 }
 
 function assertHasTestCommand(plan: CommandPlan): void {
@@ -444,10 +539,7 @@ function assertHasTestCommand(plan: CommandPlan): void {
 }
 
 /** Baseline (PRD §5.6 step 1): the plan's verification commands on the base, in a fresh VM. */
-export async function baselineEvidence(
-  options: WorkspaceOptions & { readonly manifest: SourceManifest; readonly plan: CommandPlan }
-): Promise<WorkspaceEvidence> {
-  assertPlanNetworks(options.plan);
+export async function baselineEvidence(options: BaselineOptions): Promise<WorkspaceEvidence> {
   assertHasTestCommand(options.plan);
   return workspaceEvidence(options, options.manifest, options.plan);
 }
@@ -463,16 +555,15 @@ export function reproductionManifest(
   const base = validateManifest(baseManifest);
   const candidate = new Map(validateManifest(candidateManifest).entries.map((e) => [e.path, e]));
   const entries = new Map<string, SourceEntry>(base.entries.map((e) => [e.path, e]));
-  for (const file of testFiles) {
+  testFiles.forEach((file, index) => {
     const entry = candidate.get(file);
-    if (!entry || entry.mode === '040000') throw new EvidencePlanError('test_file_missing');
-    const parts = file.split('/');
-    for (let depth = 1; depth < parts.length; depth++) {
-      const directory = parts.slice(0, depth).join('/');
+    if (!entry || entry.mode === MANIFEST_DIRECTORY)
+      throw new EvidencePlanError('test_file_missing', `test file #${index}`);
+    // A valid candidate manifest holds every parent directory of its files.
+    for (const directory of parentPaths(file))
       if (!entries.has(directory)) entries.set(directory, candidate.get(directory) as SourceEntry);
-    }
     entries.set(file, entry);
-  }
+  });
   return createManifest([...entries.values()]);
 }
 
@@ -480,21 +571,13 @@ export function reproductionManifest(
  * the base plus only the test files (must be `failed`) and on the candidate (must be
  * `passed`), each in its own fresh VM. `not_reproduced` is a hand-off before patching. */
 export async function regressionEvidence(
-  options: WorkspaceOptions & {
-    readonly baseManifest: SourceManifest;
-    readonly testFiles: readonly string[];
-    readonly candidateManifest: SourceManifest;
-    readonly regressionTargets: readonly string[];
-    readonly endpoints: ProxyEndpoints;
-    readonly planOptions?: Omit<PlanOptions, 'testTargets'>;
-  }
+  options: RegressionOptions
 ): Promise<RegressionRunEvidence> {
   if (options.regressionTargets.length === 0) throw new EvidencePlanError('no_regression_targets');
   const plan = buildCommandPlan(options.profileRecord.manager, options.endpoints, {
     ...options.planOptions,
     testTargets: options.regressionTargets,
   });
-  assertPlanNetworks(plan);
   assertHasTestCommand(plan);
   const reproduction = reproductionManifest(
     options.baseManifest,

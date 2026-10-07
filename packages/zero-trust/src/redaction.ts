@@ -54,6 +54,26 @@ export function assertNoSecrets(value: string): void {
     throw new SecretRedactionError();
 }
 
+/** What replaces an excerpt that matched a credential pattern. */
+export const REDACTED = '[redacted]';
+
+/** A bounded excerpt of `text` (`cut` chooses it), or `[redacted]` when the whole text
+ * or the excerpt matches a credential pattern: slicing can hide a secret prefix at the
+ * edge, so the whole text is scanned first. */
+export function redactedExcerpt(
+  text: string,
+  cut: (text: string) => string
+): { readonly excerpt: string; readonly redacted: boolean } {
+  try {
+    assertNoSecrets(text);
+    const excerpt = cut(text);
+    assertNoSecrets(excerpt);
+    return { excerpt, redacted: false };
+  } catch {
+    return { excerpt: REDACTED, redacted: true };
+  }
+}
+
 /** Scan detached controller data, including container payloads and array metadata.
  * Cycles terminate; unsupported object payloads are refused rather than skipped. */
 export function assertSecretFree(value: unknown): void {
