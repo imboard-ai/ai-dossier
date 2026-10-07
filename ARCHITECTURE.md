@@ -38,7 +38,7 @@ graph TB
 
 ### Core Library (`@ai-dossier/core`)
 Shared verification and parsing logic used by all tools. Handles:
-- Dossier parsing (JSON frontmatter + Markdown body)
+- Dossier parsing (frontmatter in the Agent Skills or legacy layout + Markdown body)
 - SHA256 checksum verification
 - Signature verification (Minisign, AWS KMS)
 
@@ -77,24 +77,24 @@ For per-command exit codes and user-facing error output, see [cli/README.md — 
 
 ## File Format
 
-Dossiers are Markdown files with JSON frontmatter using the `---dossier` delimiter:
+Dossiers are Markdown files with a frontmatter block. The CLI writes the **spec layout**, which is a valid Agent Skill as written: Agent Skills fields at the top level, every Dossier field under `metadata` as a `dossier.<field>` string, signed with signature v3:
 
 ```markdown
----dossier
-{
-  "title": "Example Dossier",
-  "version": "1.0.0",
-  "checksum": {
-    "algorithm": "sha256",
-    "hash": "e3b0c44298fc1c149afbf4c8996fb924..."
-  }
-}
+---
+name: 'example-dossier'
+description: 'What this dossier automates'
+metadata:
+  dossier.title: 'Example Dossier'
+  dossier.version: '1.0.0'
+  dossier.checksum: '{"algorithm":"sha256","hash":"e3b0c44298fc1c149afbf4c8996fb924..."}'
 ---
 
 # Instructions
 
 Your automation steps here...
 ```
+
+The **legacy layout** (every field at the top level, JSON under a `---dossier` fence) is still read and verified. `parseDossierContent` in core reads both layouts into the same flat frontmatter, so consumers never branch on the layout. See [docs/reference/spec-shape.md](docs/reference/spec-shape.md).
 
 ## Verification Flow
 

@@ -236,7 +236,38 @@ Dossiers **MAY** include additional sections as needed:
 
 ### 3.4 Schema Frontmatter (RECOMMENDED)
 
-As of Dossier Specification v1.0.0, dossiers **SHOULD** include structured metadata using JSON frontmatter:
+As of Dossier Specification v1.0.0, dossiers **SHOULD** include structured metadata in a frontmatter block. The metadata can sit on disk in two layouts that mean the same thing:
+
+- **Spec layout** (written by the CLI since `@ai-dossier/cli` 0.92.0): the file is a valid [Agent Skill](https://agentskills.io/specification). Only the Agent Skills fields (`name`, `description`, and optionally `license`, `compatibility`, `allowed-tools`) sit at the top level; every other Dossier field sits under `metadata` as a `dossier.<field>` string. Signed dossiers in this layout use signature v3.
+- **Legacy layout**: every Dossier field at the top level, usually as JSON under a `---dossier` fence. Still read and verified (signatures v1 and v2), and still the easiest layout to write by hand.
+
+A spec-shaped dossier, as `ai-dossier sign` writes it:
+
+```markdown
+---
+name: 'deploy-to-aws'
+description: 'Deploy a containerized application to AWS ECS'
+metadata:
+  dossier.dossier_schema_version: '1.0.0'
+  dossier.title: 'Deploy Application to AWS'
+  dossier.version: '1.2.0'
+  dossier.protocol_version: '"1.0"'
+  dossier.status: 'Stable'
+  dossier.objective: 'Deploy a containerized application to AWS ECS'
+  dossier.category: '["devops","deployment"]'
+  dossier.tags: '["aws","ecs","docker"]'
+  dossier.tools_required: '[{"check_command":"terraform --version","name":"terraform","version":">=1.0.0"}]'
+  dossier.risk_level: 'high'
+  dossier.requires_approval: 'true'
+  dossier.checksum: '{"algorithm":"sha256","hash":"…"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body",…}'
+---
+
+# Dossier: Deploy Application to AWS
+[... rest of markdown content ...]
+```
+
+The same dossier in the legacy layout:
 
 ```markdown
 ---dossier
@@ -256,15 +287,8 @@ As of Dossier Specification v1.0.0, dossiers **SHOULD** include structured metad
       "check_command": "terraform --version"
     }
   ],
-  "relationships": {
-    "preceded_by": [
-      {
-        "dossier": "setup-aws-infrastructure",
-        "condition": "required",
-        "reason": "Infrastructure must exist before deployment"
-      }
-    ]
-  }
+  "risk_level": "high",
+  "requires_approval": true
 }
 ---
 
@@ -272,18 +296,22 @@ As of Dossier Specification v1.0.0, dossiers **SHOULD** include structured metad
 [... rest of markdown content ...]
 ```
 
+Implementations **MUST** read both layouts into the same flat logical metadata, so every field in [SCHEMA.md](./schema.md) means the same thing in either. The spec layout, its value encoding, the strict-YAML rules and signature v3 are specified in [Spec-Shaped Dossiers and Signature v3](./spec-shape.md).
+
 **Purpose**: The schema frontmatter provides:
 - **Deterministic parsing**: Machine-readable metadata without LLM interpretation
 - **Fast validation**: Schema validation before expensive LLM execution
 - **Tooling foundation**: Enables CLI tools, IDEs, registries, and automation
 - **Searchability**: Programmatic discovery by category, tags, tools, dependencies
 - **Predictable costs**: Know required tools and dependencies before execution
+- **Agent Skills compatibility** (spec layout): the signed file passes `skills-ref validate` and loads in any Agent Skills runtime as is
 
 **Format Requirements**:
 - Placed at the **very top** of the file (before any markdown content)
-- Delimited by `---dossier` and `---`
-- Valid JSON format (validated against `dossier-schema.json`)
-- Must include required fields: `dossier_schema_version`, `title`, `version`, `protocol_version`, `status`, `objective`
+- Spec layout: delimited by `---` and `---`, block-style YAML, every value a string (see [spec-shape.md](./spec-shape.md#strict-yaml-portability))
+- Legacy layout: delimited by `---dossier` and `---`, JSON (YAML is also accepted)
+- Validated against `dossier-schema.json`, which accepts either layout
+- Must include required fields: `dossier_schema_version`, `title`, `version`, `protocol_version`, `status`, `objective`, `checksum`, `risk_level`, `requires_approval` (in the spec layout as `metadata["dossier.<field>"]`, plus top-level `name` and `description`)
 
 **Complete Documentation**: See [SCHEMA.md](./schema.md) for:
 - Complete field reference
@@ -292,7 +320,7 @@ As of Dossier Specification v1.0.0, dossiers **SHOULD** include structured metad
 - Migration guide from pure Markdown dossiers
 - Best practices
 
-**Backward Compatibility**: Dossiers without schema frontmatter remain valid and can be executed by LLM agents. The schema is an enhancement, not a breaking change.
+**Backward Compatibility**: Dossiers without schema frontmatter remain valid and can be executed by LLM agents. The schema is an enhancement, not a breaking change. Legacy-layout dossiers, and their v1/v2 signatures, remain valid; see [Migrating from the legacy layout](./spec-shape.md#migrating-from-the-legacy-layout).
 
 ### 3.5 MCP Integration (Optional)
 
@@ -539,8 +567,8 @@ Dossiers **MUST**:
 
 ### 6.1 File Format
 
-- **Format**: Markdown (.md)
-- **Encoding**: UTF-8
+- **Format**: Markdown (.md) with an optional frontmatter block (§3.4)
+- **Encoding**: UTF-8; spec-layout frontmatter must not contain DEL or C1 control characters (U+007F–U+009F)
 - **Line endings**: LF (Unix-style) preferred
 - **Extension**: `.md`
 
@@ -792,6 +820,12 @@ Projects **MAY** extend protocol locally (see [PROTOCOL.md](./protocol.md) § Cu
 
 ## 13. Changelog
 
+### 2026-10-07: Agent Skills layout
+
+- **Spec layout** for frontmatter (§3.4): Agent Skills fields at the top level, Dossier fields under `metadata` as `dossier.<field>` strings, so a dossier is a valid Agent Skill as written
+- **Signature v3** (`covers: spec-frontmatter+body`) over the on-disk spec-layout frontmatter and body; each signature scheme is bound to one layout, and an unknown `covers` is refused
+- The legacy layout and signatures v1/v2 remain valid. Specified in [spec-shape.md](./spec-shape.md)
+
 ### v1.0.0 (2025-11-05)
 
 **Initial Release**:
@@ -815,7 +849,8 @@ Projects **MAY** extend protocol locally (see [PROTOCOL.md](./protocol.md) § Cu
 ## 14. References
 
 - [PROTOCOL.md](./protocol.md) - Dossier Execution Protocol
-- [SCHEMA.md](./schema.md) - Dossier Schema Specification (JSON frontmatter)
+- [SCHEMA.md](./schema.md) - Dossier Schema Specification (frontmatter fields)
+- [spec-shape.md](./spec-shape.md) - Spec-shaped (Agent Skills) layout and signature v3
 - [README.md](../../README.md) - Introduction to dossiers
 - [examples/](../../examples/) - Example implementations
 - [dossier-schema.json](../../dossier-schema.json) - JSON Schema definition

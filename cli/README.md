@@ -378,6 +378,26 @@ Override the sidecar path with `--evidence <path>`, or skip attaching one (even 
 
 ---
 
+## Dossier Layout: the Agent Skills Format
+
+Since 0.92.0 the commands that write dossiers emit the **spec layout**: the file is a valid [Agent Skill](https://agentskills.io/specification) as written. `name` and `description` (plus the optional `license`, `compatibility`, `allowed-tools`) sit at the top level, and every other Dossier field sits under `metadata` as a `dossier.<field>` string. Signed files use signature v3 (`covers: spec-frontmatter+body`), which covers that frontmatter as written plus the body. Legacy (flat, usually JSON) files are still read, and their v1/v2 signatures still verify.
+
+```bash
+ai-dossier sign my-skill.ds.md --method ed25519 --key my-key   # writes the spec layout + v3 signature
+ai-dossier verify my-skill.ds.md                                 # picks v1/v2/v3 from `covers`
+ai-dossier lint my-skill.ds.md                                   # `spec-shape` rule checks the Agent Skills layout
+```
+
+| Command | Legacy input | Spec-shaped input |
+|---|---|---|
+| `sign` | converts to the spec layout, signs under v3; fills `name` (file name) and `description` (`objective`) when absent | re-signs under v3 |
+| `format` | unsigned: converts to the spec layout. Signed: stays legacy (converting would orphan the signature). `--keep-legacy` always stays legacy | re-serializes as block YAML, keeping every value's exact string; a v3 signature still verifies unless the body changed |
+| `checksum --update` | keeps the legacy layout | replaces only `dossier.checksum`; warns when a signed body changed |
+| `lint` | `legacy-layout` (info): notes the old layout and any `name`/`description` that would fail once converted | `spec-shape` (error): name pattern, description length, string-only `metadata`, required `dossier.*` keys, block-style YAML |
+| `publish` | uploads as written, with a note to re-sign | uploads as written |
+
+The registry verifies signatures at publish time and rejects a bad one with 400 `INVALID_SIGNATURE`. Full specification, value encoding, strict-YAML rules and migration steps: [Spec-Shaped Dossiers and Signature v3](../docs/reference/spec-shape.md).
+
 ## Skills
 
 A dossier is a skill with trust, versioning, and registry distribution added. These commands bridge the registry and Claude Code skills (`~/.claude/skills/`).
@@ -396,9 +416,11 @@ ai-dossier install-skill org/skills/my-skill --fresh --force
 ai-dossier install-skill --remove my-skill
 ```
 
+A spec-shaped dossier is copied byte for byte (a `---dossier`/`---json`/`---yaml` fence becomes `---`, which parses the same), so its v3 signature still verifies in `~/.claude/skills/` and `skills-ref validate ~/.claude/skills/<name>` accepts it. A legacy dossier's JSON frontmatter is rendered as YAML, with its registry path recorded as `x_source`. Every install also writes the registry path to a `.dossier-source` file next to `SKILL.md`. A spec-shaped copy cannot carry `x_source`, because v3 covers every frontmatter field, so the collision check and `sync-skills` read `.dossier-source` instead. It is ignored unless it holds exactly one registry path.
+
 Restart Claude Code (or start a new session) to pick up a newly installed skill. At run time the skill calls `ai-dossier run <registry-path>`, which fetches and verifies the dossier on demand — so you don't need to install the dossier separately.
 
-**opencode support (auto-detect)**: When `~/.config/opencode/` exists, `install-skill` also writes a YAML-frontmatter wrapper to `~/.config/opencode/skills/<name>/SKILL.md`. opencode's parser only accepts standard YAML frontmatter (`---`), so dossier skills that use `---dossier` (JSON) frontmatter would otherwise be invisible. The wrapper carries the same `name`, `description`, and body; the signed source in `~/.claude/skills/` is never modified. Delegating skills (body contains `ai-dossier run`) also get an `allowedTools: [Bash(ai-dossier run *)]` line so opencode auto-approves the delegation.
+**opencode support (auto-detect)**: When `~/.config/opencode/` exists, `install-skill` also writes a YAML-frontmatter wrapper to `~/.config/opencode/skills/<name>/SKILL.md`. opencode's parser only accepts standard YAML frontmatter (`---`), so legacy dossier skills that use `---dossier` (JSON) frontmatter would otherwise be invisible. Spec-shaped skills as the CLI writes them are already `---` YAML, so opencode reads them from `~/.claude/skills/` and no wrapper is written. The wrapper carries the same `name`, `description`, and body; the signed source in `~/.claude/skills/` is never modified. Delegating skills (body contains `ai-dossier run`) also get an `allowedTools: [Bash(ai-dossier run *)]` line so opencode auto-approves the delegation.
 
 Override with `--for claude|opencode|both`:
 
@@ -440,6 +462,8 @@ ai-dossier skill-export my-skill --version 2.0.0 --changelog "Add range support"
 | `--version <v>` / `--major` / `--no-bump` | Control the published version |
 | `--changelog <msg>` | Changelog message for the release |
 | `--verify` | Re-install after publish to confirm the roundtrip |
+
+When it bumps the version, or the skill is an unsigned legacy file, `skill-export` writes the skill in the spec layout (locally too) before publishing. A version bump changes bytes the old signature covered, so a signature is dropped with a warning rather than shipped stale, and `--json` output carries `"signatureDropped": true`. Re-sign with `ai-dossier sign` and publish to ship a signed version. A spec-shaped skill exported with `--no-bump` is published byte for byte, signature included.
 
 ---
 
@@ -2178,9 +2202,9 @@ Project registries are merged with user registries. User-configured registries t
 
 **How**:
 1. Checks if signature present in frontmatter
-2. Validates signature format
+2. Validates signature format and its `covers` scheme: v1 (body), v2 (`frontmatter+body`, legacy layout) or v3 (`spec-frontmatter+body`, spec layout). An unknown scheme, or one that does not match the file's layout, fails
 3. Checks if key is in trusted keys list
-4. Verifies signature against content
+4. Verifies signature against the payload that scheme covers
 
 **Result**:
 - ✅ Valid + Trusted → From known author

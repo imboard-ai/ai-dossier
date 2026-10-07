@@ -26,21 +26,22 @@ const oneLine = (t) => {
   const first = t.split(/(?<=[.!?])\s/)[0].trim();
   return first.length > 150 ? `${first.slice(0, 147).trimEnd()}…` : first;
 };
-const example = `---dossier
-{
-  "name": "hello",
-  "title": "Hello World Dossier",
-  "version": "1.1.0",
-  "risk_level": "low",
-  "requires_approval": false,
-  "checksum": { "algorithm": "sha256", "hash": "2caae4c1…" },
-  "signature": { "algorithm": "ed25519", "key_id": "imboard-ai", "signature": "tleSPJ4T…" }
-}
+const example = `---
+name: 'hello'
+description: 'Say hello and show what a signed skill looks like'
+metadata:
+  dossier.title: 'Hello World Dossier'
+  dossier.version: '1.1.0'
+  dossier.risk_level: 'low'
+  dossier.requires_approval: 'false'
+  dossier.checksum: '{"algorithm":"sha256","hash":"…"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","public_key":"…","signature":"…"}'
 ---
 # Hello World Dossier
 
 The skill an AI agent follows, written in plain markdown.
-The header above is what makes them verifiable.`;
+The header above is a standard Agent Skills header,
+and the signature in it is what makes them verifiable.`;
 ---
 <Base bare title="Signed Agent Skills for Model-Driven Orchestration" schema={softwareApplicationSchema(new URL('/', Astro.site).href)} description="Signed, versioned agent skills for model-driven orchestration. Publish once, install anywhere, and let anyone verify who wrote it.">
   <section class="hero">
@@ -176,7 +177,7 @@ ai-dossier run org/my-skill --pull</code></pre></li>
       <p class="eyebrow">Format</p>
       <h2 id="example">What a dossier looks like</h2>
       <Code code={example} lang="markdown" themes={{ light: 'github-light', dark: 'github-dark-default' }} />
-      <p class="muted">Trimmed from the published <a href="/registry/getting-started/hello/">getting-started/hello</a> dossier.</p>
+      <p class="muted">Trimmed. This is the layout <code>ai-dossier sign</code> writes: a valid <a href="https://agentskills.io/specification">Agent Skill</a> as is, with the Dossier fields under <code>metadata</code> and a signature that covers the whole header and body. Dossiers signed before CLI 0.92.0, like the published <a href="/registry/getting-started/hello/">getting-started/hello</a>, use the older JSON layout and verify the same way. <a href="/docs/reference/spec-shape/">The format in detail</a>.</p>
       <h3 class="trust-h">How trust works</h3>
       <ul class="trust">
         <li>Trust is a local decision. A valid signature from a key you have not added is reported as untrusted, never auto-trusted.</li>

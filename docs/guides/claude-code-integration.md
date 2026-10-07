@@ -216,7 +216,7 @@ ai-dossier install-skill --outdated                 # refresh only installed ski
 ai-dossier install-skill --list                     # installed vs latest, flags BEHIND
 ```
 
-Each install records `x_source: <owner/category/name>` in the skill's frontmatter, which is what lets `--outdated` re-fetch it. Skills whose basename collides (e.g. published under two categories) are reported, not overwritten. All modes take `--json` and exit non-zero if any skill failed.
+Each install records its registry path (`<owner/category/name>`) in a `.dossier-source` file next to `SKILL.md`, and a legacy-layout install also as `x_source` in the skill's frontmatter. That is what lets `--outdated` re-fetch it. A spec-shaped (Agent Skills layout) dossier is installed byte for byte, so its signature still verifies; see [Spec-Shaped Dossiers](../reference/spec-shape.md). Skills whose basename collides (e.g. published under two categories) are reported, not overwritten. All modes take `--json` and exit non-zero if any skill failed.
 
 To go the other direction — publish a local skill to the registry as a versioned, signed dossier — use `ai-dossier skill-export <name> --namespace <org>/skills`.
 

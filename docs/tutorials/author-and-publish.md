@@ -112,7 +112,18 @@ This is a dossier. Please execute it step-by-step and validate the success crite
 
 Iterate on the dossier content until the AI produces the expected result.
 
-## Step 6: Publish
+## Step 6: Sign (optional, recommended)
+
+Sign the dossier so consumers can verify who wrote it:
+
+```bash
+ai-dossier keys generate --name my-key   # once
+ai-dossier sign setup-dev-environment.ds.md --method ed25519 --key my-key
+```
+
+`sign` rewrites the frontmatter as standard `---` YAML in the [Agent Skills layout](../reference/spec-shape.md): `name` and `description` at the top level, every other field under `metadata` as a `dossier.<field>` string, and a v3 signature that covers all of it plus the body. The signed file passes `skills-ref validate` as is. Edit after signing and you must sign again.
+
+## Step 7: Publish
 
 Authenticate with the registry:
 
@@ -126,12 +137,12 @@ Publish:
 ai-dossier publish setup-dev-environment.ds.md
 ```
 
-Your dossier is now discoverable via `ai-dossier search` and the [Dossier Registry](https://dossier-registry.vercel.app).
+The registry verifies a signature before it stores the dossier and rejects one that does not match with `INVALID_SIGNATURE`. Your dossier is now discoverable via `ai-dossier search` and the [Dossier Registry](https://dossier-registry.vercel.app).
 
 ## Lifecycle Summary
 
 ```
-create  -->  write  -->  validate  -->  checksum  -->  test  -->  publish
+create  -->  write  -->  validate  -->  checksum  -->  test  -->  sign  -->  publish
                 ^                                        |
                 |                                        |
                 +----------  iterate  <------------------+
