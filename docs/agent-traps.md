@@ -73,11 +73,14 @@ search for first.
 | A run in `awaiting_contributor` leaves through `resume_shipping` while a prefilled PR link is still pending, or `publication_observed` leaves a fork/installation wait where nothing was submitted | `awaiting_contributor` holds two kinds of wait: a link hand-off (entered by `contributor_handoff`) and a manual fork/App-installation prerequisite (entered by `fork_missing`/`installation_missing`). A table edge alone cannot tell them apart | `state.ts` judges each exit by the transition that ENTERED the wait (self-loops skipped): observations leave only a link wait, re-checks and resumes only a prerequisite wait, and a resume returns to the phase that entered it. When adding an edge out of `awaiting_contributor`, extend that guard and the adjacency test together | PR #1074 (#1065) |
 | `Serialized Error: { code: 'ERR_STREAM_DESTROYED' }` attributed to `src/__tests__/vm-bake.test.ts` in CI only | `ensureBaseImage` destroyed its write stream in `finally` while a write could still be queued (aborted or failed download). The late `error` event had no listener, so vitest reported an unhandled error; whether it fires depends on I/O timing, so it passed locally. | Attach a no-op `error` listener before `destroy()` on a stream whose outcome is already decided; do not treat the run as flaky. | PR #1081 (#1076) |
 
-## Budget admission traps
+## Model harness traps
 
 | Symptom (grep this) | What went wrong | Fix | PR |
 |---|---|---|---|
-| Model HTTP retry times out while cancelling a cloned response body | Awaiting cancellation of one tee branch can stay pending until the other branch is consumed. An injected fetch can also resolve after the deadline and otherwise start a late retry. | Request cancellation without awaiting it, race the entire fetch/body operation against the abort deadline, and recheck the signal before each attempt and after every awaited transport read. Scan decoded tool arguments too: JSON escaping can hide an echoed key in a nested arguments string. | #1094 |
+| `model_timeout` on an `attempts: 2` retry / pending `response.body.cancel()` | Awaiting cancellation of one tee branch can stay pending until the other branch is consumed. An injected fetch can also resolve after the deadline and otherwise start a late retry. | Request cancellation without awaiting it, race the entire fetch/body operation against the abort deadline, and recheck the signal before each attempt and after every awaited transport read. | #1094 |
+| API key echo bypasses `secret_detected` through padded headers or nested JSON arguments | Fetch normalizes padded Authorization values, and a JSON arguments string can hide the key behind another encoding layer. | Refuse whitespace/control-bearing keys; scan decoded tool arguments as well as the response before returning. | #1094 |
+
+## Budget admission traps
 
 | Symptom (grep this) | What went wrong | Fix | PR |
 |---|---|---|---|

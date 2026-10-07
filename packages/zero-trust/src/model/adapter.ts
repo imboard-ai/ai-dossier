@@ -4,12 +4,15 @@ export interface ModelTool {
   function: { name: string; description?: string; parameters: unknown };
 }
 
-export interface ModelMessage {
-  role: 'user' | 'assistant' | 'tool';
-  content: string | null;
-  tool_call_id?: string;
-  tool_calls?: { id: string; type: 'function'; function: { name: string; arguments: string } }[];
+export interface ModelToolCallWire {
+  id: string;
+  type: 'function';
+  function: { name: string; arguments: string };
 }
+export type ModelMessage =
+  | { role: 'user'; content: string }
+  | { role: 'assistant'; content: string | null; tool_calls?: ModelToolCallWire[] }
+  | { role: 'tool'; content: string; tool_call_id: string };
 
 export interface ModelRequest {
   system: string;
@@ -27,10 +30,16 @@ export interface ModelUsage {
   outputTokens: number;
 }
 
+export interface ModelToolCall {
+  id: string;
+  name: string;
+  arguments: unknown;
+}
+export type MalformedReason = 'invalid_response' | 'response_too_large' | 'secret_detected';
 export type ModelResult = (
-  | { kind: 'tool_calls'; calls: { id: string; name: string; arguments: unknown }[] }
+  | { kind: 'tool_calls'; calls: ModelToolCall[] }
   | { kind: 'text'; text: string }
-  | { kind: 'malformed'; reason: string }
+  | { kind: 'malformed'; reason: MalformedReason }
 ) & { usage: ModelUsage | null };
 
 export interface ModelAdapter {
@@ -40,6 +49,9 @@ export interface ModelAdapter {
 }
 
 export const MAX_TOOL_ARGUMENT_BYTES = 64 * 1024;
+/** Node timer ceiling; the entire admitted attempt budget must fit it. */
+export const MAX_MODEL_TIMEOUT_MS = 2_147_483_647;
+export type SnapshotModelRequest = ModelRequest & { attempts: 1 | 2 };
 
 export class ModelError extends Error {
   constructor(
@@ -57,30 +69,32 @@ export class ModelError extends Error {
 }
 
 /** Detach the exact JSON data being estimated/sent; signal is never serialized. */
-export function snapshotModelRequest(request: ModelRequest): ModelRequest {
+export function snapshotModelRequest(request: ModelRequest): SnapshotModelRequest {
   try {
+    const { maxOutputTokens, timeoutMs, attempts = 1, system, messages, tools, signal } = request;
     if (
-      !Number.isSafeInteger(request.maxOutputTokens) ||
-      request.maxOutputTokens < 1 ||
-      !Number.isSafeInteger(request.timeoutMs) ||
-      request.timeoutMs < 1 ||
-      request.timeoutMs > 2_147_483_647 ||
-      (request.attempts !== undefined && request.attempts !== 1 && request.attempts !== 2) ||
-      typeof request.system !== 'string' ||
-      !Array.isArray(request.messages) ||
-      !Array.isArray(request.tools)
+      !Number.isSafeInteger(maxOutputTokens) ||
+      maxOutputTokens < 1 ||
+      !Number.isSafeInteger(timeoutMs) ||
+      timeoutMs < 1 ||
+      timeoutMs * attempts > MAX_MODEL_TIMEOUT_MS ||
+      (attempts !== 1 && attempts !== 2) ||
+      typeof system !== 'string' ||
+      !Array.isArray(messages) ||
+      !Array.isArray(tools)
     ) {
       throw new ModelError('invalid_request');
     }
-    const data = JSON.parse(
-      JSON.stringify({ system: request.system, messages: request.messages, tools: request.tools })
-    ) as Pick<ModelRequest, 'system' | 'messages' | 'tools'>;
+    const data = JSON.parse(JSON.stringify({ system, messages, tools })) as Pick<
+      ModelRequest,
+      'system' | 'messages' | 'tools'
+    >;
     return {
       ...data,
-      maxOutputTokens: request.maxOutputTokens,
-      timeoutMs: request.timeoutMs,
-      attempts: request.attempts ?? 1,
-      signal: request.signal,
+      maxOutputTokens,
+      timeoutMs,
+      attempts,
+      signal,
     };
   } catch {
     throw new ModelError('invalid_request');
@@ -92,7 +106,7 @@ export function modelRequestBody(id: string, request: ModelRequest): string {
   return JSON.stringify({
     model: id,
     messages: [{ role: 'system', content: request.system }, ...request.messages],
-    tools: request.tools,
+    ...(request.tools.length ? { tools: request.tools } : {}),
     max_tokens: request.maxOutputTokens,
     stream: false,
   });
@@ -103,13 +117,25 @@ export async function withModelDeadline<T>(
   request: ModelRequest,
   operation: (signal: AbortSignal) => Promise<T>
 ): Promise<T> {
-  const signal = request.signal
-    ? AbortSignal.any([request.signal, AbortSignal.timeout(request.timeoutMs)])
-    : AbortSignal.timeout(request.timeoutMs);
-  let listener: () => void = () => {};
+  const timeout = AbortSignal.timeout(request.timeoutMs);
+  const controller = new AbortController();
+  const signal = controller.signal;
+  const onTimeout = () => controller.abort(new ModelError('model_timeout'));
+  const onCaller = () =>
+    controller.abort(
+      new ModelError(
+        request.signal?.reason instanceof ModelError &&
+          request.signal.reason.code === 'model_timeout'
+          ? 'model_timeout'
+          : 'model_aborted'
+      )
+    );
+  timeout.addEventListener('abort', onTimeout, { once: true });
+  request.signal?.addEventListener('abort', onCaller, { once: true });
+  if (request.signal?.aborted) onCaller();
+  let listener: (() => void) | undefined;
   const aborted = new Promise<never>((_resolve, reject) => {
-    listener = () =>
-      reject(new ModelError(request.signal?.aborted ? 'model_aborted' : 'model_timeout'));
+    listener = () => reject(signal.reason);
     if (signal.aborted) listener();
     else signal.addEventListener('abort', listener, { once: true });
   });
@@ -117,6 +143,8 @@ export async function withModelDeadline<T>(
     if (signal.aborted) return await aborted;
     return await Promise.race([operation(signal), aborted]);
   } finally {
-    signal.removeEventListener('abort', listener);
+    if (listener) signal.removeEventListener('abort', listener);
+    timeout.removeEventListener('abort', onTimeout);
+    request.signal?.removeEventListener('abort', onCaller);
   }
 }

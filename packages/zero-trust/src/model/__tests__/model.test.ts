@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { BudgetLedger } from '../../budget';
+import { BudgetLedger, observeModelBudget } from '../../budget';
 import type { BudgetRate } from '../../budget-types';
 import {
   MAX_TOOL_ARGUMENT_BYTES,
@@ -83,6 +83,94 @@ afterEach(() => {
 });
 
 describe('OpenAI-compatible untrusted responses and transport', () => {
+  it.each([
+    null,
+    [],
+  ])('accepts an empty optional call list for a text-only completion %#', async (tool_calls) => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(response(recorded({ content: 'done', tool_calls })));
+    expect(await adapter(fetcher).complete({ ...request, tools: [] })).toEqual(textResult);
+    expect(JSON.parse(fetcher.mock.calls[0]?.[1]?.body as string)).not.toHaveProperty('tools');
+  });
+  it.each([
+    ' ',
+    '\r',
+    '\n',
+    '\t',
+    '\u0001',
+  ])('refuses padded/control-bearing key before any fetch %#', async (suffix) => {
+    vi.stubEnv('MODEL_TEST_KEY', KEY + suffix);
+    const fetcher = vi.fn<typeof fetch>();
+    expect(() => adapter(fetcher)).toThrow('model_unavailable');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+  it.each([
+    'https://provider.example/v1?',
+    'https://provider.example/v1#',
+  ])('refuses empty query/fragment delimiter %s', (endpoint) => {
+    expect(
+      () =>
+        new OpenAICompatibleAdapter({
+          model: 'model-a',
+          endpoint,
+          apiKeyEnv: 'MODEL_TEST_KEY',
+          fetch: vi.fn<typeof fetch>(),
+        })
+    ).toThrow('invalid_request');
+  });
+  it('grants each authorized retry its own deadline, including abortable backoff', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => {
+      await new Promise((done) => setTimeout(done, 70));
+      return fetcher.mock.calls.length === 1
+        ? new Response('', { status: 503 })
+        : response(recorded());
+    });
+    expect(
+      (
+        await meteredComplete(adapter(fetcher), ledger(), 's1', rates, {
+          ...request,
+          timeoutMs: 160,
+          attempts: 2,
+        })
+      ).kind
+    ).toBe('text');
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+  it.each([
+    '0',
+    'not-a-date',
+    'Wed, 07 Oct 2020 00:00:00 GMT',
+  ])('bounds Retry-After header %#', async (header) => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response('', { status: 429, headers: { 'Retry-After': header } }))
+      .mockResolvedValueOnce(response(recorded()));
+    expect((await adapter(fetcher).complete({ ...request, attempts: 2 })).kind).toBe('text');
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+  it('excessive Retry-After refuses retry and caller cancellation stops backoff', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response('', { status: 429, headers: { 'Retry-After': '999' } }));
+    await expect(adapter(fetcher).complete({ ...request, attempts: 2 })).rejects.toMatchObject({
+      code: 'model_http',
+      status: 429,
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    const controller = new AbortController();
+    const backoffFetch = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response('', { status: 503, headers: { 'Retry-After': '0.2' } }));
+    const completion = adapter(backoffFetch).complete({
+      ...request,
+      signal: controller.signal,
+      attempts: 2,
+    });
+    setTimeout(() => controller.abort(), 20);
+    await expect(completion).rejects.toMatchObject({ code: 'model_aborted' });
+    expect(backoffFetch).toHaveBeenCalledTimes(1);
+  });
   it('does not retry a late error after timeout even when the injected fetch ignores abort', async () => {
     const keepAlive = setInterval(() => {}, 1000);
     try {
@@ -110,7 +198,11 @@ describe('OpenAI-compatible untrusted responses and transport', () => {
         .fn<typeof fetch>()
         .mockResolvedValue(response(recorded({ tool_calls: [tool(args)] }, 'tool_calls')))
     ).complete(request);
-    expect(result).toMatchObject({ kind: 'malformed', reason: 'secret_detected', usage: null });
+    expect(result).toMatchObject({
+      kind: 'malformed',
+      reason: 'secret_detected',
+      usage: { inputTokens: 10, outputTokens: 2 },
+    });
     const broken = new ReadableStream({
       start(controller) {
         controller.error(new Error(KEY));
@@ -174,7 +266,6 @@ describe('OpenAI-compatible untrusted responses and transport', () => {
     { choices: [{ message: null }] },
     recorded({ content: 'partial' }, 'length'),
     recorded({ content: 2 }),
-    recorded({ content: 'done', tool_calls: [] }),
     recorded({ tool_calls: [] }, 'tool_calls'),
     recorded({ tool_calls: [null] }, 'tool_calls'),
     recorded({ tool_calls: [tool('{bad')] }, 'tool_calls'),
@@ -259,12 +350,14 @@ describe('OpenAI-compatible untrusted responses and transport', () => {
     }
   });
   it('missing key refuses startup/call and invalid endpoint/model/key-env refuse without echo', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>();
     vi.stubEnv('MODEL_TEST_KEY', '');
     expect(() => adapter(fetch)).toThrow('model_unavailable');
     vi.stubEnv('MODEL_TEST_KEY', KEY);
     const model = adapter(fetch);
     vi.stubEnv('MODEL_TEST_KEY', '');
     await expect(model.complete(request)).rejects.toMatchObject({ code: 'model_unavailable' });
+    expect(fetch).not.toHaveBeenCalled();
     for (const endpoint of [
       'bad',
       'http://remote.example',
@@ -343,7 +436,10 @@ describe('OpenAI-compatible untrusted responses and transport', () => {
     outputs.push(fs.readFileSync(store.file, 'utf8'), ...logs.flatMap((log) => log.mock.calls));
     expect(JSON.stringify(outputs)).not.toContain(KEY);
     expect(logs.every((log) => log.mock.calls.length === 0)).toBe(true);
-    expect(outputs[0]).toMatchObject({ kind: 'malformed', usage: null });
+    expect(outputs[0]).toMatchObject({
+      kind: 'malformed',
+      usage: { inputTokens: 10, outputTokens: 2 },
+    });
   });
   it('aborts hanging fetch and hanging body within the deadline', async () => {
     // Keep the event loop alive while AbortSignal.timeout's unref timer is pending.
@@ -376,6 +472,49 @@ describe('OpenAI-compatible untrusted responses and transport', () => {
 });
 
 describe('real budget ledger metering', () => {
+  it('refuses already-aborted calls without creating unknown reservations', async () => {
+    const store = ledger();
+    const model = new ScriptedModel('model-a', [textResult]);
+    await expect(
+      meteredComplete(model, store, 's1', rates, { ...request, signal: AbortSignal.abort() })
+    ).rejects.toMatchObject({ code: 'model_aborted' });
+    expect(store.snapshot().reservations).toEqual([]);
+    expect(model.requests).toEqual([]);
+  });
+  it('unrepresentable usage retains full hold and is returned as unknown, not a ledger config error', async () => {
+    const store = ledger();
+    const model = new ScriptedModel('model-a', [
+      { ...textResult, usage: { inputTokens: Number.MAX_SAFE_INTEGER, outputTokens: 5 } },
+    ]);
+    expect((await meteredComplete(model, store, 's1', rates, request)).usage).toBeNull();
+    expect(store.snapshot().reservations[0]?.status).toBe('reserved');
+  });
+  it('observation pricing shares exact FX/rounding and validates zero/overflow/wrong units', () => {
+    const input = {
+      currency: 'USD',
+      resource: 'model-a',
+      inputTokens: 1,
+      outputTokens: 0,
+      timeMs: 0,
+    };
+    expect(observeModelBudget(input, rates)).toMatchObject({ tokens: 1, money: { minor: 2 } });
+    expect(observeModelBudget({ ...input, inputTokens: 0 }, rates)).toMatchObject({
+      tokens: 0,
+      money: { minor: 0 },
+    });
+    const fraction = rates.map((rate) => ({ ...rate, price: 1, units: 3 }));
+    expect(observeModelBudget(input, fraction).money.minor).toBe(1);
+    expect(() =>
+      observeModelBudget(
+        input,
+        rates.map((rate) => ({ ...rate, unit: 'millisecond' }))
+      )
+    ).toThrow('pricing unit');
+    expect(() => observeModelBudget({ ...input, currency: 'EUR' }, rates)).toThrow('pricing unit');
+    expect(() =>
+      observeModelBudget({ ...input, inputTokens: Number.MAX_SAFE_INTEGER }, rates)
+    ).toThrow('overflow');
+  });
   it('durably reserves serialized UTF-8 upper bound before the call and settles observed usage', async () => {
     const store = ledger();
     const complete = vi.fn(async () => {

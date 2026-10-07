@@ -26,6 +26,9 @@ Trade-offs: compatible APIs vary in tool support and usage reporting; absent usa
 retains the full budget hold. The configured output limit is a provider contract,
 not proof of provider billing. Byte-count input bounds avoid optimistic token
 estimates. Response bytes and per-call arguments are capped independently.
+One configured token rate prices both input and output; use at least the higher
+provider rate so the estimate is conservative. Each attempt is bounded by its
+own deadline and retries include a bounded abortable backoff, never a silent fallback.
 
 ## B — Rejected: trusted-zone agent CLI plus MCP
 
@@ -36,6 +39,8 @@ do not justify widening the controller boundary.
 
 ## C — Rejected: agent CLI inside the VM
 
+This offers the CLI's native agent loop and tools behind VM execution isolation,
+reducing controller-loop implementation work, but fails the credential contract.
 This puts a model credential/gateway authorization in repository-controlled worker
 execution, contrary to PRD §5.4's explicit credential separation. Worker isolation
 must not depend on a model obeying instructions to protect its own credential.

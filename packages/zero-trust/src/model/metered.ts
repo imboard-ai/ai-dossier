@@ -1,6 +1,11 @@
 import { performance } from 'node:perf_hooks';
-import { type BudgetLedger, estimateBudget } from '../budget';
-import { BudgetError, type BudgetRate, type BudgetReservation } from '../budget-types';
+import { type BudgetLedger, estimateBudget, observeModelBudget } from '../budget';
+import {
+  BudgetError,
+  type BudgetObservation,
+  type BudgetRate,
+  type BudgetReservation,
+} from '../budget-types';
 import {
   type ModelAdapter,
   ModelError,
@@ -27,6 +32,7 @@ export async function meteredComplete(
   input: ModelRequest
 ): Promise<ModelResult> {
   const request = snapshotModelRequest(input);
+  if (request.signal?.aborted) throw new ModelError('model_aborted');
   const id = adapter.id;
   const pinnedRates = structuredClone(rates);
   const session = ledger.snapshot().sessions.find((item) => item.id === sessionId);
@@ -39,7 +45,7 @@ export async function meteredComplete(
         resource: id,
         maxInputTokens: inputBound,
         maxOutputTokens: request.maxOutputTokens,
-        retries: (request.attempts ?? 1) - 1,
+        retries: request.attempts - 1,
         streamingTimeMs: request.timeoutMs,
       },
     },
@@ -59,7 +65,10 @@ export async function meteredComplete(
   const started = performance.now();
   let result: ModelResult;
   try {
-    result = await withModelDeadline(request, (signal) => adapter.complete({ ...request, signal }));
+    result = await withModelDeadline(
+      { ...request, timeoutMs: request.timeoutMs * request.attempts },
+      (signal) => adapter.complete({ ...request, signal })
+    );
   } catch (error) {
     ledger.settle(reservation.id, null);
     // Never propagate provider exception text/cause.
@@ -76,31 +85,23 @@ export async function meteredComplete(
   ) {
     ledger.settle(reservation.id, null);
   } else {
-    const observed = estimateBudget(
-      {
-        currency: session.ceiling.currency,
-        model: {
+    let observed: BudgetObservation;
+    try {
+      observed = observeModelBudget(
+        {
+          currency: session.ceiling.currency,
           resource: id,
-          maxInputTokens: usage.inputTokens,
-          maxOutputTokens: Math.max(1, usage.outputTokens),
-          retries: 0,
-          streamingTimeMs: Math.max(1, Math.ceil(performance.now() - started)),
+          ...usage,
+          timeMs: Math.ceil(performance.now() - started),
         },
-      },
-      pinnedRates
-    );
-    // estimateBudget requires a positive output ceiling; charge actual zero output exactly.
-    const tokenRate = pinnedRates.find((rate) => rate.resource === id) as BudgetRate;
-    const tokens = usage.inputTokens + usage.outputTokens;
-    const numerator = BigInt(tokens) * BigInt(tokenRate.price) * BigInt(tokenRate.fx.numerator);
-    const denominator = BigInt(tokenRate.units) * BigInt(tokenRate.fx.denominator);
-    const minor = Number((numerator + denominator - 1n) / denominator);
-    ledger.settle(reservation.id, {
-      money: { currency: observed.money.currency, minor },
-      tokens,
-      timeMs: observed.timeMs,
-      source: 'model_usage',
-    });
+        pinnedRates
+      );
+    } catch (error) {
+      if (!(error instanceof BudgetError)) throw error;
+      ledger.settle(reservation.id, null);
+      return { ...result, usage: null };
+    }
+    ledger.settle(reservation.id, observed);
   }
   return result;
 }

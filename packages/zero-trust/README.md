@@ -419,9 +419,7 @@ other drivers' `observeRun`; a restart may hand it an older copy of the run.
   run records `declined` only after it observes the PR closed, deletes nothing, and
   sends no follow-up. `cancelAction()` drops a pending action without touching GitHub.
 
-## Budget admission ledger
-
-### Controller-side model harness (#1094)
+## Controller-side model harness (#1094)
 
 Decision: [model harness A/B/C](../../docs/features/zero-trust-full-cycle/decisions/model-harness.md).
 `ModelAdapter` has `id` (pricing resource/model name) and
@@ -431,18 +429,31 @@ Decision: [model harness A/B/C](../../docs/features/zero-trust-full-cycle/decisi
 assistant tool-call arguments are JSON strings and tool replies bind `tool_call_id`.
 `ModelTool` is a function name/description/JSON-schema parameters definition.
 `ModelResult` is `tool_calls` (`calls: { id, name, arguments: unknown }[]`), `text`
-(`text`) or `malformed` (`reason`), plus `usage: ModelUsage | null` with
-`inputTokens`/`outputTokens`. Only a complete single choice is accepted; unknown
+(`text`) or `malformed` (`reason: MalformedReason`), plus `usage: ModelUsage | null` with
+`inputTokens`/`outputTokens`. `ModelMessage` is a role-discriminated union;
+`ModelToolCallWire` models assistant calls and `ModelToolCall` models parsed proposals.
+Malformed reasons are `invalid_response`, `response_too_large`, `secret_detected`.
+Valid numeric usage survives malformed content, including rejected secrets; missing,
+unreadable, oversized or invalid-usage bodies report null usage. Retried calls always
+report null usage. Text accepts `finish_reason: stop` with absent/null/empty calls;
+tool proposals require `finish_reason: tool_calls` and a nonempty list.
+Only a complete single choice is accepted; unknown
 tools, duplicate IDs, invalid JSON, truncation and arguments over
 `MAX_TOOL_ARGUMENT_BYTES` (64 KiB UTF-8) are malformed. Proposals still require
 `admitModelAction`; this transport invokes no tools and grants no authority.
 
 `new OpenAICompatibleAdapter({ model, endpoint, apiKeyEnv, fetch })` checks a
 nonempty environment key at startup and re-reads it at call time. HTTPS is required
-except explicit loopback HTTP. Credentials in endpoint URLs are refused; redirects
+except HTTP on `localhost`, `127.0.0.1` or `[::1]`. Query/fragment delimiters (even
+empty ones) and credentials in endpoint URLs are refused; redirects
 are disabled. It POSTs to the API base plus `/chat/completions`, with `tools`,
-`max_tokens` and `stream: false`. The API key goes only in Authorization. There is
-no logging, credential field or raw provider error. Echoed keys and credential
+`max_tokens` and `stream: false`. The API key goes only in Authorization.
+`apiKeyEnv` must be a shell environment identifier; model/endpoint strings pass
+secret-pattern guards. Invalid options give `invalid_request`; absent/empty keys
+give `model_unavailable`, as do whitespace/control-bearing keys (the exact value
+must match what the Authorization header sends). Local servers should use a long
+dummy key: even a short placeholder is rejected if echoed in ordinary output.
+There is no logging, credential field or raw provider error. Echoed keys and credential
 patterns are rejected. Response bodies are capped at 1 MiB. Errors are bounded
 `ModelError.code` (`invalid_request`, `model_unavailable`, `model_timeout`,
 `model_aborted`, `model_http`); HTTP errors carry only numeric `status`.
@@ -451,17 +462,26 @@ patterns are rejected. Response bodies are capped at 1 MiB. Errors are bounded
 estimates input tokens conservatively as UTF-8 bytes of the serialized wire request
 (including model and tool schemas), and reserves all output tokens/time/attempts
 before calling. Rates are `BudgetRate[]` keyed by adapter ID, in the session's
-currency. Reservation refusal throws `BudgetExhaustedError` with a limit/ceiling
+currency. One token rate prices BOTH input and output: configure at least the higher
+provider price for conservative admission. Split input/output pricing is not supported.
+Reservation refusal throws `BudgetExhaustedError` with a limit/ceiling
 code and calls no provider. Other ledger errors retain their typed semantics.
 Observed usage is priced with pinned rates and settled; missing/invalid usage,
 errors and timeouts use `settle(id, null)`, preserving the full hold. Accounting
 keeps `max(estimate, observed)` as the existing ledger specifies; it never frees
-funds merely because observed usage was lower. The caller decides pause/failure
+money, tokens or time merely because observed usage was lower. Per-call token
+commitment is `(wire bytes + maxOutputTokens) × attempts`; time commitment is
+`timeoutMs × attempts`. Session limits must cover these conservative quantities.
+An already-aborted caller is refused before reservation. The caller decides pause/failure
 and explicitly reconciles unknown reservations on resume.
 
 Both the transport and metering wrapper enforce a deadline and caller cancellation,
 including a hanging body or injected adapter. `attempts: 2` authorizes at most one
-retry on 429/5xx; direct adapter callers must first reserve both attempts or use
+retry on 429/5xx. Each attempt has its own `timeoutMs` bound; metering's outer
+deadline is `timeoutMs × attempts`, at most `MAX_MODEL_TIMEOUT_MS` (Node's timer cap).
+The second attempt's deadline includes a 50 ms fallback backoff, or the response's
+`Retry-After` delay (seconds or date); a delay beyond its allowance refuses the retry.
+Direct adapter callers must first reserve both attempts or use
 `meteredComplete`. A retried result reports null usage because the failed attempt's
 charge is unknown. No retries of malformed answers, other HTTP errors or transport
 errors, and no provider fallback. Zero-priced models still require rates and
@@ -469,10 +489,18 @@ positive token/time ceilings. Output caps are sent to the provider; the adapter
 cannot guarantee provider billing behavior.
 
 Exported helpers `snapshotModelRequest`, `modelRequestBody` and `withModelDeadline`
-share wire estimation/deadline behavior with compatible adapters. Tests can reuse
+share wire estimation/deadline behavior with compatible adapters. The snapshot
+returns `SnapshotModelRequest` with attempts filled in. `MAX_MODEL_RESPONSE_BYTES`
+exports the 1 MiB body cap. `observeModelBudget({ currency, resource, inputTokens,
+outputTokens, timeMs }, rates)` prices actual usage, including zero output, with
+shared safe-integer budget arithmetic; unpriceable usage retains an unknown hold.
+Tests can reuse
 `src/model/__tests__/scripted-model.ts:ScriptedModel` (not a production export).
 An empty tools list permits text-only questions for the subsequent typed-decision
-adapter; neither the controller loop nor #1119's decision function is built here.
+adapter (`tools` is omitted on the wire when empty); neither the controller loop nor
+#1119's decision function is built here.
+
+## Budget admission ledger
 
 `BudgetLedger` is a separate controller-owned local-file admission primitive. Create
 it once with `initialize(requiredResources, injectedRates)`, then `startSession`
