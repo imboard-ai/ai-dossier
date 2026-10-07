@@ -120,7 +120,7 @@ const publishDossierEndpoint = {
         type: 'string',
         required: true,
         description:
-          'Full .ds.md file content with YAML frontmatter, in the legacy (flat) or the spec (Agent Skills: name/description at the top level, Dossier fields under metadata as "dossier.*") shape. Stored byte-exact. A signature, when present, must verify (v1 body, v2 frontmatter+body, v3 spec-frontmatter+body; each scheme only on the shape it covers).',
+          'Full .ds.md file content with YAML frontmatter, in the legacy (flat) or the spec (Agent Skills: name/description at the top level, Dossier fields under metadata as "dossier.*") shape. Stored byte-exact. A signature, when present, must verify (v1 body, v2 frontmatter+body, v3 spec-frontmatter+body; each scheme only on the shape it covers); signatures that cannot verify, including legacy minisign keys, are refused with INVALID_SIGNATURE.',
         example:
           '---\nname: my-dossier\ntitle: My Dossier\nversion: 1.0.0\n---\n\n# Instructions\n...',
       },

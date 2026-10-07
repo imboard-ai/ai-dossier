@@ -109,6 +109,31 @@ describe('spec-shaped frontmatter', () => {
   });
 });
 
+describe('spec-shaped layouts core also accepts', () => {
+  it('ignores a differently indented comment above the keys', () => {
+    const content = '---\nname: x\nmetadata:\n    # Dossier fields\n  dossier.title: x\n---\n';
+    const block = locateFrontmatter(content);
+    if (!block) throw new Error('no block');
+    expect(specKeyOnLine(block, 4)?.field).toBe('title');
+  });
+
+  it('reads a quoted metadata key', () => {
+    const content = '---\nname: x\n"metadata":\n  dossier.title: x\n---\n';
+    const block = locateFrontmatter(content);
+    if (!block) throw new Error('no block');
+    expect(isSpecShapedBlock(block)).toBe(true);
+  });
+
+  it('limits top-level completion for a flow-style metadata map', () => {
+    const content =
+      '---\nname: x\ndescription: d\nmetadata: {dossier.title: T, dossier.version: 1.0.0}\n\n---\n';
+    expect(parseDossierContent(content).shape).toBe('spec');
+    const labels = completionsAt(content, 4, 0).map((c) => c.label);
+    expect(labels).toContain('license');
+    expect(labels).not.toContain('title');
+  });
+});
+
 describe('diagnostics on a spec-shaped dossier', () => {
   it('reports no errors for a valid file', () => {
     expect(computeDiagnostics(SPEC).filter((d) => d.severity === 'error')).toEqual([]);

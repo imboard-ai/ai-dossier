@@ -11,7 +11,7 @@
  * `dossier.<field>` keys whose values are strings, so there completion offers those keys and
  * hover describes them; the top level only offers the Agent Skills fields.
  */
-import { SPEC_TOP_LEVEL_FIELDS } from '@ai-dossier/core';
+import { parseDossierContent, SPEC_TOP_LEVEL_FIELDS } from '@ai-dossier/core';
 import {
   type FrontmatterBlock,
   isInsideFrontmatter,
@@ -98,7 +98,7 @@ export function completionsAt(content: string, line: number, col: number): Compl
     const partial = keyMatch[1] ?? '';
     const have = presentKeys(block);
     // A Dossier field written at the top level of a spec-shaped file is rejected by the parser.
-    const spec = isSpecShapedBlock(block);
+    const spec = isSpecShapedBlock(block) || parsesAsSpec(content);
     return FIELDS.filter((f) => !have.has(f.name) && (!spec || SPEC_TOP_LEVEL.has(f.name))).map(
       (f) => ({
         label: f.name,
@@ -115,6 +115,18 @@ export function completionsAt(content: string, line: number, col: number): Compl
 }
 
 const SPEC_TOP_LEVEL = new Set<string>(SPEC_TOP_LEVEL_FIELDS);
+
+/**
+ * Core's own verdict, for layouts the line scan does not read (e.g. a flow-style
+ * `metadata: {...}`). A file mid-edit often does not parse, hence the line scan first.
+ */
+function parsesAsSpec(content: string): boolean {
+  try {
+    return parseDossierContent(content).shape === 'spec';
+  } catch {
+    return false;
+  }
+}
 
 /** Completion on a `metadata` child line: `dossier.<field>` keys, and values for them. */
 function specCompletions(

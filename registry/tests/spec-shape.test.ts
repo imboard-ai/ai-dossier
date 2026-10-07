@@ -192,6 +192,42 @@ describe('checkPublishSignature', () => {
     });
     expect(result).toMatchObject({ status: 'not-checked', covers: 'frontmatter+body' });
   });
+
+  describe('malformed signature blocks are refused, never thrown', () => {
+    const parsed = parseDossierContent(legacyDossier('frontmatter+body'));
+    const valid = parsed.frontmatter.signature as unknown as Record<string, unknown>;
+    const withSignature = (signature: unknown) =>
+      checkPublishSignature({
+        ...parsed,
+        frontmatter: { ...parsed.frontmatter, signature } as typeof parsed.frontmatter,
+      });
+
+    it.each([
+      ['a string', 'not-a-block'],
+      ['an empty object', {}],
+      ['no algorithm', { ...valid, algorithm: undefined }],
+      ['an unknown algorithm', { ...valid, algorithm: 'rsa-pss' }],
+      ['a non-string public key', { ...valid, public_key: 42 }],
+      ['a non-string signature', { ...valid, signature: ['x'] }],
+      ['a KMS block without a key ARN', { ...valid, algorithm: 'ECDSA-SHA-256', key_id: 'k' }],
+      [
+        'a KMS block with a non-base64 value',
+        {
+          ...valid,
+          algorithm: 'ECDSA-SHA-256',
+          key_id: 'arn:aws:kms:us-east-1:000000000000:key/test',
+          signature: 'not base64!',
+        },
+      ],
+    ])('%s', async (_label, signature) => {
+      expect((await withSignature(signature)).status).toBe('invalid');
+    });
+
+    it('names re-signing as the fix for a legacy minisign key', async () => {
+      const result = await withSignature({ ...valid, public_key: 'RWTabcdef' });
+      expect(result.status === 'invalid' && result.reason).toMatch(/minisign.*re-sign/);
+    });
+  });
 });
 
 describe('POST /api/v1/dossiers with spec-shaped content', () => {

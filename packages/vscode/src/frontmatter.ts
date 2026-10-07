@@ -154,9 +154,12 @@ export function lineRange(lines: string[], line: number): Range {
 /** The frontmatter key on `line` when it is a top-level key, else null. */
 export function topLevelKeyOnLine(block: FrontmatterBlock, line: number): string | null {
   const text = block.lines[line] ?? '';
-  const m =
-    block.style === 'json' ? text.match(/^\s*"([^"]+)"\s*:/) : text.match(/^([A-Za-z_][\w-]*)\s*:/);
-  return m && isTopLevelLine(block, line) ? m[1] : null;
+  // YAML keys may be quoted (`"metadata":`), as JSON's always are.
+  const key =
+    block.style === 'json'
+      ? text.match(/^\s*"([^"]+)"\s*:/)?.[1]
+      : text.match(/^(["']?)([A-Za-z_][\w-]*)\1\s*:/)?.[2];
+  return key && isTopLevelLine(block, line) ? key : null;
 }
 
 /** Prefix of the `metadata` keys that carry Dossier fields in the spec shape (#1088). */
@@ -189,7 +192,11 @@ export function isMetadataChildLine(block: FrontmatterBlock, line: number): bool
   const text = block.lines[line] ?? '';
   if (!/^\s/.test(text)) return false;
   for (let i = span.keyLine + 1; i < span.end; i++) {
-    if ((block.lines[i] ?? '').trim() !== '') return indentOf(block.lines[i]) === indentOf(text);
+    // Blank and comment lines say nothing about where the keys sit.
+    const sibling = (block.lines[i] ?? '').trim();
+    if (sibling !== '' && !sibling.startsWith('#')) {
+      return indentOf(block.lines[i]) === indentOf(text);
+    }
   }
   return false;
 }
