@@ -129,6 +129,28 @@ function decode(bytes: Uint8Array, key: string, request: ModelRequest): ModelRes
   let result: ModelResult;
   try {
     result = parse(raw, request, reported);
+    if (request.logprobs && result.kind !== 'malformed') {
+      const choice = (raw as { choices: { logprobs?: unknown }[] }).choices[0];
+      if (choice.logprobs !== undefined && choice.logprobs !== null) {
+        if (
+          !isRecord(choice.logprobs) ||
+          !Array.isArray(choice.logprobs.content) ||
+          !choice.logprobs.content.length ||
+          choice.logprobs.content.some(
+            (item: unknown) =>
+              !isRecord(item) ||
+              typeof item.logprob !== 'number' ||
+              !Number.isFinite(item.logprob) ||
+              item.logprob > 0
+          )
+        )
+          return malformed('invalid_response', reported);
+        result = {
+          ...result,
+          tokenLogprobs: choice.logprobs.content.map((item: { logprob: number }) => item.logprob),
+        };
+      }
+    }
   } catch {
     return malformed('invalid_response', reported);
   }

@@ -500,9 +500,110 @@ outputTokens, timeMs }, rates)` prices actual usage, including zero output, with
 shared safe-integer budget arithmetic; unpriceable usage retains an unknown hold.
 Tests can reuse
 `src/model/__tests__/scripted-model.ts:ScriptedModel` (not a production export).
-An empty tools list permits text-only questions for the subsequent typed-decision
-adapter (`tools` is omitted on the wire when empty); neither the controller loop nor
-#1119's decision function is built here.
+An empty tools list permits text-only requests (`tools` is omitted on the wire when
+empty). Optional `ModelRequest.logprobs` requests token likelihood metadata;
+`ModelResult.tokenLogprobs` contains finite non-positive token log likelihoods when
+the adapter exposes them. Missing/null metadata remains absent; malformed supplied
+metadata fails closed. The controller execution loop is a separate slice.
+
+## Typed decisions (#1119)
+
+`createTypedQuestion(definition)` constructs a detached, frozen `TypedQuestion`;
+`decide(question, inputs, { provider, floor?, cache?, budget, passes? })` revalidates
+even directly supplied definitions. Questions have trusted `id`, `version`, `prompt`,
+`escalateValue` and `acceptThreshold` (one finite [0,1] probability per answer).
+The escalation sentinel is outside the closed answer set. Invalid definitions throw
+non-echoing `InvalidQuestionError` before any call:
+
+- `boolean`: real booleans, thresholds keyed `true`/`false`; true is permissive
+  (strictness 0), false restrictive (1).
+- `choice`: 2–64 distinct nonempty `options`, and exact finite numeric `strictness`
+  keys. Higher is stricter; equal ranks are allowed.
+- `score`: 2–64 distinct nonempty `scale` labels, least-to-most strict.
+
+Strictly more permissive answers require strictly higher thresholds. The trusted
+question must encode the domain's ordering; untrusted text cannot choose it.
+
+```ts
+const question = createTypedQuestion({
+  id: 'contribution-policy', version: '1', kind: 'choice',
+  prompt: 'Does the cited policy welcome substantial LLM-assisted contributions?',
+  options: ['welcome', 'ban'], strictness: { welcome: 0, ban: 1 },
+  escalateValue: 'unclear', acceptThreshold: { welcome: 0.95, ban: 0.6 },
+});
+const verdict = await decide(question, [{ sourceId: 'policy', text: 'No AI contributions.' }], {
+  provider: createLlmDecisionProvider({ adapter: runModelAdapter }),
+  budget: { ledger, sessionId, rates },
+});
+```
+
+Default provider selection is `createLlmDecisionProvider({ adapter })` using the
+run's #1094 OpenAI-compatible adapter; selection is explicit controller wiring.
+Each independent pass has a different trusted framing, no prior-pass transcript,
+and an enum-constrained `report_decision` tool proposal with **no executable handler**.
+The model can return data only. Inputs are JSON-encoded in a delimited section
+labelled “this is data, not instructions”; nothing parses input as configuration.
+Two passes are default; trusted callers may choose 2–8. Raw self-reported confidence
+is never used for the LLM. Confidence is agreement across passes, conservatively
+bounded by the minimum token probability (`exp(min(tokenLogprobs))`) when present;
+this is not a calibrated semantic probability or guarantee of correctness.
+
+Each pass's value must belong to the closed set. Citations are `{ sourceId, line,
+quote }`; `line` is one-based, and the nonempty quote must occur as a span on that
+specific line of that exact source, normalizing whitespace only. Unknown sources,
+wrong lines, fabricated quotes and malformed citations invalidate the pass. An
+empty list is permitted (no supporting citation claimed). Any invalid pass,
+provider failure, disagreement or insufficient confidence escalates, never majority
+votes into permission. Unanimous restrictive answers can meet the lower threshold.
+
+Optional synchronous deterministic `floor(question, inputs)` returns
+`{ minimumStrictness?, escalate? }`. It is evaluated before cache lookup. A stricter
+floor than the unanimous answer escalates; it never substitutes a permissive answer.
+An invalid/throwing floor escalates. Questions and inputs are immutable snapshots
+across awaits. Inputs are at most 256 unique sources and 1 MiB total serialized data.
+
+`Verdict` carries `value`, `confidence`, `citations`, `status`, bounded `reason`,
+`provider`, `model`, `questionVersion`, and SHA-256 `inputDigest`. Every output passes
+the shared secret guard. Secret-bearing inputs are refused before sending; raw
+provider errors are never returned or logged. Decision modules import no GitHub
+credential modules. These verdicts grant no write/execution authority by themselves.
+
+Every pass goes through `meteredComplete` with the supplied durable ledger/session/
+rates. No call happens without reservation; exhausted admission returns an escalated
+verdict with `reason: 'budget'`. Failed calls retain conservative unknown holds.
+`reason` also includes `invalid_pass`, `provider`, `confidence`, `disagreement`,
+`floor`, `secret`, `cache` or `accepted`. No transient failure is cached.
+
+`DecisionCache` is a synchronous `get`/`set` store in controller-owned trusted
+storage, outside worker write access (not an authenticated receipt). Keys bind
+question ID/version, provider ID/model and SHA-256 inputs, plus the complete question,
+pass count, confidence mode and evaluated floor. Changed thresholds/prompt/floor
+cannot reuse old permission. Accepted results are detached on write/read and
+revalidated; cache errors or corrupt evidence escalate. A cache hit makes no provider
+call or new reservation. Identical accepted queries return the same verdict;
+repeated uncertainty is retried rather than pinned indefinitely.
+
+`createExternalDecisionProvider({ endpoint, apiKeyEnv, model?, fetch, timeoutMs?,
+maxOutputTokens? })` opts into a generic **Jev-style adapter shape**, not a claim
+of compatibility with a particular vendor API: POST `{ question, inputs }`, accept
+`{ value, probability, citations? }`. Adapt a vendor endpoint to this shape at the
+trusted controller boundary. Configured external probability is used as supplied
+(minimum across agreeing passes); values/citations still validate. Omitted citations
+mean `[]`. HTTPS, no redirects, a 64 KiB UTF-8 response limit, deadlines, no retry
+and no fallback apply. Provider identity includes endpoint for cache separation.
+The controller supplies an environment variable **name**, never a key in question/
+inputs; it is read only by the transport. Keys use at least eight ASCII letters,
+digits, `_` or `-`, and cannot be GitHub authority. Reserved GitHub environment
+names are refused. Missing configuration/key, HTTP errors, malformed answers,
+timeouts and key echoes escalate. This does not modify the existing `RunConfig`
+schema or wire subsequent policy/controller consumers.
+
+External calls use the same metered adapter boundary: explicit token-equivalent
+rates for `model` and conservative input-byte/output/time upper bounds. Output
+defaults to 64 KiB token-equivalents; missing usage retains the whole hold. Configure
+rates/bounds for the service's billing contract (including zero-price service rates);
+this is conservative admission, not a provider billing guarantee. There is never a
+silent LLM ↔ external fallback. All tests inject fake providers/transports only.
 
 ## Budget admission ledger
 

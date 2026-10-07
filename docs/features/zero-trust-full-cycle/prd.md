@@ -124,6 +124,28 @@ No visual UI is in scope; this journey and the state contract replace wireframes
 - Never post automated reminders. Maintainer waits consume no worker/model compute. A status check occurs only on explicit user resume in MVP.
 - If requested to provide a plan before assignment, only credential-free inspection is allowed; implementation waits.
 
+Semantic classification of contribution policy, eligibility/competing work, scope/
+test integrity and feedback uses a shared **typed decision function** (#1119), not
+rules-only regex classification of prose. The owner selected the run's LLM via the
+#1094 provider-neutral adapter as the default (2026-10-07); configured external
+typed-decision services such as Jev-style endpoints are optional behind the same
+interface. Fixed trusted questions have closed boolean/choice/score answers,
+versioned definitions, strictness ordering and asymmetric per-answer confidence
+thresholds. Untrusted text stays data and cannot change questions, providers,
+thresholds or authority.
+
+Independent passes validate every answer and quoted source/line citation. A
+deterministic floor can only restrict or escalate; a permissive answer requires
+unanimous agreement, sufficient confidence and no stricter floor. Any invalid
+pass, disagreement, provider failure, exhausted budget or insufficient confidence
+escalates with no weaker fallback. LLM confidence uses agreement and token
+likelihoods where exposed, never self-reported confidence; an explicitly configured
+external service may supply its probability. Calls are budget-metered and accepted
+verdicts cached by question/version, provider/model and input digest (also binding
+question/floor/pass configuration). Reasons, verdicts and logs remain secret-free.
+These semantic judgments do not replace deterministic execution/write authority
+checks (§5.4), and integrating each consumer remains its own implementation slice.
+
 Example engagement text, adapted to the project's conventions:
 
 > I'd like to work on this issue using substantial LLM assistance through ai-dossier. My proposed approach is [approach], validated with [existing tests] and a focused regression test where appropriate. Would you welcome this contribution, and should I be assigned before proceeding?
@@ -341,6 +363,7 @@ These gates establish release readiness, not market validation. Failure never pe
 - Respect OSS conventions, disclose heavy LLM use, request assignment when appropriate, add meaningful regression coverage, minimize noise.
 - Fully autonomous contributor/student execution with optional intervention and model selection, up to publication.
 - 2026-10-06: hybrid hand-off (option A in the [decision record](decisions/github-credentials.md)). The broker does every write it can with short-lived, repository-limited credentials; the contributor submits each upstream comment and PR action with one click, and creates the fork once by hand. Primary reason: a person reviews and owns every public submission. Secondary: GitHub refuses App writes to upstreams that have not installed the App.
+- 2026-10-07: typed decisions (#1119), with the run's LLM through #1094 as default and optional explicitly configured external services. Model-assisted prose classification replaces rules-only classification for policy, eligibility, review and feedback; uncertain judgments escalate. Deterministic floors and authority enforcement remain mandatory. The owner accepts the default's slower and costlier independent calls.
 - Capability investment separated from incremental operating spend; no arbitrary five-issue growth gate.
 - User-controlled infrastructure initially; own contributor identity; durable maintainer waits; resumable revisions; configured ceilings.
 - Initial completion at PR submission; maintainer owns merge.
