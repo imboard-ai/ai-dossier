@@ -57,11 +57,15 @@ import {
 
 #### `parseDossierContent(content: string): ParsedDossier`
 
-Parse a dossier content string into frontmatter and body. Accepts both `---dossier` (JSON/YAML) and standard `---` (YAML) delimiters.
+Parse a dossier content string into frontmatter and body. Accepts both `---dossier` (JSON/YAML) and standard `---` (YAML) delimiters, in either frontmatter shape: legacy (every Dossier field flat at the top level) or spec (Agent Skills fields `name`, `description`, `license`, `compatibility`, `allowed-tools` at the top level, every other field under `metadata` as `dossier.<field>` strings). `frontmatter` is always the same flat logical object; `rawFrontmatter` is the frontmatter as it sits on disk and `shape` says which layout it uses. Throws a `SpecShapeError` (message prefixed `Invalid spec-shaped frontmatter:`) when a spec-shaped frontmatter is ambiguous — see `fromSpecFrontmatter`.
 
 ```typescript
-const { frontmatter, body, raw } = parseDossierContent(content);
+const { frontmatter, body, raw, rawFrontmatter, shape } = parseDossierContent(content);
 ```
+
+#### `toSpecFrontmatter(logical) / fromSpecFrontmatter(spec)`
+
+Convert flat logical frontmatter to the spec shape and back. Values under `metadata` are strings: a string is stored as-is unless it would itself parse as JSON (then it is JSON-quoted), and any other value is stored as canonical JSON (`encodeSpecValue` / `decodeSpecValue`), so `fromSpecFrontmatter(toSpecFrontmatter(x))` equals `x`. `fromSpecFrontmatter` throws `SpecShapeError` on anything ambiguous: a Dossier field at the top level, `dossier.<agent-skills-field>`, or a non-string metadata value.
 
 #### `parseDossierFile(filePath: string): ParsedDossier`
 
@@ -105,6 +109,7 @@ const result = verifyIntegrity(body, frontmatter.checksum?.hash);
 
 ```typescript
 import {
+  buildVerificationPayload,
   verifySignature,
   verifyWithEd25519,
   verifyWithKms,
@@ -120,9 +125,14 @@ import {
 Verify a signature using the verifier registry. Automatically selects the correct verifier based on `signature.algorithm`.
 
 ```typescript
-const result = await verifySignature(body, frontmatter.signature);
+const parsed = parseDossierContent(content);
+const result = await verifySignature(buildVerificationPayload(parsed), parsed.frontmatter.signature);
 console.log(result.valid); // true | false
 ```
+
+#### `buildVerificationPayload(parsed: ParsedDossier): string`
+
+The bytes a parsed dossier's signature must verify against. Selects the scheme from `signature.covers` — absent: v1 (body only); `frontmatter+body`: v2 (flat frontmatter + body); `spec-frontmatter+body`: v3 (on-disk spec-shaped frontmatter minus `metadata["dossier.signature"]`, + body) — and binds it to the file's shape: spec-shaped files verify only under v3, legacy files only under v1/v2. Throws on an unsigned dossier, an unknown `covers`, or a scheme/shape mismatch; treat a throw as a failed verification.
 
 #### `verifyWithEd25519(content: string, signature: string, publicKey: string): VerifyResult`
 
@@ -251,7 +261,7 @@ All TypeScript types are exported from the package root:
 import type {
   // Core types
   DossierFrontmatter,   // Frontmatter fields (title, version, checksum, signature, ...)
-  ParsedDossier,        // { frontmatter, body, raw }
+  ParsedDossier,        // { frontmatter, body, raw, rawFrontmatter, shape }
   DossierStatus,        // "Draft" | "Stable" | "Deprecated" | "Experimental"
   DossierListItem,      // Summary for listing dossiers
 

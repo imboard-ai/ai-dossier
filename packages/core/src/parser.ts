@@ -7,6 +7,12 @@
  */
 
 import matter from 'gray-matter';
+import {
+  fromSpecFrontmatter,
+  hasYamlMergeKey,
+  isSpecShapedFrontmatter,
+  SpecShapeError,
+} from './spec-shape';
 import type { DossierFrontmatter, ParsedDossier } from './types';
 import { getErrorMessage } from './utils/errors';
 import { readFileIfExists } from './utils/fs';
@@ -41,7 +47,8 @@ const MATTER_OPTIONS = {
 /**
  * Parse dossier content into frontmatter and body.
  *
- * Accepts both `---dossier` (JSON/YAML) and standard `---` (YAML) frontmatter.
+ * Accepts both `---dossier` (JSON/YAML) and standard `---` (YAML) frontmatter,
+ * in either the legacy flat shape or the spec shape (see `spec-shape.ts`).
  */
 export function parseDossierContent(content: string): ParsedDossier {
   if (!content || typeof content !== 'string') {
@@ -88,10 +95,31 @@ export function parseDossierContent(content: string): ParsedDossier {
     }
   }
 
+  // Spec-shaped files (Agent Skills layout, #1088) are read into the same flat
+  // logical object as legacy ones, so no consumer needs to know the shape. The
+  // on-disk object is kept alongside for v3 signature verification.
+  const rawFrontmatter = parsed.data as Record<string, unknown>;
+  const shape = isSpecShapedFrontmatter(rawFrontmatter) ? 'spec' : 'legacy';
+  let frontmatter = rawFrontmatter as DossierFrontmatter;
+  if (shape === 'spec') {
+    try {
+      if (hasYamlMergeKey(parsed.matter)) {
+        throw new SpecShapeError('YAML merge keys (<<) are not allowed');
+      }
+      frontmatter = fromSpecFrontmatter(rawFrontmatter) as DossierFrontmatter;
+    } catch (err) {
+      throw new SpecShapeError(`Invalid spec-shaped frontmatter: ${getErrorMessage(err)}`, {
+        cause: err,
+      });
+    }
+  }
+
   return {
-    frontmatter: parsed.data as DossierFrontmatter,
+    frontmatter,
     body: parsed.content,
     raw: content,
+    rawFrontmatter,
+    shape,
   };
 }
 

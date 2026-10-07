@@ -1,5 +1,6 @@
 import { calculateChecksum } from '../checksum';
 import { parseDossierContent } from '../parser';
+import { SPEC_SHAPE_WRITE_UNSUPPORTED } from '../spec-shape';
 import type { FormatOptions, FormatResult } from './types';
 import { defaultFormatOptions } from './types';
 
@@ -105,6 +106,9 @@ export function formatDossierContent(
 ): FormatResult {
   const opts: FormatOptions = { ...defaultFormatOptions, ...options };
   const parsed = parseDossierContent(content);
+  if (parsed.shape === 'spec') {
+    throw new Error(SPEC_SHAPE_WRITE_UNSUPPORTED);
+  }
 
   let frontmatter: Record<string, unknown> = parsed.frontmatter as Record<string, unknown>;
 

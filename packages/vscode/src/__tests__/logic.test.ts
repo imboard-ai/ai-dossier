@@ -5,6 +5,7 @@ import { completionsAt, hoverAt } from '../completion';
 import { computeDiagnostics } from '../diagnostics';
 import { dryRunContent, formatDryRun } from '../dryrun';
 import { findFieldRange, locateFrontmatter } from '../frontmatter';
+import { FIELDS } from '../schema-info';
 import { buildDossier, slugify } from '../template';
 import { verifyContent } from '../verify';
 
@@ -129,6 +130,13 @@ describe('completion', () => {
   });
 });
 
+describe('schema-info', () => {
+  it('still marks the legacy required fields as required', () => {
+    const required = FIELDS.filter((f) => f.required).map((f) => f.name);
+    expect(required).toEqual(expect.arrayContaining(['title', 'version', 'risk_level']));
+  });
+});
+
 describe('hover', () => {
   it('describes a top-level key with its enum', () => {
     const line = GOOD.split('\n').findIndex((l) => l.includes('"risk_level"'));
@@ -169,6 +177,18 @@ describe('verify', () => {
     const r = await verifyContent(example('test/hello-world.ds.md'), new Map());
     const sig = r.checks.find((c) => c.name === 'Signature');
     expect(['pass', 'warn']).toContain(sig?.status);
+  });
+
+  it('reports an unknown signature scheme as a failed check instead of throwing', async () => {
+    const tampered = example('test/hello-world.ds.md').replace(
+      '"signature": {',
+      '"signature": {\n    "covers": "something-new",'
+    );
+    const r = await verifyContent(tampered, new Map());
+    const sig = r.checks.find((c) => c.name === 'Signature');
+    expect(sig?.status).toBe('fail');
+    expect(sig?.message).toMatch(/Unsupported signature coverage/);
+    expect(r.ok).toBe(false);
   });
 });
 

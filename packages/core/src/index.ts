@@ -167,13 +167,29 @@ export {
 export type { SignatureCoverage } from './signing-payload';
 export {
   buildSignedPayload,
+  buildVerificationPayload,
   canonicalizeFrontmatter,
+  canonicalizeSpecFrontmatter,
   isSupportedPublicKey,
   normalizePublicKey,
   publicKeysMatch,
+  SIGNATURE_COVERAGES,
   signatureCoverage,
   toSpkiPem,
 } from './signing-payload';
+// Spec-shape adapter (Agent Skills frontmatter layout, #1088)
+export type { FrontmatterShape } from './spec-shape';
+export {
+  DOSSIER_METADATA_PREFIX,
+  decodeSpecValue,
+  encodeSpecValue,
+  fromSpecFrontmatter,
+  isSpecShapedFrontmatter,
+  SPEC_SHAPE_WRITE_UNSUPPORTED,
+  SPEC_TOP_LEVEL_FIELDS,
+  SpecShapeError,
+  toSpecFrontmatter,
+} from './spec-shape';
 // Trace config resolver (precedence: env > project > user > defaults)
 export type {
   ConfigLayer as TraceConfigLayer,

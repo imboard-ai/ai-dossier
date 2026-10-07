@@ -32,7 +32,27 @@ vi.mock('../../helpers', async (importOriginal) => {
 const mockedFs = vi.mocked(fs);
 const dossierContent = makeDossier();
 
+const specShaped = '---\nname: x\ndescription: d\nmetadata:\n  dossier.title: T\n---\n# Body\n';
+
 describe('sign command', () => {
+  // Until the writers learn the spec shape (#1123), rewriting the logical view
+  // would silently turn the file back into the legacy layout.
+  it('refuses to sign a spec-shaped dossier and writes nothing', async () => {
+    mockedFs.existsSync.mockReturnValue(true);
+    mockedFs.readFileSync.mockReturnValue(specShaped);
+    mockedFs.writeFileSync.mockReset();
+
+    const program = createTestProgram();
+    registerSignCommand(program);
+
+    await expect(
+      program.parseAsync(['node', 'dossier', 'sign', 'test.ds.md', '--method', 'kms'])
+    ).rejects.toThrow();
+
+    expect(console.log).toHaveBeenCalledWith(expect.stringContaining('spec-shaped'));
+    expect(mockedFs.writeFileSync).not.toHaveBeenCalled();
+  });
+
   it('should exit when file not found', async () => {
     mockedFs.existsSync.mockReturnValue(false);
 

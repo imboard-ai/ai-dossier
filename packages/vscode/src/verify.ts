@@ -4,11 +4,10 @@
  * bundled; they are reported as unverifiable here rather than as failures.
  */
 import {
-  buildSignedPayload,
+  buildVerificationPayload,
   findTrustedIdentifier,
   parseDossierContent,
   type SignatureResult,
-  signatureCoverage,
   verifyIntegrity,
   verifySignature,
 } from '@ai-dossier/core';
@@ -27,7 +26,8 @@ export async function verifyContent(
   content: string,
   trustedKeys: Map<string, string>
 ): Promise<VerifyReport> {
-  const { frontmatter, body } = parseDossierContent(content);
+  const parsed = parseDossierContent(content);
+  const { frontmatter, body } = parsed;
   const checks: VerifyReport['checks'] = [];
 
   const integrity = verifyIntegrity(body, frontmatter.checksum?.hash);
@@ -47,12 +47,10 @@ export async function verifyContent(
       message: 'AWS KMS signature: not verifiable in the editor. Run `ai-dossier verify <file>`.',
     });
   } else {
-    const payload = buildSignedPayload(
-      frontmatter as unknown as Record<string, unknown>,
-      body,
-      signatureCoverage(sig as { covers?: string })
-    );
     try {
+      // Picks v1/v2/v3 from `covers`; throws on an unknown scheme or one that does
+      // not match the file's shape, which lands in the failed check below.
+      const payload = buildVerificationPayload(parsed);
       const result = await verifySignature(payload, sig as SignatureResult);
       if (!result.valid) {
         checks.push({

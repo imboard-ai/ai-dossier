@@ -7,6 +7,7 @@ import {
   Ed25519Signer,
   KmsSigner,
   parseDossierContent,
+  SPEC_SHAPE_WRITE_UNSUPPORTED,
 } from '@ai-dossier/core';
 import type { Command } from 'commander';
 import { OFFICIAL_KMS_KEYS } from '../helpers';
@@ -60,6 +61,10 @@ export function registerSignCommand(program: Command): void {
           parsed = parseDossierContent(content);
         } catch (err: unknown) {
           console.log(`\n❌ Failed to parse dossier: ${(err as Error).message}`);
+          process.exit(1);
+        }
+        if (parsed.shape === 'spec') {
+          console.log(`\n❌ ${SPEC_SHAPE_WRITE_UNSUPPORTED}`);
           process.exit(1);
         }
         const { frontmatter, body } = parsed;
