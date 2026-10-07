@@ -1,99 +1,24 @@
----dossier
-{
-  "dossier_schema_version": "1.0.0",
-  "title": "Review Issue — Parallel Code Review",
-  "version": "1.17.1",
-  "protocol_version": "1.0",
-  "status": "Stable",
-  "last_updated": "2026-09-29",
-  "objective": "Run a tiered set of report-only review agents (DRY, Security, Supportability, Maintainability, Documentation, Convention/Contract, Conformance, Visual Conformance) on the branch diff, run a validity gate, then apply surviving fixes serially; in aggregate mode (batch_id set), review the combined batch diff once — interaction-only (one agent) when every member already passed a full-tier review, the full dimension set otherwise — and push fixes before ONE foreground gate",
-  "category": [
-    "development"
-  ],
-  "tags": [
-    "issue",
-    "workflow",
-    "git",
-    "github",
-    "review",
-    "security",
-    "code-quality"
-  ],
-  "risk_level": "medium",
-  "requires_approval": false,
-  "risk_factors": [
-    "modifies_files",
-    "network_access",
-    "database_operations",
-    "executes_external_code",
-    "requires_credentials"
-  ],
-  "inputs": {
-    "required": [],
-    "optional": [
-      {
-        "name": "issue_number",
-        "description": "GitHub issue number the review belongs to; required to post the runstate milestone",
-        "type": "number"
-      },
-      {
-        "name": "run_id",
-        "description": "Runstate run id minted by gate-issue; pass through unchanged. In aggregate mode this is the batch's run id (minted against the anchor issue).",
-        "type": "string"
-      },
-      {
-        "name": "base_branch",
-        "description": "Base branch the batch branch (aggregate mode) or issue branch (per-issue mode) diverged from; scopes the diff. Default: main.",
-        "type": "string"
-      },
-      {
-        "name": "batch_id",
-        "description": "Batch id slug (e.g. b-2026-08-29-01). When set, run AGGREGATE MODE: review the combined batch diff on the batch branch against the batch ANCHOR issue (issue_number is the anchor number). Agents 7 and 8 never run in aggregate mode — per-member conformance is slot-cycle's job, and no browser pass happens on the batch path at all. Unset = ordinary per-issue review.",
-        "type": "string"
-      },
-      {
-        "name": "members",
-        "description": "Aggregate mode only: comma-separated member issue numbers (e.g. 101,102,104). Default: derived from the batch branch's per-issue boundary commits.",
-        "type": "string"
-      },
-      {
-        "name": "member_verdicts",
-        "description": "Aggregate mode only: the per-member per-AC conformance verdicts produced by slot-cycles (Agent 7's format: 'ACn <criterion> — met <file:line> | not-met <why> | unverifiable <what test would prove it>'), one member's list after another. Rolled up for the milestone and passed through to ship-issue batch mode for the PR body's per-member sections.",
-        "type": "string"
-      },
-      {
-        "name": "member_risks",
-        "description": "Aggregate mode only: comma-separated classify-record risk levels parallel to members= (e.g. low,low,med). Default: derived from each member's phase=classify milestone comment; an unreadable risk counts as high. A list whose length differs from members= is ignored entirely — fall back to derivation (misaligned risk data must never lower a tier).",
-        "type": "string"
-      }
-    ]
-  },
-  "authors": [
-    {
-      "name": "Yuval Dimnik"
-    }
-  ],
-  "name": "review-issue",
-  "destructive_operations": [
-    "Agent 8 launches the project's app through its declared environment.start capability and drives it in a headless browser",
-    "Agent 8 writes to the data store the app is pointed at — only when verify.ui has asserted it is a scratch/test instance; otherwise every mutating flow is reported unverifiable and none is driven",
-    "Applies review fixes to files in the worktree (Step 4)",
-    "Aggregate mode only: when the batch branch no longer merges into the moved base, rebases it before the review and force-pushes it with --force-with-lease"
-  ],
-  "checksum": {
-    "algorithm": "sha256",
-    "hash": "fddb5c4e59968060bd473c1d2d5c559da383da372723ef5f5bf613dcbbd6424c"
-  },
-  "signature": {
-    "algorithm": "ed25519",
-    "signature": "IuqwWt7JFT08AE04dL0iIdpg0uusPtHgSSxFzP1Z6OP0x7k0Zv488rwUvCfPFO/La2IeWV6A9Wah4q05oAS3BQ==",
-    "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-29T15:23:06.684Z",
-    "covers": "frontmatter+body",
-    "key_id": "imboard-ai",
-    "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
-  }
-}
+---
+name: 'review-issue'
+description: 'Run a tiered set of report-only review agents (DRY, Security, Supportability, Maintainability, Documentation, Convention/Contract, Conformance, Visual Conformance) on the branch diff, run a validity gate, then apply surviving fixes serially; in aggregate mode (batch_id set), review the combined batch diff once — interaction-only (one agent) when every member already passed a full-tier review, the full dimension set otherwise — and push fixes before ONE foreground gate'
+metadata:
+  dossier.dossier_schema_version: '1.0.0'
+  dossier.title: 'Review Issue — Parallel Code Review'
+  dossier.version: '1.17.3'
+  dossier.protocol_version: '"1.0"'
+  dossier.status: 'Stable'
+  dossier.last_updated: '2026-10-06'
+  dossier.objective: 'Run a tiered set of report-only review agents (DRY, Security, Supportability, Maintainability, Documentation, Convention/Contract, Conformance, Visual Conformance) on the branch diff, run a validity gate, then apply surviving fixes serially; in aggregate mode (batch_id set), review the combined batch diff once — interaction-only (one agent) when every member already passed a full-tier review, the full dimension set otherwise — and push fixes before ONE foreground gate'
+  dossier.category: '["development"]'
+  dossier.tags: '["issue","workflow","git","github","review","security","code-quality"]'
+  dossier.risk_level: 'medium'
+  dossier.risk_factors: '["modifies_files","network_access","database_operations","executes_external_code","requires_credentials"]'
+  dossier.requires_approval: 'false'
+  dossier.destructive_operations: '["Agent 8 launches the project''s app through its declared environment.start capability and drives it in a headless browser","Agent 8 writes to the data store the app is pointed at — only when verify.ui has asserted it is a scratch/test instance; otherwise every mutating flow is reported unverifiable and none is driven","Applies review fixes to files in the worktree (Step 4)","Aggregate mode only: when the batch branch no longer merges into the moved base, rebases it before the review and force-pushes it with --force-with-lease"]'
+  dossier.inputs: '{"optional":[{"description":"GitHub issue number the review belongs to; required to post the runstate milestone","name":"issue_number","type":"number"},{"description":"Runstate run id minted by gate-issue; pass through unchanged. In aggregate mode this is the batch''s run id (minted against the anchor issue).","name":"run_id","type":"string"},{"description":"Base branch the batch branch (aggregate mode) or issue branch (per-issue mode) diverged from; scopes the diff. Default: main.","name":"base_branch","type":"string"},{"description":"Batch id slug (e.g. b-2026-08-29-01). When set, run AGGREGATE MODE: review the combined batch diff on the batch branch against the batch ANCHOR issue (issue_number is the anchor number). Agents 7 and 8 never run in aggregate mode — per-member conformance is slot-cycle''s job, and no browser pass happens on the batch path at all. Unset = ordinary per-issue review.","name":"batch_id","type":"string"},{"description":"Aggregate mode only: comma-separated member issue numbers (e.g. 101,102,104). Default: derived from the batch branch''s per-issue boundary commits.","name":"members","type":"string"},{"description":"Aggregate mode only: the per-member per-AC conformance verdicts produced by slot-cycles (Agent 7''s format: ''ACn <criterion> — met <file:line> | not-met <why> | unverifiable <what test would prove it>''), one member''s list after another. Rolled up for the milestone and passed through to ship-issue batch mode for the PR body''s per-member sections.","name":"member_verdicts","type":"string"},{"description":"Aggregate mode only: comma-separated classify-record risk levels parallel to members= (e.g. low,low,med). Default: derived from each member''s phase=classify milestone comment; an unreadable risk counts as high. A list whose length differs from members= is ignored entirely — fall back to derivation (misaligned risk data must never lower a tier).","name":"member_risks","type":"string"}],"required":[]}'
+  dossier.authors: '[{"name":"Yuval Dimnik"}]'
+  dossier.checksum: '{"algorithm":"sha256","hash":"fddb5c4e59968060bd473c1d2d5c559da383da372723ef5f5bf613dcbbd6424c"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"fg4hrAxlktOgHCSFPllBCbAml91Izw3CUZkkwATnNkNOiKLH96PYgyp0sxFppJIOH4nDvmYC1neIK1AllhosDQ==","signed_at":"2026-10-07T12:01:15.213Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Review Issue — Parallel Code Review

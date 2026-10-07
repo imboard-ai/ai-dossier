@@ -1,96 +1,25 @@
----dossier
-{
-  "dossier_schema_version": "1.0.0",
-  "protocol_version": "1.0",
-  "name": "publish-dossier",
-  "title": "Publish an imboard-ai Dossier or Skill",
-  "version": "1.1.6",
-  "status": "Stable",
-  "last_updated": "2026-10-06",
-  "objective": "Edit, sign with the team key, lint, verify and publish a dossier or skill to the imboard-ai registry namespace, then refresh every machine — the exact recipe, so no agent rediscovers the signing and login walls",
-  "category": [
-    "development",
-    "documentation"
-  ],
-  "tags": [
-    "dossier",
-    "registry",
-    "publish",
-    "sign",
-    "ed25519",
-    "skills",
-    "imboard-ai",
-    "meta"
-  ],
-  "risk_level": "low",
-  "requires_approval": false,
-  "risk_factors": [
-    "network_access",
-    "requires_credentials"
-  ],
-  "tools_required": [
-    {
-      "name": "ai-dossier",
-      "description": "Dossier CLI 0.9.1+",
-      "check_command": "ai-dossier --version"
-    },
-    {
-      "name": "ssh",
-      "description": "To refresh sibling machines over ssh",
-      "check_command": "ssh -V"
-    }
-  ],
-  "inputs": {
-    "required": [
-      {
-        "name": "target",
-        "description": "Registry name to update (e.g. imboard-ai/git/ship-issue) or a new local .ds.md path",
-        "type": "string",
-        "example": "imboard-ai/git/ship-issue"
-      }
-    ],
-    "optional": [
-      {
-        "name": "bump",
-        "description": "patch | minor | major",
-        "type": "string",
-        "default": "patch"
-      },
-      {
-        "name": "changelog",
-        "description": "One-line changelog for the registry",
-        "type": "string"
-      }
-    ]
-  },
-  "outputs": {
-    "files": [
-      {
-        "path": "<work-dir>/<name>.ds.md",
-        "description": "The signed file that was published",
-        "format": "markdown"
-      }
-    ]
-  },
-  "authors": [
-    {
-      "name": "Yuval Dimnik"
-    }
-  ],
-  "checksum": {
-    "algorithm": "sha256",
-    "hash": "4f0a7985b23a992fe9a244da35feadde9bb7b65314401bbb730636e4e0c05b23"
-  },
-  "signature": {
-    "algorithm": "ed25519",
-    "signature": "zMMDzGj6n2tLXsapWPaUPUkxd4CCJsjaMbU4E5s3TiwFjEs+rnqLAguWqGAwHxTkwVGyQmITClnspe2OnIPlCQ==",
-    "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-10-06T06:26:26.237Z",
-    "covers": "frontmatter+body",
-    "key_id": "imboard-ai",
-    "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
-  }
-}
+---
+name: 'publish-dossier'
+description: 'Edit, sign with the team key, lint, verify and publish a dossier or skill to the imboard-ai registry namespace, then refresh every machine — the exact recipe, so no agent rediscovers the signing and login walls'
+metadata:
+  dossier.dossier_schema_version: '1.0.0'
+  dossier.title: 'Publish an imboard-ai Dossier or Skill'
+  dossier.version: '1.1.7'
+  dossier.protocol_version: '"1.0"'
+  dossier.status: 'Stable'
+  dossier.last_updated: '2026-10-06'
+  dossier.objective: 'Edit, sign with the team key, lint, verify and publish a dossier or skill to the imboard-ai registry namespace, then refresh every machine — the exact recipe, so no agent rediscovers the signing and login walls'
+  dossier.category: '["development","documentation"]'
+  dossier.tags: '["dossier","registry","publish","sign","ed25519","skills","imboard-ai","meta"]'
+  dossier.tools_required: '[{"check_command":"ai-dossier --version","description":"Dossier CLI 0.9.1+","name":"ai-dossier"},{"check_command":"ssh -V","description":"To refresh sibling machines over ssh","name":"ssh"}]'
+  dossier.risk_level: 'low'
+  dossier.risk_factors: '["network_access","requires_credentials"]'
+  dossier.requires_approval: 'false'
+  dossier.inputs: '{"optional":[{"default":"patch","description":"patch | minor | major","name":"bump","type":"string"},{"description":"One-line changelog for the registry","name":"changelog","type":"string"}],"required":[{"description":"Registry name to update (e.g. imboard-ai/git/ship-issue) or a new local .ds.md path","example":"imboard-ai/git/ship-issue","name":"target","type":"string"}]}'
+  dossier.outputs: '{"files":[{"description":"The signed file that was published","format":"markdown","path":"<work-dir>/<name>.ds.md"}]}'
+  dossier.authors: '[{"name":"Yuval Dimnik"}]'
+  dossier.checksum: '{"algorithm":"sha256","hash":"4f0a7985b23a992fe9a244da35feadde9bb7b65314401bbb730636e4e0c05b23"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"r/XUeWwwhKgrUPHkfMHUoaypFp5aZ8ZnOwyhxpOtDJYEyNwBWbXkt7ENKiV1VPqFoWGVbjqdJGg/CyUT6WoCCw==","signed_at":"2026-10-07T12:04:02.263Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Publish an imboard-ai Dossier or Skill

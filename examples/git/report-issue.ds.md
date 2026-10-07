@@ -1,103 +1,23 @@
----dossier
-{
-  "dossier_schema_version": "1.0.0",
-  "name": "report-issue",
-  "title": "Report Issue — Rich Completion Summary",
-  "version": "1.8.1",
-  "protocol_version": "1.0",
-  "status": "Stable",
-  "objective": "Generate a comprehensive completion report covering what changed, user-facing implications, dev/ops implications, and review results — posted to both conversation and PR comment; in batch mode (batch_id set): one batch report on the anchor plus one short completion comment per member issue",
-  "category": [
-    "development"
-  ],
-  "tags": [
-    "issue",
-    "workflow",
-    "git",
-    "github",
-    "report",
-    "summary"
-  ],
-  "risk_level": "low",
-  "risk_factors": [
-    "network_access"
-  ],
-  "requires_approval": false,
-  "inputs": {
-    "required": [
-      {
-        "name": "issue_number",
-        "description": "GitHub issue number",
-        "type": "number"
-      },
-      {
-        "name": "pr_number",
-        "description": "PR number that was merged",
-        "type": "number"
-      }
-    ],
-    "optional": [
-      {
-        "name": "base_branch",
-        "description": "The branch the PR was merged into",
-        "type": "string",
-        "default": "main"
-      },
-      {
-        "name": "review_fixed",
-        "description": "List of findings fixed in-place during review",
-        "type": "array",
-        "default": []
-      },
-      {
-        "name": "review_clean",
-        "description": "List of review categories with zero findings",
-        "type": "array",
-        "default": []
-      },
-      {
-        "name": "cleanup_method",
-        "description": "How the worktree was cleaned up: pool_returned, worktree_removed, or skipped",
-        "type": "string",
-        "default": "worktree_removed"
-      },
-      {
-        "name": "run_id",
-        "description": "Runstate run id minted by gate-issue; pass through unchanged",
-        "type": "string"
-      },
-      {
-        "name": "batch_id",
-        "description": "Batch id slug. When set, run the BATCH VARIANT: one batch report on the anchor + one short completion comment per member issue. issue_number is the batch ANCHOR; pr_number is the batch PR. Unset = ordinary per-issue report.",
-        "type": "string"
-      },
-      {
-        "name": "members",
-        "description": "Batch mode only: comma-separated member issue numbers (e.g. 101,102,104). Falls back to the PR body's 'Closes #N' list when omitted.",
-        "type": "string"
-      }
-    ]
-  },
-  "authors": [
-    {
-      "name": "Yuval Dimnik"
-    }
-  ],
-  "last_updated": "2026-09-29",
-  "checksum": {
-    "algorithm": "sha256",
-    "hash": "6e5c9746394ddc54fc91f804073c0c697a83da65ef90991595e17d0f2f34b12d"
-  },
-  "signature": {
-    "algorithm": "ed25519",
-    "signature": "qAPlENkzJKJu9qxfXLkyXmw2poNxhBx7Tqz/+kMoCRBy0BatN0OPdtATnWcoGcBN1S/C8miD1zpnuS32FUYYBQ==",
-    "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-29T15:23:11.979Z",
-    "covers": "frontmatter+body",
-    "key_id": "imboard-ai",
-    "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
-  }
-}
+---
+name: 'report-issue'
+description: 'Generate a comprehensive completion report covering what changed, user-facing implications, dev/ops implications, and review results — posted to both conversation and PR comment; in batch mode (batch_id set): one batch report on the anchor plus one short completion comment per member issue'
+metadata:
+  dossier.dossier_schema_version: '1.0.0'
+  dossier.title: 'Report Issue — Rich Completion Summary'
+  dossier.version: '1.8.2'
+  dossier.protocol_version: '"1.0"'
+  dossier.status: 'Stable'
+  dossier.last_updated: '2026-09-29'
+  dossier.objective: 'Generate a comprehensive completion report covering what changed, user-facing implications, dev/ops implications, and review results — posted to both conversation and PR comment; in batch mode (batch_id set): one batch report on the anchor plus one short completion comment per member issue'
+  dossier.category: '["development"]'
+  dossier.tags: '["issue","workflow","git","github","report","summary"]'
+  dossier.risk_level: 'low'
+  dossier.risk_factors: '["network_access"]'
+  dossier.requires_approval: 'false'
+  dossier.inputs: '{"optional":[{"default":"main","description":"The branch the PR was merged into","name":"base_branch","type":"string"},{"default":[],"description":"List of findings fixed in-place during review","name":"review_fixed","type":"array"},{"default":[],"description":"List of review categories with zero findings","name":"review_clean","type":"array"},{"default":"worktree_removed","description":"How the worktree was cleaned up: pool_returned, worktree_removed, or skipped","name":"cleanup_method","type":"string"},{"description":"Runstate run id minted by gate-issue; pass through unchanged","name":"run_id","type":"string"},{"description":"Batch id slug. When set, run the BATCH VARIANT: one batch report on the anchor + one short completion comment per member issue. issue_number is the batch ANCHOR; pr_number is the batch PR. Unset = ordinary per-issue report.","name":"batch_id","type":"string"},{"description":"Batch mode only: comma-separated member issue numbers (e.g. 101,102,104). Falls back to the PR body''s ''Closes #N'' list when omitted.","name":"members","type":"string"}],"required":[{"description":"GitHub issue number","name":"issue_number","type":"number"},{"description":"PR number that was merged","name":"pr_number","type":"number"}]}'
+  dossier.authors: '[{"name":"Yuval Dimnik"}]'
+  dossier.checksum: '{"algorithm":"sha256","hash":"6e5c9746394ddc54fc91f804073c0c697a83da65ef90991595e17d0f2f34b12d"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"wP8EV2UnDg4Y+rasj78Ll0GApsV385GzAnugSFLvHkbyzktsy/ntXLeiEabPz5daH1r917kneeYe4fbLV54vDw==","signed_at":"2026-10-07T12:01:04.931Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Report Issue — Rich Completion Summary

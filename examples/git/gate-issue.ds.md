@@ -1,67 +1,25 @@
----dossier
-{
-  "dossier_schema_version": "1.0.0",
-  "name": "gate-issue",
-  "title": "Gate Issue — Pre-Flight Safety Check",
-  "version": "1.6.1",
-  "protocol_version": "1.0",
-  "status": "Stable",
-  "last_updated": "2026-08-29",
-  "objective": "Lightweight safety gate that checks issue metadata for hard blocks and soft warnings before starting any workflow; recognizes classify, slot-mode, and batch-anchor runstate trails so a full-cycle run never resumes into a nonexistent batch",
-  "category": [
-    "development"
-  ],
-  "tags": [
-    "issue",
-    "workflow",
-    "git",
-    "github",
-    "gate"
-  ],
-  "risk_level": "low",
-  "risk_factors": [
-    "network_access"
-  ],
-  "requires_approval": false,
-  "inputs": {
-    "required": [
-      {
-        "name": "issue_number",
-        "description": "GitHub issue number to check",
-        "type": "number"
-      }
-    ],
-    "optional": []
-  },
-  "authors": [
-    {
-      "name": "Yuval Dimnik"
-    }
-  ],
-  "content_scope": "references-external",
-  "external_references": [
-    {
-      "url": "https://cli.github.com/",
-      "description": "GitHub CLI documentation",
-      "type": "documentation",
-      "trust_level": "trusted",
-      "required": false
-    }
-  ],
-  "checksum": {
-    "algorithm": "sha256",
-    "hash": "fba1e5ce8e28e4c2811b4b93f29e362b21c04a385e5c8ae01059941b89f06a14"
-  },
-  "signature": {
-    "algorithm": "ed25519",
-    "signature": "Ooww3tkm1aHD/HROEGK8Xx2YcO9BM1fISLL+kMfnVvBvnkb+NGkrBNyyyDOx1wJ6xXcDzbLqmootLM4PWh4oBA==",
-    "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-08-29T18:21:27.060Z",
-    "covers": "frontmatter+body",
-    "key_id": "imboard-ai",
-    "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
-  }
-}
+---
+name: 'gate-issue'
+description: 'Lightweight safety gate that checks issue metadata for hard blocks and soft warnings before starting any workflow; recognizes classify, slot-mode, and batch-anchor runstate trails so a full-cycle run never resumes into a nonexistent batch'
+metadata:
+  dossier.dossier_schema_version: '1.0.0'
+  dossier.title: 'Gate Issue — Pre-Flight Safety Check'
+  dossier.version: '1.6.3'
+  dossier.protocol_version: '"1.0"'
+  dossier.status: 'Stable'
+  dossier.last_updated: '2026-10-06'
+  dossier.objective: 'Lightweight safety gate that checks issue metadata for hard blocks and soft warnings before starting any workflow; recognizes classify, slot-mode, and batch-anchor runstate trails so a full-cycle run never resumes into a nonexistent batch'
+  dossier.category: '["development"]'
+  dossier.tags: '["issue","workflow","git","github","gate"]'
+  dossier.risk_level: 'low'
+  dossier.risk_factors: '["network_access"]'
+  dossier.requires_approval: 'false'
+  dossier.content_scope: 'references-external'
+  dossier.external_references: '[{"description":"GitHub CLI documentation","required":false,"trust_level":"trusted","type":"documentation","url":"https://cli.github.com/"}]'
+  dossier.inputs: '{"optional":[],"required":[{"description":"GitHub issue number to check","name":"issue_number","type":"number"}]}'
+  dossier.authors: '[{"name":"Yuval Dimnik"}]'
+  dossier.checksum: '{"algorithm":"sha256","hash":"2e4685022c2021cebd789bc276c14b4f5dba3abe13ce2bcbaf31a7d910161b38"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"2IZ68ggvviyWaKWX1eX4dBiEM8R2HhBvL2f/ZbZX3DQcj71FbhrVsMsRhNETBVx8x9Tt2Pve2nNEZW9s3eyuDQ==","signed_at":"2026-10-07T11:59:11.710Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Gate Issue — Pre-Flight Safety Check
@@ -143,7 +101,7 @@ The three fresh-entry rows outrank the blocked row — a `status=blocked` slot-m
 
 The planning-file check (`test -f <planning>`) is not in this table — it happens AFTER the worktree is materialized, in full-cycle-issue's "## Resuming", since the worktree may not exist on this machine yet.
 
-When the last milestone carried a `worktree=` path, also check `test -d <worktree>` on this machine and report `local_worktree=present|absent`. Informational only — it never changes the `resume_from` decision, since the remote check is authoritative.
+When the last milestone carried a `worktree=` value, also check `test -d` on the locally resolved path (`resolved_paths.worktree` from `runstate verify --json`; posted values are `<repo>/…` forms, not local paths) and report `local_worktree=present|absent`. Informational only — it never changes the `resume_from` decision, since the remote check is authoritative.
 
 **Loop cap**: if the last THREE runstate milestones are all `status=blocked` on the same phase, hard block with `reason=resume-loop` — add label `decision-pending`, post the abort comment (Step 2), and stop.
 
@@ -249,7 +207,7 @@ Let the CLI stamp `at=` and compute `next=` (here `setup`) — do not pass eithe
 - `resume_from`: phase to resume from, or `none` for a fresh run
 - `resume_context`: parsed key=value lines of the last runstate milestone, for later phases to consume
 - `slot_trail`: true when the prior trail was slot-mode (fresh entry — never a resume; pass the pointer keys to plan so it reads the prior trail's plan artifact + failure evidence)
-- `local_worktree`: `present` | `absent` | `n/a` — whether the `worktree=` path from resume_context exists on this machine (informational; remote is authoritative)
+- `local_worktree`: `present` | `absent` | `n/a` — whether the locally resolved `worktree` path (`resolved_paths.worktree`) exists on this machine (informational; remote is authoritative)
 - Posts runstate milestone to the issue (`phase=gate`)
 
 ## Validation

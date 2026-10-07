@@ -1,82 +1,25 @@
----dossier
-{
-  "dossier_schema_version": "1.0.0",
-  "name": "batch-integrate",
-  "title": "Batch Integrate — Verify N Members Once, Repair What Is Yours, Escalate What Is Not",
-  "version": "1.6.1",
-  "protocol_version": "1.0",
-  "status": "Draft",
-  "last_updated": "2026-09-29",
-  "objective": "Merge a batch's members onto its integration branch, run the batch gate (gate.batch when declared) once, repair mechanical failures, escalate semantic ones, never evict on an unreliable signal, run an interaction-only review when every member passed a full-tier review (else the full set plus the risk-floor review), push fixes before ONE foreground gate, refuse to ship unreviewed members, release claims, ship one PR",
-  "category": [
-    "development",
-    "orchestration"
-  ],
-  "tags": [
-    "batch-cycles",
-    "integration-branch",
-    "parent",
-    "verification",
-    "handover",
-    "conformance",
-    "review"
-  ],
-  "risk_level": "high",
-  "risk_factors": [
-    "modifies_files",
-    "network_access",
-    "creates_pull_request"
-  ],
-  "requires_approval": false,
-  "destructive_operations": [
-    "Reverts a member's commits when evicting it. Force-pushes the integration branch only after an eviction, with --force-with-lease.",
-    "Posts a parent-run phase=review milestone on a member issue whose own review never ran (review_by=parent), or evicts that member"
-  ],
-  "inputs": {
-    "required": [
-      {
-        "name": "batch",
-        "description": "Batch id",
-        "type": "string"
-      },
-      {
-        "name": "integration_branch",
-        "description": "Branch every member is based on and lands onto",
-        "type": "string"
-      },
-      {
-        "name": "members",
-        "description": "Issue numbers and their member branches",
-        "type": "array"
-      },
-      {
-        "name": "worktree",
-        "description": "Absolute path to the parent's worktree on the integration branch, dependencies installed",
-        "type": "string"
-      }
-    ],
-    "optional": []
-  },
-  "authors": [
-    {
-      "name": "Yuval Dimnik"
-    }
-  ],
-  "content_scope": "self-contained",
-  "checksum": {
-    "algorithm": "sha256",
-    "hash": "fda5311c6c63c208b1ee806c62777e97219a936e9ffd886485720576bb809f5a"
-  },
-  "signature": {
-    "algorithm": "ed25519",
-    "signature": "h6OJ+WzF3aXJ8+9zWH69zYwa+JUC1IAnEnQs/W3r6Y6x5C0ndNq4zCzEIggoDmobOxWz3rv3qd7xhUlxeK4hBQ==",
-    "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-29T19:06:47.699Z",
-    "covers": "frontmatter+body",
-    "key_id": "imboard-ai",
-    "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
-  }
-}
+---
+name: 'batch-integrate'
+description: 'Merge a batch''s members onto its integration branch, run the batch gate (gate.batch when declared) once, repair mechanical failures, escalate semantic ones, never evict on an unreliable signal, run an interaction-only review when every member passed a full-tier review (else the full set plus the risk-floor review), push fixes before ONE foreground gate, refuse to ship unreviewed members, release claims, ship one PR'
+metadata:
+  dossier.dossier_schema_version: '1.0.0'
+  dossier.title: 'Batch Integrate — Verify N Members Once, Repair What Is Yours, Escalate What Is Not'
+  dossier.version: '1.6.3'
+  dossier.protocol_version: '"1.0"'
+  dossier.status: 'Draft'
+  dossier.last_updated: '2026-10-06'
+  dossier.objective: 'Merge a batch''s members onto its integration branch, run the batch gate (gate.batch when declared) once, repair mechanical failures, escalate semantic ones, never evict on an unreliable signal, run an interaction-only review when every member passed a full-tier review (else the full set plus the risk-floor review), push fixes before ONE foreground gate, refuse to ship unreviewed members, release claims, ship one PR'
+  dossier.category: '["development","orchestration"]'
+  dossier.tags: '["batch-cycles","integration-branch","parent","verification","handover","conformance","review"]'
+  dossier.risk_level: 'high'
+  dossier.risk_factors: '["modifies_files","network_access","creates_pull_request"]'
+  dossier.requires_approval: 'false'
+  dossier.destructive_operations: '["Reverts a member''s commits when evicting it. Force-pushes the integration branch only after an eviction, with --force-with-lease.","Posts a parent-run phase=review milestone on a member issue whose own review never ran (review_by=parent), or evicts that member"]'
+  dossier.content_scope: 'self-contained'
+  dossier.inputs: '{"optional":[],"required":[{"description":"Batch id","name":"batch","type":"string"},{"description":"Branch every member is based on and lands onto","name":"integration_branch","type":"string"},{"description":"Issue numbers and their member branches","name":"members","type":"array"},{"description":"Absolute path to the parent''s worktree on the integration branch, dependencies installed","name":"worktree","type":"string"}]}'
+  dossier.authors: '[{"name":"Yuval Dimnik"}]'
+  dossier.checksum: '{"algorithm":"sha256","hash":"fda5311c6c63c208b1ee806c62777e97219a936e9ffd886485720576bb809f5a"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"TqkSIGS3P+tnbd85CZw7PcznuIMDNRiIwMBkXsJRSTD+XpUIxpGTchbnG4EQPE3gunwTZ2b8xxZU98QpvRhdDw==","signed_at":"2026-10-07T11:57:38.588Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Batch Integrate

@@ -1,106 +1,24 @@
----dossier
-{
-  "dossier_schema_version": "1.0.0",
-  "name": "watch-task",
-  "title": "Watch Task — Armed Watchdog on a Long-Running Task",
-  "version": "1.0.0",
-  "protocol_version": "1.0",
-  "status": "Draft",
-  "last_updated": "2026-08-26",
-  "objective": "Keep an agent attached to a long-running task until a terminal state — every wait is an armed watch (blocking loop, harness monitor, or verified scheduled wakeup), with stall detection and bounded recovery, so no time is lost to waits that nothing ever wakes",
-  "category": [
-    "development"
-  ],
-  "tags": [
-    "watchdog",
-    "supervision",
-    "polling",
-    "background-agents",
-    "orchestration",
-    "autonomous",
-    "stall-detection"
-  ],
-  "risk_level": "medium",
-  "risk_factors": [
-    "network_access"
-  ],
-  "requires_approval": false,
-  "destructive_operations": [
-    "May trigger caller-defined recovery actions when a watched task stalls (re-tasking or redispatching a background agent, dispatching a tail run)"
-  ],
-  "inputs": {
-    "required": [
-      {
-        "name": "task",
-        "description": "What is being watched — one line, e.g. 'full-cycle run for issue #42' or 'parked PR #431 until merged'.",
-        "type": "string",
-        "example": "parked PR #431 until merged"
-      },
-      {
-        "name": "check",
-        "description": "A read-only, idempotent command whose output classifies the task as success / failure / still-running, plus the classification rules. E.g. `gh pr view 431 --json state,mergedAt,mergeable` with: mergedAt non-null => success; CONFLICTING or closed-unmerged => failure; else running.",
-        "type": "string",
-        "example": "gh pr view 431 --json state,mergedAt,mergeable"
-      }
-    ],
-    "optional": [
-      {
-        "name": "progress_signal",
-        "description": "How to tell the task is alive even though not terminal — e.g. a new runstate milestone, a new pushed commit, a growing log file. Default: the check output changing between polls.",
-        "type": "string",
-        "default": "check output changed since last poll"
-      },
-      {
-        "name": "poll_interval",
-        "description": "Seconds between checks. Match how fast the state actually changes — coarse for CI/merge watchers (120-180s), finer only for fast-moving state.",
-        "type": "number",
-        "default": 120
-      },
-      {
-        "name": "stall_timeout",
-        "description": "Minutes without any progress signal before the task is declared stalled and on_stall runs.",
-        "type": "number",
-        "default": 30
-      },
-      {
-        "name": "deadline",
-        "description": "Minutes of total watch time before the task is declared failed regardless of apparent liveness (hung-but-chatty guard). Escalate per the caller's hand-off protocol.",
-        "type": "number",
-        "default": 90
-      },
-      {
-        "name": "on_stall",
-        "description": "Recovery action when stalled: probe first (read the agent's output / logs / trail), then one caller-defined recovery (nudge, re-task, or redispatch stronger). Default: probe and report to the caller.",
-        "type": "string",
-        "default": "probe, then report to caller"
-      },
-      {
-        "name": "max_recoveries",
-        "description": "Recovery attempts before declaring the task failed and running the failure action.",
-        "type": "number",
-        "default": 2
-      }
-    ]
-  },
-  "authors": [
-    {
-      "name": "Yuval Dimnik"
-    }
-  ],
-  "checksum": {
-    "algorithm": "sha256",
-    "hash": "2dc194e5fd2c2898f959d8e663a44787a80d44259d00a2d75631cb67e6a6bd35"
-  },
-  "signature": {
-    "algorithm": "ed25519",
-    "signature": "miMtR4IpUIRFLC9UdlW60woQUTEbAFKsxuQDYu3dJkclbRVXUAkufiHKLoEIpK0zldYytioDlfZ6ksbgmS/KBw==",
-    "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-08-26T06:48:17.264Z",
-    "covers": "frontmatter+body",
-    "key_id": "imboard-ai",
-    "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
-  }
-}
+---
+name: 'watch-task'
+description: 'Keep an agent attached to a long-running task until a terminal state — every wait is an armed watch (blocking loop, harness monitor, or verified scheduled wakeup), with stall detection and bounded recovery, so no time is lost to waits that nothing ever wakes'
+metadata:
+  dossier.dossier_schema_version: '1.0.0'
+  dossier.title: 'Watch Task — Armed Watchdog on a Long-Running Task'
+  dossier.version: '1.0.1'
+  dossier.protocol_version: '"1.0"'
+  dossier.status: 'Draft'
+  dossier.last_updated: '2026-08-26'
+  dossier.objective: 'Keep an agent attached to a long-running task until a terminal state — every wait is an armed watch (blocking loop, harness monitor, or verified scheduled wakeup), with stall detection and bounded recovery, so no time is lost to waits that nothing ever wakes'
+  dossier.category: '["development"]'
+  dossier.tags: '["watchdog","supervision","polling","background-agents","orchestration","autonomous","stall-detection"]'
+  dossier.risk_level: 'medium'
+  dossier.risk_factors: '["network_access"]'
+  dossier.requires_approval: 'false'
+  dossier.destructive_operations: '["May trigger caller-defined recovery actions when a watched task stalls (re-tasking or redispatching a background agent, dispatching a tail run)"]'
+  dossier.inputs: '{"optional":[{"default":"check output changed since last poll","description":"How to tell the task is alive even though not terminal — e.g. a new runstate milestone, a new pushed commit, a growing log file. Default: the check output changing between polls.","name":"progress_signal","type":"string"},{"default":120,"description":"Seconds between checks. Match how fast the state actually changes — coarse for CI/merge watchers (120-180s), finer only for fast-moving state.","name":"poll_interval","type":"number"},{"default":30,"description":"Minutes without any progress signal before the task is declared stalled and on_stall runs.","name":"stall_timeout","type":"number"},{"default":90,"description":"Minutes of total watch time before the task is declared failed regardless of apparent liveness (hung-but-chatty guard). Escalate per the caller''s hand-off protocol.","name":"deadline","type":"number"},{"default":"probe, then report to caller","description":"Recovery action when stalled: probe first (read the agent''s output / logs / trail), then one caller-defined recovery (nudge, re-task, or redispatch stronger). Default: probe and report to the caller.","name":"on_stall","type":"string"},{"default":2,"description":"Recovery attempts before declaring the task failed and running the failure action.","name":"max_recoveries","type":"number"}],"required":[{"description":"What is being watched — one line, e.g. ''full-cycle run for issue #42'' or ''parked PR #431 until merged''.","example":"parked PR #431 until merged","name":"task","type":"string"},{"description":"A read-only, idempotent command whose output classifies the task as success / failure / still-running, plus the classification rules. E.g. `gh pr view 431 --json state,mergedAt,mergeable` with: mergedAt non-null => success; CONFLICTING or closed-unmerged => failure; else running.","example":"gh pr view 431 --json state,mergedAt,mergeable","name":"check","type":"string"}]}'
+  dossier.authors: '[{"name":"Yuval Dimnik"}]'
+  dossier.checksum: '{"algorithm":"sha256","hash":"2dc194e5fd2c2898f959d8e663a44787a80d44259d00a2d75631cb67e6a6bd35"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"Lf+A3kflvIDsf3LOPumSGu6PpHfgoiBp6vKSneSo7hvo53gkO3XT64ob163ArOIh6mSHxk8AfnoIpjWp5/vlAw==","signed_at":"2026-10-07T12:02:41.572Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Watch Task — Armed Watchdog on a Long-Running Task

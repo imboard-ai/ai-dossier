@@ -1,88 +1,25 @@
----dossier
-{
-  "dossier_schema_version": "1.0.0",
-  "name": "member-cycle",
-  "title": "Member Cycle — One Issue Inside a Batch, Verified Only Where It Is Cheap",
-  "version": "1.3.1",
-  "protocol_version": "1.0",
-  "status": "Draft",
-  "last_updated": "2026-09-29",
-  "objective": "Implement ONE issue in its own worktree off a shared integration branch, test it by relevance, review it at the level the scheduler assigned (review=full: full-cycle-grade, security included; review=light: at least the correctness reviewer — never zero agents), and hand over to a parent orchestrator that owns all expensive verification",
-  "category": [
-    "development"
-  ],
-  "tags": [
-    "issue",
-    "workflow",
-    "batch-cycles",
-    "member",
-    "integration-branch",
-    "handover",
-    "runstate",
-    "review"
-  ],
-  "risk_level": "medium",
-  "risk_factors": [
-    "modifies_files",
-    "network_access"
-  ],
-  "requires_approval": false,
-  "destructive_operations": [
-    "Pushes commits to its own member branch. Never to the integration branch, never to the default branch; the parent orchestrator owns integration, revert and eviction.",
-    "Posts runstate milestones (implement, review) and the handover comment on its own issue"
-  ],
-  "inputs": {
-    "required": [
-      {
-        "name": "issue_number",
-        "description": "The issue this member implements",
-        "type": "number"
-      },
-      {
-        "name": "batch",
-        "description": "Batch id this member belongs to, carried on every milestone as batch=<id>",
-        "type": "string"
-      },
-      {
-        "name": "worktree",
-        "description": "Absolute path to this member's OWN worktree, branch already checked out off the integration branch, dependencies installed",
-        "type": "string"
-      },
-      {
-        "name": "integration_branch",
-        "description": "The shared branch this member's branch is based on and whose parent will verify the combined result",
-        "type": "string"
-      }
-    ],
-    "optional": [
-      {
-        "name": "review",
-        "description": "Review level the scheduler assigned this member (#771): light (default) or full. full = the member hit an E.2 review floor (risk-floor area, deploy pipeline, > 8 files, > 400 lines, broad/unknown test scope) and gets full-cycle-grade review (all review-issue agents, security included). The scheduler passes it via the {review} prompt placeholder or its review=full directive.",
-        "type": "string",
-        "default": "light"
-      }
-    ]
-  },
-  "authors": [
-    {
-      "name": "Yuval Dimnik"
-    }
-  ],
-  "content_scope": "self-contained",
-  "checksum": {
-    "algorithm": "sha256",
-    "hash": "b71bb8454b5dddad85bffa7964b289a40c8ee12c198dfb5e62a317b8f52925ee"
-  },
-  "signature": {
-    "algorithm": "ed25519",
-    "signature": "3hpQuqKfJogYSOYQtMQ4sVfzU6nImtN5EpwEhrnU9TamkAriCahcPB+hYqnWIWInNn4FqATWG3nQloWeqromAA==",
-    "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-29T19:06:52.152Z",
-    "covers": "frontmatter+body",
-    "key_id": "imboard-ai",
-    "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
-  }
-}
+---
+name: 'member-cycle'
+description: 'Implement ONE issue in its own worktree off a shared integration branch, test it by relevance, review it at the level the scheduler assigned (review=full: full-cycle-grade, security included; review=light: at least the correctness reviewer — never zero agents), and hand over to a parent orchestrator that owns all expensive verification'
+metadata:
+  dossier.dossier_schema_version: '1.0.0'
+  dossier.title: 'Member Cycle — One Issue Inside a Batch, Verified Only Where It Is Cheap'
+  dossier.version: '1.3.3'
+  dossier.protocol_version: '"1.0"'
+  dossier.status: 'Draft'
+  dossier.last_updated: '2026-10-06'
+  dossier.objective: 'Implement ONE issue in its own worktree off a shared integration branch, test it by relevance, review it at the level the scheduler assigned (review=full: full-cycle-grade, security included; review=light: at least the correctness reviewer — never zero agents), and hand over to a parent orchestrator that owns all expensive verification'
+  dossier.category: '["development"]'
+  dossier.tags: '["issue","workflow","batch-cycles","member","integration-branch","handover","runstate","review"]'
+  dossier.risk_level: 'medium'
+  dossier.risk_factors: '["modifies_files","network_access"]'
+  dossier.requires_approval: 'false'
+  dossier.destructive_operations: '["Pushes commits to its own member branch. Never to the integration branch, never to the default branch; the parent orchestrator owns integration, revert and eviction.","Posts runstate milestones (implement, review) and the handover comment on its own issue"]'
+  dossier.content_scope: 'self-contained'
+  dossier.inputs: '{"optional":[{"default":"light","description":"Review level the scheduler assigned this member (#771): light (default) or full. full = the member hit an E.2 review floor (risk-floor area, deploy pipeline, > 8 files, > 400 lines, broad/unknown test scope) and gets full-cycle-grade review (all review-issue agents, security included). The scheduler passes it via the {review} prompt placeholder or its review=full directive.","name":"review","type":"string"}],"required":[{"description":"The issue this member implements","name":"issue_number","type":"number"},{"description":"Batch id this member belongs to, carried on every milestone as batch=<id>","name":"batch","type":"string"},{"description":"Absolute path to this member''s OWN worktree, branch already checked out off the integration branch, dependencies installed","name":"worktree","type":"string"},{"description":"The shared branch this member''s branch is based on and whose parent will verify the combined result","name":"integration_branch","type":"string"}]}'
+  dossier.authors: '[{"name":"Yuval Dimnik"}]'
+  dossier.checksum: '{"algorithm":"sha256","hash":"b71bb8454b5dddad85bffa7964b289a40c8ee12c198dfb5e62a317b8f52925ee"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"SaaTIgeidSV43hz8oCUdg3GXEd3M5/ZoFRwXy5UR2/f5LXtekmUv9FmK1ON8BMtr0HNOzc/xJKOzaOuTyXuqCQ==","signed_at":"2026-10-07T12:00:09.207Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Member Cycle — One Issue Inside a Batch

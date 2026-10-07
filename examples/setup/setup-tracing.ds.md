@@ -1,72 +1,26 @@
----dossier
-{
-  "dossier_schema_version": "1.0.0",
-  "name": "setup-tracing",
-  "title": "Setup Tracing",
-  "version": "1.0.0",
-  "protocol_version": "1.0",
-  "status": "Draft",
-  "last_updated": "2026-05-13",
-  "objective": "Turn on execution tracing for dossier runs by writing a tracing block to the user (or project) Dossier config. After this dossier runs, `mcp-server` will start emitting traces to the configured registry on every journey, with no further setup required.",
-  "category": [
-    "setup",
-    "monitoring"
-  ],
-  "tags": [
-    "tracing",
-    "configuration",
-    "mcp",
-    "observability"
-  ],
-  "tools_required": [],
-  "risk_level": "medium",
-  "requires_approval": false,
-  "risk_factors": [
-    "modifies_files"
-  ],
-  "destructive_operations": [
-    "Writes ~/.dossier/config.json (preserves existing keys) or .dossierrc.json in the current project directory"
-  ],
-  "estimated_duration": {
-    "min_minutes": 1,
-    "max_minutes": 3
-  },
-  "inputs": {
-    "required": [],
-    "optional": [
-      {
-        "name": "url",
-        "description": "Custom logger URL. Omit to use the user's logged-in registry (the default behavior).",
-        "type": "string",
-        "default": "",
-        "example": "https://obs.imboard.corp"
-      },
-      {
-        "name": "scope",
-        "description": "Where to write the tracing block. 'user' writes ~/.dossier/config.json (default, applies to all projects). 'project' writes .dossierrc.json in the current directory (applies only to this project, can be checked into git).",
-        "type": "string",
-        "default": "user",
-        "example": "user"
-      }
-    ]
-  },
-  "outputs": {
-    "files": [
-      {
-        "path": "~/.dossier/config.json",
-        "description": "User config with tracing.enabled = true (when scope=user). Other keys preserved."
-      },
-      {
-        "path": ".dossierrc.json",
-        "description": "Project config with tracing block (when scope=project, in the current project directory)."
-      }
-    ]
-  },
-  "checksum": {
-    "algorithm": "sha256",
-    "hash": "bd7a1985c7f19d3591eff31f1e5f89746627333500a13509e872829741dd3903"
-  }
-}
+---
+name: 'setup-tracing'
+description: 'Turn on execution tracing for dossier runs by writing a tracing block to the user (or project) Dossier config. After this dossier runs, `mcp-server` will start emitting traces to the configured registry on every journey, with no further setup required.'
+metadata:
+  dossier.dossier_schema_version: '1.0.0'
+  dossier.title: 'Setup Tracing'
+  dossier.version: '1.0.2'
+  dossier.protocol_version: '"1.0"'
+  dossier.status: 'Draft'
+  dossier.last_updated: '2026-05-13'
+  dossier.objective: 'Turn on execution tracing for dossier runs by writing a tracing block to the user (or project) Dossier config. After this dossier runs, `mcp-server` will start emitting traces to the configured registry on every journey, with no further setup required.'
+  dossier.category: '["setup","monitoring"]'
+  dossier.tags: '["tracing","configuration","mcp","observability"]'
+  dossier.tools_required: '[]'
+  dossier.estimated_duration: '{"max_minutes":3,"min_minutes":1}'
+  dossier.risk_level: 'medium'
+  dossier.risk_factors: '["modifies_files"]'
+  dossier.requires_approval: 'false'
+  dossier.destructive_operations: '["Writes ~/.dossier/config.json (preserves existing keys) or .dossierrc.json in the current project directory"]'
+  dossier.inputs: '{"optional":[{"default":"","description":"Custom logger URL. Omit to use the user''s logged-in registry (the default behavior).","example":"https://obs.imboard.corp","name":"url","type":"string"},{"default":"user","description":"Where to write the tracing block. ''user'' writes ~/.dossier/config.json (default, applies to all projects). ''project'' writes .dossierrc.json in the current directory (applies only to this project, can be checked into git).","example":"user","name":"scope","type":"string"}],"required":[]}'
+  dossier.outputs: '{"files":[{"description":"User config with tracing.enabled = true (when scope=user). Other keys preserved.","path":"~/.dossier/config.json"},{"description":"Project config with tracing block (when scope=project, in the current project directory).","path":".dossierrc.json"}]}'
+  dossier.checksum: '{"algorithm":"sha256","hash":"bd7a1985c7f19d3591eff31f1e5f89746627333500a13509e872829741dd3903"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"psaUaiSa2N8yb74+sZ4FwJnN7KdmGeOiWjSZhpO8wOk0pQy7XNp95hqd+49garjb6mPqefF6UqC1i53Mavt3Aw==","signed_at":"2026-10-07T12:05:16.782Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Setup Tracing

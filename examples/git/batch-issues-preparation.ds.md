@@ -1,93 +1,26 @@
----dossier
-{
-  "dossier_schema_version": "1.0.0",
-  "name": "batch-issues-preparation",
-  "title": "Batch Issues Preparation — classify, DAG, compose batches, enqueue",
-  "version": "3.5.0",
-  "protocol_version": "1.0",
-  "status": "Draft",
-  "last_updated": "2026-09-29",
-  "objective": "Turn an issue list/range into admitted, classified, batched scheduler queue entries: free batch compose over the whole set first, body-readiness screen + backfill to min_members, decision-grade classify only admitted members, review-floor issues as review=full members (at most 2 per batch; over-cap picks held for the next run, slot backfilled light), no batch under 2 members, then anchor, audit, claim and enqueue with a per-member review level",
-  "category": [
-    "development"
-  ],
-  "tags": [
-    "issue",
-    "workflow",
-    "batch-cycles",
-    "classification",
-    "scheduling",
-    "runstate",
-    "batch-compose"
-  ],
-  "risk_level": "medium",
-  "risk_factors": [
-    "network_access"
-  ],
-  "requires_approval": false,
-  "destructive_operations": [
-    "Creates batch-epic anchor issues and applies labels in the target repo",
-    "Posts classify records, rationale comments, and plan:v1 artifacts on ADMITTED batch members only (never on issues batch compose excluded)",
-    "Claims each enqueued batch member with the in-progress label and a pickup comment (skipped under dry_run)",
-    "Writes scheduler queue entries via sched enqueue --from-manifest (skipped under dry_run)"
-  ],
-  "inputs": {
-    "required": [
-      {
-        "name": "issues",
-        "description": "Issue list/range to prepare — fleet-cycle Phase 1 grammar: explicit list `1,2,3`, range `1..9`, mixed `1,2,5..8`",
-        "type": "string"
-      }
-    ],
-    "optional": [
-      {
-        "name": "dry_run",
-        "description": "Produce everything (classify records, plan artifacts, anchor issues, audit file, manifest) but do NOT invoke sched enqueue — the shadow-mode deliverable (RFC-0001 G Step 2): admitted members get classified and planned while execution stays untouched.",
-        "type": "boolean",
-        "default": false
-      },
-      {
-        "name": "min_members",
-        "description": "Minimum viable batch (#770 P4). Survivors below it are backfilled from batch compose's ranked backlog candidates; fewer than 2 after backfill forms no batch.",
-        "type": "number",
-        "default": 3
-      },
-      {
-        "name": "dispatch_profile",
-        "description": "The validated scheduler dispatch profile selected by batch-cycle-skill; carried to every slot member and passed explicitly to sched enqueue.",
-        "type": "string"
-      }
-    ]
-  },
-  "authors": [
-    {
-      "name": "Yuval Dimnik"
-    }
-  ],
-  "external_references": [
-    {
-      "url": "https://cli.github.com/",
-      "description": "GitHub CLI documentation",
-      "type": "documentation",
-      "trust_level": "trusted",
-      "required": false
-    }
-  ],
-  "content_scope": "references-external",
-  "checksum": {
-    "algorithm": "sha256",
-    "hash": "a3d01505cf3f1a5efa39b4347ef499c0cfe98f903dc87727b7eaeefa03c7e107"
-  },
-  "signature": {
-    "algorithm": "ed25519",
-    "signature": "Y+pJNk6D7pl3TaIqBBap/WPPAaadxYO9Ux9/A3QR2hKJRC2zDlJ7lEmFf+bFHic5iW59HfdjUddmR8IjpxqVBg==",
-    "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-09-29T19:06:49.876Z",
-    "covers": "frontmatter+body",
-    "key_id": "imboard-ai",
-    "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
-  }
-}
+---
+name: 'batch-issues-preparation'
+description: 'Turn an issue list/range into admitted, classified, batched scheduler queue entries: free batch compose over the whole set first, body-readiness screen + backfill to min_members, decision-grade classify only admitted members, review-floor issues as review=full members (at most 2 per batch; over-cap picks held for the next run, slot backfilled light), no batch under 2 members, then anchor, audit, claim and enqueue with a per-member review level'
+metadata:
+  dossier.dossier_schema_version: '1.0.0'
+  dossier.title: 'Batch Issues Preparation — classify, DAG, compose batches, enqueue'
+  dossier.version: '3.5.2'
+  dossier.protocol_version: '"1.0"'
+  dossier.status: 'Draft'
+  dossier.last_updated: '2026-10-06'
+  dossier.objective: 'Turn an issue list/range into admitted, classified, batched scheduler queue entries: free batch compose over the whole set first, body-readiness screen + backfill to min_members, decision-grade classify only admitted members, review-floor issues as review=full members (at most 2 per batch; over-cap picks held for the next run, slot backfilled light), no batch under 2 members, then anchor, audit, claim and enqueue with a per-member review level'
+  dossier.category: '["development"]'
+  dossier.tags: '["issue","workflow","batch-cycles","classification","scheduling","runstate","batch-compose"]'
+  dossier.risk_level: 'medium'
+  dossier.risk_factors: '["network_access"]'
+  dossier.requires_approval: 'false'
+  dossier.destructive_operations: '["Creates batch-epic anchor issues and applies labels in the target repo","Posts classify records, rationale comments, and plan:v1 artifacts on ADMITTED batch members only (never on issues batch compose excluded)","Claims each enqueued batch member with the in-progress label and a pickup comment (skipped under dry_run)","Writes scheduler queue entries via sched enqueue --from-manifest (skipped under dry_run)"]'
+  dossier.content_scope: 'references-external'
+  dossier.external_references: '[{"description":"GitHub CLI documentation","required":false,"trust_level":"trusted","type":"documentation","url":"https://cli.github.com/"}]'
+  dossier.inputs: '{"optional":[{"default":false,"description":"Produce everything (classify records, plan artifacts, anchor issues, audit file, manifest) but do NOT invoke sched enqueue — the shadow-mode deliverable (RFC-0001 G Step 2): admitted members get classified and planned while execution stays untouched.","name":"dry_run","type":"boolean"},{"default":3,"description":"Minimum viable batch (#770 P4). Survivors below it are backfilled from batch compose''s ranked backlog candidates; fewer than 2 after backfill forms no batch.","name":"min_members","type":"number"},{"description":"The validated scheduler dispatch profile selected by batch-cycle-skill; carried to every slot member and passed explicitly to sched enqueue.","name":"dispatch_profile","type":"string"}],"required":[{"description":"Issue list/range to prepare — fleet-cycle Phase 1 grammar: explicit list `1,2,3`, range `1..9`, mixed `1,2,5..8`","name":"issues","type":"string"}]}'
+  dossier.authors: '[{"name":"Yuval Dimnik"}]'
+  dossier.checksum: '{"algorithm":"sha256","hash":"a3d01505cf3f1a5efa39b4347ef499c0cfe98f903dc87727b7eaeefa03c7e107"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"zo7mvEF/1/VevENXQkS4/m0tF30ROCd9aJ1FZ97TDZouxQaKgc5ztNO8Bb2sI1ND+H9X/4hatmkhuNdWCTJ6Bw==","signed_at":"2026-10-07T11:57:59.667Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Batch Issues Preparation — classify, DAG, compose batches, enqueue

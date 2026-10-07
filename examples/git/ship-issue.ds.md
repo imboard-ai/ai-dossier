@@ -1,129 +1,24 @@
----dossier
-{
-  "dossier_schema_version": "1.0.0",
-  "name": "ship-issue",
-  "title": "Ship Issue — Commit, PR, Merge, Deploy, Teardown",
-  "version": "1.18.2",
-  "protocol_version": "1.0",
-  "status": "Stable",
-  "objective": "Commit changes, push, create a PR, then either drive it to a confirmed merge and deploy (attached) or park it on auto-merge and stop (detached); in batch mode (batch_id set): ship the batch PR from the batch branch — per-member PR sections, Closes #N per member, rebase-merged so one commit per member issue lands on the base branch",
-  "category": [
-    "development"
-  ],
-  "tags": [
-    "issue",
-    "workflow",
-    "git",
-    "github",
-    "ship",
-    "pr",
-    "merge"
-  ],
-  "risk_level": "high",
-  "risk_factors": [
-    "modifies_files",
-    "network_access",
-    "creates_pull_request",
-    "merges_code"
-  ],
-  "requires_approval": false,
-  "destructive_operations": [
-    "Pushes branch to remote",
-    "Creates and merges pull request (squash for per-issue PRs; rebase for batch PRs — one commit per member issue lands on the base branch)",
-    "Deletes branch after merge",
-    "Rewrites the PR body's Acceptance Criteria section when a stale verdict is refreshed (Step 3a.5)"
-  ],
-  "inputs": {
-    "required": [
-      {
-        "name": "issue_number",
-        "description": "GitHub issue number",
-        "type": "number"
-      }
-    ],
-    "optional": [
-      {
-        "name": "base_branch",
-        "description": "Target branch for the PR",
-        "type": "string",
-        "default": "main"
-      },
-      {
-        "name": "worktree_path",
-        "description": "Path of the worktree to clean up after merge",
-        "type": "string",
-        "default": ""
-      },
-      {
-        "name": "original_dir",
-        "description": "Directory to return to after teardown",
-        "type": "string",
-        "default": ""
-      },
-      {
-        "name": "pool_claimed",
-        "description": "Whether the worktree was claimed from the pool (affects cleanup)",
-        "type": "boolean",
-        "default": false
-      },
-      {
-        "name": "run_id",
-        "description": "Runstate run id minted by gate-issue; pass through unchanged. In batch mode this is the batch's run id (minted against the anchor issue).",
-        "type": "string"
-      },
-      {
-        "name": "ship_mode",
-        "description": "attached (default) = open the PR, wait for CI, merge, confirm the deploy, and tear down in this run. detached = open the PR, park it on auto-merge, post the awaiting-merge milestone, and STOP — a later run (gate resumes at ship-teardown) finishes it. Detached needs a merge mechanism (an auto-merge watcher workflow, or native auto-merge requested on the PR); without one Step 3c runs attached instead. Every mode merges only after the full review round.",
-        "type": "string",
-        "default": "attached"
-      },
-      {
-        "name": "ac_results",
-        "description": "Per-acceptance-criterion checklist from review-issue's Agent 7 (Conformance) — criterion, verdict, file:line or reason. Used to populate the PR body's Acceptance Criteria section. Per-issue mode only.",
-        "type": "string"
-      },
-      {
-        "name": "live_results",
-        "description": "Per-touched-UI-flow verdict list from review-issue's Agent 8 (Visual Conformance) — flow, the AC it bears on, verdict, and either the evidence path plus the observed state that proved it or the reason it was not met / could not be driven. Arrives with live (pass|fail|unverifiable|n/a), live_flows and, when one was recorded, live_note. Populates the PR body's Visual verification section; omitted entirely when live=n/a. Per-issue mode only.",
-        "type": "string"
-      },
-      {
-        "name": "batch_id",
-        "description": "Batch id slug (e.g. b-2026-08-29-01). When set, run BATCH MODE: ship the batch PR from the batch branch against the batch ANCHOR issue (issue_number is the anchor number) — per-member PR sections, Closes #N per member, rebase-merge. Unset = ordinary per-issue ship.",
-        "type": "string"
-      },
-      {
-        "name": "members",
-        "description": "Batch mode only: comma-separated member issue numbers (e.g. 101,102,104). Drives the PR body's per-member sections and the Closes #N list. Default: derived from the batch branch's per-issue commits.",
-        "type": "string"
-      },
-      {
-        "name": "member_verdicts",
-        "description": "Batch mode only: per-member per-AC conformance verdicts from slot-cycles, passed through by review-issue's aggregate mode (Agent 7's format: 'ACn <criterion> — met <file:line> | not-met <why> | unverifiable <what test would prove it>'). Populates the PR body's per-member Acceptance Criteria checkboxes. Fallback when absent: the per-member verdict comment a prior aggregate review posted on the anchor.",
-        "type": "string"
-      }
-    ]
-  },
-  "authors": [
-    {
-      "name": "Yuval Dimnik"
-    }
-  ],
-  "last_updated": "2026-10-06",
-  "checksum": {
-    "algorithm": "sha256",
-    "hash": "0ac62926d6716f117a9a9c6a2b73026051f14a987d5dec068e350b51126659f0"
-  },
-  "signature": {
-    "algorithm": "ed25519",
-    "signature": "repZuSAGeczZTGX1t5GqAnLmNd+Qu3WZhOg7yeTbMKAHAIUqDmqJEcznRKAB7w1g0Sumd7m7eNUjvfym8X6GAg==",
-    "public_key": "m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=",
-    "signed_at": "2026-10-06T06:16:41.591Z",
-    "covers": "frontmatter+body",
-    "key_id": "imboard-ai",
-    "signed_by": "Yuval Dimnik <yuval.dimnik@gmail.com>"
-  }
-}
+---
+name: 'ship-issue'
+description: 'Commit changes, push, create a PR, then either drive it to a confirmed merge and deploy (attached) or park it on auto-merge and stop (detached); in batch mode (batch_id set): ship the batch PR from the batch branch — per-member PR sections, Closes #N per member, rebase-merged so one commit per member issue lands on the base branch'
+metadata:
+  dossier.dossier_schema_version: '1.0.0'
+  dossier.title: 'Ship Issue — Commit, PR, Merge, Deploy, Teardown'
+  dossier.version: '1.18.3'
+  dossier.protocol_version: '"1.0"'
+  dossier.status: 'Stable'
+  dossier.last_updated: '2026-10-06'
+  dossier.objective: 'Commit changes, push, create a PR, then either drive it to a confirmed merge and deploy (attached) or park it on auto-merge and stop (detached); in batch mode (batch_id set): ship the batch PR from the batch branch — per-member PR sections, Closes #N per member, rebase-merged so one commit per member issue lands on the base branch'
+  dossier.category: '["development"]'
+  dossier.tags: '["issue","workflow","git","github","ship","pr","merge"]'
+  dossier.risk_level: 'high'
+  dossier.risk_factors: '["modifies_files","network_access","creates_pull_request","merges_code"]'
+  dossier.requires_approval: 'false'
+  dossier.destructive_operations: '["Pushes branch to remote","Creates and merges pull request (squash for per-issue PRs; rebase for batch PRs — one commit per member issue lands on the base branch)","Deletes branch after merge","Rewrites the PR body''s Acceptance Criteria section when a stale verdict is refreshed (Step 3a.5)"]'
+  dossier.inputs: '{"optional":[{"default":"main","description":"Target branch for the PR","name":"base_branch","type":"string"},{"default":"","description":"Path of the worktree to clean up after merge","name":"worktree_path","type":"string"},{"default":"","description":"Directory to return to after teardown","name":"original_dir","type":"string"},{"default":false,"description":"Whether the worktree was claimed from the pool (affects cleanup)","name":"pool_claimed","type":"boolean"},{"description":"Runstate run id minted by gate-issue; pass through unchanged. In batch mode this is the batch''s run id (minted against the anchor issue).","name":"run_id","type":"string"},{"default":"attached","description":"attached (default) = open the PR, wait for CI, merge, confirm the deploy, and tear down in this run. detached = open the PR, park it on auto-merge, post the awaiting-merge milestone, and STOP — a later run (gate resumes at ship-teardown) finishes it. Detached needs a merge mechanism (an auto-merge watcher workflow, or native auto-merge requested on the PR); without one Step 3c runs attached instead. Every mode merges only after the full review round.","name":"ship_mode","type":"string"},{"description":"Per-acceptance-criterion checklist from review-issue''s Agent 7 (Conformance) — criterion, verdict, file:line or reason. Used to populate the PR body''s Acceptance Criteria section. Per-issue mode only.","name":"ac_results","type":"string"},{"description":"Per-touched-UI-flow verdict list from review-issue''s Agent 8 (Visual Conformance) — flow, the AC it bears on, verdict, and either the evidence path plus the observed state that proved it or the reason it was not met / could not be driven. Arrives with live (pass|fail|unverifiable|n/a), live_flows and, when one was recorded, live_note. Populates the PR body''s Visual verification section; omitted entirely when live=n/a. Per-issue mode only.","name":"live_results","type":"string"},{"description":"Batch id slug (e.g. b-2026-08-29-01). When set, run BATCH MODE: ship the batch PR from the batch branch against the batch ANCHOR issue (issue_number is the anchor number) — per-member PR sections, Closes #N per member, rebase-merge. Unset = ordinary per-issue ship.","name":"batch_id","type":"string"},{"description":"Batch mode only: comma-separated member issue numbers (e.g. 101,102,104). Drives the PR body''s per-member sections and the Closes #N list. Default: derived from the batch branch''s per-issue commits.","name":"members","type":"string"},{"description":"Batch mode only: per-member per-AC conformance verdicts from slot-cycles, passed through by review-issue''s aggregate mode (Agent 7''s format: ''ACn <criterion> — met <file:line> | not-met <why> | unverifiable <what test would prove it>''). Populates the PR body''s per-member Acceptance Criteria checkboxes. Fallback when absent: the per-member verdict comment a prior aggregate review posted on the anchor.","name":"member_verdicts","type":"string"}],"required":[{"description":"GitHub issue number","name":"issue_number","type":"number"}]}'
+  dossier.authors: '[{"name":"Yuval Dimnik"}]'
+  dossier.checksum: '{"algorithm":"sha256","hash":"0ac62926d6716f117a9a9c6a2b73026051f14a987d5dec068e350b51126659f0"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"01Pbh4kNuVdrzyn58fH00AR2s22i3wR/Kk88e2Mmrvrc/pmF5G1USXUYGhWHHDodCYIp964qjBZY7dGeWBXeBQ==","signed_at":"2026-10-07T12:01:47.101Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Ship Issue — Commit, PR, Merge, Teardown
