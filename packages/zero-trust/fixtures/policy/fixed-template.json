@@ -1,4 +1,7 @@
 {
+  "actor": "upstream_maintainer",
+  "slice": "S2",
+  "expectedOutcome": "receipt_forbidden_baseline_permitted",
   "files": {
     ".github/pull_request_template.md": "No additional sections.\nBaseline failures are permitted."
   },

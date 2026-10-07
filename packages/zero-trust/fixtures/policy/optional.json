@@ -1,4 +1,7 @@
 {
+  "actor": "upstream_maintainer",
+  "slice": "S2",
+  "expectedOutcome": "assignment_optional_baseline_permitted",
   "files": {
     "CONTRIBUTING.md": "No assignment is needed.\nFeel free to open a PR.\nPre-existing test failures are allowed."
   },

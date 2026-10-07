@@ -2,7 +2,12 @@ import { createHash } from 'node:crypto';
 import { canonicalJson } from '../receipt/schema';
 import { assertNoSecrets } from '../redaction';
 import { type PolicyFile, validatePolicyFiles } from './discover';
-import { POLICY_AI_MENTION, POLICY_RULES, type PolicyCategory } from './rules';
+import {
+  POLICY_AI_MENTION,
+  POLICY_PERMISSION_CAVEAT,
+  POLICY_RULES,
+  type PolicyCategory,
+} from './rules';
 
 export interface PolicyCitation {
   readonly path: string;
@@ -28,6 +33,16 @@ export interface PolicyAssessment {
 
 const RULES = POLICY_RULES.map((rule) => ({ ...rule, regex: new RegExp(rule.pattern, 'iu') }));
 const AI_MENTION = new RegExp(POLICY_AI_MENTION, 'iu');
+const CAVEAT = new RegExp(POLICY_PERMISSION_CAVEAT, 'iu');
+const CITATION_LIMIT = 128;
+// Worst case: 128 * 200 six-byte JSON escapes, plus bounded paths/identities.
+const POLICY_JSON_LIMIT = 256 * 1024;
+const PERMISSIVE = new Set<PolicyCategory>([
+  'ai_welcome',
+  'assignment_optional',
+  'direct_pr',
+  'baseline_permitted',
+]);
 const AI_VALUES = {
   ai_ban: 'banned',
   ai_approval: 'requires_approval',
@@ -62,7 +77,8 @@ function policyLines(file: PolicyFile): { text: string; line: number }[] {
           : 2
         : 0;
     if (depth) {
-      if (/contribut/iu.test(heading ? heading[2] : text)) sectionDepth = depth;
+      if (/contribut/iu.test(heading ? heading[2] : text))
+        sectionDepth = sectionDepth ? Math.min(sectionDepth, depth) : depth;
       else if (sectionDepth && depth <= sectionDepth) sectionDepth = 0;
     }
     return sectionDepth ? [{ text, line: index + 1 }] : [];
@@ -89,27 +105,59 @@ export function classifyPolicy(files: readonly PolicyFile[]): PolicyAssessment {
   const categories = new Set<PolicyCategory>();
   const citations: PolicyCitation[] = [];
   let unknownAi = false;
+  let unknownAssignment = false;
+  let unknownDirect = false;
+  let unknownBaseline = false;
   for (const file of [...files].sort((a, b) => compare(a.path, b.path))) {
     const cited = new Set<string>();
     for (const { text, line } of policyLines(file)) {
-      let matchedAi = false;
-      for (const rule of RULES) {
-        if (!rule.regex.test(text)) continue;
-        categories.add(rule.category);
-        if (rule.category.startsWith('ai_')) matchedAi = true;
-        if (!cited.has(rule.id) && citations.length < 128) {
-          citations.push(
-            Object.freeze({ path: file.path, line, ruleId: rule.id, excerpt: excerpt(text) })
-          );
-          cited.add(rule.id);
+      // Matching view only: normalize spacing and separate independent clauses.
+      // Original blob text/line remains the citation; no text is executed.
+      const clauses = text.replace(/\s+/gu, ' ').split(/[.!?;,]|\bbut\b/iu);
+      for (const clause of clauses) {
+        let matchedAi = false;
+        let matchedAssignment = false;
+        let matchedDirect = false;
+        let matchedBaseline = false;
+        for (const rule of RULES) {
+          if (!rule.regex.test(clause)) continue;
+          const caveatText =
+            rule.category === 'assignment_optional' ? clause.replace(rule.regex, '') : clause;
+          if (PERMISSIVE.has(rule.category) && CAVEAT.test(caveatText)) continue;
+          categories.add(rule.category);
+          if (rule.category.startsWith('ai_')) matchedAi = true;
+          if (rule.category.startsWith('assignment_')) matchedAssignment = true;
+          if (
+            rule.category === 'direct_pr' ||
+            rule.category === 'discussion_first' ||
+            rule.category === 'draft_required'
+          )
+            matchedDirect = true;
+          if (rule.category.startsWith('baseline_')) matchedBaseline = true;
+          if (!cited.has(rule.id) && citations.length < CITATION_LIMIT) {
+            citations.push(
+              Object.freeze({ path: file.path, line, ruleId: rule.id, excerpt: excerpt(text) })
+            );
+            cited.add(rule.id);
+          }
         }
+        if (
+          !matchedAi &&
+          AI_MENTION.test(clause) &&
+          !/^\s*#{1,6}\s+(?:AI|LLM)\s+policy\s*$/iu.test(clause)
+        )
+          unknownAi = true;
+        // A second unparsed AI assertion must not be swallowed by a recognized
+        // match's gap. Multiple mentions in one clause are conservative ambiguity.
+        if ((clause.match(new RegExp(POLICY_AI_MENTION, 'giu'))?.length ?? 0) > 1) unknownAi = true;
+        if (!matchedAssignment && /\bassign(?:ment|ed)\b/iu.test(clause)) unknownAssignment = true;
+        if (!matchedDirect && /\b(?:PRs?|pull requests?)\b/iu.test(clause)) unknownDirect = true;
+        if (
+          !matchedBaseline &&
+          /\b(?:baseline|pre[- ]existing|unrelated) (?:test )?failures\b/iu.test(clause)
+        )
+          unknownBaseline = true;
       }
-      if (
-        !matchedAi &&
-        AI_MENTION.test(text) &&
-        !/^\s*#{1,6}\s+(?:AI|LLM)\s+policy\s*$/iu.test(text)
-      )
-        unknownAi = true;
     }
   }
   const aiMatches = (Object.keys(AI_VALUES) as (keyof typeof AI_VALUES)[]).filter((category) =>
@@ -122,25 +170,30 @@ export function classifyPolicy(files: readonly PolicyFile[]): PolicyAssessment {
         ? AI_VALUES[aiMatches[0]]
         : 'silent';
   const directPr =
-    categories.has('direct_pr') === categories.has('discussion_first')
+    unknownDirect || categories.has('direct_pr') === categories.has('discussion_first')
       ? 'unclear'
       : categories.has('direct_pr')
         ? 'welcomed'
         : 'discussion_first';
-  const assignment = categories.has('assignment_required')
-    ? categories.has('assignment_optional')
-      ? 'unclear'
-      : 'required'
-    : categories.has('assignment_optional') || directPr === 'welcomed'
-      ? 'not_required'
-      : 'unclear';
+  const assignment = unknownAssignment
+    ? 'unclear'
+    : categories.has('assignment_required')
+      ? categories.has('assignment_optional')
+        ? 'unclear'
+        : 'required'
+      : categories.has('assignment_optional') || directPr === 'welcomed'
+        ? 'not_required'
+        : 'unclear';
   return Object.freeze({
     ai,
     assignment,
     directPr,
     draftRequired: categories.has('draft_required'),
     receiptBlockAllowed: !categories.has('template_fixed'),
-    baselineFailuresPermitted: categories.has('baseline_permitted'),
+    baselineFailuresPermitted:
+      categories.has('baseline_permitted') &&
+      !categories.has('baseline_forbidden') &&
+      !unknownBaseline,
     citations: Object.freeze(citations.sort((a, b) => compare(citationKey(a), citationKey(b)))),
   });
 }
@@ -156,5 +209,7 @@ export function policyDigest(assessment: PolicyAssessment, files: readonly Polic
     assessment: { ...assessment, citations },
     files: files.map(({ path, sha }) => ({ path, sha })).sort((a, b) => compare(a.path, b.path)),
   };
-  return createHash('sha256').update(canonicalJson(payload), 'utf8').digest('hex');
+  return createHash('sha256')
+    .update(canonicalJson(payload, POLICY_JSON_LIMIT), 'utf8')
+    .digest('hex');
 }

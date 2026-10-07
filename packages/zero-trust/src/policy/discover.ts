@@ -1,3 +1,5 @@
+import { isCommitSha } from '../github/fork-ref';
+import { isGitHubLogin, isRepoName } from '../github/handoff';
 import type { GitHubRead } from '../github/reconcile';
 import { assertNoSecrets } from '../redaction';
 
@@ -61,6 +63,7 @@ export function validatePolicyFiles(files: readonly PolicyFile[]): void {
   if (!Array.isArray(files) || files.length > POLICY_PATHS.length + POLICY_TEMPLATE_LIMIT)
     throw new PolicyInputError();
   let total = 0;
+  let templates = 0;
   const seen = new Set<string>();
   for (const file of files) {
     if (
@@ -74,6 +77,8 @@ export function validatePolicyFiles(files: readonly PolicyFile[]): void {
     )
       throw new PolicyInputError();
     assertNoSecrets(file.path);
+    if (templatePath(file.path) && ++templates > POLICY_TEMPLATE_LIMIT)
+      throw new PolicyInputError();
     const bytes = Buffer.byteLength(file.content);
     total += bytes;
     if (
@@ -86,22 +91,35 @@ export function validatePolicyFiles(files: readonly PolicyFile[]): void {
   }
 }
 
-function decodeFile(body: unknown, path: string, expectedSha?: string): PolicyFile {
+function fileMetadata(
+  body: unknown
+): Record<string, unknown> & { path: string; sha: string; size: number } {
   const file = object(body);
   if (
     !file ||
     file.type !== 'file' ||
-    file.path !== path ||
+    typeof file.path !== 'string' ||
     typeof file.sha !== 'string' ||
-    !/^[a-f0-9]{40}$/u.test(file.sha) ||
-    (expectedSha !== undefined && file.sha !== expectedSha) ||
-    file.encoding !== 'base64' ||
-    typeof file.content !== 'string' ||
+    !isCommitSha(file.sha) ||
     !Number.isSafeInteger(file.size) ||
     (file.size as number) < 0 ||
     (file.size as number) > POLICY_FILE_LIMIT ||
-    file.content.length > Math.ceil(POLICY_FILE_LIMIT / 3) * 4 + 16384 ||
+    'target' in file ||
+    'submodule_git_url' in file ||
     (file.truncated !== undefined && file.truncated !== false)
+  )
+    throw new PolicyInputError();
+  return file as Record<string, unknown> & { path: string; sha: string; size: number };
+}
+
+function decodeFile(body: unknown, path: string, expectedSha?: string): PolicyFile {
+  const file = fileMetadata(body);
+  if (
+    file.path !== path ||
+    (expectedSha !== undefined && file.sha !== expectedSha) ||
+    file.encoding !== 'base64' ||
+    typeof file.content !== 'string' ||
+    file.content.length > Math.ceil(POLICY_FILE_LIMIT / 3) * 4 + 16384
   )
     throw new PolicyInputError();
   // GitHub wraps base64 at newlines. Reject every other ignored character and
@@ -121,13 +139,7 @@ export async function discoverPolicy(
   upstream: { readonly owner: string; readonly repo: string; readonly ref: string }
 ): Promise<PolicyDiscovery> {
   try {
-    if (
-      !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/u.test(upstream.owner) ||
-      !/^[A-Za-z0-9_.-]{1,100}$/u.test(upstream.repo) ||
-      upstream.repo === '.' ||
-      upstream.repo === '..' ||
-      !/^[a-f0-9]{40}$/u.test(upstream.ref)
-    )
+    if (!isGitHubLogin(upstream.owner) || !isRepoName(upstream.repo) || !isCommitSha(upstream.ref))
       return { kind: 'unknown' };
     const prefix = `/repos/${encodeURIComponent(upstream.owner)}/${encodeURIComponent(upstream.repo)}/contents/`;
     const suffix = `?ref=${upstream.ref}`;
@@ -154,19 +166,10 @@ export async function discoverPolicy(
     const entries: { path: string; sha: string }[] = [];
     const seen = new Set<string>();
     for (const value of listing.body) {
-      const entry = object(value);
+      const entry = fileMetadata(value);
       if (
-        !entry ||
-        entry.type !== 'file' ||
-        typeof entry.path !== 'string' ||
         !templatePath(entry.path) ||
         entry.name !== entry.path.slice(POLICY_TEMPLATE_DIRECTORY.length + 1) ||
-        typeof entry.sha !== 'string' ||
-        !/^[a-f0-9]{40}$/u.test(entry.sha) ||
-        !Number.isSafeInteger(entry.size) ||
-        (entry.size as number) < 0 ||
-        (entry.size as number) > POLICY_FILE_LIMIT ||
-        (entry.truncated !== undefined && entry.truncated !== false) ||
         seen.has(entry.path)
       )
         return { kind: 'unknown' };

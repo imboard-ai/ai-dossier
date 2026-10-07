@@ -1,4 +1,7 @@
 {
+  "actor": "upstream_maintainer",
+  "slice": "S2",
+  "expectedOutcome": "disclosure_required",
   "files": { "AI_POLICY.md": "LLM usage must be disclosed." },
   "expected": {
     "ai": "disclosure_required",

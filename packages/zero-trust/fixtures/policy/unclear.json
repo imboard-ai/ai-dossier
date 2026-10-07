@@ -1,4 +1,7 @@
 {
+  "actor": "upstream_maintainer",
+  "slice": "S2",
+  "expectedOutcome": "hand_off_on_ambiguity",
   "files": { "AI_POLICY.md": "AI usage depends on the situation." },
   "expected": {
     "ai": "unclear",

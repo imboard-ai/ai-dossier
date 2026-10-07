@@ -1,4 +1,7 @@
 {
+  "actor": "upstream_maintainer",
+  "slice": "S2",
+  "expectedOutcome": "draft_required_receipt_forbidden",
   "files": {
     ".github/PULL_REQUEST_TEMPLATE/bug.md": "Please open a draft PR.\nDo not modify the template."
   },

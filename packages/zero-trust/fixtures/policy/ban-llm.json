@@ -1,4 +1,7 @@
 {
+  "actor": "hostile_repository",
+  "slice": "S2",
+  "expectedOutcome": "banned_with_citation",
   "files": { "CONTRIBUTING.md": "# Contributions\nLLM contributions are banned." },
   "expected": {
     "ai": "banned",

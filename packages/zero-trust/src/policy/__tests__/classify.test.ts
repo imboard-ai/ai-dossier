@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { canonicalJson, ReceiptError } from '../../receipt/schema';
 import { assertNoSecrets } from '../../redaction';
 import { classifyPolicy, policyDigest } from '../classify';
 import { type PolicyFile, PolicyInputError } from '../discover';
@@ -22,6 +23,9 @@ const fixtures = readdirSync(fixtureRoot)
     ...(JSON.parse(readFileSync(resolve(fixtureRoot, path), 'utf8')) as {
       files: Record<string, string>;
       expected: object;
+      actor: string;
+      slice: string;
+      expectedOutcome: string;
     }),
   }));
 
@@ -32,7 +36,10 @@ describe('synthetic policy fixtures', () => {
     expect(Object.isFrozen(POLICY_RULES)).toBe(true);
     expect(POLICY_RULES.every(Object.isFrozen)).toBe(true);
   });
-  it.each(fixtures)('$name', ({ files, expected }) => {
+  it.each(fixtures)('$name', ({ files, expected, actor, slice, expectedOutcome }) => {
+    expect(['hostile_repository', 'upstream_maintainer']).toContain(actor);
+    expect(slice).toBe('S2');
+    expect(expectedOutcome.length).toBeGreaterThan(0);
     const input = Object.entries(files).map(([path, content]) => policyFile(content, path));
     const { citations, ...assessment } = classifyPolicy(input);
     expect(assessment).toEqual(expected);
@@ -47,6 +54,118 @@ describe('synthetic policy fixtures', () => {
 });
 
 describe('classification and digest boundaries', () => {
+  it.each([
+    'AI-generated contributions are not   allowed.',
+    'AI contributions are not\taccepted.',
+    'LLM contributions are never allowed.',
+    'We never accept AI contributions.',
+    'We do not normally accept AI contributions.',
+  ])('never grants negated AI permission: %s', (content) => {
+    expect(['banned', 'unclear']).toContain(classifyPolicy([policyFile(content)]).ai);
+  });
+  it.each([
+    '.',
+    ';',
+    ', but',
+    '\n',
+  ])('detects independent same-line AI caveats separated by %s', (separator) => {
+    expect(
+      classifyPolicy([
+        policyFile(`AI is welcome${separator} AI rules depend on committee judgment.`),
+      ]).ai
+    ).toBe('unclear');
+  });
+  it('does not swallow a second AI assertion inside one matching gap', () => {
+    expect(
+      classifyPolicy([policyFile('AI is welcome and AI contributions must have written consent.')])
+        .ai
+    ).toBe('unclear');
+  });
+  it('never treats negated direct-PR permission as assignment silence', () => {
+    expect(classifyPolicy([policyFile('Do not feel free to open a PR.')])).toMatchObject({
+      directPr: 'unclear',
+      assignment: 'unclear',
+    });
+  });
+  it('recognizes assigned-issue requirements and keeps unknown assignment prose uncertain', () => {
+    expect(
+      classifyPolicy([
+        policyFile('Direct PRs are welcome.\nYou must get an issue assigned before contributing.'),
+      ]).assignment
+    ).toBe('required');
+    expect(
+      classifyPolicy([
+        policyFile('Direct PRs are welcome.\nAssignment depends on committee approval.'),
+      ]).assignment
+    ).toBe('unclear');
+    expect(
+      classifyPolicy([
+        policyFile('It is false that assignment is optional. Direct PRs are welcome.'),
+      ]).assignment
+    ).toBe('unclear');
+  });
+  it.each([
+    'No baseline failures are permitted.',
+    'Baseline failures are allowed.\nBaseline failures are not allowed.',
+    'Baseline failures are allowed only in examples.',
+  ])('refuses negated, conditional or conflicting baseline permissions: %s', (content) => {
+    expect(classifyPolicy([policyFile(content)]).baselineFailuresPermitted).toBe(false);
+  });
+  it('does not grant baseline permission across a conflicting second file', () => {
+    expect(
+      classifyPolicy([
+        policyFile('Baseline failures are allowed.'),
+        policyFile('Baseline failures are forbidden.', 'AI_POLICY.md'),
+      ]).baselineFailuresPermitted
+    ).toBe(false);
+  });
+  it('keeps the outer README contribution scope across nested matching headings', () => {
+    const a = classifyPolicy([
+      policyFile(
+        '## Contributing\nAI is welcome.\n### Contribution workflow\nRun tests.\n### Restrictions\nAI contributions are banned.\n## Usage\nAI is welcome.',
+        'README.md'
+      ),
+    ]);
+    expect(a.ai).toBe('unclear');
+    expect(a.citations.find((c) => c.ruleId === 'ai-ban-1')?.line).toBe(6);
+  });
+  it('continues classification when the first opposing statement follows the citation cap', () => {
+    const text =
+      'AI is banned.\nDo not use AI.\nAssignment is required.\nAssignment is optional.\nDirect PRs are welcome.\nDiscuss changes before PRs.\nDraft PRs are required.\nNo extra sections.\nBaseline failures are allowed.';
+    const files = Array.from({ length: 15 }, (_, n) =>
+      policyFile(text, `.github/PULL_REQUEST_TEMPLATE/${String(n).padStart(2, '0')}.md`)
+    );
+    files.push(policyFile('AI is welcome.', '.github/PULL_REQUEST_TEMPLATE/zzz.md'));
+    const a = classifyPolicy(files);
+    expect(a.citations).toHaveLength(128);
+    expect(a.ai).toBe('unclear');
+    expect(classifyPolicy([...files].reverse())).toEqual(a);
+    expect(policyDigest(a, [...files].reverse())).toBe(policyDigest(a, files));
+  });
+  it('digests accepted snapshots at worst-case escaped citation size', () => {
+    const text = [
+      'AI is banned.',
+      'AI requires approval.',
+      'AI disclosure required.',
+      'Assignment is required.',
+      'Assignment is optional.',
+      'Direct PRs are welcome.',
+      'Discuss changes before PRs.',
+      'Draft PRs are required.',
+      'No extra sections.',
+      'Baseline failures are allowed.',
+    ]
+      .map((line) => `${line} ${'\u0001'.repeat(200)}`)
+      .join('\n');
+    const files = Array.from({ length: 20 }, (_, n) =>
+      policyFile(text, `.github/PULL_REQUEST_TEMPLATE/${n}.md`)
+    );
+    const a = classifyPolicy(files);
+    expect(a.citations).toHaveLength(128);
+    expect(policyDigest(a, files)).toMatch(/^[a-f0-9]{64}$/u);
+    expect(() => canonicalJson('x', 0)).toThrow(ReceiptError);
+    expect(() => canonicalJson('x', 1024 * 1024 + 1)).toThrow(ReceiptError);
+  });
   it('cites the scenario 1 ban at its original line', () => {
     const a = classifyPolicy([policyFile('# Contributions\n\nLLM contributions are banned.')]);
     expect(a.ai).toBe('banned');

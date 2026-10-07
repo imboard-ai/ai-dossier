@@ -1,4 +1,7 @@
 {
+  "actor": "upstream_maintainer",
+  "slice": "S2",
+  "expectedOutcome": "assignment_required",
   "files": {
     "docs/CONTRIBUTING.md": "You must be assigned before contributing.\nDirect pull requests are welcome."
   },

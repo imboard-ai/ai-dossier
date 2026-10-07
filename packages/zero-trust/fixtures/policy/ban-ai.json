@@ -1,4 +1,7 @@
 {
+  "actor": "hostile_repository",
+  "slice": "S2",
+  "expectedOutcome": "banned_with_citation",
   "files": { "AI_POLICY.md": "AI-generated contributions are not accepted." },
   "expected": {
     "ai": "banned",

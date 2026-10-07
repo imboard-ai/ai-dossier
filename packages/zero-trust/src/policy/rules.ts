@@ -11,7 +11,8 @@ export type PolicyCategory =
   | 'direct_pr'
   | 'draft_required'
   | 'template_fixed'
-  | 'baseline_permitted';
+  | 'baseline_permitted'
+  | 'baseline_forbidden';
 
 export interface PolicyRule {
   readonly id: string;
@@ -28,12 +29,17 @@ export const POLICY_RULES: readonly PolicyRule[] = Object.freeze(
     {
       id: 'ai-ban-1',
       category: 'ai_ban',
-      pattern: `${AI}${GAP}\\b(?:banned|prohibited|forbidden|not (?:accepted|allowed|permitted|welcome)|disallowed)\\b`,
+      pattern: `${AI}${GAP}\\b(?:banned|prohibited|forbidden|(?:not|never) (?:accepted|allowed|permitted|welcome)|disallowed)\\b`,
     },
     {
       id: 'ai-ban-2',
       category: 'ai_ban',
-      pattern: `\\b(?:no|ban|reject|do not (?:accept|submit|use)|don't (?:accept|submit|use))\\b${GAP}${AI}`,
+      pattern: `\\b(?:no|ban|reject|never (?:accept|submit|use)|do not (?:accept|submit|use)|don't (?:accept|submit|use))\\b${GAP}${AI}`,
+    },
+    {
+      id: 'assignment-required-2',
+      category: 'assignment_required',
+      pattern: '\\bmust (?:get|have) (?:an |the )?issue assigned\\b',
     },
     {
       id: 'ai-approval-1',
@@ -107,8 +113,17 @@ export const POLICY_RULES: readonly PolicyRule[] = Object.freeze(
       pattern:
         '\\b(?:baseline|pre[- ]existing|unrelated) (?:test )?failures (?:are )?(?:permitted|allowed|acceptable)\\b',
     },
+    {
+      id: 'baseline-forbidden-1',
+      category: 'baseline_forbidden',
+      pattern:
+        '\\bno (?:baseline|pre[- ]existing|unrelated) (?:test )?failures\\b|\\b(?:baseline|pre[- ]existing|unrelated) (?:test )?failures (?:are )?(?:not allowed|not permitted|forbidden|prohibited)\\b',
+    },
   ].map((rule) => Object.freeze(rule as PolicyRule))
 );
 
-/** Any AI mention without a recognized rule is ambiguous, not silence. */
+/** Unrecognized AI-bearing clauses are ambiguous, not silence. */
 export const POLICY_AI_MENTION = AI;
+/** Permission cannot be earned by a negated, conditional or uncertain clause. */
+export const POLICY_PERMISSION_CAVEAT =
+  "\\b(?:not|no|never|cannot|can't|don't|false|only|unless|except|if|depends|may require)\\b";

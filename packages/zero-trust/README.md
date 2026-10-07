@@ -3,7 +3,7 @@
 Private, provider-independent foundation for [PRD-ZTFC-001](../../docs/features/zero-trust-full-cycle/prd.md)
 §5.1, §5.5 and §5.6 (gate 2), §5.7, §5.8 and §5.9. No model calls; the only
 GitHub calls are the controller-only broker/push modules and credential-free reads in
-`src/github/`, and the VM adapter and proxy scripts are described below. Receipts use
+`src/github/` and `src/policy/`, and the VM adapter and proxy scripts are described below. Receipts use
 core's Ed25519 signer abstraction and Ajv schema validation.
 This provides lifecycle/status, durable intent/budget, canonical Git and receipt primitives,
 plus ecosystem detection, runtime profiles, command plans and package-proxy policy
@@ -226,7 +226,7 @@ list of contributing files, AI policies, individual templates and README; one
 Listing paths never supply a URL or change the target. `POLICY_FILE_LIMIT` is
 256 KiB decoded bytes and `POLICY_TOTAL_LIMIT` is 1 MiB. Base64 must be canonical
 (GitHub CR/LF wrapping is allowed), size must match, and UTF-8 decoding is strict.
-The BOM is preserved. Symlinks, submodules, malformed responses, duplicate entries,
+The BOM is preserved. Explicit symlink/submodule responses or metadata, malformed responses, duplicate entries,
 truncated/over-cap listings, blob mismatches and every non-404 failed read yield
 `{ kind: 'unknown' }`, without partial files, retries or a weaker fallback. A listed
 file disappearing also yields unknown. Complete absence is `{ kind: 'known', files: [] }`.
@@ -234,6 +234,17 @@ file disappearing also yields unknown. Complete absence is `{ kind: 'known', fil
 (Git blob SHA) and `content` (untrusted text). The injected reader is responsible
 for the GitHub protocol and complete response; GitHub's 1,000-entry directory
 truncation is necessarily above the stricter 20-entry cap.
+Contents can dereference an in-repository symlink and return a normal file response;
+this API assesses that returned pinned content at its logical policy path, not Git
+tree modes. No additional tree reads or repository-controlled URLs are followed.
+
+Owner and repository names use the shared GitHub binding validators (login at most
+39 characters without trailing/consecutive hyphens; repository at most 100 ASCII
+letters/digits/underscore/dot/hyphen, excluding `.` and `..`). `POLICY_TEMPLATE_DIRECTORY`
+and `POLICY_TEMPLATE_LIMIT` export the directory and 20-file cap. Template names
+are 1–120 ASCII letters/digits/underscore/dot/space/hyphen, excluding `.` and `..`.
+Both discovery and direct validation enforce at most 20 templates and 34 total
+files, unique eligible paths, lowercase 40-hex SHAs, strict UTF-8, and byte caps.
 
 `classifyPolicy(files)` returns `PolicyAssessment`: `ai` is `banned`,
 `requires_approval`, `disclosure_required`, `welcomed`, `silent` or `unclear`;
@@ -241,7 +252,8 @@ truncation is necessarily above the stricter 20-entry cap.
 `discussion_first` or `unclear`. It also returns `draftRequired`,
 `receiptBlockAllowed` (false for fixed templates/no extra sections),
 `baselineFailuresPermitted` (default false), and `citations` with original `path`,
-1-based `line`, stable `ruleId` and at most 200-character `excerpt`.
+1-based `line`, stable `ruleId` and at most 200-Unicode-code-point `excerpt`
+(`PolicyCitation`).
 Secret-bearing lines are replaced with `[redacted]` after `assertNoSecrets`, including
 secrets outside the excerpt slice. Evidence retains the first occurrence of each
 rule per file and is capped at 128 citations; every line still affects classification.
@@ -249,12 +261,18 @@ README contributes only sections headed with `/contribut/i` (ATX or setext headi
 including nested sections), preserving original line numbers. Other README prose
 does not count. Direct inputs are bounded/validated by `validatePolicyFiles` and
 invalid snapshots raise non-echoing `PolicyInputError` (unsafe paths also fail the
-secret guard).
+secret guard, raising `SecretRedactionError`).
 
 `POLICY_RULES` is frozen case-insensitive **data**, with category and ID for each
-pattern; `PolicyRule`, `PolicyCategory` and `POLICY_AI_MENTION` are exported.
-Opposing categories make their dimension `unclear`. An unrecognized AI mention
-also makes AI unclear rather than silent. Assignment silence is `not_required`
+pattern; `PolicyRule`, `PolicyCategory`, `POLICY_AI_MENTION` and
+`POLICY_PERMISSION_CAVEAT` are exported. Matching normalizes whitespace and checks
+punctuation/`but`-separated clauses independently. Negative/conditional permission
+clauses cannot earn permission. Any distinct AI categories (including cumulative
+approval and disclosure requirements), unrecognized AI-bearing clauses or multiple
+AI assertions within one clause make AI `unclear`; standalone `# AI Policy`/`# LLM Policy`
+headings do not. Unrecognized assignment/PR clauses also keep their dimension
+unclear; ambiguous or conflicting baseline-failure permission remains false.
+Assignment silence is `not_required`
 only when direct PRs are welcomed; otherwise unclear. No model classification is
 performed. These bounded literal rules do not understand all natural language;
 `unknown` and `unclear` always require a block/hand-off, never permission. Repository
@@ -262,11 +280,32 @@ text is never executed or interpreted as controller instructions.
 
 `policyDigest(assessment, files)` hashes canonical sorted-key JSON containing the
 assessment (with sorted citations) and sorted `{ path, sha }` file identities using
-SHA-256. Input order and object-key order cannot affect the digest; any blob SHA or
+SHA-256. The payload is `{ assessment: { ...assessment, citations }, files }`:
+citations sort lexicographically by each citation's entire canonical JSON, files
+sort lexicographically by path and contain only `{ path, sha }`. Hash input is
+UTF-8 and output is 64 lowercase hex characters. Input order and object-key order cannot affect the digest; any blob SHA or
 assessment change does. Content is bound by the supplied GitHub blob identity;
 callers must use discovered snapshots, not fabricate SHA/content pairs. A digest
 is a freshness binding, not authorization or proof that contributions are permitted.
-Twenty synthetic fixtures in `fixtures/policy/` and fake-read tests run offline.
+Files are validated; assessment semantic validity remains caller-owned: use
+`classifyPolicy` output. Canonical serialization rejects unsupported JSON or secrets
+with `ReceiptError('invalid_json')`/`SecretRedactionError`. Policy serialization uses
+a 256-KiB escaped-JSON budget; receipt callers retain their 128-KiB default.
+`canonicalJson(input, maxBytes?)` permits a positive safe-integer budget up to 1 MiB;
+this does not alter receipt parsing or signing defaults.
+An empty-snapshot test vector is
+`3236ec6be3056ffe44c3667e516c6bcb8c51fa9b5511f30e1839090e8fad581f`.
+Twenty synthetic fixtures in `fixtures/policy/` identify actor, expected outcome
+and S2 ownership, and fake-read tests run offline.
+
+```ts
+const discovery = await discoverPolicy(anonymousReader(), { owner, repo, ref: pinnedSha });
+if (discovery.kind === 'known') {
+  const assessment = classifyPolicy(discovery.files);
+  const digest = policyDigest(assessment, discovery.files);
+  // Persist the binding; the controller still decides block/hand-off/permission.
+}
+```
 
 ## Development commands
 
