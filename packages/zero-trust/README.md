@@ -535,6 +535,9 @@ path aliases, collisions and malformed objects throw `unsupported`; source/pack
 limits remain `limit_exceeded`; unavailable Git inspection remains `unavailable`.
 The shared internal `importPack(git, pack)` plumbing distinguishes strict rejection
 from an unavailable subprocess; unavailable import never triggers another fetch.
+Only positively identified fixed terminal Git pack/object rejection diagnostics
+permit fallback. Completed disk/permission failures and unknown diagnostics remain
+unavailable; raw diagnostic text is never returned.
 No path or byte normalization occurs. The manifest
 has the existing immutable `SourceManifest` shape. Both APIs are package exports.
 Tests alone can pass `options.remoteUrlForTest`, a local `file:` URL accepted only

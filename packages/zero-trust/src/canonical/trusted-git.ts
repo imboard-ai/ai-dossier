@@ -41,6 +41,8 @@ export interface GitResult {
   readonly stdout: Buffer;
   readonly outputLimitExceeded?: boolean;
   readonly fileLimitExceeded?: boolean;
+  /** Positively identified strict object/pack refusal, never generic nonzero exit. */
+  readonly strictImportRejected?: boolean;
 }
 
 /** Internal plumbing only. Never points Git at an artifact's repository/config. */
@@ -120,6 +122,17 @@ export class TrustedGit {
         source &&
         (result.signal === 'SIGXFSZ' ||
           (result.stderr?.includes(Buffer.from('File too large')) ?? false)),
+      strictImportRejected:
+        args[0] === 'index-pack' &&
+        args.includes('--strict') &&
+        !result.error &&
+        result.status !== null &&
+        result.status !== 0 &&
+        // Only Git's fixed terminal diagnostics; do not expose raw stderr or trust
+        // names/messages embedded in earlier fsck lines. Unknown failure is unavailable.
+        /^fatal: (?:did not receive expected object [a-f0-9]{40}|fsck error in packed object|early EOF|pack signature mismatch)$/u.test(
+          result.stderr?.toString('utf8').trim().split('\n').at(-1) ?? ''
+        ),
     };
   }
   /** exec() for long network operations: the event loop stays free, so a revoked lease or

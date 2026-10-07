@@ -116,7 +116,8 @@ export function importPack(git: TrustedGit, pack: Buffer): void {
   // Copy once: caller cannot mutate bytes between checks/import.
   const result = git.exec(['index-pack', '--strict', '--stdin'], { input: Buffer.from(pack) });
   if (result.status === null) throw new CanonicalError('unavailable');
-  if (result.status !== 0) throw new CanonicalError('unsupported');
+  if (result.status !== 0)
+    throw new CanonicalError(result.strictImportRejected ? 'unsupported' : 'unavailable');
 }
 function importBase(git: TrustedGit, pack: Buffer, baseSha: string): void {
   importPack(git, pack);

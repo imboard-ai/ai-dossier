@@ -325,6 +325,61 @@ describe('credential-free source acquisition', () => {
       expect(fs.existsSync((context as TrustedGit).directory)).toBe(false);
   });
   it.each([
+    'No space left on device',
+    'Permission denied',
+    'unknown failure',
+  ])('completed operational import failure %s never retries', (detail) => {
+    const f = fixture();
+    const original = TrustedGit.prototype.exec;
+    const exec = vi.spyOn(TrustedGit.prototype, 'exec').mockImplementation(function (
+      this: TrustedGit,
+      args,
+      options
+    ) {
+      if (args[0] === 'index-pack')
+        return { status: 128, stdout: Buffer.alloc(0), strictImportRejected: false };
+      return original.call(this, args, options);
+    });
+    expect(detail).toBeTruthy();
+    expect(() => acquire(f)).toThrow(new CanonicalError('unavailable'));
+    expect(exec.mock.calls.filter(([args]) => args[0] === 'fetch')).toHaveLength(1);
+    for (const context of exec.mock.contexts)
+      expect(fs.existsSync((context as TrustedGit).directory)).toBe(false);
+  });
+  it('strict importer classifies fixed terminal Git diagnostics without exposing arbitrary stderr', () => {
+    const trusted = new TrustedGit();
+    try {
+      const spawn = vi.spyOn(childProcess, 'spawnSync');
+      syncBuiltinESMExports();
+      for (const [stderr, rejected] of [
+        [`fatal: did not receive expected object ${'a'.repeat(40)}\n`, true],
+        ['fatal: fsck error in packed object\n', true],
+        ['fatal: early EOF\n', true],
+        ['fatal: pack signature mismatch\n', true],
+        ['fatal: cannot create temporary file: No space left on device\n', false],
+        ['fatal: cannot create temporary file: Permission denied\n', false],
+        ['fatal: unknown failure\n', false],
+        [`fatal: did not receive expected object ${'a'.repeat(40)}\nfatal: write failed\n`, false],
+      ] as const) {
+        spawn.mockReturnValue({
+          pid: 0,
+          output: [null, Buffer.alloc(0), Buffer.from(stderr)],
+          stdout: Buffer.alloc(0),
+          stderr: Buffer.from(stderr),
+          status: 128,
+          signal: null,
+        });
+        const result = trusted.exec(['index-pack', '--strict', '--stdin'], {
+          input: Buffer.from('pack'),
+        });
+        expect(result.strictImportRejected).toBe(rejected);
+        expect(JSON.stringify(result)).not.toContain(stderr.trim());
+      }
+    } finally {
+      trusted.close();
+    }
+  });
+  it.each([
     true,
     false,
   ])('kernel receive bound stops the actual fetch before pack publication, shallow=%s', (shallow) => {
