@@ -1,0 +1,13 @@
+---
+dossier_schema_version: '1.0.0'
+title: 'Legacy YAML Fixture'
+version: '0.3.0'
+risk_level: 'low'
+requires_approval: false
+risk_factors: []
+checksum:
+  algorithm: sha256
+  hash: 'abababababababababababababababababababababababababababababababab'
+---
+
+# Legacy YAML

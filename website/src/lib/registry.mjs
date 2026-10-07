@@ -1,20 +1,114 @@
 // Build-time registry snapshot. The registry API has a CORS allowlist that does not
 // include this site's origin, so the browser never calls it: every page is generated
 // from data fetched here, once per build. Freshness = rebuild cadence.
+import { load as loadYaml } from 'js-yaml';
+
 const API = process.env.REGISTRY_API_URL || 'https://dossier-registry.vercel.app/api/v1';
 const CONCURRENCY = 8;
 const RETRIES = 2;
 
-/** Split a `.ds.md` into its `---dossier` JSON header and markdown body. */
-export function parseDossier(text) {
-  const m = text.match(/^---dossier\s*\n([\s\S]*?)\n---\s*(?:\n|$)/);
-  if (!m) return null;
+// Minimal port of @ai-dossier/core's parseDossierContent + fromSpecFrontmatter
+// (packages/core/src/parser.ts, spec-shape.ts). The site is not an npm workspace and
+// the published core lags main, so it cannot depend on it; the fixtures under
+// __fixtures__/registry pin both implementations to the same logical objects
+// (this package's registry.test.mjs and scripts/website-registry-parity.test.mjs).
+const SPEC_TOP_LEVEL = new Set([
+  'name',
+  'description',
+  'license',
+  'compatibility',
+  'allowed-tools',
+]);
+const PREFIX = 'dossier.';
+
+const isPlainObject = (v) =>
+  v !== null &&
+  typeof v === 'object' &&
+  !Array.isArray(v) &&
+  [Object.prototype, null].includes(Object.getPrototypeOf(v));
+
+const isSpecShaped = (fm) =>
+  isPlainObject(fm) &&
+  isPlainObject(fm.metadata) &&
+  Object.keys(fm.metadata).some((k) => k.startsWith(PREFIX));
+
+const hasYamlMergeKey = (yaml) => /^[ \t]*(?:-[ \t]+)?<<[ \t]*:|[{,][ \t]*<<[ \t]*:/m.test(yaml);
+
+const decodeSpecValue = (text) => {
   try {
-    return { meta: JSON.parse(m[1]), body: text.slice(m[0].length) };
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+};
+
+/** Spec shape -> flat logical frontmatter; throws on anything core's strict reader refuses. */
+function fromSpecFrontmatter(spec) {
+  const logical = {};
+  for (const [key, value] of Object.entries(spec)) {
+    if (key === 'metadata') continue;
+    if (!SPEC_TOP_LEVEL.has(key)) throw new Error(`unexpected top-level field "${key}"`);
+    if (typeof value !== 'string') throw new Error(`top-level "${key}" must be a string`);
+    logical[key] = value;
+  }
+  for (const [key, value] of Object.entries(spec.metadata)) {
+    if (typeof value !== 'string') throw new Error(`metadata "${key}" must be a string`);
+    if (!key.startsWith(PREFIX)) continue;
+    const field = key.slice(PREFIX.length);
+    if (!field || field === '__proto__') throw new Error(`metadata "${key}" is not a valid field`);
+    if (SPEC_TOP_LEVEL.has(field))
+      throw new Error(`metadata "${key}" duplicates a top-level field`);
+    if (Object.hasOwn(logical, field)) throw new Error(`field "${field}" appears more than once`);
+    logical[field] = decodeSpecValue(value);
+  }
+  if (isSpecShaped(logical)) throw new Error(`metadata "${PREFIX}metadata" carries dossier.* keys`);
+  return logical;
+}
+
+/**
+ * Split a `.ds.md` into its logical frontmatter and markdown body. Reads the legacy
+ * `---dossier` JSON header and the spec-shaped (Agent Skills) `---` YAML header alike;
+ * `meta` is always the flat logical view, so `meta.checksum`/`meta.signature` are found
+ * in both. Returns null for anything core refuses; at the margins (a header with no
+ * closing `---` line, YAML 1.1-only number forms) it is stricter or reads differently,
+ * and then the page falls back to the registry entry rather than guessing.
+ */
+export function parseDossier(text) {
+  // Same openings core accepts: `---dossier`/`---json` (any trailing text), `---`, `---yaml`.
+  const nl = text.indexOf('\n');
+  if (nl < 0) return null;
+  const opening = text.slice(0, nl).trimEnd();
+  const jsonFence = text.startsWith('---dossier') || text.startsWith('---json');
+  if (!jsonFence && opening !== '---' && opening !== '---yaml') return null;
+  const rest = text.slice(nl + 1);
+  const close = rest.match(/^---[ \t]*(?:\r?\n|$)/m);
+  if (!close) return null;
+  const yaml = rest.slice(0, close.index);
+  try {
+    const raw = yaml.trim() ? loadYaml(yaml) : {};
+    if (!isPlainObject(raw)) return null;
+    const shape = isSpecShaped(raw) ? 'spec' : 'legacy';
+    if (shape === 'spec' && hasYamlMergeKey(yaml)) return null;
+    const meta = shape === 'spec' ? fromSpecFrontmatter(raw) : raw;
+    return { meta, body: rest.slice(close.index + close[0].length), shape };
   } catch {
     return null;
   }
 }
+
+// Signature schemes by `covers` (core's SIGNATURE_COVERAGES). Only an absent `covers`
+// means v1: core refuses any other value it does not know, `null` included.
+const SIGNATURE_SCHEMES = {
+  body: 'v1',
+  'frontmatter+body': 'v2',
+  'spec-frontmatter+body': 'v3',
+};
+const signatureScheme = (covers) =>
+  typeof covers === 'string' && Object.hasOwn(SIGNATURE_SCHEMES, covers)
+    ? SIGNATURE_SCHEMES[covers]
+    : 'unrecognized';
+const coversLabel = (covers) =>
+  covers === undefined ? 'body' : typeof covers === 'string' ? covers : JSON.stringify(covers);
 
 async function getText(url) {
   let lastErr;
@@ -63,7 +157,7 @@ export const validName = (n) =>
   /^[A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*$/.test(n) &&
   !n.split('/').some((s) => s === '..' || s === '.');
 
-function shape(entry, parsed) {
+export function shape(entry, parsed) {
   const meta = parsed?.meta ?? {};
   return {
     name: entry.name,
@@ -92,9 +186,13 @@ function shape(entry, parsed) {
           signedBy: meta.signature.signed_by ?? '',
           signedAt: meta.signature.signed_at ?? '',
           publicKey: meta.signature.public_key ?? '',
-          covers: meta.signature.covers ?? '',
+          covers: coversLabel(meta.signature.covers),
+          scheme: signatureScheme(
+            meta.signature.covers === undefined ? 'body' : meta.signature.covers
+          ),
         }
       : null,
+    headerShape: parsed?.shape ?? '',
     detailLoaded: Boolean(parsed),
   };
 }
