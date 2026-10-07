@@ -41,7 +41,7 @@ export function policyRegions(file: PolicyFile): readonly PolicyRegion[] {
   for (const token of tokens) {
     // Validate the container-stripped opener too: raw lines can retain list/quote
     // prefixes that hide an unsupported separator from the source-line guard.
-    if (token.type === 'html_block') assertHtmlSeparator(token.content);
+    if (token.type === 'html_block') assertHtmlSeparator(token.content.replace(/^[ \t]*/u, ''));
     if (!token.map) continue;
     const [start, end] = token.map;
     if (token.type === 'fence') {

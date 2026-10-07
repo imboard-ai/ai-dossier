@@ -234,4 +234,14 @@ describe('CommonMark subset policy regions', () => {
       'banned'
     );
   });
+  it.each(['> \t', '>\t', '>  \t'])('validates retained token indentation behind %s', (prefix) => {
+    for (const opener of ['<span a\u00a0="b">', '<script\u000b', '<!doctype html>']) {
+      expect(() =>
+        classifyPolicy([file(`${prefix}${opener}\n> ## Contributing\n> No AI.`)])
+      ).toThrow(PolicyInputError);
+    }
+    expect(
+      classifyPolicy([file(`## Contributing\n\`\`\`\n${prefix}<script\u000b\n\`\`\`\nNo AI.`)]).ai
+    ).toBe('banned');
+  });
 });
