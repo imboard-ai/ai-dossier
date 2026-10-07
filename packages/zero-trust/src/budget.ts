@@ -319,6 +319,22 @@ export function budgetTotals(state: BudgetState, sessionId: string): BudgetTotal
   };
 }
 
+/** Read-only stopping predicate. Work cannot consume the protected cleanup
+ * allowance; bigint totals also recognize observed overruns beyond safe sums. */
+export function isBudgetSessionExhausted(state: BudgetState, sessionId: string): boolean {
+  const session = state.sessions.find((entry) => entry.id === sessionId);
+  if (!session) throw new BudgetError('unknown_session', 'Unknown budget session');
+  const totals = reservationTotals(state, sessionId);
+  const committedMoney = totals.spent + totals.reserved;
+  const workCeiling = BigInt(session.ceiling.minor) - BigInt(session.cleanupAllowance);
+  return (
+    committedMoney > workCeiling ||
+    (workCeiling > 0n && committedMoney === workCeiling) ||
+    totals.tokens >= BigInt(session.tokenLimit) ||
+    totals.timeMs >= BigInt(session.timeLimitMs)
+  );
+}
+
 /** Controller-owned LOCAL filesystem ledger. Opening is read-only and never resets history. */
 export class BudgetLedger {
   readonly file: string;

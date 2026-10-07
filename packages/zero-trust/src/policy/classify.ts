@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
+import type { Citation, DecisionReason, Verdict } from '../decision/types';
 import { canonicalJson } from '../receipt/schema';
-import { redactedExcerpt } from '../redaction';
+import { assertSecretFree, redactedExcerpt } from '../redaction';
 import { type PolicyFile, validatePolicyFiles } from './discover';
-import { policyRegions } from './regions';
+import { type PolicyRegion, policyRegions } from './regions';
 import { POLICY_RULES, POLICY_TOPICS, type PolicyCategory, type PolicyDimension } from './rules';
 
 export interface PolicyCitation {
@@ -11,6 +12,14 @@ export interface PolicyCitation {
   readonly ruleId: string;
   readonly excerpt: string;
 }
+export type PolicyAssessmentDimension =
+  | 'ai'
+  | 'assignment'
+  | 'directPr'
+  | 'draftRequired'
+  | 'receiptBlockAllowed'
+  | 'baselineFailuresPermitted';
+
 export interface PolicyAssessment {
   readonly ai:
     | 'banned'
@@ -25,11 +34,33 @@ export interface PolicyAssessment {
   readonly receiptBlockAllowed: boolean;
   readonly baselineFailuresPermitted: boolean;
   readonly citations: readonly PolicyCitation[];
+  /** Assessment-wide refusal; dimension evidence remains available for audit. */
+  readonly reason?: 'budget' | 'ledger';
+  readonly decisions?: Readonly<Partial<Record<PolicyAssessmentDimension, PolicyDecisionEvidence>>>;
+}
+
+export interface PolicyDecisionEvidence {
+  readonly status: Verdict['status'];
+  readonly reason: DecisionReason;
+  /** Question answer/sentinel normally (non-draft permission is inverted in the
+   * assessment). Assessment-wide budget/ledger refusal stores the assessment's
+   * deterministic floor value instead, including assessment boolean polarity. */
+  readonly value: string | boolean;
+  /** Decimal string because receipt canonical JSON only accepts integer numbers. */
+  readonly confidence: string;
+  readonly provider: string;
+  readonly model: string;
+  readonly questionVersion: string;
+  readonly questionDigest: string;
+  readonly inputDigest: string;
+  /** Complete distinct validated evidence; display truncation never changes this set. */
+  readonly citations: readonly Citation[];
+  readonly citationDigest: string;
 }
 
 const RULES = POLICY_RULES.map((rule) => ({ ...rule, regex: new RegExp(rule.pattern, 'iu') }));
 const TOPICS = POLICY_TOPICS.map((topic) => ({ ...topic, regex: new RegExp(topic.pattern, 'iu') }));
-const CITATION_LIMIT = 128;
+export const POLICY_CITATION_LIMIT = 128;
 // Worst case: 128 * 200 six-byte JSON escapes, plus bounded paths/identities.
 const POLICY_JSON_LIMIT = 256 * 1024;
 const CATEGORY_DIMENSION: Record<PolicyCategory, PolicyDimension> = {
@@ -43,10 +74,10 @@ const CATEGORY_DIMENSION: Record<PolicyCategory, PolicyDimension> = {
   baseline_forbidden: 'baseline',
 };
 
-function compare(a: string, b: string): number {
+export function comparePolicyText(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
-function citationKey(c: PolicyCitation): string {
+export function policyCitationKey(c: PolicyCitation): string {
   return canonicalJson(c);
 }
 
@@ -66,16 +97,25 @@ function units(text: string): string[] {
     .filter(Boolean);
 }
 
-function excerpt(text: string): string {
+export function policyExcerpt(text: string): string {
   return redactedExcerpt(text, (value) => Array.from(value).slice(0, 200).join('')).excerpt;
 }
 
 /** Deterministic restriction floor only: no permission can be inferred from text.
  * Citations retain the first occurrence of each rule per file (at most 128 total).
  * Assessment still examines every line even once the evidence cap is reached. */
-export function classifyPolicy(files: readonly PolicyFile[]): PolicyAssessment {
+export interface PolicyFloor {
+  readonly assessment: PolicyAssessment;
+  readonly restrictions: Readonly<Record<PolicyDimension, readonly PolicyCategory[]>>;
+  readonly regions: ReadonlyMap<string, readonly PolicyRegion[]>;
+  readonly contradictions: Readonly<Record<PolicyDimension, boolean>>;
+}
+
+/** Internal consumer floor metadata is independent of bounded display evidence. */
+export function analyzePolicyFloor(files: readonly PolicyFile[]): PolicyFloor {
   validatePolicyFiles(files);
   const citations: PolicyCitation[] = [];
+  const regions = new Map<string, readonly PolicyRegion[]>();
   const dimensions = Object.fromEntries(
     TOPICS.map(({ dimension }) => [
       dimension,
@@ -83,21 +123,26 @@ export function classifyPolicy(files: readonly PolicyFile[]): PolicyAssessment {
         seen: false,
         unclear: false,
         restrictions: new Set<PolicyCategory>(),
+        contradiction: false,
       },
     ])
   ) as Record<
     PolicyDimension,
-    { seen: boolean; unclear: boolean; restrictions: Set<PolicyCategory> }
+    { seen: boolean; unclear: boolean; restrictions: Set<PolicyCategory>; contradiction: boolean }
   >;
-  for (const file of [...files].sort((a, b) => compare(a.path, b.path))) {
+  for (const file of [...files].sort((a, b) => comparePolicyText(a.path, b.path))) {
     const cited = new Set<string>();
     function cite(ruleId: string, text: string, line: number): void {
-      if (!cited.has(ruleId) && citations.length < CITATION_LIMIT) {
-        citations.push(Object.freeze({ path: file.path, line, ruleId, excerpt: excerpt(text) }));
+      if (!cited.has(ruleId) && citations.length < POLICY_CITATION_LIMIT) {
+        citations.push(
+          Object.freeze({ path: file.path, line, ruleId, excerpt: policyExcerpt(text) })
+        );
         cited.add(ruleId);
       }
     }
-    for (const region of policyRegions(file)) {
+    const selected = policyRegions(file);
+    regions.set(file.path, selected);
+    for (const region of selected) {
       for (const { text, line } of region.lines) {
         for (const unit of units(text)) {
           for (const topic of TOPICS) {
@@ -108,6 +153,23 @@ export function classifyPolicy(files: readonly PolicyFile[]): PolicyAssessment {
               (rule) =>
                 CATEGORY_DIMENSION[rule.category] === topic.dimension && rule.regex.test(unit)
             );
+            // A separate refusal-only check. Do not change #1091's classification
+            // units or infer permission from the nonrestrictive sub-clause.
+            if (
+              restrictions.length &&
+              unit
+                .split(/[,():—]|\bbut\b/u)
+                .some(
+                  (clause) =>
+                    topic.regex.test(clause) &&
+                    !RULES.some(
+                      (rule) =>
+                        CATEGORY_DIMENSION[rule.category] === topic.dimension &&
+                        rule.regex.test(clause)
+                    )
+                )
+            )
+              state.contradiction = true;
             if (region.ambiguous || !restrictions.length) {
               state.unclear = true;
               cite(
@@ -140,15 +202,61 @@ export function classifyPolicy(files: readonly PolicyFile[]): PolicyAssessment {
   // cannot produce; assignment silence therefore remains unclear.
   const assignment =
     dimensions.assignment.seen && !dimensions.assignment.unclear ? 'required' : 'unclear';
-  return Object.freeze({
+  const assessment = Object.freeze({
     ai,
     assignment,
     directPr,
     draftRequired: dimensions.draft.seen,
     receiptBlockAllowed: !dimensions.template.seen,
     baselineFailuresPermitted: false,
-    citations: Object.freeze(citations.sort((a, b) => compare(citationKey(a), citationKey(b)))),
+    citations: Object.freeze(
+      citations.sort((a, b) => comparePolicyText(policyCitationKey(a), policyCitationKey(b)))
+    ),
   });
+  const restrictions = Object.freeze(
+    Object.fromEntries(
+      Object.entries(dimensions).map(([dimension, state]) => [
+        dimension,
+        Object.freeze([...state.restrictions]),
+      ])
+    )
+  ) as PolicyFloor['restrictions'];
+  const contradictions = Object.freeze(
+    Object.fromEntries(
+      Object.entries(dimensions).map(([dimension, state]) => [dimension, state.contradiction])
+    )
+  ) as PolicyFloor['contradictions'];
+  return Object.freeze({ assessment, restrictions, regions, contradictions });
+}
+
+export function classifyPolicy(files: readonly PolicyFile[]): PolicyAssessment {
+  return analyzePolicyFloor(files).assessment;
+}
+
+/** Known validated citation fields in sorted-key JSON order. The full set is
+ * hashed incrementally so large valid quotes do not consume the display budget. */
+function decisionCitationKey(c: Citation): string {
+  return JSON.stringify({ line: c.line, quote: c.quote, sourceId: c.sourceId });
+}
+export function canonicalPolicyDecisionCitations(
+  citations: readonly Citation[]
+): readonly Citation[] {
+  assertSecretFree(citations);
+  const distinct = new Map(citations.map((c) => [decisionCitationKey(c), c]));
+  return Object.freeze(
+    [...distinct]
+      .sort(([a], [b]) => comparePolicyText(a, b))
+      .map(([, c]) => Object.freeze({ sourceId: c.sourceId, line: c.line, quote: c.quote }))
+  );
+}
+export function policyDecisionCitationDigest(citations: readonly Citation[]): string {
+  const hash = createHash('sha256').update('[');
+  let separator = '';
+  for (const citation of canonicalPolicyDecisionCitations(citations)) {
+    hash.update(separator).update(decisionCitationKey(citation));
+    separator = ',';
+  }
+  return hash.update(']').digest('hex');
 }
 
 /** Canonical sorted-key JSON, sorted citations and path/blob identities. Content is
@@ -156,11 +264,29 @@ export function classifyPolicy(files: readonly PolicyFile[]): PolicyAssessment {
 export function policyDigest(assessment: PolicyAssessment, files: readonly PolicyFile[]): string {
   validatePolicyFiles(files);
   const citations = [...assessment.citations].sort((a, b) =>
-    compare(citationKey(a), citationKey(b))
+    comparePolicyText(policyCitationKey(a), policyCitationKey(b))
   );
   const payload = {
-    assessment: { ...assessment, citations },
-    files: files.map(({ path, sha }) => ({ path, sha })).sort((a, b) => compare(a.path, b.path)),
+    assessment: {
+      ...assessment,
+      citations,
+      ...(assessment.decisions
+        ? {
+            decisions: Object.fromEntries(
+              Object.entries(assessment.decisions).map(([dimension, evidence]) => {
+                const { citations: fullCitations, ...metadata } = evidence;
+                return [
+                  dimension,
+                  { ...metadata, citationDigest: policyDecisionCitationDigest(fullCitations) },
+                ];
+              })
+            ),
+          }
+        : {}),
+    },
+    files: files
+      .map(({ path, sha }) => ({ path, sha }))
+      .sort((a, b) => comparePolicyText(a.path, b.path)),
   };
   return createHash('sha256')
     .update(canonicalJson(payload, POLICY_JSON_LIMIT), 'utf8')
