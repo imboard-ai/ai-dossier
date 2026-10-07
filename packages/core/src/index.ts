@@ -174,6 +174,8 @@ export {
   normalizePublicKey,
   publicKeysMatch,
   SIGNATURE_COVERAGES,
+  SIGNATURE_PAYLOAD_TAG_V2,
+  SIGNATURE_PAYLOAD_TAG_V3,
   signatureCoverage,
   toSpkiPem,
 } from './signing-payload';

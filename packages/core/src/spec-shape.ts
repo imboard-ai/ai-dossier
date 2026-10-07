@@ -145,7 +145,9 @@ export function decodeSpecValue(text: string): unknown {
  * one `dossier.*` key. A legacy dossier never has one, since no legacy field is
  * named `metadata` with dotted keys.
  */
-export function isSpecShapedFrontmatter(frontmatter: unknown): boolean {
+export function isSpecShapedFrontmatter(
+  frontmatter: unknown
+): frontmatter is Record<string, unknown> & { metadata: Record<string, unknown> } {
   if (!isPlainObject(frontmatter)) {
     return false;
   }

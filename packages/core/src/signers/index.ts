@@ -2,6 +2,8 @@
  * Signer and Verifier interfaces for dossier signatures
  */
 
+import type { SignatureCoverage } from '../signing-payload';
+
 export interface SignatureResult {
   algorithm: string;
   signature: string;
@@ -11,7 +13,7 @@ export interface SignatureResult {
   signed_by?: string;
   signed_at: string;
   /** Which bytes the signature covers. Absent means the legacy body-only scheme. */
-  covers?: 'body' | 'frontmatter+body';
+  covers?: SignatureCoverage;
 }
 
 export interface Signer {

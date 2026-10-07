@@ -17,10 +17,13 @@ const MAX_DESCRIPTION_LENGTH = 1024;
 const NAME_RULE = 'lowercase letters, digits and single hyphens, at most 64 characters';
 
 function toDiagnostic(err: ErrorObject): LintDiagnostic {
-  const field = (err.instancePath || '').replace(/^\//, '').replace(/\//g, '.') || undefined;
+  // `/metadata/dossier.title` names a key with a dot in it; write it the way it
+  // reads in the file rather than as an ambiguous `metadata.dossier.title`.
+  const [top, ...rest] = (err.instancePath || '').split('/').slice(1);
+  const field = top === undefined ? undefined : `${top}${rest.map((k) => `["${k}"]`).join('')}`;
   let message: string;
   if (err.keyword === 'required') {
-    message = `Missing required field: ${field ? `${field}.` : ''}${err.params.missingProperty}`;
+    message = `Missing required field: ${field ? `${field}["${err.params.missingProperty}"]` : err.params.missingProperty}`;
   } else if (err.keyword === 'additionalProperties') {
     message = `Unexpected top-level field "${err.params.additionalProperty}"; Dossier fields belong under metadata as "dossier.${err.params.additionalProperty}"`;
   } else if (field === 'name' && (err.keyword === 'pattern' || err.keyword === 'maxLength')) {

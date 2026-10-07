@@ -16,6 +16,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import {
+  buildVerificationPayload,
   type DossierFrontmatter,
   findTrustedIdentifier,
   loadTrustedKeys,
@@ -151,8 +152,16 @@ async function verifyDossier(dossierFile: string, trustedKeysFile: string): Prom
       result.authenticity.trustedAs = trustedAs;
     }
 
-    // Verify signature
-    const verifyResult = await verifySignature(body, sig);
+    // Verify against the payload the signature's scheme covers (v1 body, v2
+    // frontmatter+body, v3 on-disk spec frontmatter+body). An unknown scheme, or
+    // one that does not match the file's layout, is refused: fail closed.
+    let verifyResult: { valid: boolean; error?: string };
+    try {
+      verifyResult = await verifySignature(buildVerificationPayload(parsed), sig);
+    } catch (err) {
+      verifyResult = { valid: false };
+      result.errors.push(`Signature cannot be checked: ${(err as Error).message}`);
+    }
 
     if (verifyResult.valid) {
       if (result.authenticity.isTrusted) {

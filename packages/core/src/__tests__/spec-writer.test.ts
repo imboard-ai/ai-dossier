@@ -301,7 +301,22 @@ describe('spec-shape and legacy-layout lint rules', () => {
     );
     const messages = byRule(content, 'spec-shape').map((d) => d.message);
     expect(messages).toContainEqual(expect.stringMatching(/^description: /));
-    expect(messages).toContain('Missing required field: metadata.dossier.checksum');
+    expect(messages).toContain('Missing required field: metadata["dossier.checksum"]');
+  });
+
+  it('names the on-disk key when another rule flags a field of a spec-shaped file', () => {
+    const [d] = lintDossier(spec({ risk_level: 'bogus' })).diagnostics.filter(
+      (x) => x.ruleId === 'schema-valid'
+    );
+    expect(d.field).toBe('risk_level');
+    expect(d.message).toMatch(
+      /risk_level must be one of: .* \(in metadata\["dossier\.risk_level"\]\)$/
+    );
+    // The same file in the legacy layout keeps the plain field name.
+    const legacy = lintDossier(
+      fixture('legacy-twin.ds.md').replace(/"risk_level": "\w+"/, '"risk_level": "bogus"')
+    ).diagnostics.filter((x) => x.ruleId === 'schema-valid');
+    expect(legacy.map((x) => x.field)).toContain('risk_level');
   });
 
   it('reports flow-style (JSON) spec frontmatter, which strict YAML readers reject', () => {

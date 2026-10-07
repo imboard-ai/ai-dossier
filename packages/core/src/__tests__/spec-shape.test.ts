@@ -552,6 +552,15 @@ describe('signature verification across v1, v2 and v3', () => {
     return `---dossier\n${JSON.stringify({ ...fm, signature }, null, 2)}\n---\n${body}`;
   }
 
+  /** Rewrite the signature block of a rendered legacy file (parsed, not string-patched). */
+  function editLegacySignature(file: string, mutate: (sig: Record<string, unknown>) => void) {
+    const parsed = parseDossierContent(file);
+    const fm = { ...(parsed.frontmatter as Record<string, unknown>) };
+    const signature = { ...(fm.signature as Record<string, unknown>) };
+    mutate(signature);
+    return `---dossier\n${JSON.stringify({ ...fm, signature }, null, 2)}\n---\n${parsed.body}`;
+  }
+
   /** Rewrite one metadata string in a rendered spec file, keeping the signature. */
   function editMetadata(file: string, mutate: (m: Record<string, string>) => void): string {
     const parsed = parseDossierContent(file);
@@ -757,20 +766,18 @@ describe('signature verification across v1, v2 and v3', () => {
     });
 
     it('a v2 signature relabelled as v3 on its legacy file is refused', async () => {
-      const file = (await signLegacy('frontmatter+body')).replace(
-        '"covers": "frontmatter+body"',
-        '"covers": "spec-frontmatter+body"'
-      );
+      const file = editLegacySignature(await signLegacy('frontmatter+body'), (sig) => {
+        sig.covers = 'spec-frontmatter+body';
+      });
       expect(() => buildVerificationPayload(parseDossierContent(file))).toThrow(
         /Legacy-shaped dossier/
       );
     });
 
     it('unknown covers fails closed on both shapes', async () => {
-      const legacyFile = (await signLegacy('body')).replace(
-        '"public_key"',
-        '"covers": "spec-frontmatter+body+v4",\n    "public_key"'
-      );
+      const legacyFile = editLegacySignature(await signLegacy('body'), (sig) => {
+        sig.covers = 'spec-frontmatter+body+v4';
+      });
       expect(() => buildVerificationPayload(parseDossierContent(legacyFile))).toThrow(
         /Unsupported signature coverage/
       );
@@ -800,6 +807,11 @@ describe('dossier schema accepts the spec shape', () => {
   const specRaw = parseDossierContent(fixture('spec-twin.ds.md')).rawFrontmatter;
   const legacy = parseDossierContent(fixture('legacy-twin.ds.md')).frontmatter;
   const errorsOf = (value: unknown) => (validate(value) ? [] : validate.errors);
+  /** The errors that say why, without the root `if` that only picks the branch. */
+  const reasons = (value: unknown) =>
+    (errorsOf(value) ?? [])
+      .filter((e) => e.keyword !== 'if')
+      .map(({ keyword, instancePath, params }) => ({ keyword, instancePath, params }));
 
   it('keeps the root copy and the bundled copy identical', () => {
     expect(rootSchemaCopy).toEqual(dossierSchema);
@@ -825,27 +837,47 @@ describe('dossier schema accepts the spec shape', () => {
   });
 
   it('rejects a spec-shaped object with a Dossier field at the top level', () => {
-    expect(validate({ ...specRaw, risk_level: 'low' })).toBe(false);
+    expect(reasons({ ...specRaw, risk_level: 'low' })).toEqual([
+      {
+        keyword: 'additionalProperties',
+        instancePath: '',
+        params: { additionalProperty: 'risk_level' },
+      },
+    ]);
   });
 
   it('rejects a non-string metadata value', () => {
     const metadata = { ...(specRaw.metadata as Record<string, unknown>), 'dossier.extra': true };
-    expect(validate({ ...specRaw, metadata })).toBe(false);
+    expect(reasons({ ...specRaw, metadata })).toEqual([
+      { keyword: 'type', instancePath: '/metadata/dossier.extra', params: { type: 'string' } },
+    ]);
   });
 
   it('rejects dossier.<agent-skills-field> under metadata', () => {
     const metadata = { ...(specRaw.metadata as Record<string, unknown>), 'dossier.name': 'x' };
-    expect(validate({ ...specRaw, metadata })).toBe(false);
+    expect(reasons({ ...specRaw, metadata })).toContainEqual({
+      keyword: 'propertyNames',
+      instancePath: '/metadata',
+      params: { propertyName: 'dossier.name' },
+    });
   });
 
   it('requires the legacy required fields under metadata', () => {
     const { 'dossier.title': _dropped, ...metadata } = specRaw.metadata as Record<string, unknown>;
-    expect(validate({ ...specRaw, metadata })).toBe(false);
+    expect(reasons({ ...specRaw, metadata })).toEqual([
+      {
+        keyword: 'required',
+        instancePath: '/metadata',
+        params: { missingProperty: 'dossier.title' },
+      },
+    ]);
   });
 
   it('still requires the legacy fields on a legacy-shaped object', () => {
     const { title: _dropped, ...rest } = legacy;
-    expect(validate(rest)).toBe(false);
+    expect(reasons(rest)).toEqual([
+      { keyword: 'required', instancePath: '', params: { missingProperty: 'title' } },
+    ]);
   });
 
   it('keeps the schema lists in step with the code that owns them', () => {
