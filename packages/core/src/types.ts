@@ -2,6 +2,8 @@
  * TypeScript type definitions for Dossier format
  */
 
+import type { FrontmatterShape } from './spec-shape';
+
 export type DossierStatus = 'Draft' | 'Stable' | 'Deprecated' | 'Experimental';
 
 export type ContentScope = 'self-contained' | 'references-external';
@@ -70,16 +72,29 @@ export interface DossierFrontmatter {
     key_id?: string;
     signed_by?: string;
     signed_at?: string;
-    /** Which bytes the signature covers. Absent means the legacy body-only scheme. */
-    covers?: 'body' | 'frontmatter+body';
+    /**
+     * Which bytes the signature covers. Absent means the legacy body-only scheme;
+     * `spec-frontmatter+body` (v3) covers a spec-shaped file's on-disk frontmatter.
+     */
+    covers?: 'body' | 'frontmatter+body' | 'spec-frontmatter+body';
   };
   [key: string]: unknown; // Allow additional fields
 }
 
 export interface ParsedDossier {
+  /** Flat logical frontmatter — the same object whichever shape the file uses. */
   frontmatter: DossierFrontmatter;
   body: string;
+  /** The whole file as read. */
   raw: string;
+  /**
+   * Frontmatter exactly as it sits on disk: spec-shaped files keep their
+   * `metadata["dossier.*"]` strings here. This, not `frontmatter`, is what a v3
+   * signature covers.
+   */
+  rawFrontmatter: Record<string, unknown>;
+  /** On-disk layout: `legacy` (flat Dossier fields) or `spec` (Agent Skills, fields under `metadata`). */
+  shape: FrontmatterShape;
 }
 
 export interface IntegrityResult {
