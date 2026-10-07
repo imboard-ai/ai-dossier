@@ -34,19 +34,15 @@ describe('skill collision detection', () => {
 
   // The common case. Requiring --force here is what trained people to pass it always.
   it('allows upgrading the same dossier', () => {
-    writeFileSync(
-      file,
-      toSkillFrontmatter(dossier({ name: 'idea-to-prd' }), 'imboard-ai/pm/idea-to-prd')
-    );
+    writeFileSync(file, toSkillFrontmatter(dossier({ name: 'idea-to-prd' })));
+    writeSourceSidecar(dir, 'imboard-ai/pm/idea-to-prd');
     expect(checkSkillCollision(file, 'imboard-ai/pm/idea-to-prd').collides).toBe(false);
   });
 
   // The case that silently cost you a skill: same basename, different dossier.
   it('flags a different dossier occupying the same directory', () => {
-    writeFileSync(
-      file,
-      toSkillFrontmatter(dossier({ name: 'idea-to-prd' }), 'imboard-ai/idea-to-prd')
-    );
+    writeFileSync(file, toSkillFrontmatter(dossier({ name: 'idea-to-prd' })));
+    writeSourceSidecar(dir, 'imboard-ai/idea-to-prd');
     const r = checkSkillCollision(file, 'imboard-ai/pm/idea-to-prd');
     expect(r.collides).toBe(true);
     expect(r.existingSource).toBe('imboard-ai/idea-to-prd');
@@ -103,13 +99,33 @@ describe('skill collision detection', () => {
   });
 });
 
-describe('toSkillFrontmatter source recording', () => {
-  it('records the full registry path so future installs can compare identity', () => {
-    const out = toSkillFrontmatter(dossier({ name: 'idea-to-prd' }), 'imboard-ai/pm/idea-to-prd');
-    expect(out).toContain('x_source: imboard-ai/pm/idea-to-prd');
+// Legacy installs before #1136 recorded provenance only as `x_source` in the frontmatter.
+describe('provenance from x_source', () => {
+  let dir: string;
+  let file: string;
+
+  beforeEach(() => {
+    dir = join(tmpdir(), `skill-x-source-${Date.now()}-${process.pid}`);
+    mkdirSync(dir, { recursive: true });
+    file = join(dir, 'SKILL.md');
+    writeFileSync(file, '---\nname: idea-to-prd\nx_source: imboard-ai/idea-to-prd\n---\n# B\n');
+  });
+  afterEach(() => {
+    if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
   });
 
-  it('omits x_source when no source is supplied', () => {
+  it('is still read when there is no sidecar', () => {
+    expect(readInstalledSource(file)).toBe('imboard-ai/idea-to-prd');
+    expect(checkSkillCollision(file, 'imboard-ai/pm/idea-to-prd').collides).toBe(true);
+    expect(checkSkillCollision(file, 'imboard-ai/idea-to-prd').collides).toBe(false);
+  });
+
+  it('gives way to the sidecar', () => {
+    writeSourceSidecar(dir, 'imboard-ai/pm/idea-to-prd');
+    expect(readInstalledSource(file)).toBe('imboard-ai/pm/idea-to-prd');
+  });
+
+  it('is no longer written by toSkillFrontmatter', () => {
     expect(toSkillFrontmatter(dossier({ name: 'idea-to-prd' }))).not.toContain('x_source');
   });
 });

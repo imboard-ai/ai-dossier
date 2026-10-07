@@ -314,7 +314,7 @@ It never re-serializes, which would break a v3 signature.
 | `verify` | v1 or v2 | v3 |
 | `lint` | `legacy-layout` (info) | `spec-shape` (error) |
 | `publish` | uploads as written, with a note that `sign` writes the spec layout | uploads as written |
-| `install-skill` | a `---dossier` file is rendered as YAML with `x_source` (and `description` from `objective` when absent) added, so a v2 signature does not verify on the installed copy; other legacy fences are copied as is. Writes `.dossier-source` | copies the file byte for byte (a `---dossier`, `---json` or `---yaml` fence becomes `---`, which parses the same) and writes `.dossier-source` beside `SKILL.md` |
+| `install-skill` | a `---dossier` file is rendered as YAML; `description` is added from `objective` when absent, unless a v2 signature covers the frontmatter, so v1 and v2 signatures still verify on the installed copy. Other legacy fences are copied as is. Writes `.dossier-source` | copies the file byte for byte (a `---dossier`, `---json` or `---yaml` fence becomes `---`, which parses the same) and writes `.dossier-source` beside `SKILL.md` |
 | `skill-export` | converts to the spec layout when it bumps the version or the skill is unsigned | publishes byte for byte with `--no-bump`; converts when it bumps the version |
 
 **Lint rules.**
@@ -327,12 +327,13 @@ It never re-serializes, which would break a v3 signature.
   layout, and flags a `name` or `description` (or `objective`, when there is no
   `description`) that would fail the spec rules once the file is converted.
 
-**`.dossier-source`.** A legacy install records its registry path as `x_source` in the
-rendered frontmatter. A spec-shaped install cannot, because v3 covers every frontmatter field,
-so `install-skill` writes the registry path to a `.dossier-source` file next to `SKILL.md`
-(it writes one for legacy installs too). The collision check and `install-skill --list`,
-`--all` and `--outdated` read it, and it is ignored unless it holds exactly one
-registry path (`namespace/…/name`).
+**`.dossier-source`.** An installed copy cannot record its registry path in its
+frontmatter, because v3 covers every frontmatter field and v2 every legacy one, so
+`install-skill` writes the registry path to a `.dossier-source` file next to `SKILL.md`.
+The collision check and `install-skill --list`, `--all` and `--outdated` read it, and it is
+ignored unless it holds exactly one registry path (`namespace/…/name`). Legacy installs from
+older CLI versions may record the path only as `x_source` in the rendered frontmatter; that
+is read when there is no `.dossier-source`.
 
 **`signatureDropped`.** When `skill-export` rewrites a signed skill (a version bump changes
 covered bytes), the old signature no longer matches, so it is dropped with a warning and the

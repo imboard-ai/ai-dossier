@@ -14,9 +14,12 @@
  * Why this does not break verification: a v2 signature covers
  * `canonicalizeFrontmatter(parsedFrontmatter) + body` — the parsed object, not the
  * bytes of the frontmatter block. Re-serializing JSON to YAML leaves the parsed object
- * (and therefore the signed payload) identical, so checksum and signature both still
- * verify. Legacy body-only signatures are likewise unaffected, since the body is copied
- * verbatim.
+ * identical, so checksum and signature both still verify, as long as no field is
+ * added. Provenance therefore lives only in `.dossier-source` beside the skill (#1136;
+ * installs before that also wrote `x_source` into the frontmatter, which readers still
+ * honour), and `description` is filled from `objective` only when the signature does
+ * not cover the frontmatter. Legacy body-only (v1) signatures and the checksum cover
+ * the body alone, which is copied verbatim.
  *
  * A spec-shaped dossier (Agent Skills layout, #1088) is already what a runtime
  * reads, and its v3 signature covers every frontmatter field, so it is copied as
@@ -25,17 +28,30 @@
  * unchanged.
  */
 
-import { parseDossierContent } from '@ai-dossier/core';
+import { parseDossierContent, signatureCoverage } from '@ai-dossier/core';
 import YAML from 'yaml';
 
 /** Keys an agent runtime reads first; the rest follow in their existing order. */
 const AGENT_KEYS = ['name', 'description'];
 
 /**
+ * Whether a signature covers the frontmatter, so adding a field would break it: false
+ * for an unsigned or body-only (v1) dossier, true for v2 or a coverage this CLI cannot
+ * read.
+ */
+function signatureCoversFrontmatter(fm: Record<string, unknown>): boolean {
+  try {
+    return signatureCoverage(fm.signature as { covers?: unknown } | undefined) !== 'body';
+  } catch {
+    return true;
+  }
+}
+
+/**
  * Convert a dossier to `---` YAML frontmatter suitable for agent skill discovery.
  * Returns the input unchanged when it is already YAML-fronted or cannot be parsed.
  */
-export function toSkillFrontmatter(rawContent: string, source?: string): string {
+export function toSkillFrontmatter(rawContent: string): string {
   let parsed: ReturnType<typeof parseDossierContent>;
   try {
     parsed = parseDossierContent(rawContent);
@@ -51,20 +67,20 @@ export function toSkillFrontmatter(rawContent: string, source?: string): string 
   }
 
   // Copy before mutating. parseDossierContent can hand back a shared object for
-  // identical input, so writing to it leaks fields into later calls — an unsourced
-  // install picked up the x_source of a previous one.
+  // identical input, so writing to it leaks fields into later calls.
   const fm = { ...(parsed.frontmatter as Record<string, unknown>) };
 
   // `description` is what the runtime matches on. Fall back to `objective` so
-  // dossiers that never declared one are still discoverable.
-  if (fm.description == null && typeof fm.objective === 'string') {
+  // dossiers that never declared one are still discoverable — unless a v2 signature
+  // covers the frontmatter, where the added field would fail verification. Those
+  // install without a description until they move to the spec layout (#1126).
+  if (
+    fm.description == null &&
+    typeof fm.objective === 'string' &&
+    !signatureCoversFrontmatter(fm)
+  ) {
     fm.description = fm.objective;
   }
-
-  // Record the full registry path the skill came from. The directory name is only
-  // the basename, so without this there is no way to tell which of two same-named
-  // dossiers is installed.
-  if (source) fm.x_source = source;
 
   const ordered: Record<string, unknown> = {};
   for (const key of AGENT_KEYS) {

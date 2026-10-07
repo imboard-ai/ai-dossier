@@ -88,8 +88,10 @@ export function readInstalledSkills(skillsDir: string): InstalledSkill[] {
         unknown
       >;
       // Only a full registry path is provenance; a bare `name` (pre-x_source install) is not.
+      // Installs before #1136 may record it only as `x_source` in the frontmatter.
       const source =
-        typeof fm.x_source === 'string' ? fm.x_source : readSourceSidecar(path.dirname(file));
+        readSourceSidecar(path.dirname(file)) ??
+        (typeof fm.x_source === 'string' ? fm.x_source : undefined);
       if (source?.includes('/')) skill.source = source;
       if (fm.version != null) skill.version = String(fm.version);
     } catch {

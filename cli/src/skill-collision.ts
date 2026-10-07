@@ -22,10 +22,10 @@ import { parseDossierContent } from '@ai-dossier/core';
 /**
  * Provenance file next to an installed `SKILL.md`, holding the full registry path.
  *
- * A legacy install records it as `x_source` in the rendered frontmatter. A
- * spec-shaped dossier is installed byte-for-byte instead — its v3 signature covers
- * every frontmatter field, so adding one would break verification — and the
- * registry path has to live beside it.
+ * Every install writes it. A frontmatter field would break the installed copy's
+ * signature (v3 covers every frontmatter field, v2 every legacy one), so the registry
+ * path lives beside the copy. Legacy installs before #1136 also recorded it as
+ * `x_source` in the rendered frontmatter; readers fall back to that.
  */
 export const SOURCE_SIDECAR = '.dossier-source';
 
@@ -59,9 +59,9 @@ export interface CollisionCheck {
 /**
  * Read the source identity an installed skill records, if any.
  *
- * `install-skill` writes `x_source` into a legacy dossier's frontmatter and a
- * `SOURCE_SIDECAR` beside a spec-shaped one; older installs predate both, so fall
- * back to the dossier's own `name`. Returns undefined when the
+ * `install-skill` writes `SOURCE_SIDECAR` beside every copy. Earlier legacy installs
+ * may have only `x_source` in their frontmatter, and older ones neither, so fall back
+ * to that and then to the dossier's own `name`. Returns undefined when the
  * file is absent or unparseable — an unreadable file is not evidence of a collision,
  * and blocking on it would be worse than the problem.
  */
@@ -73,8 +73,8 @@ export function readInstalledSource(skillFile: string): string | undefined {
       unknown
     >;
     return (
-      (fm.x_source as string) ??
       readSourceSidecar(path.dirname(skillFile)) ??
+      (fm.x_source as string) ??
       (fm.name as string) ??
       undefined
     );

@@ -115,6 +115,42 @@ describe('toSkillFrontmatter preserves verifiability', () => {
     expect(result.valid).toBe(true);
   });
 
+  it('adds no field a v2 signature covers, so it still verifies (#1136)', async () => {
+    for (const extra of [{ description: 'Review it.' }, { objective: 'Review it.' }]) {
+      const fm: Record<string, unknown> = {
+        name: 'pr-review',
+        title: 'PR Review',
+        version: '1.0.0',
+        checksum: { algorithm: 'sha256', hash: calculateChecksum(BODY) },
+        ...extra,
+      };
+      const sig = await new Ed25519Signer(keyPath).sign(buildSignedPayload(fm, BODY));
+      fm.signature = { ...sig, covers: 'frontmatter+body' };
+
+      const parsed = parseDossierContent(toSkillFrontmatter(dossier(fm)));
+      expect(Object.keys(parsed.frontmatter).sort()).toEqual(Object.keys(fm).sort());
+      const result = await verifySignature(
+        buildVerificationPayload(parsed),
+        parsed.frontmatter.signature as never
+      );
+      expect(result.valid).toBe(true);
+    }
+  });
+
+  it('still fills description from objective under a body-only (v1) signature', async () => {
+    const fm: Record<string, unknown> = { name: 'x', title: 'X', objective: 'Do X.' };
+    const sig = await new Ed25519Signer(keyPath).sign(buildSignedPayload(fm, BODY, 'body'));
+    fm.signature = sig;
+
+    const parsed = parseDossierContent(toSkillFrontmatter(dossier(fm)));
+    expect(parsed.frontmatter.description).toBe('Do X.');
+    const result = await verifySignature(
+      buildVerificationPayload(parsed),
+      parsed.frontmatter.signature as never
+    );
+    expect(result.valid).toBe(true);
+  });
+
   it('still detects tampering after conversion', async () => {
     const fm: Record<string, unknown> = {
       dossier_schema_version: '1.0.0',
@@ -164,18 +200,17 @@ describe('toSkillFrontmatter preserves verifiability', () => {
     );
   }
 
-  it('copies a spec-shaped dossier byte-for-byte, with or without a source', async () => {
+  it('copies a spec-shaped dossier byte-for-byte', async () => {
     const spec = await signedSpec();
     expect(toSkillFrontmatter(spec)).toBe(spec);
-    expect(toSkillFrontmatter(spec, 'org/x')).toBe(spec);
   });
 
   it('only rewrites a ---dossier fence on a spec-shaped dossier, and v3 still verifies', async () => {
     const spec = await signedSpec();
     for (const fence of ['---dossier', '---json', '---yaml']) {
-      expect(toSkillFrontmatter(spec.replace(/^---\n/, `${fence}\n`), 'org/x')).toBe(spec);
+      expect(toSkillFrontmatter(spec.replace(/^---\n/, `${fence}\n`))).toBe(spec);
     }
-    const out = toSkillFrontmatter(spec.replace(/^---\n/, '---dossier\n'), 'org/x');
+    const out = toSkillFrontmatter(spec.replace(/^---\n/, '---dossier\n'));
 
     const parsed = parseDossierContent(out);
     const result = await verifySignature(

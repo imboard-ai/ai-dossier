@@ -55,8 +55,8 @@ interface InstallResult {
 
 /**
  * Fetch one dossier and write it as a skill (claude and/or opencode copy), recording its
- * registry path (`x_source` in a legacy copy's frontmatter, and `SOURCE_SIDECAR` beside
- * it). Throws on any failure; callers decide how to report it.
+ * registry path in `SOURCE_SIDECAR` beside it. Throws on any failure; callers decide how
+ * to report it.
  */
 async function installOne(
   dossierName: string,
@@ -108,8 +108,8 @@ async function installOne(
     // Emit YAML frontmatter so the runtime can read `name`/`description`: a legacy
     // dossier is re-serialized, a spec-shaped one copied as is. The signed payload
     // is unchanged either way — see skill-frontmatter.ts.
-    fs.writeFileSync(skillFile, toSkillFrontmatter(content, dossierName), 'utf8');
-    // A spec-shaped copy cannot carry `x_source`; record provenance beside it.
+    fs.writeFileSync(skillFile, toSkillFrontmatter(content), 'utf8');
+    // Provenance goes beside the copy: a frontmatter field would break its signature.
     writeSourceSidecar(skillDir, dossierName);
   }
 
