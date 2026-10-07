@@ -238,8 +238,9 @@ Contents can dereference an in-repository symlink and return a normal file respo
 this API assesses that returned pinned content at its logical policy path, not Git
 tree modes. No additional tree reads or repository-controlled URLs are followed.
 
-Owner and repository names use the shared GitHub binding validators (login at most
-39 characters without trailing/consecutive hyphens; repository at most 100 ASCII
+Owner and repository names use the shared GitHub binding validators (1–39 ASCII
+alphanumeric login characters with optional single hyphens between them, up to
+77 total characters without trailing/consecutive hyphens; repository at most 100 ASCII
 letters/digits/underscore/dot/hyphen, excluding `.` and `..`). `POLICY_TEMPLATE_DIRECTORY`
 and `POLICY_TEMPLATE_LIMIT` export the directory and 20-file cap. Template names
 are 1–120 ASCII letters/digits/underscore/dot/space/hyphen, excluding `.` and `..`.
@@ -262,15 +263,21 @@ secrets outside the excerpt slice. Evidence retains the first occurrence of each
 rule per file and is capped at 128 citations; every line still affects classification.
 README contributes only ATX sections headed with `/contribut/i`, including nested
 subsections. ATX headings have 0–3 leading spaces, 1–6 `#`, then a space or end of
-line. A same/higher-level heading ends the enclosing contribution region. Fences
+line (tabs also separate heading content). A same/higher-level heading ends the
+enclosing contribution region; in-region heading text itself remains policy evidence. Fences
 in every policy file open with 3+ backticks/tildes (0–3 spaces), and close only on
-the same marker with at least that length; fenced text is excluded. README setext
+the same marker with at least that length; fenced text is excluded. Backtick info
+strings may contain no backticks. An unclosed fence excludes its remaining text.
+Active HTML blocks cannot open Markdown fences or manufacture heading boundaries;
+comments, raw tags, declarations, processing instructions and CDATA terminate
+on their appropriate markers, other HTML blocks at a blank line. README setext
 headings and HTML blocks inside a region taint every dimension touched anywhere
 in that region as unclear, including preceding restrictions. Boolean dimensions
 retain their restrictive topic-presence defaults. Outside-region prose does not
 count. No full Markdown or prose parser is claimed. Direct inputs are bounded/validated by `validatePolicyFiles` and
-invalid snapshots raise non-echoing `PolicyInputError` (unsafe paths also fail the
-secret guard, raising `SecretRedactionError`).
+invalid snapshots and ineligible paths raise non-echoing `PolicyInputError`;
+otherwise eligible paths containing prohibited credential patterns raise
+`SecretRedactionError`.
 
 `POLICY_RULES` and `POLICY_TOPICS` are frozen case-insensitive **data**, with stable
 IDs. `PolicyRule`, `PolicyCategory`, `PolicyTopic`, `PolicyDimension`,

@@ -79,7 +79,7 @@ function excerpt(text: string): string {
 }
 
 /** Deterministic restriction floor only: no permission can be inferred from text.
- * Citations retain the first occurrence of each rule per blob (at most 128 total).
+ * Citations retain the first occurrence of each rule per file (at most 128 total).
  * Assessment still examines every line even once the evidence cap is reached. */
 export function classifyPolicy(files: readonly PolicyFile[]): PolicyAssessment {
   validatePolicyFiles(files);

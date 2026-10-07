@@ -13,7 +13,7 @@ export function policyRegions(file: PolicyFile): readonly PolicyRegion[] {
   let region: (typeof regions)[number] | undefined;
   let depth = 0;
   let fence: { marker: string; length: number } | undefined;
-  let htmlEnd: string | undefined;
+  let htmlEnd: RegExp | null | undefined;
   const lines = file.content.split(/\r\n|\n|\r/u);
   if (!readme) {
     region = { ambiguous: false, lines: [] };
@@ -21,6 +21,15 @@ export function policyRegions(file: PolicyFile): readonly PolicyRegion[] {
   }
   for (let index = 0; index < lines.length; index++) {
     const text = lines[index];
+    // Active HTML content cannot open a Markdown fence or manufacture a heading.
+    if (htmlEnd !== undefined) {
+      if (region) {
+        region.ambiguous = true;
+        region.lines.push({ text, line: index + 1 });
+      }
+      if (htmlEnd ? htmlEnd.test(text) : text.trim() === '') htmlEnd = undefined;
+      continue;
+    }
     if (fence) {
       const close = /^ {0,3}(`{3,}|~{3,})[ \t]*$/u.exec(text);
       if (close && close[1][0] === fence.marker && close[1].length >= fence.length)
@@ -35,20 +44,25 @@ export function policyRegions(file: PolicyFile): readonly PolicyRegion[] {
     // An HTML block cannot manufacture a heading that ends the active region.
     // Comments/raw tags have explicit ends; other HTML blocks end at a blank.
     const html = /^ {0,3}<(?:!--|\/?[A-Za-z]|!|\?)/u.test(text);
-    if (readme && (html || htmlEnd !== undefined)) {
+    if (readme && html) {
       if (region) {
         region.ambiguous = true;
         region.lines.push({ text, line: index + 1 });
       }
-      if (htmlEnd === undefined) {
-        const raw = /^ {0,3}<(script|style|pre|textarea)(?:\s|>)/iu.exec(text);
-        htmlEnd = text.trimStart().startsWith('<!--')
-          ? '-->'
-          : raw
-            ? `</${raw[1].toLowerCase()}>`
-            : '';
-      }
-      if (htmlEnd ? text.toLowerCase().includes(htmlEnd) : text.trim() === '') htmlEnd = undefined;
+      const raw = /^ {0,3}<(script|style|pre|textarea)(?:\s|>)/iu.exec(text);
+      const start = text.trimStart();
+      htmlEnd = start.startsWith('<!--')
+        ? /-->/u
+        : start.startsWith('<?')
+          ? /\?>/u
+          : start.startsWith('<![CDATA[')
+            ? /\]\]>/u
+            : /^<![A-Z]/u.test(start)
+              ? />/u
+              : raw
+                ? new RegExp(`</${raw[1]}\\s*>`, 'iu')
+                : null;
+      if (htmlEnd?.test(text)) htmlEnd = undefined;
       continue;
     }
     if (readme) {
@@ -61,7 +75,9 @@ export function policyRegions(file: PolicyFile): readonly PolicyRegion[] {
           region = { ambiguous: false, lines: [] };
           regions.push(region);
         }
-        // Headings establish regions; they are not policy assertions.
+        // In-region headings can themselves state restrictions; boundary headings
+        // outside the selected contribution region must never become evidence.
+        region?.lines.push({ text, line: index + 1 });
         continue;
       }
       if (

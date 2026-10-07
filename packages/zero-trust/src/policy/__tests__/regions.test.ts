@@ -28,8 +28,8 @@ describe('CommonMark subset policy regions', () => {
       )
     );
     expect(regions).toHaveLength(2);
-    expect(regions[0].lines.map((line) => line.line)).toEqual([2, 4]);
-    expect(regions[1].lines[0].line).toBe(8);
+    expect(regions[0].lines.map((line) => line.line)).toEqual([1, 2, 3, 4]);
+    expect(regions[1].lines[1].line).toBe(8);
   });
   it('only closes matching fences with sufficient length and excludes all fenced text', () => {
     const text =
@@ -81,5 +81,38 @@ describe('CommonMark subset policy regions', () => {
     expect(
       classifyPolicy([file('<div>\n# Contributing\nNo AI.\n\n# Contributing\nNo AI.')]).ai
     ).toBe('banned');
+  });
+  it.each([
+    '<!--\n```\n-->',
+    '<script>\n~~~\n</script   >',
+    '<?xml\n```\n?>',
+    '<![CDATA[\n~~~\n]]>',
+  ])('does not let fence-looking HTML content hide subsequent restrictions: %s', (html) => {
+    expect(
+      classifyPolicy([
+        file(`## Contributing\n${html}\nNo AI.\nDraft required.\nNo extra sections.`),
+      ])
+    ).toMatchObject({ ai: 'unclear', draftRequired: true, receiptBlockAllowed: false });
+    expect(classifyPolicy([file(`${html}\n## Contributing\nNo AI.`)]).ai).toBe('banned');
+  });
+  it.each([
+    '<!DOCTYPE html>',
+    '<?xml version="1.0"?>',
+    '<![CDATA[placeholder]]>',
+  ])('recognizes explicit HTML termination before a contribution heading: %s', (html) => {
+    expect(classifyPolicy([file(`${html}\n## Contributing\nAI is banned.`)]).ai).toBe('banned');
+  });
+  it('retains policy-bearing headings and propagates ambiguity to their topics', () => {
+    const content =
+      '## Contributing\n### AI contributions are banned.\n### Draft required.\n### Do not modify the template.\n## Usage\nAI is welcome.';
+    const a = classifyPolicy([file(content)]);
+    expect(a).toMatchObject({ ai: 'banned', draftRequired: true, receiptBlockAllowed: false });
+    expect(a.citations.find((citation) => citation.ruleId === 'ai-ban-1')?.line).toBe(2);
+    expect(classifyPolicy([file(`${content.split('## Usage')[0]}Details\n===`)])).toMatchObject({
+      ai: 'unclear',
+      draftRequired: true,
+      receiptBlockAllowed: false,
+    });
+    expect(classifyPolicy([file('## Contributing: no AI.')]).ai).toBe('banned');
   });
 });
