@@ -1,7 +1,7 @@
 # @ai-dossier/zero-trust
 
 Private, provider-independent foundation for [PRD-ZTFC-001](../../docs/features/zero-trust-full-cycle/prd.md)
-§5.1, §5.5 and §5.6 (gate 2), §5.7, §5.8 and §5.9. No model calls; the only
+§5.1, §5.5 and §5.6 (gate 2), §5.7, §5.8 and §5.9. Controller-side model calls; the only
 GitHub calls are the controller-only broker/push modules and credential-free reads in
 `src/github/`, and the VM adapter and proxy scripts are described below. Receipts use
 core's Ed25519 signer abstraction and Ajv schema validation.
@@ -420,6 +420,59 @@ other drivers' `observeRun`; a restart may hand it an older copy of the run.
   sends no follow-up. `cancelAction()` drops a pending action without touching GitHub.
 
 ## Budget admission ledger
+
+### Controller-side model harness (#1094)
+
+Decision: [model harness A/B/C](../../docs/features/zero-trust-full-cycle/decisions/model-harness.md).
+`ModelAdapter` has `id` (pricing resource/model name) and
+`complete(ModelRequest): Promise<ModelResult>`. Requests contain `system`,
+`messages`, `tools`, positive safe-integer `maxOutputTokens`, `timeoutMs`, optional
+`signal` and `attempts: 1 | 2` (default 1). Messages use user/assistant/tool roles;
+assistant tool-call arguments are JSON strings and tool replies bind `tool_call_id`.
+`ModelTool` is a function name/description/JSON-schema parameters definition.
+`ModelResult` is `tool_calls` (`calls: { id, name, arguments: unknown }[]`), `text`
+(`text`) or `malformed` (`reason`), plus `usage: ModelUsage | null` with
+`inputTokens`/`outputTokens`. Only a complete single choice is accepted; unknown
+tools, duplicate IDs, invalid JSON, truncation and arguments over
+`MAX_TOOL_ARGUMENT_BYTES` (64 KiB UTF-8) are malformed. Proposals still require
+`admitModelAction`; this transport invokes no tools and grants no authority.
+
+`new OpenAICompatibleAdapter({ model, endpoint, apiKeyEnv, fetch })` checks a
+nonempty environment key at startup and re-reads it at call time. HTTPS is required
+except explicit loopback HTTP. Credentials in endpoint URLs are refused; redirects
+are disabled. It POSTs to the API base plus `/chat/completions`, with `tools`,
+`max_tokens` and `stream: false`. The API key goes only in Authorization. There is
+no logging, credential field or raw provider error. Echoed keys and credential
+patterns are rejected. Response bodies are capped at 1 MiB. Errors are bounded
+`ModelError.code` (`invalid_request`, `model_unavailable`, `model_timeout`,
+`model_aborted`, `model_http`); HTTP errors carry only numeric `status`.
+
+`meteredComplete(adapter, ledger, sessionId, rates, request)` snapshots JSON input,
+estimates input tokens conservatively as UTF-8 bytes of the serialized wire request
+(including model and tool schemas), and reserves all output tokens/time/attempts
+before calling. Rates are `BudgetRate[]` keyed by adapter ID, in the session's
+currency. Reservation refusal throws `BudgetExhaustedError` with a limit/ceiling
+code and calls no provider. Other ledger errors retain their typed semantics.
+Observed usage is priced with pinned rates and settled; missing/invalid usage,
+errors and timeouts use `settle(id, null)`, preserving the full hold. Accounting
+keeps `max(estimate, observed)` as the existing ledger specifies; it never frees
+funds merely because observed usage was lower. The caller decides pause/failure
+and explicitly reconciles unknown reservations on resume.
+
+Both the transport and metering wrapper enforce a deadline and caller cancellation,
+including a hanging body or injected adapter. `attempts: 2` authorizes at most one
+retry on 429/5xx; direct adapter callers must first reserve both attempts or use
+`meteredComplete`. A retried result reports null usage because the failed attempt's
+charge is unknown. No retries of malformed answers, other HTTP errors or transport
+errors, and no provider fallback. Zero-priced models still require rates and
+positive token/time ceilings. Output caps are sent to the provider; the adapter
+cannot guarantee provider billing behavior.
+
+Exported helpers `snapshotModelRequest`, `modelRequestBody` and `withModelDeadline`
+share wire estimation/deadline behavior with compatible adapters. Tests can reuse
+`src/model/__tests__/scripted-model.ts:ScriptedModel` (not a production export).
+An empty tools list permits text-only questions for the subsequent typed-decision
+adapter; neither the controller loop nor #1119's decision function is built here.
 
 `BudgetLedger` is a separate controller-owned local-file admission primitive. Create
 it once with `initialize(requiredResources, injectedRates)`, then `startSession`
