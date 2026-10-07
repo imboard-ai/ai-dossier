@@ -14,6 +14,13 @@ import {
   snapshotModelRequest,
   withModelDeadline,
 } from './adapter';
+import {
+  assertModelKeyEnv,
+  containsModelKey as containsKey,
+  modelEndpoint,
+  readBoundedModelBody,
+  readModelKey,
+} from './transport';
 
 export const MAX_MODEL_RESPONSE_BYTES = 1024 * 1024;
 const MAX_RESPONSE_DEPTH = 256;
@@ -88,15 +95,6 @@ function parse(raw: unknown, request: ModelRequest, reported: ModelUsage | null)
     return { kind: 'text', text: message.content, usage: reported };
   return malformed('invalid_response', reported);
 }
-function containsKey(value: unknown, key: string): boolean {
-  if (typeof value === 'string') return value.includes(key);
-  if (Array.isArray(value)) return value.some((item) => containsKey(item, key));
-  if (isRecord(value))
-    return Object.entries(value).some(
-      ([name, item]) => name.includes(key) || containsKey(item, key)
-    );
-  return false;
-}
 function boundedDepth(value: unknown): boolean {
   const stack: { value: unknown; depth: number }[] = [{ value, depth: 0 }];
   while (stack.length) {
@@ -132,23 +130,26 @@ function decode(bytes: Uint8Array, key: string, request: ModelRequest): ModelRes
     if (request.logprobs && result.kind !== 'malformed') {
       const choice = (raw as { choices: { logprobs?: unknown }[] }).choices[0];
       if (choice.logprobs !== undefined && choice.logprobs !== null) {
+        if (!isRecord(choice.logprobs)) return malformed('invalid_response', reported);
+        const content = choice.logprobs.content;
         if (
-          !isRecord(choice.logprobs) ||
-          !Array.isArray(choice.logprobs.content) ||
-          !choice.logprobs.content.length ||
-          choice.logprobs.content.some(
-            (item: unknown) =>
-              !isRecord(item) ||
-              typeof item.logprob !== 'number' ||
-              !Number.isFinite(item.logprob) ||
-              item.logprob > 0
-          )
+          content !== undefined &&
+          content !== null &&
+          (!Array.isArray(content) ||
+            content.some(
+              (item: unknown) =>
+                !isRecord(item) ||
+                typeof item.logprob !== 'number' ||
+                !Number.isFinite(item.logprob) ||
+                item.logprob > 0
+            ))
         )
           return malformed('invalid_response', reported);
-        result = {
-          ...result,
-          tokenLogprobs: choice.logprobs.content.map((item: { logprob: number }) => item.logprob),
-        };
+        if (Array.isArray(content) && content.length)
+          result = {
+            ...result,
+            tokenLogprobs: content.map((item: { logprob: number }) => item.logprob),
+          };
       }
     }
   } catch {
@@ -162,24 +163,6 @@ function decode(bytes: Uint8Array, key: string, request: ModelRequest): ModelRes
     return malformed('secret_detected', reported);
   }
   return result;
-}
-async function readBounded(response: Response, signal: AbortSignal): Promise<Uint8Array | null> {
-  const reader = response.body?.getReader();
-  if (!reader) return null;
-  const chunks: Uint8Array[] = [];
-  let bytes = 0;
-  try {
-    while (true) {
-      const part = await reader.read();
-      signal.throwIfAborted();
-      if (part.done) return Buffer.concat(chunks);
-      bytes += part.value.byteLength;
-      if (bytes > MAX_MODEL_RESPONSE_BYTES) return null;
-      chunks.push(part.value);
-    }
-  } finally {
-    void reader.cancel().catch(() => {});
-  }
 }
 function retryDelay(response: Response, timeoutMs: number): number {
   const raw = response.headers.get('retry-after');
@@ -202,29 +185,14 @@ export interface OpenAICompatibleOptions {
 export class OpenAICompatibleAdapter implements ModelAdapter {
   readonly id: string;
   private readonly url: string;
-  // biome-ignore lint/correctness/noUnusedPrivateClassMembers: Read by key() at startup and before each call (Biome misses computed env access).
   private readonly apiKeyEnv: string;
   private readonly fetcher: typeof fetch;
   constructor(options: OpenAICompatibleOptions) {
     try {
       const { model, endpoint, apiKeyEnv, fetch: fetcher } = options;
-      const url = new URL(endpoint);
-      if (
-        url.username ||
-        url.password ||
-        endpoint.includes('?') ||
-        endpoint.includes('#') ||
-        (url.protocol !== 'https:' &&
-          !(
-            url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
-          )) ||
-        typeof model !== 'string' ||
-        !model ||
-        !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(apiKeyEnv) ||
-        /^(?:ZTFC_|GIT_)/u.test(apiKeyEnv) ||
-        ['GH_TOKEN', 'GITHUB_TOKEN', 'GITHUB_CLIENT_SECRET'].includes(apiKeyEnv) ||
-        typeof fetcher !== 'function'
-      )
+      const url = modelEndpoint(endpoint, true);
+      assertModelKeyEnv(apiKeyEnv);
+      if (typeof model !== 'string' || !model || typeof fetcher !== 'function')
         throw new ModelError('invalid_request');
       assertNoSecrets(model);
       assertNoSecrets(endpoint);
@@ -238,12 +206,7 @@ export class OpenAICompatibleAdapter implements ModelAdapter {
     this.key();
   }
   private key(): string {
-    const key = process.env[this.apiKeyEnv];
-    // Validate the exact header value; header normalization must not evade echo detection.
-    if (!key || !/^[\x21-\x7e]+$/u.test(key)) throw new ModelError('model_unavailable');
-    // Defense in depth against a controller profile accidentally selecting GitHub authority.
-    if (/^(?:gh[pousr]_|github_pat_)/u.test(key)) throw new ModelError('model_unavailable');
-    return key;
+    return readModelKey(this.apiKeyEnv);
   }
   private async post(
     request: SnapshotModelRequest,
@@ -283,7 +246,7 @@ export class OpenAICompatibleAdapter implements ModelAdapter {
                 return { retry: retryDelay(response, request.timeoutMs) };
               throw new ModelError('model_http', response.status);
             }
-            const bytes = await readBounded(response, signal);
+            const bytes = await readBoundedModelBody(response, signal, MAX_MODEL_RESPONSE_BYTES);
             return {
               result: bytes
                 ? decode(bytes, key, request)

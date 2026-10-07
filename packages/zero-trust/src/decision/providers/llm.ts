@@ -10,12 +10,22 @@ export interface LlmDecisionOptions {
   adapter: ModelAdapter;
   maxOutputTokens?: number;
   timeoutMs?: number;
+  /** Disable for endpoints that do not expose token likelihoods. No retry/fallback. */
+  logprobs?: boolean;
+  /** Stable non-secret controller endpoint/profile identity for shared caches. */
+  id?: string;
 }
 /** Default provider: the run's #1094 adapter. report_decision has no executable handler. */
 export function createLlmDecisionProvider(options: LlmDecisionOptions): DecisionProvider {
-  const { adapter, maxOutputTokens = 1024, timeoutMs = 30_000 } = options;
+  const {
+    adapter,
+    maxOutputTokens = 1024,
+    timeoutMs = 30_000,
+    logprobs = true,
+    id = 'llm',
+  } = options;
   return Object.freeze({
-    id: 'llm',
+    id,
     model: adapter.id,
     confidenceKind: 'agreement' as const,
     adapter,
@@ -70,7 +80,7 @@ export function createLlmDecisionProvider(options: LlmDecisionOptions): Decision
         maxOutputTokens,
         timeoutMs,
         attempts: 1,
-        logprobs: true,
+        logprobs,
       };
     },
     decode(result: ModelResult): unknown {

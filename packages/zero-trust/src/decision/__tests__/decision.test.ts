@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BudgetLedger, budgetTotals } from '../../budget';
 import type { BudgetRate } from '../../budget-types';
+import { ScriptedModel } from '../../model/__tests__/scripted-model';
 import type { ModelAdapter, ModelRequest, ModelResult } from '../../model/adapter';
 import { OpenAICompatibleAdapter } from '../../model/openai-compatible';
 import { decide } from '../decide';
@@ -13,6 +14,7 @@ import {
   createTypedQuestion,
   type DecisionCache,
   type DecisionFloor,
+  questionStrictness,
   type TypedQuestion,
   type Verdict,
 } from '../types';
@@ -45,6 +47,34 @@ const proposal = (raw: unknown = answer(), tokenLogprobs?: readonly number[]): M
   usage: { inputTokens: 10, outputTokens: 10 },
   ...(tokenLogprobs ? { tokenLogprobs } : {}),
 });
+const openAiResponse = (raw: unknown, logprobs: unknown) =>
+  new Response(
+    JSON.stringify({
+      choices: [
+        {
+          finish_reason: 'tool_calls',
+          message: {
+            tool_calls: [
+              {
+                id: 'p',
+                type: 'function',
+                function: { name: 'report_decision', arguments: JSON.stringify(raw) },
+              },
+            ],
+          },
+          logprobs,
+        },
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    })
+  );
+const openAi = (fetcher: typeof fetch) =>
+  new OpenAICompatibleAdapter({
+    model: 'model-a',
+    endpoint: 'https://model.example/v1',
+    apiKeyEnv: 'DECISION_TEST_KEY',
+    fetch: fetcher,
+  });
 let directory: string;
 let sequence: number;
 beforeEach(() => {
@@ -84,13 +114,9 @@ function budget(model = 'model-a', tokenLimit = 10_000_000) {
   return { ledger, sessionId: 's1', rates };
 }
 function scripted(results: (ModelResult | Error)[] = [proposal(), proposal()], model = 'model-a') {
-  const requests: ModelRequest[] = [];
-  const complete = vi.fn(async (request: ModelRequest): Promise<ModelResult> => {
-    requests.push(request);
-    const result = results.shift() ?? proposal();
-    if (result instanceof Error) throw result;
-    return result;
-  });
+  const script = new ScriptedModel(model, results);
+  const requests = script.requests;
+  const complete = vi.fn((request: ModelRequest) => script.complete(request));
   const adapter: ModelAdapter = { id: model, complete };
   return { provider: createLlmDecisionProvider({ adapter, timeoutMs: 100 }), complete, requests };
 }
@@ -289,13 +315,19 @@ describe('closed validation, confidence and monotonicity', () => {
     { escalate: 'yes' },
     null,
   ])('floor never creates permission %#', async (floor) => {
-    const fake = scripted([proposal(answer('ban')), proposal(answer('ban'))]);
+    const fake = scripted();
     const v = await decide(definition, inputs, {
       provider: fake.provider,
       budget: budget(),
       floor: () => floor as DecisionFloor,
     });
-    expect(v.value).not.toBe('welcome');
+    expect(v).toMatchObject(
+      floor &&
+        (Object.keys(floor).length === 0 ||
+          ('minimumStrictness' in floor && floor.minimumStrictness === 0))
+        ? { status: 'accepted', value: 'welcome' }
+        : { status: 'escalated', reason: 'floor' }
+    );
   });
   it('floor failures and provider decode failures use bounded reasons', async () => {
     const fake = scripted();
@@ -322,23 +354,57 @@ describe('closed validation, confidence and monotonicity', () => {
   });
   it('property: random permissive answers plus one stricter pass/floor cannot yield permission', async () => {
     let seed = 1119;
-    for (let n = 0; n < 24; n++) {
+    for (let n = 0; n < 12; n++) {
       seed = (seed * 1664525 + 1013904223) >>> 0;
-      const rank = seed % 100;
-      const q = { ...definition, strictness: { welcome: rank, ban: rank + 1 } };
-      const v = await decide(q, inputs, {
-        provider: scripted([proposal(), proposal(answer('ban'))]).provider,
-        budget: budget(),
+      const labels = ['allow', 'ask', 'ban'];
+      const rank = seed % 2;
+      const passes = 2 + (seed % 7);
+      const pos = seed % passes;
+      const q: TypedQuestion =
+        n % 2
+          ? {
+              ...definition,
+              kind: 'score',
+              scale: labels,
+              acceptThreshold: { allow: 0.95, ask: 0.8, ban: 0.6 },
+            }
+          : {
+              ...definition,
+              kind: 'choice',
+              options: labels,
+              strictness: { allow: 0, ask: 1, ban: 2 },
+              acceptThreshold: { allow: 0.95, ask: 0.8, ban: 0.6 },
+            };
+      // Drop the choice-only fields when constructing a score definition.
+      if (q.kind === 'score') {
+        delete (q as unknown as Record<string, unknown>).options;
+        delete (q as unknown as Record<string, unknown>).strictness;
+      }
+      const b = budget();
+      const unanimous = Array.from({ length: passes }, () => proposal(answer(labels[rank])));
+      const baseline = await decide(q, inputs, {
+        provider: scripted([...unanimous]).provider,
+        budget: b,
+        passes,
       });
-      expect(v.value).not.toBe('welcome');
+      expect(baseline.status).toBe('accepted');
+      unanimous[pos] = proposal(answer(labels[rank + 1]));
+      const v = await decide(q, inputs, {
+        provider: scripted(unanimous).provider,
+        budget: b,
+        passes,
+      });
+      expect(v.status).toBe('escalated');
       const f = await decide(q, inputs, {
-        provider: scripted().provider,
-        budget: budget(),
+        provider: scripted(Array.from({ length: passes }, () => proposal(answer(labels[rank]))))
+          .provider,
+        budget: b,
+        passes,
         floor: () => ({ minimumStrictness: rank + 1 }),
       });
-      expect(f.value).not.toBe('welcome');
+      expect(f).toMatchObject({ status: 'escalated', reason: 'floor' });
     }
-  }, 30_000); // 96 real durable reservations; coverage/shared-runner fs overhead exceeds 5s.
+  }, 60_000); // Random multi-pass decisions include real durable filesystem metering.
   it('malformed/text/wrong tool/multiple proposals do not count as decisions', async () => {
     for (const result of [
       { kind: 'text', text: '{}', usage: null },
@@ -388,7 +454,7 @@ describe('budget, cache and snapshots', () => {
   });
   it('cache returns identical detached evidence without a new reservation; versions/models/prompts/floors miss', async () => {
     const c = cache();
-    const fake = scripted();
+    const fake = scripted(Array.from({ length: 13 }, () => proposal()));
     const b = budget();
     const deps = { provider: fake.provider, budget: b, cache: c.store };
     const first = await decide(definition, inputs, deps);
@@ -400,7 +466,7 @@ describe('budget, cache and snapshots', () => {
     await decide(definition, [{ sourceId: 'policy', text: 'other' }], deps);
     await decide(definition, inputs, { ...deps, passes: 3 });
     expect(fake.complete).toHaveBeenCalledTimes(11);
-    const other = scripted([], 'model-b');
+    const other = scripted([proposal(), proposal()], 'model-b');
     await decide(definition, inputs, {
       ...deps,
       provider: other.provider,
@@ -415,7 +481,7 @@ describe('budget, cache and snapshots', () => {
   });
   it('cache corruption/error is escalation and transient errors are not cached', async () => {
     const c = cache();
-    const fake = scripted();
+    const fake = scripted([proposal(), proposal(), proposal(), proposal()]);
     const b = budget();
     await decide(definition, inputs, { provider: fake.provider, budget: b, cache: c.store });
     const key = [...c.map.keys()][0];
@@ -426,6 +492,7 @@ describe('budget, cache and snapshots', () => {
       { ...saved, citations: [{ ...cite, quote: 'fake' }] },
       { ...saved, value: 'unknown' },
       { ...saved, reason: 'floor' },
+      { ...saved, note: 'injected-field' },
       { ...saved, value: 'ghp_syntheticfixture' },
     ]) {
       c.map.set(key, v as Verdict);
@@ -453,7 +520,7 @@ describe('budget, cache and snapshots', () => {
     expect(
       (await decide(definition, inputs, { provider: fake.provider, budget: b, cache: writeThrows }))
         .reason
-    ).toBe('cache');
+    ).toBe('cache_write');
     const empty = cache();
     await decide(definition, inputs, {
       provider: scripted([new Error('fail')]).provider,
@@ -501,17 +568,19 @@ describe('budget, cache and snapshots', () => {
     ).rejects.toThrow('Invalid decision configuration');
     expect(fake.complete).not.toHaveBeenCalled();
   });
-  it.each([
-    null,
-    [{}],
-    [{ sourceId: '', text: 'x' }],
-    [{ sourceId: 'x', text: 2 }],
-    [{ sourceId: 'x', text: '', extra: true }],
+  it.each(
     [
-      { sourceId: 'x', text: '' },
-      { sourceId: 'x', text: '' },
-    ],
-  ])('rejects malformed source sets %#', async (raw) => {
+      null,
+      [{}],
+      [{ sourceId: '', text: 'x' }],
+      [{ sourceId: 'x', text: 2 }],
+      [{ sourceId: 'x', text: '', extra: true }],
+      [
+        { sourceId: 'x', text: '' },
+        { sourceId: 'x', text: '' },
+      ],
+    ].map((raw) => ({ raw }))
+  )('rejects malformed source sets %#', async ({ raw }) => {
     await expect(
       decide(definition, raw as typeof inputs, { provider: scripted().provider, budget: budget() })
     ).rejects.toThrow('Invalid decision inputs');
@@ -623,38 +692,12 @@ describe('optional external service and actual OpenAI adapter', () => {
     expect(() => external(vi.fn<typeof fetch>(), extra)).toThrow('invalid_request');
   });
   it('OpenAI enum schema, optional wire logprobs and evidence reach the decision', async () => {
-    const fetcher = vi.fn<typeof fetch>().mockImplementation(
-      async () =>
-        new Response(
-          JSON.stringify({
-            choices: [
-              {
-                finish_reason: 'tool_calls',
-                message: {
-                  tool_calls: [
-                    {
-                      id: 'p',
-                      type: 'function',
-                      function: {
-                        name: 'report_decision',
-                        arguments: JSON.stringify(answer('ban', [cite])),
-                      },
-                    },
-                  ],
-                },
-                logprobs: { content: [{ token: 'ban', logprob: Math.log(0.8) }] },
-              },
-            ],
-            usage: { prompt_tokens: 1, completion_tokens: 1 },
-          })
-        )
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async () =>
+      openAiResponse(answer('ban', [cite]), {
+        content: [{ token: 'ban', logprob: Math.log(0.8) }],
+      })
     );
-    const adapter = new OpenAICompatibleAdapter({
-      model: 'model-a',
-      endpoint: 'https://model.example/v1',
-      apiKeyEnv: 'DECISION_TEST_KEY',
-      fetch: fetcher,
-    });
+    const adapter = openAi(fetcher);
     expect(
       await decide(definition, inputs, {
         provider: createLlmDecisionProvider({ adapter }),
@@ -667,38 +710,14 @@ describe('optional external service and actual OpenAI adapter', () => {
     null,
     {},
     { content: [] },
+    { content: null, refusal: null },
     { content: [{ logprob: 1 }] },
     { content: [{ logprob: '0' }] },
   ])('OpenAI handles null/invalid logprobs %#', async (logprobs) => {
-    const fetcher = vi.fn<typeof fetch>().mockImplementation(
-      async () =>
-        new Response(
-          JSON.stringify({
-            choices: [
-              {
-                finish_reason: 'tool_calls',
-                message: {
-                  tool_calls: [
-                    {
-                      id: 'p',
-                      type: 'function',
-                      function: { name: 'report_decision', arguments: JSON.stringify(answer()) },
-                    },
-                  ],
-                },
-                logprobs,
-              },
-            ],
-            usage: null,
-          })
-        )
-    );
-    const adapter = new OpenAICompatibleAdapter({
-      model: 'model-a',
-      endpoint: 'https://model.example/v1',
-      apiKeyEnv: 'DECISION_TEST_KEY',
-      fetch: fetcher,
-    });
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockImplementation(async () => openAiResponse(answer(), logprobs));
+    const adapter = openAi(fetcher);
     expect(
       (
         await decide(definition, inputs, {
@@ -706,6 +725,263 @@ describe('optional external service and actual OpenAI adapter', () => {
           budget: budget(),
         })
       ).status
-    ).toBe(logprobs === null ? 'accepted' : 'escalated');
+    ).toBe(
+      logprobs === null ||
+        !('content' in logprobs) ||
+        logprobs.content === null ||
+        (Array.isArray(logprobs.content) && logprobs.content.length === 0)
+        ? 'accepted'
+        : 'escalated'
+    );
+  });
+});
+
+describe('independent review regressions', () => {
+  it('injection-obeying fake on either framing cannot outvote a restrictive independent pass, without a floor', async () => {
+    for (const vulnerableFrame of [1, 2]) {
+      const complete = vi.fn(async (request: ModelRequest) => {
+        const obeys =
+          request.system.includes(`Independent framing ${vulnerableFrame}:`) &&
+          request.messages[0].content?.includes('ignore previous instructions');
+        return proposal(obeys ? answer('welcome') : answer('ban', [cite]));
+      });
+      const v = await decide(definition, inputs, {
+        provider: createLlmDecisionProvider({ adapter: { id: 'model-a', complete } }),
+        budget: budget(),
+      });
+      expect(v).toMatchObject({ status: 'escalated', reason: 'disagreement' });
+      expect(complete).toHaveBeenCalledTimes(2);
+    }
+  });
+  it('model-derived uncertainty is cached, so repeating a question cannot turn disagreement into permission', async () => {
+    const c = cache();
+    const fake = scripted([proposal(), proposal(answer('ban')), proposal(), proposal()]);
+    const deps = { provider: fake.provider, cache: c.store, budget: budget() };
+    const v = await decide(definition, inputs, deps);
+    expect(v.reason).toBe('disagreement');
+    expect(await decide(definition, inputs, deps)).toEqual(v);
+    expect(fake.complete).toHaveBeenCalledTimes(2);
+    for (const results of [
+      [proposal(answer('outside'))],
+      [proposal(answer('welcome'), [Math.log(0.8)]), proposal(answer('welcome'), [Math.log(0.8)])],
+    ]) {
+      const cached = cache();
+      const p = scripted(results);
+      const d = { provider: p.provider, cache: cached.store, budget: budget() };
+      const before = await decide(definition, inputs, d);
+      expect(before.status).toBe('escalated');
+      expect(await decide(definition, inputs, d)).toEqual(before);
+    }
+  });
+  it('key order in question thresholds and source properties does not change digest/cache identity', async () => {
+    const c = cache();
+    const fake = scripted();
+    const b = budget();
+    const v = await decide(definition, [{ sourceId: 'x', text: 'fixed' }], {
+      provider: fake.provider,
+      cache: c.store,
+      budget: b,
+    });
+    const q = {
+      ...definition,
+      acceptThreshold: { ban: 0.6, welcome: 0.95 },
+      strictness: { ban: 1, welcome: 0 },
+    };
+    expect(
+      await decide(q, [{ text: 'fixed', sourceId: 'x' }], {
+        provider: fake.provider,
+        cache: c.store,
+        budget: b,
+      })
+    ).toEqual(v);
+    expect(fake.complete).toHaveBeenCalledTimes(2);
+  });
+  it('successful external byte-metering settles conservative bounds and permits reopened-ledger admission', async () => {
+    const b = budget();
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockImplementation(
+        async () => new Response(JSON.stringify({ value: 'ban', probability: 0.8 }))
+      );
+    const provider = createExternalDecisionProvider({
+      endpoint: 'https://private.example/tenant/fixture',
+      apiKeyEnv: 'DECISION_TEST_KEY',
+      model: 'model-a',
+      fetch: fetcher,
+      timeoutMs: 100,
+    });
+    const v = await decide(definition, inputs, { provider, budget: b });
+    expect(v.status).toBe('accepted');
+    expect(JSON.stringify(v)).not.toContain('private.example');
+    expect(JSON.stringify(v)).not.toContain('/tenant/');
+    expect(b.ledger.snapshot().reservations.every((r) => r.status === 'settled')).toBe(true);
+    const reopened = new BudgetLedger(b.ledger.file, 'contribution');
+    expect(
+      (
+        await decide(definition, inputs, {
+          provider: scripted().provider,
+          budget: { ...b, ledger: reopened },
+        })
+      ).status
+    ).toBe('accepted');
+  });
+  it('disabled/keyless external providers do not consume budget, including exhausted sessions', async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    for (const tokenLimit of [1, 100_000]) {
+      const b = budget('model-a', tokenLimit);
+      const provider = createExternalDecisionProvider({ model: 'model-a', fetch: fetcher });
+      expect((await decide(definition, inputs, { provider, budget: b })).reason).toBe('provider');
+      expect(b.ledger.snapshot().reservations).toHaveLength(0);
+    }
+    vi.stubEnv('DECISION_TEST_KEY', '');
+    const b = budget();
+    const provider = createExternalDecisionProvider({
+      model: 'model-a',
+      endpoint: 'https://judge.example',
+      apiKeyEnv: 'DECISION_TEST_KEY',
+      fetch: fetcher,
+    });
+    await decide(definition, inputs, { provider, budget: b });
+    expect(b.ledger.snapshot().reservations).toHaveLength(0);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+  it('ledger/configuration errors are distinguishable without returning raw exception text', async () => {
+    const b = budget();
+    const fake = scripted();
+    expect(
+      (
+        await decide(definition, inputs, {
+          provider: fake.provider,
+          budget: { ...b, sessionId: 'absent' },
+        })
+      ).reason
+    ).toBe('ledger');
+    expect(
+      (await decide(definition, inputs, { provider: fake.provider, budget: { ...b, rates: [] } }))
+        .reason
+    ).toBe('ledger');
+    const invalid = createLlmDecisionProvider({
+      adapter: { id: 'model-a', complete: fake.complete },
+      maxOutputTokens: 0,
+    });
+    expect((await decide(definition, inputs, { provider: invalid, budget: b })).reason).toBe(
+      'configuration'
+    );
+    expect(fake.complete).not.toHaveBeenCalled();
+  });
+  it('oversize/count inputs escalate without invoking a provider or losing the input digest', async () => {
+    for (const raw of [
+      [{ sourceId: 'x', text: 'x'.repeat(1024 * 1024 + 1) }],
+      Array.from({ length: 257 }, (_, n) => ({ sourceId: String(n), text: '' })),
+    ]) {
+      const fake = scripted();
+      const b = budget();
+      expect(await decide(definition, raw, { provider: fake.provider, budget: b })).toMatchObject({
+        status: 'escalated',
+        reason: 'input',
+        inputDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      });
+      expect(fake.complete).not.toHaveBeenCalled();
+      expect(b.ledger.snapshot().reservations).toHaveLength(0);
+    }
+  });
+  it('cancellation before dispatch and during an ignored-signal adapter stops further passes', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const fake = scripted();
+    const b = budget();
+    expect(
+      (
+        await decide(definition, inputs, {
+          provider: fake.provider,
+          budget: b,
+          signal: controller.signal,
+        })
+      ).reason
+    ).toBe('aborted');
+    expect(fake.complete).not.toHaveBeenCalled();
+    expect(b.ledger.snapshot().reservations).toHaveLength(0);
+    const active = new AbortController();
+    const complete = vi.fn(async () => {
+      active.abort();
+      return new Promise<ModelResult>(() => {});
+    });
+    expect(
+      (
+        await decide(definition, inputs, {
+          provider: createLlmDecisionProvider({ adapter: { id: 'model-a', complete } }),
+          budget: b,
+          signal: active.signal,
+        })
+      ).reason
+    ).toBe('aborted');
+    expect(complete).toHaveBeenCalledTimes(1);
+  });
+  it('second-pass exhaustion returns budget and preserves the settled first pass', async () => {
+    const b = budget();
+    const fake = scripted();
+    const complete = vi.fn(async (r: ModelRequest) => {
+      // Reserve the remaining token allowance through the REAL ledger, simulating other admitted work.
+      b.ledger.reserve(
+        's1',
+        {
+          money: { currency: 'USD', minor: 0 },
+          tokens: 10_000_000 - budgetTotals(b.ledger.snapshot(), 's1').tokens - 1,
+          timeMs: 1,
+          rates: b.rates,
+        },
+        'work'
+      );
+      return fake.provider.adapter.complete(r);
+    });
+    const provider = createLlmDecisionProvider({
+      adapter: { id: 'model-a', complete },
+      maxOutputTokens: 10_000,
+    });
+    expect((await decide(definition, inputs, { provider, budget: b })).reason).toBe('budget');
+    expect(complete).toHaveBeenCalledTimes(1);
+  });
+  it('strictness public helper rejects values outside the set', () => {
+    expect(() => questionStrictness(definition, 'outside')).toThrow('Invalid typed question');
+  });
+  it('logprobs can be disabled explicitly; provider profile identity separates shared caches', async () => {
+    const fake = scripted([proposal(), proposal(), proposal(), proposal()]);
+    const c = cache();
+    const b = budget();
+    for (const id of ['llm-profile-a', 'llm-profile-b']) {
+      const provider = createLlmDecisionProvider({
+        adapter: fake.provider.adapter,
+        id,
+        logprobs: false,
+      });
+      expect(
+        (await decide(definition, inputs, { provider, cache: c.store, budget: b })).status
+      ).toBe('accepted');
+    }
+    expect(fake.requests.every((r) => r.logprobs === false)).toBe(true);
+    expect(fake.complete).toHaveBeenCalledTimes(4);
+  });
+  it('max-sized evidence is validated in linear source preparation and cache accepts merged per-pass citations', async () => {
+    const source = [{ sourceId: 'large', text: 'line\n'.repeat(120_000) }];
+    const evidence = Array.from({ length: 256 }, (_, n) => ({
+      sourceId: 'large',
+      line: n + 1,
+      quote: 'line',
+    }));
+    const fake = scripted([proposal(answer('ban', evidence)), proposal(answer('ban', evidence))]);
+    const c = cache();
+    const b = budget();
+    const start = performance.now();
+    const v = await decide(definition, source, {
+      provider: fake.provider,
+      budget: b,
+      cache: c.store,
+    });
+    expect(v).toMatchObject({ status: 'accepted', value: 'ban' });
+    expect(v.citations).toHaveLength(512);
+    expect(
+      await decide(definition, source, { provider: fake.provider, budget: b, cache: c.store })
+    ).toEqual(v);
+    expect(performance.now() - start).toBeLessThan(5000);
   });
 });

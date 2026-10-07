@@ -134,8 +134,9 @@ versioned definitions, strictness ordering and asymmetric per-answer confidence
 thresholds. Untrusted text stays data and cannot change questions, providers,
 thresholds or authority.
 
-Independent passes validate every answer and quoted source/line citation. A
-deterministic floor can only restrict or escalate; a permissive answer requires
+Independent model calls (alternating trusted LLM framings, or repeated configured
+external-service requests) validate every answer and quoted source/line citation. A
+deterministic floor can only escalate an insufficiently strict answer; a permissive answer requires
 unanimous agreement, sufficient confidence and no stricter floor. Any invalid
 pass, disagreement, provider failure, exhausted budget or insufficient confidence
 escalates with no weaker fallback. LLM confidence uses agreement and token

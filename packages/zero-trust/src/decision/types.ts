@@ -2,9 +2,15 @@ import type { BudgetLedger } from '../budget';
 import type { BudgetRate } from '../budget-types';
 import type { ModelAdapter, ModelRequest, ModelResult } from '../model/adapter';
 import { assertSecretFree } from '../redaction';
-import { isRecord } from '../state';
+import { isNonemptyString, isRecord } from '../state';
 
 export type DecisionValue = string | boolean;
+export const DEFAULT_DECISION_PASSES = 2;
+export const MAX_DECISION_PASSES = 8;
+export const MAX_DECISION_SOURCES = 256;
+export const MAX_DECISION_INPUT_BYTES = 1024 * 1024;
+export const MAX_DECISION_CITATIONS = 256;
+export const MAX_DECISION_ANSWERS = 64;
 interface QuestionBase {
   id: string;
   version: string;
@@ -42,18 +48,26 @@ export type DecisionReason =
   | 'budget'
   | 'provider'
   | 'secret'
-  | 'cache';
-export interface Verdict {
-  value: DecisionValue;
+  | 'cache'
+  | 'cache_write'
+  | 'ledger'
+  | 'configuration'
+  | 'aborted'
+  | 'input';
+interface VerdictEvidence {
   confidence: number;
   citations: readonly Citation[];
-  status: 'accepted' | 'escalated';
-  reason: DecisionReason;
   provider: string;
   model: string;
   questionVersion: string;
   inputDigest: string;
 }
+/** Consumers MUST narrow status before treating value as an answer/permission. */
+export type Verdict = VerdictEvidence &
+  (
+    | { status: 'accepted'; reason: 'accepted'; value: DecisionValue }
+    | { status: 'escalated'; reason: Exclude<DecisionReason, 'accepted'>; value: string }
+  );
 export interface DecisionBudget {
   ledger: BudgetLedger;
   sessionId: string;
@@ -84,6 +98,13 @@ export interface DecisionDeps {
   budget: DecisionBudget;
   /** Independent calls with different trusted framings. Default two, maximum eight. */
   passes?: number;
+  signal?: AbortSignal;
+}
+export class InvalidDecisionError extends Error {
+  constructor(readonly code: 'configuration' | 'inputs') {
+    super(code === 'inputs' ? 'Invalid decision inputs' : 'Invalid decision configuration');
+    this.name = 'InvalidDecisionError';
+  }
 }
 export class InvalidQuestionError extends Error {
   constructor() {
@@ -100,6 +121,7 @@ export function questionValues(question: TypedQuestion): readonly DecisionValue[
 }
 /** Boolean true is permissive; score scale is least-to-most strict. */
 export function questionStrictness(question: TypedQuestion, value: DecisionValue): number {
+  if (!questionValues(question).includes(value)) throw new InvalidQuestionError();
   if (question.kind === 'boolean') return value === true ? 0 : 1;
   if (question.kind === 'choice') return question.strictness[String(value)];
   return question.scale.indexOf(String(value));
@@ -130,9 +152,7 @@ export function createTypedQuestion(raw: TypedQuestion): TypedQuestion {
             ...extra,
           ].includes(key)
       ) ||
-      !['id', 'version', 'prompt', 'escalateValue'].every(
-        (key) => typeof q[key] === 'string' && (q[key] as string).trim().length > 0
-      ) ||
+      !['id', 'version', 'prompt', 'escalateValue'].every((key) => isNonemptyString(q[key])) ||
       !isRecord(q.acceptThreshold)
     )
       throw new InvalidQuestionError();
@@ -141,7 +161,7 @@ export function createTypedQuestion(raw: TypedQuestion): TypedQuestion {
       if (
         !Array.isArray(values) ||
         values.length < 2 ||
-        values.length > 64 ||
+        values.length > MAX_DECISION_ANSWERS ||
         values.some((v) => typeof v !== 'string' || !v.trim() || v === q.escalateValue) ||
         new Set(values).size !== values.length ||
         Object.keys(values).length !== values.length

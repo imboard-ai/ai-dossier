@@ -1,15 +1,23 @@
 import { createHash } from 'node:crypto';
+import { BudgetError } from '../budget-types';
+import { ModelError, type ModelResult } from '../model/adapter';
 import { BudgetExhaustedError, meteredComplete } from '../model/metered';
 import { assertSecretFree, SecretRedactionError } from '../redaction';
 import { isRecord } from '../state';
 import {
   type Citation,
   createTypedQuestion,
+  DEFAULT_DECISION_PASSES,
   type DecisionDeps,
   type DecisionFloor,
   type DecisionInput,
   type DecisionReason,
   type DecisionValue,
+  InvalidDecisionError,
+  MAX_DECISION_CITATIONS,
+  MAX_DECISION_INPUT_BYTES,
+  MAX_DECISION_PASSES,
+  MAX_DECISION_SOURCES,
   questionStrictness,
   questionValues,
   type TypedQuestion,
@@ -17,10 +25,89 @@ import {
   validDecisionProbability,
 } from './types';
 
-const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+// Receipt canonicalJson has a smaller limit and integer-only numbers; thresholds are fractional.
+const stableJson = (value: unknown): string =>
+  JSON.stringify(value, (_key, item: unknown) =>
+    isRecord(item)
+      ? Object.fromEntries(
+          Object.keys(item)
+            .sort()
+            .map((k) => [k, item[k]])
+        )
+      : item
+  );
+const digest = (value: unknown) => createHash('sha256').update(stableJson(value)).digest('hex');
 const whitespace = (s: string) => s.replace(/\s+/gu, ' ').trim();
-function citations(raw: unknown, inputs: readonly DecisionInput[]): Citation[] | null {
-  if (!Array.isArray(raw) || raw.length > 256) return null;
+type Sources = ReadonlyMap<string, readonly string[]>;
+const SEMANTIC_REASONS: readonly DecisionReason[] = [
+  'invalid_pass',
+  'disagreement',
+  'confidence',
+  'floor',
+];
+const VERDICT_KEYS = [
+  'value',
+  'confidence',
+  'citations',
+  'status',
+  'reason',
+  'provider',
+  'model',
+  'questionVersion',
+  'inputDigest',
+];
+
+function snapshotInputs(raw: readonly DecisionInput[]): readonly DecisionInput[] {
+  let inputs: unknown;
+  try {
+    inputs = structuredClone(raw);
+  } catch {
+    throw new InvalidDecisionError('inputs');
+  }
+  if (
+    !Array.isArray(inputs) ||
+    inputs.some(
+      (i) =>
+        !isRecord(i) ||
+        Object.keys(i).some((k) => !['sourceId', 'text'].includes(k)) ||
+        typeof i.sourceId !== 'string' ||
+        !i.sourceId ||
+        typeof i.text !== 'string'
+    ) ||
+    new Set(inputs.map((i: DecisionInput) => i.sourceId)).size !== inputs.length
+  )
+    throw new InvalidDecisionError('inputs');
+  return Object.freeze(
+    inputs.map((i: DecisionInput) => Object.freeze({ sourceId: i.sourceId, text: i.text }))
+  );
+}
+function evaluateFloor(
+  fn: DecisionDeps['floor'],
+  question: TypedQuestion,
+  inputs: readonly DecisionInput[]
+): DecisionFloor {
+  const raw: unknown = structuredClone(fn ? fn(question, inputs) : {});
+  if (
+    !isRecord(raw) ||
+    Object.keys(raw).some((k) => !['minimumStrictness', 'escalate'].includes(k)) ||
+    (raw.escalate !== undefined && typeof raw.escalate !== 'boolean') ||
+    (raw.minimumStrictness !== undefined &&
+      (typeof raw.minimumStrictness !== 'number' || !Number.isFinite(raw.minimumStrictness)))
+  )
+    throw new Error('Invalid floor');
+  return {
+    ...(raw.escalate === undefined ? {} : { escalate: raw.escalate as boolean }),
+    ...(raw.minimumStrictness === undefined
+      ? {}
+      : { minimumStrictness: raw.minimumStrictness as number }),
+  };
+}
+function citations(
+  raw: unknown,
+  sources: Sources,
+  max = MAX_DECISION_CITATIONS
+): Citation[] | null {
+  if (!Array.isArray(raw) || raw.length > max) return null;
   const result: Citation[] = [];
   for (const c of raw) {
     if (
@@ -33,9 +120,8 @@ function citations(raw: unknown, inputs: readonly DecisionInput[]): Citation[] |
       (c.line as number) < 1
     )
       return null;
-    const source = inputs.find((i) => i.sourceId === c.sourceId);
-    const line = source?.text.split(/\r?\n/u)[(c.line as number) - 1];
-    if (line === undefined || !whitespace(line).includes(whitespace(c.quote))) return null;
+    const line = sources.get(c.sourceId)?.[(c.line as number) - 1];
+    if (line === undefined || !line.includes(whitespace(c.quote))) return null;
     result.push({ sourceId: c.sourceId, line: c.line as number, quote: c.quote });
   }
   return result;
@@ -46,6 +132,79 @@ function freezeVerdict(v: Verdict): Verdict {
   Object.freeze(v.citations);
   return Object.freeze(v);
 }
+function refusal(
+  question: TypedQuestion,
+  floor: DecisionFloor,
+  value: DecisionValue,
+  confidence: number
+): 'floor' | 'confidence' | null {
+  if (
+    floor.minimumStrictness !== undefined &&
+    questionStrictness(question, value) < floor.minimumStrictness
+  )
+    return 'floor';
+  return confidence < question.acceptThreshold[String(value)] ? 'confidence' : null;
+}
+function passConfidence(
+  kind: 'agreement' | 'external',
+  raw: Record<string, unknown>,
+  result: ModelResult
+): number | null {
+  if (kind === 'external') return validDecisionProbability(raw.confidence) ? raw.confidence : null;
+  const logs = result.tokenLogprobs;
+  if (logs === undefined) return 1;
+  if (!Array.isArray(logs) || !logs.length || logs.some((n) => !Number.isFinite(n) || n > 0))
+    return null;
+  // Reduce avoids an argument-spread limit with large custom-adapter responses.
+  return Math.exp(logs.reduce((a, b) => Math.min(a, b), 0));
+}
+function readCache(
+  v: Verdict,
+  identity: Pick<Verdict, 'provider' | 'model' | 'questionVersion' | 'inputDigest'>,
+  question: TypedQuestion,
+  floor: DecisionFloor,
+  sources: Sources
+): Verdict | null {
+  assertSecretFree(v);
+  if (
+    !isRecord(v) ||
+    Object.keys(v).some((k) => !VERDICT_KEYS.includes(k)) ||
+    Object.entries(identity).some(([k, value]) => v[k] !== value) ||
+    !validDecisionProbability(v.confidence)
+  )
+    return null;
+  const evidence = citations(v.citations, sources, MAX_DECISION_CITATIONS * MAX_DECISION_PASSES);
+  if (evidence === null) return null;
+  if (
+    v.status === 'accepted' &&
+    v.reason === 'accepted' &&
+    questionValues(question).includes(v.value) &&
+    refusal(question, floor, v.value, v.confidence) === null
+  )
+    return freezeVerdict({
+      ...identity,
+      value: v.value,
+      confidence: v.confidence,
+      citations: evidence,
+      status: 'accepted',
+      reason: 'accepted',
+    });
+  if (
+    v.status === 'escalated' &&
+    v.value === question.escalateValue &&
+    SEMANTIC_REASONS.includes(v.reason) &&
+    !evidence.length
+  )
+    return freezeVerdict({
+      ...identity,
+      value: question.escalateValue,
+      confidence: v.confidence,
+      citations: [],
+      status: 'escalated',
+      reason: v.reason,
+    });
+  return null;
+}
 
 /** No provider/floor/cache failure may grant a more permissive answer. */
 export async function decide(
@@ -54,12 +213,19 @@ export async function decide(
   deps: DecisionDeps
 ): Promise<Verdict> {
   const question = createTypedQuestion(definition);
-  const { provider, budget, cache, floor: floorFn, passes = 2 } = deps;
+  const {
+    provider,
+    budget,
+    cache,
+    floor: floorFn,
+    passes = DEFAULT_DECISION_PASSES,
+    signal,
+  } = deps;
   const { id, model, confidenceKind, adapter } = provider;
   if (
     !Number.isSafeInteger(passes) ||
-    passes < 2 ||
-    passes > 8 ||
+    passes < DEFAULT_DECISION_PASSES ||
+    passes > MAX_DECISION_PASSES ||
     !['agreement', 'external'].includes(confidenceKind) ||
     typeof id !== 'string' ||
     !id ||
@@ -67,99 +233,80 @@ export async function decide(
     !model ||
     adapter.id !== model
   )
-    throw new Error('Invalid decision configuration');
+    throw new InvalidDecisionError('configuration');
   assertSecretFree({ id, model });
-  const inputs = structuredClone(rawInputs);
-  if (
-    !Array.isArray(inputs) ||
-    inputs.length > 256 ||
-    inputs.some(
-      (i) =>
-        !isRecord(i) ||
-        Object.keys(i).some((k) => !['sourceId', 'text'].includes(k)) ||
-        typeof i.sourceId !== 'string' ||
-        !i.sourceId ||
-        typeof i.text !== 'string'
-    ) ||
-    new Set(inputs.map((i) => i.sourceId)).size !== inputs.length ||
-    Buffer.byteLength(JSON.stringify(inputs), 'utf8') > 1024 * 1024
-  )
-    throw new Error('Invalid decision inputs');
-  for (const input of inputs) Object.freeze(input);
-  Object.freeze(inputs);
-  const inputDigest = digest(inputs);
-  const verdict = (reason: DecisionReason, confidence = 0): Verdict =>
+  const inputs = snapshotInputs(rawInputs);
+  const identity = {
+    provider: id,
+    model,
+    questionVersion: question.version,
+    inputDigest: digest(inputs),
+  };
+  const escalate = (reason: Exclude<DecisionReason, 'accepted'>, confidence = 0): Verdict =>
     freezeVerdict({
+      ...identity,
       value: question.escalateValue,
       confidence,
       citations: [],
       status: 'escalated',
       reason,
-      provider: id,
-      model,
-      questionVersion: question.version,
-      inputDigest,
     });
+  if (
+    inputs.length > MAX_DECISION_SOURCES ||
+    Buffer.byteLength(stableJson(inputs), 'utf8') > MAX_DECISION_INPUT_BYTES
+  )
+    return escalate('input');
+  if (signal?.aborted) return escalate('aborted');
   try {
     assertSecretFree(inputs);
   } catch {
-    return verdict('secret');
+    return escalate('secret');
   }
   let floor: DecisionFloor;
   try {
-    floor = structuredClone(floorFn ? floorFn(question, inputs) : {});
-    if (
-      !isRecord(floor) ||
-      Object.keys(floor).some((k) => !['minimumStrictness', 'escalate'].includes(k)) ||
-      (floor.escalate !== undefined && typeof floor.escalate !== 'boolean') ||
-      (floor.minimumStrictness !== undefined && !Number.isFinite(floor.minimumStrictness))
-    )
-      return verdict('floor');
+    floor = evaluateFloor(floorFn, question, inputs);
   } catch {
-    return verdict('floor');
+    return escalate('floor');
   }
-  if (floor.escalate) return verdict('floor');
-  const minimumStrictness = floor.minimumStrictness as number | undefined;
-  const values = questionValues(question);
+  if (floor.escalate) return escalate('floor');
+  const sources: Sources = new Map(
+    inputs.map((i) => [i.sourceId, i.text.split(/\r?\n/u).map(whitespace)])
+  );
   const key = digest([
     question.id,
     question.version,
     id,
     model,
-    inputDigest,
+    identity.inputDigest,
     question,
     confidenceKind,
     passes,
     floor,
   ]);
+  const remember = (v: Verdict): Verdict => {
+    try {
+      cache?.set(key, structuredClone(v));
+    } catch {
+      return escalate('cache_write');
+    }
+    return v;
+  };
+  const semantic = (
+    reason: 'invalid_pass' | 'disagreement' | 'confidence' | 'floor',
+    confidence = 0
+  ) => remember(escalate(reason, confidence));
   try {
     const cached = cache?.get(key);
-    if (cached !== undefined) {
-      const v = structuredClone(cached);
-      assertSecretFree(v);
-      if (
-        !isRecord(v) ||
-        v.status !== 'accepted' ||
-        v.reason !== 'accepted' ||
-        v.provider !== id ||
-        v.model !== model ||
-        v.questionVersion !== question.version ||
-        v.inputDigest !== inputDigest ||
-        !values.includes(v.value) ||
-        !validDecisionProbability(v.confidence) ||
-        v.confidence < question.acceptThreshold[String(v.value)] ||
-        (minimumStrictness !== undefined &&
-          questionStrictness(question, v.value) < minimumStrictness) ||
-        citations(v.citations, inputs) === null
-      )
-        return verdict('cache');
-      return freezeVerdict(v);
-    }
+    if (cached !== undefined)
+      return (
+        readCache(structuredClone(cached), identity, question, floor, sources) ?? escalate('cache')
+      );
   } catch {
-    return verdict('cache');
+    return escalate('cache');
   }
   const answers: { value: DecisionValue; citations: Citation[]; confidence: number }[] = [];
   for (let pass = 0; pass < passes; pass++) {
+    if (signal?.aborted) return escalate('aborted');
     try {
       const request = provider.request(question, inputs, pass);
       const result = await meteredComplete(
@@ -167,35 +314,30 @@ export async function decide(
         budget.ledger,
         budget.sessionId,
         budget.rates,
-        request
+        signal ? { ...request, signal } : request
       );
+      if (signal?.aborted) return escalate('aborted');
       const raw = structuredClone(provider.decode(result));
       assertSecretFree(raw);
-      if (!isRecord(raw) || !values.includes(raw.value as DecisionValue))
-        return verdict('invalid_pass');
-      const evidence = citations(raw.citations, inputs);
-      if (evidence === null) return verdict('invalid_pass');
-      let confidence = 1;
-      if (confidenceKind === 'external') {
-        if (!validDecisionProbability(raw.confidence)) return verdict('invalid_pass');
-        confidence = raw.confidence;
-      } else if (result.tokenLogprobs !== undefined) {
-        if (
-          !Array.isArray(result.tokenLogprobs) ||
-          result.tokenLogprobs.length === 0 ||
-          result.tokenLogprobs.some((n) => !Number.isFinite(n) || n > 0)
-        )
-          return verdict('invalid_pass');
-        confidence = Math.exp(Math.min(...result.tokenLogprobs));
-      }
+      if (!isRecord(raw) || !questionValues(question).includes(raw.value as DecisionValue))
+        return semantic('invalid_pass');
+      const evidence = citations(raw.citations, sources);
+      const confidence = passConfidence(confidenceKind, raw, result);
+      if (evidence === null || confidence === null) return semantic('invalid_pass');
       answers.push({ value: raw.value as DecisionValue, citations: evidence, confidence });
     } catch (error) {
-      return verdict(
-        error instanceof BudgetExhaustedError
-          ? 'budget'
-          : error instanceof SecretRedactionError
-            ? 'secret'
-            : 'provider'
+      return escalate(
+        signal?.aborted
+          ? 'aborted'
+          : error instanceof BudgetExhaustedError
+            ? 'budget'
+            : error instanceof BudgetError
+              ? 'ledger'
+              : error instanceof SecretRedactionError
+                ? 'secret'
+                : error instanceof ModelError && error.code === 'invalid_request'
+                  ? 'configuration'
+                  : 'provider'
       );
     }
   }
@@ -204,29 +346,17 @@ export async function decide(
   );
   const agreement = answers.filter((a) => a.value === strictest.value).length / passes;
   const confidence = Math.min(agreement, ...answers.map((a) => a.confidence));
-  if (agreement !== 1) return verdict('disagreement', confidence);
-  if (
-    minimumStrictness !== undefined &&
-    questionStrictness(question, strictest.value) < minimumStrictness
-  )
-    return verdict('floor', confidence);
-  if (confidence < question.acceptThreshold[String(strictest.value)])
-    return verdict('confidence', confidence);
-  const accepted = freezeVerdict({
-    value: strictest.value,
-    confidence,
-    citations: answers.flatMap((a) => a.citations),
-    status: 'accepted',
-    reason: 'accepted',
-    provider: id,
-    model,
-    questionVersion: question.version,
-    inputDigest,
-  });
-  try {
-    cache?.set(key, structuredClone(accepted));
-  } catch {
-    return verdict('cache');
-  }
-  return accepted;
+  if (agreement !== 1) return semantic('disagreement', confidence);
+  const reason = refusal(question, floor, strictest.value, confidence);
+  if (reason) return semantic(reason, confidence);
+  return remember(
+    freezeVerdict({
+      ...identity,
+      value: strictest.value,
+      confidence,
+      citations: answers.flatMap((a) => a.citations),
+      status: 'accepted',
+      reason: 'accepted',
+    })
+  );
 }

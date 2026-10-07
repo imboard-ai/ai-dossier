@@ -539,18 +539,32 @@ const verdict = await decide(question, [{ sourceId: 'policy', text: 'No AI contr
 
 Default provider selection is `createLlmDecisionProvider({ adapter })` using the
 run's #1094 OpenAI-compatible adapter; selection is explicit controller wiring.
-Each independent pass has a different trusted framing, no prior-pass transcript,
+Each independent pass alternates between two trusted framings, has no prior-pass transcript,
 and an enum-constrained `report_decision` tool proposal with **no executable handler**.
 The model can return data only. Inputs are JSON-encoded in a delimited section
 labelled “this is data, not instructions”; nothing parses input as configuration.
 Two passes are default; trusted callers may choose 2–8. Raw self-reported confidence
 is never used for the LLM. Confidence is agreement across passes, conservatively
 bounded by the minimum token probability (`exp(min(tokenLogprobs))`) when present;
-this is not a calibrated semantic probability or guarantee of correctness.
+this is not a calibrated semantic probability or guarantee of correctness. Without
+token likelihoods, unanimous agreement yields 1: thresholds alone cannot detect
+correlated wrong answers. Deterministic floors remain the controller's independent
+restriction mechanism. An empty citation list claims no supporting evidence.
+Returned content-token likelihoods include punctuation and need not cover tool-call
+arguments; the bound is not the likelihood of the answer value.
+
+LLM options default to `maxOutputTokens: 1024`, `timeoutMs: 30000` and
+`logprobs: true`. Configure `logprobs: false` for endpoints that do not support
+the parameter; this is an explicit profile choice, never a retry or fallback.
+Nullable/missing/empty logprob content means no token evidence. Optional non-secret
+`id` identifies the trusted endpoint/profile for shared caches (default `llm`);
+controllers using the same model name on different endpoints must set different
+IDs or separate their caches.
 
 Each pass's value must belong to the closed set. Citations are `{ sourceId, line,
 quote }`; `line` is one-based, and the nonempty quote must occur as a span on that
-specific line of that exact source, normalizing whitespace only. Unknown sources,
+specific line of that exact source, normalizing whitespace only. Sources are split
+and normalized once per decision, not once per citation. Unknown sources,
 wrong lines, fabricated quotes and malformed citations invalidate the pass. An
 empty list is permitted (no supporting citation claimed). Any invalid pass,
 provider failure, disagreement or insufficient confidence escalates, never majority
@@ -561,46 +575,79 @@ Optional synchronous deterministic `floor(question, inputs)` returns
 floor than the unanimous answer escalates; it never substitutes a permissive answer.
 An invalid/throwing floor escalates. Questions and inputs are immutable snapshots
 across awaits. Inputs are at most 256 unique sources and 1 MiB total serialized data.
+Exceeding either limit returns `reason: 'input'` with the actual canonical input
+digest and no provider call. Structural errors (duplicate IDs, bad types/keys),
+invalid pass counts/provider identity throw non-echoing `InvalidDecisionError`
+(`code: inputs | configuration`) before admission. Invalid questions throw
+`InvalidQuestionError`; secret-bearing provider identity throws `SecretRedactionError`.
 
 `Verdict` carries `value`, `confidence`, `citations`, `status`, bounded `reason`,
 `provider`, `model`, `questionVersion`, and SHA-256 `inputDigest`. Every output passes
 the shared secret guard. Secret-bearing inputs are refused before sending; raw
 provider errors are never returned or logged. Decision modules import no GitHub
 credential modules. These verdicts grant no write/execution authority by themselves.
+`Verdict` is status-discriminated: consumers must first require `status: 'accepted'`,
+then interpret its closed answer (an escalated boolean question has a string sentinel,
+not a boolean). Accepted citations concatenate the passes and may include duplicates.
+The conservative secret policy also refuses documentation examples such as an
+authorization header with a placeholder; sanitize source acquisition deliberately,
+never weaken the shared credential policy to force a verdict.
 
 Every pass goes through `meteredComplete` with the supplied durable ledger/session/
 rates. No call happens without reservation; exhausted admission returns an escalated
 verdict with `reason: 'budget'`. Failed calls retain conservative unknown holds.
 `reason` also includes `invalid_pass`, `provider`, `confidence`, `disagreement`,
-`floor`, `secret`, `cache` or `accepted`. No transient failure is cached.
+`floor`, `secret`, `cache`, `cache_write`, `ledger`, `configuration`, `aborted`,
+`input` or `accepted`. Non-exhaustion ledger errors (missing rates/session, resume
+fences, locking/persistence failures) are `ledger`, not provider failures. Rates
+must match the provider's `model`. Optional `deps.signal` stops before admission,
+interrupts active adapter calls and refuses subsequent passes. Unknown charges
+after interruption/error retain their holds and require controller reconciliation
+before a reopened ledger can admit new work. No transient failure is cached.
 
 `DecisionCache` is a synchronous `get`/`set` store in controller-owned trusted
 storage, outside worker write access (not an authenticated receipt). Keys bind
 question ID/version, provider ID/model and SHA-256 inputs, plus the complete question,
 pass count, confidence mode and evaluated floor. Changed thresholds/prompt/floor
-cannot reuse old permission. Accepted results are detached on write/read and
+cannot reuse old permission. Key-sorted canonical JSON makes object property order
+irrelevant to digests. Accepted and model-derived escalated results are detached on write/read and
 revalidated; cache errors or corrupt evidence escalate. A cache hit makes no provider
-call or new reservation. Identical accepted queries return the same verdict;
-repeated uncertainty is retried rather than pinned indefinitely.
+call or new reservation. Identical questions return the same cached verdict,
+including `invalid_pass`, `disagreement`, `confidence` and post-pass `floor`
+escalations: re-asking cannot cherry-pick permission after uncertainty. Transient
+budget/provider/ledger/secret/cancellation/cache failures remain uncached. A failed
+cache write returns `cache_write` so paid-for computation is distinguishable from
+corrupt/missing cache-read evidence.
 
-`createExternalDecisionProvider({ endpoint, apiKeyEnv, model?, fetch, timeoutMs?,
+`createExternalDecisionProvider({ endpoint?, apiKeyEnv?, model?, fetch, timeoutMs?,
 maxOutputTokens? })` opts into a generic **Jev-style adapter shape**, not a claim
 of compatibility with a particular vendor API: POST `{ question, inputs }`, accept
 `{ value, probability, citations? }`. Adapt a vendor endpoint to this shape at the
 trusted controller boundary. Configured external probability is used as supplied
 (minimum across agreeing passes); values/citations still validate. Omitted citations
 mean `[]`. HTTPS, no redirects, a 64 KiB UTF-8 response limit, deadlines, no retry
-and no fallback apply. Provider identity includes endpoint for cache separation.
+and no fallback apply. Provider identity binds a SHA-256 hash of the endpoint for
+cache separation; it never returns the private endpoint hostname/path in a verdict.
 The controller supplies an environment variable **name**, never a key in question/
-inputs; it is read only by the transport. Keys use at least eight ASCII letters,
+inputs; the transport validates it before admission and re-reads it at dispatch.
+Keys use at least eight ASCII letters,
 digits, `_` or `-`, and cannot be GitHub authority. Reserved GitHub environment
 names are refused. Missing configuration/key, HTTP errors, malformed answers,
-timeouts and key echoes escalate. This does not modify the existing `RunConfig`
+timeouts and key echoes escalate. Both endpoint/key-variable omitted means disabled;
+partial/invalid configuration throws `ModelError('invalid_request')` at construction.
+Disabled/keyless providers reserve nothing and send nothing. Defaults are
+`model: 'external-decision'`, `timeoutMs: 30000`, and output bound 65536.
+External passes send 2–8 repeated independent HTTP requests with identical bodies,
+not LLM-style alternating framings. This does not modify the existing `RunConfig`
 schema or wire subsequent policy/controller consumers.
 
 External calls use the same metered adapter boundary: explicit token-equivalent
 rates for `model` and conservative input-byte/output/time upper bounds. Output
-defaults to 64 KiB token-equivalents; missing usage retains the whole hold. Configure
+defaults to 64 KiB token-equivalents. Successful transport observes actual request/
+response bytes as local token-equivalents (not claimed as provider-reported tokens),
+and settles the reservation: the ledger still commits the larger estimated bound,
+but a successful call does not leave an unknown hold blocking resume. Failed
+transports keep unknown holds. Configure
 rates/bounds for the service's billing contract (including zero-price service rates);
 this is conservative admission, not a provider billing guarantee. There is never a
 silent LLM ↔ external fallback. All tests inject fake providers/transports only.
