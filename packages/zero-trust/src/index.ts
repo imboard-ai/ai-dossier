@@ -41,6 +41,7 @@ export * from './state';
 export * from './status';
 export * from './vm/adapter';
 export * from './vm/bake';
+export * from './vm/boundary-probe';
 export * from './vm/broker';
 export * from './vm/cloud-init';
 export * from './vm/evidence';

@@ -10,6 +10,93 @@ plus ecosystem detection, runtime profiles, command plans and package-proxy poli
 (see the gate 2 section below).
 Publication remains gated on S1 feasibility.
 
+## Per-run boundary probe (#1096)
+
+`prepareBoundary(artifactsDir?)` runs **before** `adapter.create`: it plants fresh
+random host environment/file canaries and opens counting loopback/LAN listeners.
+It returns an opaque, one-shot `BoundarySession` with `cleanup()` and a local
+`artifactPath`. Pass `RunStore.storeDirectory('artifacts')` for run-owned durable
+storage; without a directory, it allocates private temporary evidence storage.
+The evidence directory survives session cleanup and is retained/deleted by the
+controller's artifact-retention policy, never mounted in a guest.
+
+After `endProvisioning`, call `probeBoundary(session, adapter, vm, profile)`.
+It uploads the checked-in hostile npm lifecycle fixture, runs offline install/test
+in the node container, and for `python` also runs the pip install/test witness.
+Every command explicitly uses `network: 'none'`. It checks report file identities
+and runs seven host-side broker-abuse checks.
+Reports are untrusted; non-denied outcomes, malformed/missing reports, failed,
+timed-out or truncated commands cannot produce a passing input. Probe exceptions
+clean the session and throw a fixed, non-echoing error; there is no retry/fallback.
+
+After the last guest operation on that VM, **await**
+`finishBoundary(session, collector, runId, { timeoutMs? })` with its evidence-runner
+`OutputCollector`. There is no synchronous finalization API. Finalization first
+awaits `adapter.destroy(vm)` for the VM bound by `probeBoundary`, so the guest
+cannot start another connection. It then crosses an event-loop poll phase with
+two `setImmediate` yields, checks each listener's native `getConnections()` count,
+and awaits both `server.close()` callbacks before snapshotting the counters.
+Quiescence and drain each have a controller-selected deadline (default 5000 ms).
+Errors or timeouts produce failed inputs with a fixed controller finalization
+reason, never a clean verdict; emergency cleanup remains retryable. The adapter's
+destroy contract must observe guest exit, rather than merely request termination.
+It scans all probe output plus **every** collector chunk,
+including consecutive chunks to detect split raw/hex/base64 canary encodings.
+Marker reports in every output channel (stdout, stderr, report buffers, file
+transfers and later collector output) can worsen the verdict; identical reports
+are deduplicated without discarding conflicting outcomes.
+It combines these bytes, reports, canaries, listener counts, broker checks and
+the run identity into a `BoundaryInput`, publishes a private (0600) immutable
+artifact, and returns the persisted snapshot. Secret-shaped data and collector
+truncation throw rather than sanitize away evidence. Cleanup happens in `finally`,
+including wrong IDs and failed artifact publication. Cleanup must succeed before
+an authoritative artifact is published; failures retain explicit cleanup
+retryability and throw `BoundaryOperationError('cleanup', 'resources_remaining')`.
+An unfinished/early-cleaned
+session returns a failed input; finishing twice is refused.
+
+`runBoundaryVerdict(inputs, runId)` calls `evaluateBoundary` over the combined
+inputs, with per-VM full-category checks so another VM cannot cover a missing
+category. It also requires both distinct meaningful canaries, the complete unique
+seven-check host measurement set, valid counters and matching run identity.
+Controller-defined indexed failure records retain each VM's failed requirements
+when another VM supplies its missing category coverage.
+A breach, incomplete VM or wrong-run input fails the whole run. Read
+each session's private artifact to recompute this verdict. Only this evaluator
+creates `BoundaryEvidence`; shipping still requires the run's own clean held
+verdict. Neither the probe nor its artifacts issue shipping authorization.
+
+Always call `session.cleanup()` from the controller's outer `finally`, including
+when VM creation fails, and independently destroy any created VM on failure.
+Finalization itself destroys the successfully bound probe VM. Successful
+probing leaves listeners active until finish, to measure subsequent guest work.
+Cleanup closes listeners, unsets the unique environment variable and removes the
+temporary canary home. Partial setup failures clean everything already allocated.
+
+The gate harness re-exports `plantCanaries`, `listen`, `lanAddress`,
+`rejectedByBroker`, `rootProbeArgv`, `HOST_ENFORCED` and `hex` from production.
+`plantCanaries()` returns the canaries, target descriptor, both `Listener`s and
+count/cleanup methods plus `await drain()`. Call drain only after observed guest
+quiescence: it awaits both listener closes before authoritative measurement but
+leaves the environment/file canaries in place, so `cleanup()` is still required.
+The raw helper has no deadline; prefer deadline-controlled `finishBoundary` for
+sessions. `listen(host)` counts and drops every accepted connection;
+`lanAddress()` requires a non-internal IPv4 interface. `rejectedByBroker(work, expectedCode?)`
+counts only controller-validation `BrokerError` codes as a rejection; session
+checks require each attempt's exact expected code. Guest errors, transport and
+readiness failures never prove host-side refusal. `boundaryBrokerChecks(adapter,
+vm, capture?)` shares that seven-attempt sequence with the gate and optionally
+captures unexpected returned data. `uploadBoundaryFixture(adapter, vm, fixture,
+targets)` uploads only a fixture named in the shared `BOUNDARY_PHASES` table.
+`boundaryCommands(profile)` returns fresh trusted fixture/profile/argv descriptors
+shared by production and the gate, including the gate's independent timing labels.
+`BoundaryOperationError` carries fixed controller-defined `stage`/`code` fields,
+allowing upload, exec, report-read and cleanup failures to be diagnosed without
+echoing guest text or OS paths. `rootProbeArgv(phase)` retains the fixed
+assumed-container-escape gate command; production sessions require container scope.
+The env-gated KVM suite additionally probes the production session after the real
+provisioning-to-verification transition and recomputes its persisted verdict.
+
 ```ts
 import { createRun, transitionRun, ReasonCode, serializeRun, deserializeRun } from '@ai-dossier/zero-trust';
 
