@@ -753,6 +753,44 @@ describe('optional external service and actual OpenAI adapter', () => {
 });
 
 describe('independent review regressions', () => {
+  it('sparse inputs are typed structural errors with zero provider calls', async () => {
+    const sparse = new Array<{ sourceId: string; text: string }>(2);
+    sparse[1] = { sourceId: 'x', text: 'fixed' };
+    const fake = scripted();
+    const b = budget();
+    await expect(
+      decide(definition, sparse, { provider: fake.provider, budget: b })
+    ).rejects.toMatchObject({ name: 'InvalidDecisionError', code: 'inputs' });
+    expect(fake.complete).not.toHaveBeenCalled();
+    expect(b.ledger.snapshot().reservations).toHaveLength(0);
+  });
+  it('budget admission identity and rates cannot move between passes', async () => {
+    const b = budget();
+    const original = b.ledger;
+    const adapter: ModelAdapter = {
+      id: 'model-a',
+      complete: async () => {
+        b.sessionId = 'other';
+        b.rates = [];
+        Object.defineProperty(adapter, 'id', { value: 'other' });
+        return proposal();
+      },
+    };
+    const v = await decide(definition, inputs, {
+      provider: createLlmDecisionProvider({ adapter }),
+      budget: b,
+    });
+    expect(v).toMatchObject({ status: 'accepted', model: 'model-a' });
+    expect(original.snapshot().reservations).toHaveLength(2);
+    expect(
+      original
+        .snapshot()
+        .reservations.every(
+          (r) =>
+            r.sessionId === 's1' && r.estimate.rates.every((rate) => rate.resource === 'model-a')
+        )
+    ).toBe(true);
+  });
   it('normalized secret forms are refused before sending, and control-bearing citation output is invalid', async () => {
     for (const gap of ['\u00a0', '\v']) {
       const fake = scripted();

@@ -558,7 +558,7 @@ LLM options default to `maxOutputTokens: 1024`, `timeoutMs: 30000` and
 `logprobs: true`. Configure `logprobs: false` for endpoints that do not support
 the parameter; this is an explicit profile choice, never a retry or fallback.
 Nullable/missing/empty logprob content means no token evidence. Optional non-secret
-`id` identifies the trusted endpoint/profile for shared caches (default `llm`);
+`id` identifies the trusted endpoint/profile for shared caches (default `llm`).
 The OpenAI-compatible adapter supplies a private endpoint fingerprint automatically;
 custom adapters using the same model name on different endpoints must set different
 IDs, supply an adapter fingerprint or separate their caches. Built-in provider `cacheIdentity` automatically binds
@@ -573,7 +573,7 @@ and normalized once per decision, not once per citation. Unknown sources,
 wrong lines, fabricated quotes and malformed citations invalidate the pass. An
 accepted quote is the validated whitespace-normalized single-line form; non-whitespace
 control characters and format controls in quoted evidence are rejected.
-empty list is permitted (no supporting citation claimed). Any invalid pass,
+An empty citation list is permitted (no supporting citation claimed). Any invalid pass,
 provider failure, disagreement or insufficient confidence escalates, never majority
 votes into permission. Unanimous restrictive answers can meet the lower threshold.
 

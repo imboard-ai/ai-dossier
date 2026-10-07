@@ -79,6 +79,7 @@ function snapshotInputs(raw: readonly DecisionInput[]): readonly DecisionInput[]
   }
   if (
     !Array.isArray(inputs) ||
+    Object.keys(inputs).length !== inputs.length ||
     inputs.some(
       (i) =>
         !isRecord(i) ||
@@ -260,6 +261,9 @@ export async function decide(
   )
     throw new InvalidDecisionError('configuration');
   assertSecretFree({ id, model, cacheIdentity });
+  const { ledger, sessionId } = budget;
+  const rates = structuredClone(budget.rates);
+  const meteredAdapter = Object.freeze({ id: model, complete: adapter.complete.bind(adapter) });
   const inputs = snapshotInputs(rawInputs);
   const identity = {
     provider: id,
@@ -367,10 +371,10 @@ export async function decide(
       let result: ModelResult;
       try {
         result = await meteredComplete(
-          adapter,
-          budget.ledger,
-          budget.sessionId,
-          budget.rates,
+          meteredAdapter,
+          ledger,
+          sessionId,
+          rates,
           signal ? { ...request, signal } : request
         );
       } catch (error) {
