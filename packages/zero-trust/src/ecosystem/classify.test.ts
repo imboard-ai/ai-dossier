@@ -14,6 +14,7 @@ import {
   applyVerification,
   assertRepairAllowed,
   type CommandOutcome,
+  classifyCommand,
   classifyOutcome,
   classifyRegression,
   commandEvidence,
@@ -218,5 +219,60 @@ describe('two-repair cap (scenario 7)', () => {
   it('rejects verdicts outside the verifying state', () => {
     const run = move(verifying(), R.RepairRequired);
     expect(() => applyVerification(run, 'passed', time)).toThrow(IllegalTransitionError);
+  });
+});
+
+describe('classifyOutcome with case counts', () => {
+  const report = (tests: number, failures: number, skipped = 0) => ({
+    suites: 1,
+    tests,
+    failures,
+    skipped,
+  });
+  it.each<[string, CommandOutcome, string]>([
+    ['exit 0, no failures', { kind: 'exited', exitCode: 0, report: report(2, 0) }, 'passed'],
+    ['exit 1, a failure', { kind: 'exited', exitCode: 1, report: report(2, 1) }, 'failed'],
+    [
+      'exit 0 with a failure',
+      { kind: 'exited', exitCode: 0, report: report(2, 1) },
+      'inconclusive',
+    ],
+    [
+      'exit 1 with none failing',
+      { kind: 'exited', exitCode: 1, report: report(2, 0) },
+      'inconclusive',
+    ],
+    [
+      'exit 0, all skipped',
+      { kind: 'exited', exitCode: 0, report: report(2, 0, 2) },
+      'inconclusive',
+    ],
+    [
+      'a partial count set',
+      { kind: 'exited', exitCode: 0, report: { suites: 1, tests: 2 } },
+      'inconclusive',
+    ],
+    [
+      'an invalid count',
+      { kind: 'exited', exitCode: 0, report: report(Number.NaN, 0) },
+      'inconclusive',
+    ],
+  ])('%s', (_label, outcome, status) => {
+    expect(classifyOutcome(outcome)).toBe(status);
+  });
+});
+
+describe('classifyCommand', () => {
+  const setup = { captureReport: false };
+  it('classifies a setup step by exit status; a timeout or signal is inconclusive', () => {
+    expect(classifyCommand(setup, { kind: 'exited', exitCode: 0, report: null })).toBe('passed');
+    expect(classifyCommand(setup, { kind: 'exited', exitCode: 2, report: null })).toBe('failed');
+    expect(classifyCommand(setup, { kind: 'timeout' })).toBe('inconclusive');
+    expect(classifyCommand(setup, { kind: 'signal', signal: 'SIGKILL' })).toBe('inconclusive');
+  });
+  it('classifies a test command from its report', () => {
+    expect(
+      classifyCommand({ captureReport: true }, { kind: 'exited', exitCode: 0, report: null })
+    ).toBe('inconclusive');
   });
 });

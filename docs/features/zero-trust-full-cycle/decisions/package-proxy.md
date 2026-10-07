@@ -5,7 +5,9 @@
 - **Spec:** [PRD](../prd.md) §5.5, §5.6, §9 feasibility gate 2; scenarios 6 and 7.
 - **Code:** `packages/zero-trust/src/ecosystem/`, `src/vm/provision-channel.ts`, the
   provisioning phase in `src/vm/local-qemu.ts` and `vm-guest/agent.py`, the host stack in
-  `scripts/zt-proxy.mjs` and `proxy/zt_proxpi.py`. Proof: `src/__tests__/vm-proxy.e2e.test.ts`.
+  `scripts/zt-proxy.mjs` and `proxy/zt_proxpi.py`; the production evidence runner in
+  `src/controller/evidence-runner.ts` (#1095). Proof: `src/__tests__/vm-proxy.e2e.test.ts`,
+  which drives that runner.
   Fixtures: `packages/zero-trust/fixtures/ecosystem/`.
 - **Builds on:** [execution-profile record](execution-profile.md) (#1009, gate 1).
 
@@ -212,7 +214,9 @@ outside the repository and installed from the mirror; the hashes still come from
 ## Decision 6: result classification and the repair cap
 
 - A command is `passed` only when it exits 0 **and** the supervisor read a report with at
-  least one suite, and `failed` only when it exits non-zero with such a report. A timeout,
+  least one suite, and `failed` only when it exits non-zero with such a report. Since #1095 the report's case counts must also agree with the exit
+  status: exit 0 with a failing case or with no executed case, or a non-zero exit with no
+  failing case, is `inconclusive` (a hook that forces the exit status is not a result). A timeout,
   a signal, a missing or unreadable report, or zero or unknown suites is `inconclusive`,
   never a pass: a crashed or misconfigured runner is not a test result. Invalid suite
   counts are recorded as `unknown` in receipt evidence.

@@ -1132,7 +1132,8 @@ claim is limited to the exact candidate and is not proof of patch correctness.
 ## Ecosystem support and package proxy (gate 2)
 
 `src/ecosystem/` holds the VM-independent parts of feasibility gate 2; the in-VM proof is
-`src/__tests__/vm-proxy.e2e.test.ts` with the host proxy stack in `scripts/zt-proxy.mjs`.
+`src/__tests__/vm-proxy.e2e.test.ts`, which drives the production evidence runner (see
+[Evidence runner](#evidence-runner-1095)), with the host proxy stack in `scripts/zt-proxy.mjs`.
 Design, evidence and verdict:
 [package-proxy decision record](../../docs/features/zero-trust-full-cycle/decisions/package-proxy.md).
 
@@ -1152,12 +1153,16 @@ Design, evidence and verdict:
   uv export file and junit report path, all outside the repository. Test commands carry
   `captureReport`; `parseJunitReport` turns the supervisor-read report into the suite
   count classification needs. uv provisions from an offline `uv export` of the lock, not
-  `uv sync --frozen` (which fetches the lockfile URLs directly). This package executes
-  nothing; the VM supervisor runs the plans.
+  `uv sync --frozen` (which fetches the lockfile URLs directly). `src/ecosystem/`
+  executes nothing; the evidence runner runs the plans through a `VmAdapter`.
 - `classifyOutcome`, `classifyRegression`, `applyProvisioning` and `applyVerification`
-  treat timeouts, unreadable reports and zero suites as `inconclusive`, map provisioning
+  treat timeouts, unreadable reports and zero suites as `inconclusive` (as are report case
+  counts that contradict the exit status: exit 0 with a failing or no executed case, or a
+  non-zero exit with no failing case), map provisioning
   failures to `unsupported_environment`, and enforce the two-repair cap from run history
-  (`assertRepairAllowed`). `commandEvidence` and `overallStatus` build receipt evidence.
+  (`assertRepairAllowed`). `classifyCommand` adds the rule for setup steps without a
+  report (exit 0 passes, other exits fail, a timeout or signal is `inconclusive`);
+  `commandEvidence` (status from `classifyCommand`) and `overallStatus` build receipt evidence.
 - `PROXY_POLICY`, `evaluateRequest`, `evaluateRedirect`, `buildLockIndex` and
   `checkArtifact` define the proxy policy. `renderSquidConfig`, `renderVerdaccioConfig`,
   `verdaccioEnvironment` and `proxpiEnvironment` render it for the OSS components that
@@ -1171,6 +1176,88 @@ Design, evidence and verdict:
 
 Fixtures with known bugs live in `fixtures/ecosystem/`. CI self-checks them
 (`scripts/zero-trust-fixtures-selfcheck.mjs`); that is the only host-side install/test run.
+
+## Evidence runner (#1095)
+
+`src/controller/evidence-runner.ts` is the production form of the gate-2 pipeline (PRD §5.5,
+§5.6 steps 1, 2, 4 and 7; scenarios 6 and 7). Every function drives a `VmAdapter`; nothing
+is installed or run on the host. The env-gated `vm-proxy.e2e.test.ts` proof calls these
+functions against the real adapter, so the real-VM suite exercises this code.
+
+- `provisionWorkspace({ adapter, runId, limits, manifest, profileRecord, proxyTarget, plan,
+  collector, lifecycle, artifactsDir? })` checks the plan's networks, that the plan's manager
+  is `profileRecord.manager`, the manifest (`validateManifest`) and that the profile is
+  baked. It then creates a `provisioning` VM (container scope) forwarded to the one mirror,
+  uploads exactly the manifest's files (exec bit from mode `100755`), runs the provisioning
+  commands, calls `endProvisioning`, and requires the broker to refuse `package_proxy` with
+  `network_not_allowed` (`ProvisioningNotClosedError` if it is accepted; any other error
+  propagates). The returned `ProvisionedWorkspace` records that code as
+  `phaseSwitch.refusedWith`. A provisioning command that does not pass destroys the VM,
+  then makes `lifecycle.run` `unsupported_environment` through `applyProvisioning`, passes
+  it to `lifecycle.observeRun` and throws `ProvisioningFailedError` with that run, the
+  records and the failed command id.
+- `runPlanned(adapter, workspace, command, collector, options?)` runs one verification
+  command and returns a `CommandRecord`. It accepts only a workspace `provisionWorkspace`
+  returned and that was not released (`EvidencePlanError('workspace_unproven')`
+  otherwise). Its status comes from `classifyCommand`: test commands (`captureReport`) are
+  classified from the supervisor-read report, so a timeout, a signal, a missing or
+  unreadable report, zero or unknown suites, and case counts that contradict the exit
+  status are `inconclusive`, never `passed`.
+- `releaseWorkspace(adapter, workspace, lifecycle, cause?)` destroys a workspace VM
+  through `teardownVm`; a caller holding a `provisionWorkspace` result must call it.
+- `baselineEvidence({ ...workspace options, manifest, plan })` runs the plan's verification
+  commands on the base in a fresh VM and returns `{ provisioning, records, status,
+  phaseSwitch }`. `workspaceStatus` makes the status `inconclusive` when a setup step did
+  not pass, and otherwise rolls the test commands up with `overallStatus` (none at all is
+  `inconclusive`).
+- `regressionEvidence({ ...workspace options, baseManifest, testFiles, candidateManifest,
+  regressionTargets, endpoints, planOptions? })` builds the plan itself
+  (`buildCommandPlan(profileRecord.manager, endpoints, { ...planOptions, testTargets:
+  regressionTargets })`). It runs it on the base plus only the candidate's `testFiles`
+  (`reproductionManifest(base, candidate, testFiles)`, which also adds any parent
+  directories the base lacks), which must be `failed`, and then on the candidate, which
+  must be `passed`, each in its own fresh VM. It returns `classifyRegression`'s proof.
+  When the base does not fail, no candidate VM boots (`candidate: null`): the proof is
+  `not_reproduced` when the base passed (a hand-off before patching) and `inconclusive`
+  when it was inconclusive.
+- Refusals before any VM: `EvidencePlanError(code, detail?)` with `network_mismatch`
+  (`assertPlanNetworks`: a provisioning command not on `package_proxy` or a verification
+  command not on `none`; `runPlanned` also refuses a provisioning command),
+  `manager_mismatch`, `no_test_command` (no `captureReport` verification command),
+  `no_regression_targets`, `no_test_files` and `test_file_missing` (absent from, or a
+  directory in, the candidate). `detail` names a command id and phase or a test-file
+  index, never repository text.
+- `RunLifecycle` is `{ run, now, observeRun, journal?, retryDelayMs?, sleep? }`. The runner
+  changes the run only on a failure, and every changed run (`unsupported_environment`,
+  `blocked_cleanup`) reaches `observeRun` before the throw.
+- Teardown on every path: each workspace VM is released through `teardownVm`, including
+  when a command, an upload or the phase switch throws; `journal` then gets an
+  `evidence_workspace_aborted` event with the stage, the command id and the error class.
+  Three failed deletions make the run `blocked_cleanup` and throw `VmCleanupError`, with
+  `cause` set to the failure that led to the teardown (for a failed provisioning,
+  `{ failedAt, records }`). A blocked cleanup wins over a provisioning failure because
+  `unsupported` has no cleanup edge. A `create` that throws returns no handle; the
+  adapter cleans up after its own failed create.
+- Logs: `logArtifact(stdout, stderr, outputTruncated)` makes each command's `LogArtifact`:
+  the SHA-256 of the whole log, a tail excerpt of at most `MAX_LOG_EXCERPT_CHARS` (4096)
+  UTF-16 code units, and `REDACTED_EXCERPT` (`[redacted]`) instead of the excerpt when the
+  log or the excerpt matches `assertNoSecrets` (`redactedExcerpt` in `src/redaction.ts`).
+  Evidence references the log by `log.digest` (`evidence.sanitizedLogDigest`), and each
+  record is checked with `assertSecretFree`. With `artifactsDir` (e.g.
+  `RunStore.storeDirectory('artifacts')`) the artifact is written once as a private
+  `<digest>.<complete|truncated>.log.json`.
+- `OutputCollector(capBytes = DEFAULT_OUTPUT_CAP_BYTES)` (`src/controller/output-collector.ts`,
+  64 MiB) keeps every byte the guests returned (stdout, stderr, reports read back), and
+  `outputs()` gives the chunks in arrival order for `evaluateBoundary`'s `guestOutputs`.
+  Past the cap it drops the rest, sets `truncated`, and `outputs()` throws
+  `OutputTruncatedError`: a partial canary scan is not a clean one. The e2e boundary test
+  scans the probes' output plus the collector's.
+
+`src/__tests__/fake-vm.ts` has `FakeVmAdapter`, an in-memory adapter for controller tests:
+exec results scripted per argv (`on`) or by a function that sees the VM's uploaded files,
+the real adapter's phase rules (`package_proxy` only while provisioning, one
+`endProvisioning`, destroyed VMs refuse everything), `failDestroy` and `failCreate`
+switches, and a call log.
 
 ## Local VM execution profile (gate 1)
 
