@@ -415,8 +415,10 @@ changing a model or question version changes it, while reversing input order doe
 not. Confidence is a string because receipt canonical JSON accepts integer numbers
 only. `canonicalPolicyDecisionCitations` deduplicates/freezes the complete evidence;
 `policyDecisionCitationDigest` hashes its sorted-key JSON array incrementally.
-Evidence `value` is the question answer/sentinel, not the final boolean field;
-`policy-non-draft=true` means `draftRequired=false`. Missing configuration is
+Evidence `value` normally holds the question answer/sentinel, not the final boolean
+field: `policy-non-draft=true` means `draftRequired=false`. Assessment-wide
+budget/ledger refusal is the exception: escalated records hold deterministic
+assessment-floor values, including the assessment's boolean polarity. Missing configuration is
 `reason=configuration`, IDs `unconfigured` and an empty input digest; invalid
 citations are `invalid_pass`. AI-topic absence returns the offline defaults for all
 dimensions without semantic calls. Otherwise uncertain draft/receipt permission

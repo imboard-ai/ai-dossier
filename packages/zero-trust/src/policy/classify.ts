@@ -42,7 +42,9 @@ export interface PolicyAssessment {
 export interface PolicyDecisionEvidence {
   readonly status: Verdict['status'];
   readonly reason: DecisionReason;
-  /** Raw question answer/sentinel. Non-draft permission is inverted in the assessment. */
+  /** Question answer/sentinel normally (non-draft permission is inverted in the
+   * assessment). Assessment-wide budget/ledger refusal stores the assessment's
+   * deterministic floor value instead, including assessment boolean polarity. */
   readonly value: string | boolean;
   /** Decimal string because receipt canonical JSON only accepts integer numbers. */
   readonly confidence: string;
