@@ -294,9 +294,13 @@ describe('parseDossierContent with both shapes', () => {
     );
   });
 
-  it('lints the spec twin the same way as its legacy twin', () => {
+  it('lints the spec twin the same way as its legacy twin, layout rules aside', () => {
+    const LAYOUT_RULES = ['spec-shape', 'legacy-layout'];
     const strip = (r: ReturnType<typeof lintDossier>) =>
-      r.diagnostics.map((d) => `${d.ruleId}:${d.field ?? ''}:${d.message}`).sort();
+      r.diagnostics
+        .filter((d) => !LAYOUT_RULES.includes(d.ruleId))
+        .map((d) => `${d.ruleId}:${d.field ?? ''}:${d.message}`)
+        .sort();
     expect(strip(lintDossier(fixture('spec-twin.ds.md')))).toEqual(
       strip(lintDossier(fixture('legacy-twin.ds.md')))
     );
@@ -470,10 +474,14 @@ describe('spec-shape parsing rejects ambiguity', () => {
     ).toThrow(SpecShapeError);
   });
 
-  it('formatDossierContent refuses a spec-shaped dossier instead of rewriting it as legacy', () => {
-    expect(() =>
-      formatDossierContent(specFile('name: n\ndescription: d\nmetadata:\n  dossier.title: T\n'))
-    ).toThrow(/spec-shaped/);
+  it('formatDossierContent keeps a spec-shaped dossier spec-shaped, even when asked for legacy', () => {
+    const { formatted } = formatDossierContent(
+      specFile('name: n\ndescription: d\nmetadata:\n  dossier.title: T\n'),
+      { toSpec: false }
+    );
+    const parsed = parseDossierContent(formatted);
+    expect(parsed.shape).toBe('spec');
+    expect(parsed.frontmatter.title).toBe('T');
   });
 });
 

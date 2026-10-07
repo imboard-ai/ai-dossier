@@ -2,8 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   type DossierFrontmatter,
+  type ParsedDossier,
   parseDossierContent,
-  SPEC_SHAPE_WRITE_UNSUPPORTED,
+  renderSpecDossier,
   sha256Hex,
 } from '@ai-dossier/core';
 import type { Command } from 'commander';
@@ -26,13 +27,11 @@ export function registerChecksumCommand(program: Command): void {
 
       const content = fs.readFileSync(dossierFile, 'utf8');
 
+      let parsed: ParsedDossier;
       let frontmatter: DossierFrontmatter;
       let body: string;
       try {
-        const parsed = parseDossierContent(content);
-        if (options.update && parsed.shape === 'spec') {
-          throw new Error(SPEC_SHAPE_WRITE_UNSUPPORTED);
-        }
+        parsed = parseDossierContent(content);
         frontmatter = parsed.frontmatter;
         body = parsed.body;
       } catch (err: unknown) {
@@ -77,7 +76,18 @@ export function registerChecksumCommand(program: Command): void {
           hash: calculatedHash,
         };
 
-        const updatedContent = `---dossier\n${JSON.stringify(frontmatter, null, 2)}\n---\n${body}`;
+        // Keep the file's layout: converting here would orphan a signature it
+        // carries ('sign' and 'format' are the commands that change layouts).
+        let updatedContent: string;
+        try {
+          updatedContent =
+            parsed.shape === 'spec'
+              ? renderSpecDossier(frontmatter, body, parsed)
+              : `---dossier\n${JSON.stringify(frontmatter, null, 2)}\n---\n${body}`;
+        } catch (err: unknown) {
+          console.log(`❌ ${(err as Error).message}`);
+          process.exit(1);
+        }
         const fileChanged = updatedContent !== content;
         if (fileChanged) {
           fs.writeFileSync(dossierFile, updatedContent, 'utf8');

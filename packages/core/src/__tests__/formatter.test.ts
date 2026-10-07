@@ -7,6 +7,9 @@ function makeDossier(frontmatter: Record<string, unknown>, body = '# Test\n\n## 
   return `---dossier\n${json}\n---\n${body}`;
 }
 
+/** The tests below check the legacy (JSON) layout; spec output is covered in spec-writer.test.ts. */
+const LEGACY = { toSpec: false };
+
 const baseFrontmatter = {
   dossier_schema_version: '1.0.0',
   title: 'Test Dossier',
@@ -38,7 +41,7 @@ describe('formatDossierContent', () => {
         requires_approval: false,
       };
       const content = makeDossier(fm, body);
-      const result = formatDossierContent(content);
+      const result = formatDossierContent(content, LEGACY);
 
       // Parse the formatted output to check key order
       const match = result.formatted.match(/^---dossier\n([\s\S]*?)\n---/);
@@ -61,7 +64,7 @@ describe('formatDossierContent', () => {
         checksum: { algorithm: 'sha256', hash: calculateChecksum(body) },
       };
       const content = makeDossier(fm, body);
-      const result = formatDossierContent(content, { sortKeys: false });
+      const result = formatDossierContent(content, { ...LEGACY, sortKeys: false });
 
       const match = result.formatted.match(/^---dossier\n([\s\S]*?)\n---/);
       const formatted = JSON.parse(match?.[1] as string);
@@ -79,7 +82,7 @@ describe('formatDossierContent', () => {
         { title: 'Test', checksum: { algorithm: 'sha256', hash: calculateChecksum(body) } },
         body
       );
-      const result = formatDossierContent(content);
+      const result = formatDossierContent(content, LEGACY);
       expect(result.formatted).toContain('  "title"');
     });
 
@@ -89,7 +92,7 @@ describe('formatDossierContent', () => {
         { title: 'Test', checksum: { algorithm: 'sha256', hash: calculateChecksum(body) } },
         body
       );
-      const result = formatDossierContent(content, { indent: 4 });
+      const result = formatDossierContent(content, { ...LEGACY, indent: 4 });
       expect(result.formatted).toContain('    "title"');
     });
   });
@@ -98,7 +101,7 @@ describe('formatDossierContent', () => {
     it('should trim trailing whitespace from body lines', () => {
       const body = '# Test   \n\n## Section  \nContent   ';
       const content = makeDossier(baseFrontmatter, body);
-      const result = formatDossierContent(content);
+      const result = formatDossierContent(content, LEGACY);
 
       // Extract the body from the formatted output
       const parts = result.formatted.split('---\n');
@@ -114,7 +117,7 @@ describe('formatDossierContent', () => {
     it('should ensure file ends with newline', () => {
       const body = '# Test\n\n## Section\nContent';
       const content = `---dossier\n${JSON.stringify(baseFrontmatter, null, 2)}\n---\n${body}`;
-      const result = formatDossierContent(content);
+      const result = formatDossierContent(content, LEGACY);
       expect(result.formatted.endsWith('\n')).toBe(true);
     });
   });
@@ -130,7 +133,7 @@ describe('formatDossierContent', () => {
         },
       };
       const content = makeDossier(fm, body);
-      const result = formatDossierContent(content);
+      const result = formatDossierContent(content, LEGACY);
 
       const match = result.formatted.match(/^---dossier\n([\s\S]*?)\n---/);
       const formatted = JSON.parse(match?.[1] as string);
@@ -146,7 +149,7 @@ describe('formatDossierContent', () => {
         checksum: { algorithm: 'sha256', hash: oldHash },
       };
       const content = makeDossier(fm, body);
-      const result = formatDossierContent(content, { updateChecksum: false });
+      const result = formatDossierContent(content, { ...LEGACY, updateChecksum: false });
 
       const match = result.formatted.match(/^---dossier\n([\s\S]*?)\n---/);
       const formatted = JSON.parse(match?.[1] as string);
@@ -163,16 +166,16 @@ describe('formatDossierContent', () => {
       };
       const content = makeDossier(fm, body);
       // Format once to get canonical form
-      const first = formatDossierContent(content);
+      const first = formatDossierContent(content, LEGACY);
       // Format again — should be unchanged
-      const second = formatDossierContent(first.formatted);
+      const second = formatDossierContent(first.formatted, LEGACY);
       expect(second.changed).toBe(false);
     });
 
     it('should report changed=true when content needs formatting', () => {
       const body = '# Test   \n\n## Section\nContent';
       const content = makeDossier(baseFrontmatter, body);
-      const result = formatDossierContent(content);
+      const result = formatDossierContent(content, LEGACY);
       expect(result.changed).toBe(true);
     });
   });
@@ -188,7 +191,7 @@ describe('formatDossierContent', () => {
         checksum: { algorithm: 'sha256', hash: calculateChecksum(body) },
       };
       const content = makeDossier(fm, body);
-      const result = formatDossierContent(content);
+      const result = formatDossierContent(content, LEGACY);
 
       const match = result.formatted.match(/^---dossier\n([\s\S]*?)\n---/);
       const formatted = JSON.parse(match?.[1] as string);

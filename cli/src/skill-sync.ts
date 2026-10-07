@@ -12,7 +12,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { parseDossierContent } from '@ai-dossier/core';
-import { checkSkillCollision } from './skill-collision';
+import { checkSkillCollision, readSourceSidecar } from './skill-collision';
 
 export const SKILL_SUFFIX = '-skill';
 
@@ -88,7 +88,9 @@ export function readInstalledSkills(skillsDir: string): InstalledSkill[] {
         unknown
       >;
       // Only a full registry path is provenance; a bare `name` (pre-x_source install) is not.
-      if (typeof fm.x_source === 'string' && fm.x_source.includes('/')) skill.source = fm.x_source;
+      const source =
+        typeof fm.x_source === 'string' ? fm.x_source : readSourceSidecar(path.dirname(file));
+      if (source?.includes('/')) skill.source = source;
       if (fm.version != null) skill.version = String(fm.version);
     } catch {
       // unreadable frontmatter -> treated as unknown source

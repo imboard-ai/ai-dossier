@@ -18,7 +18,11 @@
  * verify. Legacy body-only signatures are likewise unaffected, since the body is copied
  * verbatim.
  *
- * A dossier that is already YAML-fronted is returned unchanged.
+ * A spec-shaped dossier (Agent Skills layout, #1088) is already what a runtime
+ * reads, and its v3 signature covers every frontmatter field, so it is copied as
+ * is — only a `---dossier`/`---json` fence is rewritten to `---`, which the parser
+ * treats identically. Any other dossier that is already YAML-fronted is returned
+ * unchanged.
  */
 
 import { parseDossierContent } from '@ai-dossier/core';
@@ -32,15 +36,18 @@ const AGENT_KEYS = ['name', 'description'];
  * Returns the input unchanged when it is already YAML-fronted or cannot be parsed.
  */
 export function toSkillFrontmatter(rawContent: string, source?: string): string {
-  if (!rawContent.startsWith('---dossier')) {
-    return rawContent; // already YAML-fronted (or not a dossier) — leave alone
-  }
-
   let parsed: ReturnType<typeof parseDossierContent>;
   try {
     parsed = parseDossierContent(rawContent);
   } catch {
     return rawContent;
+  }
+
+  if (parsed.shape === 'spec') {
+    return rawContent.replace(/^---(dossier|json)[^\n]*/, '---');
+  }
+  if (!rawContent.startsWith('---dossier')) {
+    return rawContent; // already YAML-fronted — leave alone
   }
 
   // Copy before mutating. parseDossierContent can hand back a shared object for

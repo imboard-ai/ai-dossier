@@ -4,9 +4,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   buildSignedPayload,
+  buildSpecFrontmatter,
+  buildVerificationPayload,
   calculateChecksum,
   Ed25519Signer,
   parseDossierContent,
+  renderSpecDossier,
   signatureCoverage,
   verifyIntegrity,
   verifySignature,
@@ -137,5 +140,47 @@ describe('toSkillFrontmatter preserves verifiability', () => {
       parsed.frontmatter.signature as never
     );
     expect(result.valid).toBe(false);
+  });
+
+  // A spec-shaped dossier is what a runtime reads already, and v3 covers every
+  // frontmatter field — so install copies it rather than re-rendering.
+  async function signedSpec(): Promise<string> {
+    const fm: Record<string, unknown> = {
+      name: 'x',
+      description: 'Do X.',
+      dossier_schema_version: '1.0.0',
+      title: 'X',
+      version: '1.0.0',
+      risk_level: 'high',
+      checksum: { algorithm: 'sha256', hash: calculateChecksum(BODY) },
+    };
+    const signer = new Ed25519Signer(keyPath);
+    const sig = await signer.sign(
+      buildSignedPayload(buildSpecFrontmatter(fm), BODY, 'spec-frontmatter+body')
+    );
+    return renderSpecDossier(
+      { ...fm, signature: { ...sig, covers: 'spec-frontmatter+body' } },
+      BODY
+    );
+  }
+
+  it('copies a spec-shaped dossier byte-for-byte, with or without a source', async () => {
+    const spec = await signedSpec();
+    expect(toSkillFrontmatter(spec)).toBe(spec);
+    expect(toSkillFrontmatter(spec, 'org/x')).toBe(spec);
+  });
+
+  it('only rewrites a ---dossier fence on a spec-shaped dossier, and v3 still verifies', async () => {
+    const spec = await signedSpec();
+    const fenced = spec.replace(/^---\n/, '---dossier\n');
+    const out = toSkillFrontmatter(fenced, 'org/x');
+    expect(out).toBe(spec);
+
+    const parsed = parseDossierContent(out);
+    const result = await verifySignature(
+      buildVerificationPayload(parsed),
+      parsed.frontmatter.signature as never
+    );
+    expect(result.valid).toBe(true);
   });
 });

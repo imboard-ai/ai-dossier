@@ -33,9 +33,11 @@ export const SPEC_TOP_LEVEL_FIELDS = [
 export const DOSSIER_METADATA_PREFIX = 'dossier.';
 
 /**
- * Why a writer refuses spec-shaped input: until the writers learn the spec shape
- * (#1123), re-serializing the logical view would silently turn the file back
- * into the legacy layout — and orphan a v3 signature it carries.
+ * Why a writer refused spec-shaped input before the writers learned the spec
+ * shape (#1123).
+ *
+ * @deprecated No writer refuses spec-shaped input any more (see `spec-writer.ts`);
+ * kept so existing imports keep compiling.
  */
 export const SPEC_SHAPE_WRITE_UNSUPPORTED =
   'Rewriting spec-shaped (Agent Skills layout) dossiers is not supported yet; edit the file by hand or wait for #1123';

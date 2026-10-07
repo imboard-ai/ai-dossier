@@ -1,7 +1,14 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { buildSignedPayload, calculateChecksum, Ed25519Signer } from '@ai-dossier/core';
+import {
+  buildSignedPayload,
+  buildSpecFrontmatter,
+  calculateChecksum,
+  Ed25519Signer,
+  renderSpecDossier,
+  withSkillIdentity,
+} from '@ai-dossier/core';
 import type { Command } from 'commander';
 import { collectRepeatable } from '../helpers';
 
@@ -84,7 +91,7 @@ export function registerFromFileCommand(program: Command): void {
 
         // Build frontmatter
         const version = options.dossierVersion || (meta.version as string) || '1.0.0';
-        const frontmatter: Record<string, unknown> = {
+        const frontmatter: Record<string, unknown> = withSkillIdentity({
           ...meta,
           name,
           title,
@@ -96,7 +103,7 @@ export function registerFromFileCommand(program: Command): void {
             algorithm: 'sha256',
             hash: calculateChecksum(body),
           },
-        };
+        });
 
         // Sign if requested
         if (options.sign) {
@@ -120,10 +127,12 @@ export function registerFromFileCommand(program: Command): void {
 
           try {
             const signer = new Ed25519Signer(keyPath);
-            const sigResult = await signer.sign(buildSignedPayload(frontmatter, body));
+            const sigResult = await signer.sign(
+              buildSignedPayload(buildSpecFrontmatter(frontmatter), body, 'spec-frontmatter+body')
+            );
             frontmatter.signature = {
               ...sigResult,
-              covers: 'frontmatter+body',
+              covers: 'spec-frontmatter+body',
               signed_by: options.signedBy || 'unknown',
             };
           } catch (err: unknown) {
@@ -132,7 +141,13 @@ export function registerFromFileCommand(program: Command): void {
           }
         }
 
-        const output = `---dossier\n${JSON.stringify(frontmatter, null, 2)}\n---\n${body}`;
+        let output: string;
+        try {
+          output = renderSpecDossier(frontmatter, body);
+        } catch (err: unknown) {
+          console.error(`\n❌ Cannot write the Agent Skills layout: ${(err as Error).message}\n`);
+          process.exit(1);
+        }
         const outputPath = options.output
           ? path.resolve(options.output)
           : path.resolve(`${name}.ds.md`);

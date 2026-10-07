@@ -34,6 +34,8 @@ export function lintDossier(content: string, config?: LintConfig): LintResult {
     frontmatter: parsed.frontmatter,
     body: parsed.body,
     raw: parsed.raw,
+    shape: parsed.shape,
+    rawFrontmatter: parsed.rawFrontmatter,
   };
 
   const diagnostics = registry.run(context, resolvedConfig);
@@ -49,6 +51,8 @@ export function lintDossierFile(filePath: string, config?: LintConfig): LintResu
     frontmatter: parsed.frontmatter,
     body: parsed.body,
     raw: parsed.raw,
+    shape: parsed.shape,
+    rawFrontmatter: parsed.rawFrontmatter,
   };
 
   const diagnostics = registry.run(context, resolvedConfig);

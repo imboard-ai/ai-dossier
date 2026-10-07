@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 
 import {
+  asWritten,
   errorKeys,
   errorLines,
   findDossiers,
@@ -72,5 +73,27 @@ describe('findDossiers', () => {
     writeFileSync(join(root, 'a/b/y.ds.md'), '');
     writeFileSync(join(root, 'a/readme.md'), '');
     expect(findDossiers(root)).toEqual([join(root, 'a/b/y.ds.md'), join(root, 'z.ds.md')]);
+  });
+});
+
+describe('asWritten', () => {
+  it('renders the logical frontmatter minus its signature, naming it from the file', () => {
+    const calls = [];
+    const parsed = {
+      frontmatter: { title: 'T', signature: { covers: 'frontmatter+body' } },
+      body: '# B\n',
+    };
+    const core = {
+      parseDossierContent: () => parsed,
+      withSkillIdentity: (fm, source) => ({ ...fm, name: source }),
+      renderSpecDossier: (fm, body, original) => {
+        calls.push({ fm, body, original });
+        return 'rendered';
+      },
+    };
+    expect(asWritten('content', 'examples/x.ds.md', core)).toBe('rendered');
+    expect(calls).toEqual([
+      { fm: { title: 'T', name: 'examples/x.ds.md' }, body: '# B\n', original: parsed },
+    ]);
   });
 });

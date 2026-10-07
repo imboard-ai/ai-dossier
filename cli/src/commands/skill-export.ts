@@ -1,9 +1,15 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { type DossierFrontmatter, parseDossierContent } from '@ai-dossier/core';
+import {
+  type ParsedDossier,
+  parseDossierContent,
+  renderSpecDossier,
+  withSkillIdentity,
+} from '@ai-dossier/core';
 import type { Command } from 'commander';
 import { getClientForRegistry } from '../registry-client';
+import { writeSourceSidecar } from '../skill-collision';
 import { handleRegistryWriteError, requireWriteAuth } from '../write-auth';
 
 function bumpVersion(current: string, bump: 'minor' | 'major'): string {
@@ -16,15 +22,6 @@ function bumpVersion(current: string, bump: 'minor' | 'major'): string {
     return `${parts[0] + 1}.0.0`;
   }
   return `${parts[0]}.${parts[1] + 1}.0`;
-}
-
-function replaceVersion(content: string, oldVersion: string, newVersion: string): string {
-  // Replace version in frontmatter section only (between first --- delimiters)
-  const versionPattern = new RegExp(
-    `(["']?version["']?\\s*[:=]\\s*["']?)${oldVersion.replace(/\./g, '\\.')}(["']?)`,
-    'm'
-  );
-  return content.replace(versionPattern, `$1${newVersion}$2`);
 }
 
 export function registerSkillExportCommand(program: Command): void {
@@ -95,10 +92,9 @@ export function registerSkillExportCommand(program: Command): void {
 
         let content = fs.readFileSync(skillFile, 'utf8');
 
-        let frontmatter: DossierFrontmatter;
+        let parsed: ParsedDossier;
         try {
-          const parsed = parseDossierContent(content);
-          frontmatter = parsed.frontmatter;
+          parsed = parseDossierContent(content);
         } catch (err: unknown) {
           if (options.json) {
             console.log(
@@ -114,7 +110,8 @@ export function registerSkillExportCommand(program: Command): void {
           process.exit(1);
         }
 
-        const currentVersion = frontmatter.version || '0.0.0';
+        let frontmatter: Record<string, unknown> = parsed.frontmatter;
+        const currentVersion = (frontmatter.version as string | undefined) || '0.0.0';
         let newVersion: string;
 
         if (options.version) {
@@ -125,18 +122,41 @@ export function registerSkillExportCommand(program: Command): void {
           newVersion = bumpVersion(currentVersion, options.major ? 'major' : 'minor');
         }
 
-        // Update version in content if it changed
-        if (newVersion !== currentVersion) {
-          content = replaceVersion(content, currentVersion, newVersion);
-          // Write back to local file so it stays in sync
+        // Publish the bytes as they are when nothing needs changing and they are
+        // either spec-shaped already or signed (a rewrite would drop the signature).
+        // Otherwise write the Agent Skills layout with the new version; a signature
+        // covered the old bytes, so it is dropped rather than shipped stale.
+        const bumped = newVersion !== currentVersion;
+        let droppedSignature = false;
+        if (bumped || (parsed.shape === 'legacy' && !frontmatter.signature)) {
+          const { x_source: installedFrom, signature, ...unsigned } = frontmatter;
+          droppedSignature = signature !== undefined;
+          frontmatter = withSkillIdentity({ ...unsigned, version: newVersion }, name);
+          try {
+            content = renderSpecDossier(frontmatter, parsed.body, parsed);
+          } catch (err: unknown) {
+            const message = `Cannot write the Agent Skills layout: ${(err as Error).message}`;
+            if (options.json) {
+              console.log(
+                JSON.stringify({ exported: false, error: message, code: 'parse_error' }, null, 2)
+              );
+            } else {
+              console.error(`\n❌ ${message}\n`);
+            }
+            process.exit(1);
+          }
+          // Write back to local file so it stays in sync; provenance moves beside it.
           fs.writeFileSync(skillFile, content, 'utf8');
+          if (typeof installedFrom === 'string') {
+            writeSourceSidecar(skillDir, installedFrom);
+          }
         }
 
         const namespace =
           options.namespace ||
           (credentials.orgs.length > 0 ? credentials.orgs[0] : credentials.username);
 
-        const dossierName = frontmatter.name || frontmatter.title || name;
+        const dossierName = (frontmatter.name as string) || (frontmatter.title as string) || name;
         const fullPath = `${namespace}/${dossierName}`;
 
         if (!options.yes && !options.json) {
@@ -150,6 +170,11 @@ export function registerSkillExportCommand(program: Command): void {
             console.log(`   Changelog: ${options.changelog}`);
           }
           console.log('');
+        }
+        if (droppedSignature && !options.json) {
+          console.log(
+            "⚠️  Signature dropped: it covered the previous content. Re-sign with 'ai-dossier sign' and publish to ship a signed version.\n"
+          );
         }
 
         try {

@@ -190,6 +190,14 @@ export {
   SpecShapeError,
   toSpecFrontmatter,
 } from './spec-shape';
+export {
+  buildSpecFrontmatter,
+  deriveSkillName,
+  foreignMetadata,
+  renderSpecDossier,
+  serializeSpecDossier,
+  withSkillIdentity,
+} from './spec-writer';
 // Trace config resolver (precedence: env > project > user > defaults)
 export type {
   ConfigLayer as TraceConfigLayer,

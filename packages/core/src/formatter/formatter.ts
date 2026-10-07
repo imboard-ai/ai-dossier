@@ -1,6 +1,6 @@
 import { calculateChecksum } from '../checksum';
 import { parseDossierContent } from '../parser';
-import { SPEC_SHAPE_WRITE_UNSUPPORTED } from '../spec-shape';
+import { renderSpecDossier, withSkillIdentity } from '../spec-writer';
 import type { FormatOptions, FormatResult } from './types';
 import { defaultFormatOptions } from './types';
 
@@ -106,11 +106,8 @@ export function formatDossierContent(
 ): FormatResult {
   const opts: FormatOptions = { ...defaultFormatOptions, ...options };
   const parsed = parseDossierContent(content);
-  if (parsed.shape === 'spec') {
-    throw new Error(SPEC_SHAPE_WRITE_UNSUPPORTED);
-  }
 
-  let frontmatter: Record<string, unknown> = parsed.frontmatter as Record<string, unknown>;
+  let frontmatter: Record<string, unknown> = { ...parsed.frontmatter };
 
   if (opts.sortKeys) {
     frontmatter = sortFrontmatterKeys(frontmatter);
@@ -128,11 +125,14 @@ export function formatDossierContent(
     }
   }
 
-  // Serialize frontmatter with controlled indentation
-  const jsonStr = JSON.stringify(frontmatter, null, opts.indent);
-
-  // Build the formatted output
-  let result = `---dossier\n${jsonStr}\n---\n${body}`;
+  let result: string;
+  if (parsed.shape === 'spec' || (opts.toSpec && !frontmatter.signature)) {
+    result = renderSpecDossier(withSkillIdentity(frontmatter, opts.nameSource), body, parsed);
+  } else {
+    // Legacy layout: JSON with controlled indentation
+    const jsonStr = JSON.stringify(frontmatter, null, opts.indent);
+    result = `---dossier\n${jsonStr}\n---\n${body}`;
+  }
 
   // Ensure final newline
   result = ensureFinalNewline(result);

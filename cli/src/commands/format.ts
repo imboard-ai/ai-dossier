@@ -10,7 +10,11 @@ export function registerFormatCommand(program: Command): void {
     .option('--check', 'Check if file is already formatted (exit 1 if not)')
     .option('--no-checksum', 'Do not update checksum after formatting')
     .option('--no-sort-keys', 'Do not sort frontmatter keys')
-    .option('--indent <n>', 'JSON indentation spaces', '2')
+    .option('--indent <n>', 'JSON indentation spaces (legacy layout only)', '2')
+    .option(
+      '--keep-legacy',
+      'Keep a legacy dossier in the legacy layout instead of writing the Agent Skills layout'
+    )
     .option('--json', 'Output result as JSON')
     .action(
       (
@@ -20,6 +24,7 @@ export function registerFormatCommand(program: Command): void {
           checksum?: boolean;
           sortKeys?: boolean;
           indent: string;
+          keepLegacy?: boolean;
           json?: boolean;
         }
       ) => {
@@ -27,6 +32,8 @@ export function registerFormatCommand(program: Command): void {
           indent: parseInt(options.indent, 10),
           sortKeys: options.sortKeys !== false,
           updateChecksum: options.checksum !== false,
+          toSpec: !options.keepLegacy,
+          nameSource: file,
         };
 
         let exitCode = 0;

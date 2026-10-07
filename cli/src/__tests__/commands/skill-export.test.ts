@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { parseDossierContent, renderSpecDossier } from '@ai-dossier/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerSkillExportCommand } from '../../commands/skill-export';
 import * as config from '../../config';
@@ -124,8 +125,67 @@ describe('skill-export command', () => {
       expect.stringContaining('1.0.0'),
       expect.any(String)
     );
-    // Should NOT write back to file since version didn't change
+    // An unsigned legacy skill is rewritten in the Agent Skills layout, version kept.
+    const written = mockedFs.writeFileSync.mock.calls[0][1] as string;
+    expect(parseDossierContent(written)).toMatchObject({
+      shape: 'spec',
+      frontmatter: { name: 'my-skill', version: '1.0.0' },
+    });
+  });
+
+  it('publishes a spec-shaped skill byte-for-byte with --no-bump, keeping its signature', async () => {
+    const spec = renderSpecDossier(
+      {
+        name: 'my-skill',
+        description: 'd',
+        title: 'My Skill',
+        version: '1.0.0',
+        signature: { covers: 'spec-frontmatter+body', signature: 'sig' },
+      },
+      '# Skill body'
+    );
+    mockedFs.existsSync.mockReturnValue(true);
+    mockedFs.readFileSync.mockReturnValue(spec);
+    mockClient.publishDossier.mockResolvedValue({ name: 'myorg/my-skill' });
+
+    const program = createTestProgram();
+    registerSkillExportCommand(program);
+    await program.parseAsync(['node', 'dossier', 'skill-export', 'my-skill', '-y', '--no-bump']);
+
+    expect(mockClient.publishDossier).toHaveBeenCalledWith('myorg', spec, expect.any(String));
     expect(mockedFs.writeFileSync).not.toHaveBeenCalled();
+  });
+
+  it('a version bump rewrites in the Agent Skills layout, drops the stale signature and keeps provenance', async () => {
+    const installed = [
+      '---',
+      'name: my-skill',
+      'x_source: myorg/tools/my-skill',
+      'title: My Skill',
+      'version: 1.0.0',
+      'signature: { covers: frontmatter+body, signature: sig }',
+      '---',
+      '# Skill body',
+    ].join('\n');
+    mockedFs.existsSync.mockReturnValue(true);
+    mockedFs.readFileSync.mockReturnValue(installed);
+    mockClient.publishDossier.mockResolvedValue({ name: 'myorg/my-skill' });
+
+    const program = createTestProgram();
+    registerSkillExportCommand(program);
+    await program.parseAsync(['node', 'dossier', 'skill-export', 'my-skill', '-y']);
+
+    const published = mockClient.publishDossier.mock.calls[0][1] as string;
+    const parsed = parseDossierContent(published);
+    expect(parsed.shape).toBe('spec');
+    expect(parsed.frontmatter.version).toBe('1.1.0');
+    expect(parsed.frontmatter.signature).toBeUndefined();
+    expect(parsed.frontmatter).not.toHaveProperty('x_source');
+    const writes = mockedFs.writeFileSync.mock.calls.map((c) => [String(c[0]), c[1]]);
+    expect(writes).toContainEqual([
+      expect.stringMatching(/my-skill[\\/]\.dossier-source$/),
+      'myorg/tools/my-skill\n',
+    ]);
   });
 
   it('should exit 1 when not logged in', async () => {
