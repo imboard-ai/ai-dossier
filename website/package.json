@@ -19,6 +19,7 @@
   "dependencies": {
     "@astrojs/sitemap": "^3.6.0",
     "astro": "^5.14.0",
+    "js-yaml": "^4.3.2",
     "unist-util-visit": "^5.0.0"
   }
 }

@@ -40,7 +40,8 @@ const sig = d.signature;
       {sig ? (
         <>
           <tr><th scope="row">Signature</th><td>{sig.algorithm}, key <code>{sig.keyId || 'unnamed'}</code>{sig.signedBy && <> by {sig.signedBy}</>}</td></tr>
-          <tr><th scope="row">Signed at</th><td>{sig.signedAt || 'unknown'}{sig.covers && ` (covers ${sig.covers})`}</td></tr>
+          <tr><th scope="row">Signed at</th><td>{sig.signedAt || 'unknown'}</td></tr>
+          <tr><th scope="row">Signature scheme</th><td>{sig.scheme} (covers <code>{sig.covers}</code>)</td></tr>
           <tr><th scope="row">Public key</th><td><code>{sig.publicKey}</code></td></tr>
         </>
       ) : (
@@ -60,6 +61,7 @@ const sig = d.signature;
       {d.tags.length > 0 && <tr><th scope="row">Tags</th><td>{d.tags.join(', ')}</td></tr>}
       {d.tools.length > 0 && <tr><th scope="row">Tools required</th><td>{d.tools.join(', ')}</td></tr>}
       {d.authors.length > 0 && <tr><th scope="row">Authors</th><td>{d.authors.join(', ')}</td></tr>}
+      {d.headerShape && <tr><th scope="row">Header layout</th><td>{d.headerShape === 'spec' ? <a href="/docs/reference/spec-shape/">Agent Skills spec shape</a> : 'legacy'}</td></tr>}
       {d.sourceUrl && <tr><th scope="row">Source</th><td><a href={d.sourceUrl}>raw <code>.ds.md</code></a></td></tr>}
     </tbody>
   </table>
