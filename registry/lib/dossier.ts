@@ -1,4 +1,4 @@
-import type { DossierFrontmatter } from '@ai-dossier/core';
+import type { DossierFrontmatter, ParsedDossier } from '@ai-dossier/core';
 import { parseDossierContent } from '@ai-dossier/core';
 import {
   DOSSIER_FILE_SUFFIX,
@@ -31,14 +31,17 @@ export function sanitizeActor(login: string | null | undefined): string | null {
 
 /**
  * Parse frontmatter from dossier content.
- * Delegates to @ai-dossier/core's parseDossierContent.
+ * Delegates to @ai-dossier/core's parseDossierContent, so both the legacy and the
+ * spec (Agent Skills) shape are accepted. `frontmatter` is the flat logical view the
+ * registry indexes; `rawFrontmatter` and `shape` are kept for signature verification
+ * (a v3 signature covers the on-disk spec frontmatter). The content itself is stored
+ * as submitted — never re-serialized from either view.
  */
-export function parseFrontmatter(content: string): {
-  frontmatter: DossierFrontmatter;
-  body: string;
-} {
-  const result = parseDossierContent(content);
-  return { frontmatter: result.frontmatter, body: result.body };
+export function parseFrontmatter(
+  content: string
+): Pick<ParsedDossier, 'frontmatter' | 'body' | 'rawFrontmatter' | 'shape'> {
+  const { frontmatter, body, rawFrontmatter, shape } = parseDossierContent(content);
+  return { frontmatter, body, rawFrontmatter, shape };
 }
 
 /**

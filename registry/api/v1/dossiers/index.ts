@@ -21,6 +21,7 @@ import {
   methodNotAllowed,
   serverError,
 } from '../../../lib/responses';
+import { checkPublishSignature } from '../../../lib/signature';
 import type { VercelRequest, VercelResponse } from '../../../lib/types';
 
 const log = createLogger('dossiers/index');
@@ -208,6 +209,19 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
       return badRequest(res, 'INVALID_CONTENT', validation.errors.join('; '), requestId);
     }
 
+    // A signature the registry can show to be wrong is refused here, before anything is
+    // stored: clients would reject it on install anyway, and serving it would make the
+    // registry vouch for bytes the signer never covered.
+    const signatureCheck = await checkPublishSignature(parsed);
+    if (signatureCheck.status === 'invalid') {
+      return badRequest(
+        res,
+        'INVALID_SIGNATURE',
+        `Signature verification failed: ${signatureCheck.reason}`,
+        requestId
+      );
+    }
+
     const fullPath = dossier.buildFullName(namespace, parsed.frontmatter.name as string);
 
     let evidenceRecord: EvidenceRecord | undefined;
@@ -263,6 +277,10 @@ async function handlePublish(req: VercelRequest, res: VercelResponse, requestId:
       content_url: config.getCdnUrl(dossier.dossierFilePath(fullPath)),
       published_at: publishedAt,
       published_by: publishedBy,
+      signature:
+        signatureCheck.status === 'unsigned'
+          ? null
+          : { status: signatureCheck.status, covers: signatureCheck.covers },
       ...(evidence !== undefined
         ? { evidence_url: config.getCdnUrl(dossier.evidenceFilePath(fullPath)) }
         : {}),

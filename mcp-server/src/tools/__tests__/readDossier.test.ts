@@ -89,6 +89,27 @@ title: Test
     expect(result.body).toContain('# Body Content');
   });
 
+  it('should extract the body of a spec-shaped (Agent Skills layout) dossier', async () => {
+    const dossierContent = `---
+name: test
+description: A spec-shaped dossier.
+metadata:
+  dossier.title: Test
+  dossier.version: 1.0.0
+---
+
+# Body Content`;
+
+    const filePath = join(tempDir, 'spec.ds.md');
+    writeFileSync(filePath, dossierContent);
+
+    vi.mocked(execCli).mockResolvedValue({ name: 'test', title: 'Test', version: '1.0.0' });
+
+    const result = await readDossier({ path: filePath });
+    expect(result.body.trim()).toBe('# Body Content');
+    expect(result.body).not.toContain('dossier.title');
+  });
+
   it('should reject paths outside working directory', async () => {
     await expect(readDossier({ path: '/etc/passwd' })).rejects.toThrow('Access denied');
   });
