@@ -30,6 +30,14 @@ export * from './policy/classify';
 export * from './policy/decide-policy';
 export * from './policy/discover';
 export * from './policy/eligibility';
+export {
+  ENGAGEMENT_MAX_LENGTH,
+  EngagementError,
+  type EngagementFacts,
+  engagementBody as policyEngagementBody,
+} from './policy/engagement';
+export * from './policy/gate';
+export * from './policy/invitation';
 export * from './policy/rules';
 export * from './receipt/issue';
 export * from './receipt/nonces';
