@@ -71,6 +71,26 @@ function object(properties: Record<string, unknown>) {
     properties,
   };
 }
+/** Supervised command evidence, shared with the persisted verification record. */
+export const COMMANDS_SCHEMA = {
+  type: 'array',
+  minItems: 1,
+  maxItems: 128,
+  items: object({
+    id,
+    command: text,
+    required: { type: 'boolean' },
+    status: { enum: ['passed', 'failed', 'inconclusive', 'skipped'] },
+    exitStatus: { anyOf: [{ type: 'integer', minimum: 0, maximum: 255 }, { const: 'unknown' }] },
+    suites: {
+      anyOf: [
+        { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+        { const: 'unknown' },
+      ],
+    },
+    sanitizedLogDigest: digest,
+  }),
+};
 /** The exported schema is also the runtime validator's single source of truth. */
 export const RECEIPT_SCHEMA = object({
   schemaVersion: { const: RECEIPT_VERSION },
@@ -93,25 +113,7 @@ export const RECEIPT_SCHEMA = object({
     imageDigest: { type: 'string', pattern: '^sha256:[a-f0-9]{64}$' },
     accelerator: { enum: ['kvm', 'tcg'] },
   }),
-  commands: {
-    type: 'array',
-    minItems: 1,
-    maxItems: 128,
-    items: object({
-      id,
-      command: text,
-      required: { type: 'boolean' },
-      status: { enum: ['passed', 'failed', 'inconclusive', 'skipped'] },
-      exitStatus: { anyOf: [{ type: 'integer', minimum: 0, maximum: 255 }, { const: 'unknown' }] },
-      suites: {
-        anyOf: [
-          { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
-          { const: 'unknown' },
-        ],
-      },
-      sanitizedLogDigest: digest,
-    }),
-  },
+  commands: COMMANDS_SCHEMA,
   networkPolicy: object({
     acquisition: text,
     provisioning: text,
