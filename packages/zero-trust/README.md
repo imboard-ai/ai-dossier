@@ -10,6 +10,81 @@ plus ecosystem detection, runtime profiles, command plans and package-proxy poli
 (see the gate 2 section below).
 Publication remains gated on S1 feasibility.
 
+## Community gate and explicit-resume invitation (#1098)
+
+`decideGate(policy: PolicyAssessment, eligibility: Eligibility, contributor)` is
+a synchronous effect-free composition. `GATE_ROWS` is its ordered decision table:
+cited AI ban → `terminate` (`PolicyBlocked`); ineligible → `ineligible`
+(`PolicyBlocked`); refused/unknown policy or eligibility, competing work, unclear
+AI, or both unclear assignment and direct-PR policy → `hand_off`; AI approval,
+unfulfilled required assignment, or discussion-first → `request_permission`
+(`PermissionRequired`); otherwise → `proceed`. Contributor identity and assignment
+compare case-insensitively. Missing ban evidence hands off. Required snapshot
+fields and reason enums are validated; explicit competing-work reasons or open PR
+facts cannot be erased by an inconsistent `eligible` discriminant. `bug_unlabeled`
+remains advisory. These are suggestions,
+not transitions. No ceremonial engagement is made on proceed; only the controller
+may invoke `HandoffDriver.issueEngagement` after a permission decision. Its existing
+marker reconciliation and journal ensure one request even across repeated resume.
+
+`policy/engagement.ts:engagementBody({ testCommand? })`, exported from the package
+as **`policyEngagementBody`**, renders a deterministic, non-promotional request for
+welcome/assignment and a minimal fix with focused regression coverage. It always
+discloses substantial LLM assistance through ai-dossier, with no product URL.
+The optional command is a controller-detected primitive, never model prose.
+It snapshots once, rejects secrets, controls/format characters and markup, and
+throws fixed `EngagementError` for invalid facts or output above
+`ENGAGEMENT_MAX_LENGTH` (1,500 UTF-16 code units), without truncating. Append the
+driver's existing `handoffMarker(intent)` before passing the body to the driver.
+The older `github/handoff.ts:engagementBody(intent, input)` export remains intact
+for compatibility; new gate code uses the controller-facts renderer.
+
+`checkInvitation(read, binding: IssueBinding, options)` is called **only on an
+explicit resume** in `awaiting_maintainer`; it never polls, schedules nudges,
+issues links, writes to GitHub or applies lifecycle transitions. Options contain
+`engagementCommentUrl`, `engagementAt`, `contributor`, `issueAuthor`, `policy` and
+injected `persist(evidence)`. `policy` has the controller's current policy `digest`
+(canonical SHA-256) and explicit boolean `issueAuthorMayInvite`; authorship alone
+does not grant authority. It reads bound issue comments and timeline pages,
+100 entries/page, at most 10 pages per endpoint. Identity URLs are validated as
+data, never followed; incomplete, malformed, duplicate, failed, secret-bearing or
+truncated relevant reads give `unknown`. Non-assignment timeline event kinds are
+ignored after checking record shape, truncation flags and string-valued `event`;
+their other fields are not decoded or secret-scanned. Both endpoints must complete before persistence.
+Page observations and caller facts are detached before subsequent awaits.
+Supplied REST comment `url`/`issue_url` identity fields must agree with the bound
+issue and comment ID. Authorized responses require valid `updated_at` metadata;
+missing edit evidence is `unknown`.
+Supplied assignment `issue_url` or nested `issue.number`/`url`/`html_url` must also
+agree with the bound issue; the repository-wide event URL alone is not issue identity.
+Supplied human account `type` must be `User`; App accounts require `Bot` and a
+matching `[bot]` login/App URL. Missing human `type` remains compatible with the
+existing minimal structural fixtures.
+Supplied actor REST `url` must identify the same login (including percent-encoded
+App-bot suffixes). The invitation permission allowlist is private immutable data,
+independent of consumers mutating core's public trusted-association collection.
+Valid GitHub App bot identities are supported
+as data, including issue authors, but bot comments never grant invitation authority.
+
+Only responses strictly after engagement are considered. The contributor's own
+comment and engagement comment are excluded. Whole, unqualified affirmative
+messages from OWNER/MEMBER/COLLABORATOR (or the issue author when the explicit
+policy allows it) give `invited`; other associations confer no authority. An
+`assigned` event for the contributor also invites, with `ASSIGNMENT_EVENT` as
+association evidence of the assignment API's triage authorization. The evidence
+is `{ actor, association, url, policyDigest, at }`, frozen, with canonical UTC time;
+`persist` is awaited before returning `MaintainerInvited`. The controller stores
+it in its run store. Persistence failure returns `unknown`, never permission.
+
+`INVITATION_RULES` contains anchored affirmative/negative rules (e.g. “go ahead”,
+“PR welcome”, “feel free”, “assigned you”; “not accepting”, “no AI”, “won't fix”).
+Authorized negative messages give `declined` with `UpstreamDeclined`. Other
+authorized prose, plan-first requests, caveats, quotes, edited comments,
+unassignment and conflicting signals give `ambiguous` with the relevant URL and
+no reason-code transition or new link. Only unambiguous invitation evidence is
+persisted. With no authorized response, return `waiting`, recording nothing and
+keeping `awaiting_maintainer`. There is no weaker permission fallback.
+
 ## Deterministic scope and test-integrity review (#1097)
 
 `reviewCandidate({ baseManifest, candidateManifest, baseDiscovery,

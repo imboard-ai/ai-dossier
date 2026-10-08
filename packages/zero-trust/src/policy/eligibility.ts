@@ -3,6 +3,13 @@ import { isGitHubLogin, isRepoName } from '../github/handoff';
 import type { GitHubRead } from '../github/reconcile';
 import { canonicalJson } from '../receipt/schema';
 import { isTimestamp, ReasonCode } from '../state';
+import {
+  githubActor as actor,
+  githubArray as array,
+  githubRecord as object,
+  githubPositiveId as positive,
+} from './github-values';
+import { isNonBugIssue } from './issue-labels';
 
 export const ELIGIBILITY_PAGE_LIMIT = 10;
 export const ELIGIBILITY_PAGE_SIZE = 100;
@@ -82,19 +89,9 @@ export type Eligibility =
       readonly reasonCode: ReasonCode.PolicyBlocked;
     };
 
-function object(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error();
-  const result = value as Record<string, unknown>;
-  if ('truncated' in result && result.truncated !== false) throw new Error();
-  return result;
-}
 function text(value: unknown): string {
   if (typeof value !== 'string' || !value || value.length > 1024) throw new Error();
   return value;
-}
-function positive(value: unknown): number {
-  if (!Number.isSafeInteger(value) || (value as number) <= 0) throw new Error();
-  return value as number;
 }
 function bool(value: unknown): boolean {
   if (typeof value !== 'boolean') throw new Error();
@@ -112,35 +109,6 @@ function time(value: unknown): string {
   )
     throw new Error();
   return result;
-}
-function actor(value: unknown): EligibilityActor {
-  const user = object(value);
-  const login = text(user.login);
-  const url = text(user.html_url);
-  const botName = login.endsWith('[bot]') ? login.slice(0, -5) : null;
-  if (botName !== null) {
-    if (
-      user.type !== 'Bot' ||
-      !isGitHubLogin(botName) ||
-      url.toLowerCase() !== `https://github.com/apps/${botName}`.toLowerCase()
-    )
-      throw new Error();
-  } else if (
-    !isGitHubLogin(login) ||
-    url.toLowerCase() !== `https://github.com/${login}`.toLowerCase()
-  ) {
-    throw new Error();
-  }
-  return Object.freeze({ login, url });
-}
-function array(value: unknown, cap: number): unknown[] {
-  if (
-    !Array.isArray(value) ||
-    value.length > cap ||
-    ('truncated' in value && value.truncated !== false)
-  )
-    throw new Error();
-  return value;
 }
 function compare(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
@@ -408,15 +376,7 @@ export async function assessIssue(
         reasonCode: ReasonCode.PolicyBlocked,
       };
     const reasons: EligibilityReason[] = [];
-    const names = labels.map((label) => label.toLowerCase());
-    const bug = names.some((label) => ['bug', 'defect', 'regression'].includes(label));
-    if (
-      !bug &&
-      names.some((label) =>
-        ['enhancement', 'feature', 'question', 'discussion', 'documentation'].includes(label)
-      )
-    )
-      reasons.push('not_a_bug');
+    if (isNonBugIssue(labels)) reasons.push('not_a_bug');
     if (assignees.some((user) => user.login.toLowerCase() !== facts.contributor))
       reasons.push('competing_assignee');
     for (const pr of pulls.values()) {
