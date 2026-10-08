@@ -1,3 +1,4 @@
+import { isPositiveId } from '../github/fork';
 import { isGitHubLogin } from '../github/handoff';
 
 /** Strict credential-free REST primitives shared by policy readers. No coercion. */
@@ -8,8 +9,8 @@ export function githubRecord(value: unknown): Record<string, unknown> {
   return record;
 }
 export function githubPositiveId(value: unknown): number {
-  if (!Number.isSafeInteger(value) || (value as number) < 1) throw new Error();
-  return value as number;
+  if (!isPositiveId(value)) throw new Error();
+  return value;
 }
 export function githubArray(value: unknown, cap: number): unknown[] {
   if (
@@ -34,6 +35,10 @@ export function githubActor(value: unknown): { readonly login: string; readonly 
   const expected = bot
     ? `https://github.com/apps/${login.slice(0, -5)}`
     : `https://github.com/${login}`;
-  if ((bot && type !== 'Bot') || url.toLowerCase() !== expected.toLowerCase()) throw new Error();
+  if (
+    (bot ? type !== 'Bot' : type !== undefined && type !== 'User') ||
+    url.toLowerCase() !== expected.toLowerCase()
+  )
+    throw new Error();
   return Object.freeze({ login, url });
 }

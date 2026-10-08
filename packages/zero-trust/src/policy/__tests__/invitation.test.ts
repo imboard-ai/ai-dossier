@@ -51,6 +51,46 @@ function rig(comments: unknown[] = [], events: unknown[] = []) {
 }
 
 describe('explicit resume invitation', () => {
+  it('refuses contradictory supplied assignment issue identity while accepting REST omissions', async () => {
+    for (const patch of [
+      { issue_url: 'https://api.github.com/repos/up/proj/issues/9' },
+      { issue_url: null },
+      { issue: { number: 9 } },
+      { issue: { number: '8' } },
+      { issue: { url: 'https://api.github.com/repos/other/proj/issues/8' } },
+      { issue: { html_url: 'https://github.com/up/proj/issues/9' } },
+      { issue: null },
+    ]) {
+      const r = rig([], [{ ...assignment(), ...patch }]);
+      expect((await checkInvitation(r.read, binding, r.options)).kind).toBe('unknown');
+      expect(r.persist).not.toHaveBeenCalled();
+    }
+    for (const patch of [
+      {},
+      {
+        issue_url: 'https://api.github.com/repos/up/proj/issues/8',
+        issue: {
+          number: 8,
+          url: 'https://api.github.com/repos/up/proj/issues/8',
+          html_url: 'https://github.com/up/proj/issues/8',
+        },
+      },
+    ]) {
+      const r = rig([], [{ ...assignment(), ...patch }]);
+      expect((await checkInvitation(r.read, binding, r.options)).kind).toBe('invited');
+    }
+  });
+  it.each([
+    'Bot',
+    'Organization',
+    'unknown',
+    null,
+    1,
+  ])('refuses contradictory human actor type %j', async (type) => {
+    const r = rig([{ ...comment(), user: { ...user('maintainer'), type } }]);
+    expect((await checkInvitation(r.read, binding, r.options)).kind).toBe('unknown');
+    expect(r.persist).not.toHaveBeenCalled();
+  });
   it('accepts validated bot data without giving bot comments authority', async () => {
     const bot = {
       login: 'automation[bot]',

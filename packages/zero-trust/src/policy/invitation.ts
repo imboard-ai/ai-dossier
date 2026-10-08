@@ -203,6 +203,29 @@ export async function checkInvitation(
             const apiUrl = `https://api.github.com/repos/${b.upstream.owner}/${b.upstream.repo}/issues/events/${id}`;
             if (typeof r.url !== 'string' || r.url.toLowerCase() !== apiUrl.toLowerCase())
               throw new Error();
+            const expectedIssueApi = `https://api.github.com${path}`;
+            const suppliedIssueUrl = r.issue_url;
+            if (
+              suppliedIssueUrl !== undefined &&
+              (typeof suppliedIssueUrl !== 'string' ||
+                suppliedIssueUrl.toLowerCase() !== expectedIssueApi.toLowerCase())
+            )
+              throw new Error();
+            if (r.issue !== undefined) {
+              const issue = record(r.issue);
+              const fields = { number: b.issue, url: expectedIssueApi, html_url: issueUrl(b) };
+              for (const [key, expected] of Object.entries(fields)) {
+                const supplied = issue[key];
+                if (supplied === undefined) continue;
+                if (
+                  typeof expected === 'number'
+                    ? supplied !== expected
+                    : typeof supplied !== 'string' ||
+                      supplied.toLowerCase() !== expected.toLowerCase()
+                )
+                  throw new Error();
+              }
+            }
             if (at <= since || !sameLogin(assignee, contributor)) continue;
             // Assignment API authorization is the authority evidence; no fabricated association.
             association = 'ASSIGNMENT_EVENT';

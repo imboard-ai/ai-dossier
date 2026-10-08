@@ -51,7 +51,13 @@ their other fields are not decoded or secret-scanned. Both endpoints must comple
 Page observations and caller facts are detached before subsequent awaits.
 Supplied REST comment `url`/`issue_url` identity fields must agree with the bound
 issue and comment ID. Authorized responses require valid `updated_at` metadata;
-missing edit evidence is `unknown`. Valid GitHub App bot identities are supported
+missing edit evidence is `unknown`.
+Supplied assignment `issue_url` or nested `issue.number`/`url`/`html_url` must also
+agree with the bound issue; the repository-wide event URL alone is not issue identity.
+Supplied human account `type` must be `User`; App accounts require `Bot` and a
+matching `[bot]` login/App URL. Missing human `type` remains compatible with the
+existing minimal structural fixtures.
+Valid GitHub App bot identities are supported
 as data, including issue authors, but bot comments never grant invitation authority.
 
 Only responses strictly after engagement are considered. The contributor's own

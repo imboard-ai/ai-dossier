@@ -1,8 +1,9 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { GitHubFake } from '../../github/__tests__/github-fake';
+import * as handoff from '../../github/handoff';
 import { handoffMarker } from '../../github/handoff';
 import { HandoffDriver } from '../../github/handoff-driver';
 import { Journal } from '../../journal';
@@ -227,12 +228,16 @@ describe('gate table', () => {
       });
       const body = `${engagementBody({ testCommand: 'npm test' })}\n\n${handoffMarker(intent)}`;
       const request = { intent, binding, body };
+      const linkConstruction = vi.spyOn(handoff, 'issueCommentLink');
       expect(decideGate({ ...policy, assignment: 'required' }, eligible(), 'alice').kind).toBe(
         'request_permission'
       );
       fake.override('GET /repos/up/proj/issues/8/comments', { status: 200, json: [] }, 3);
       const first = await driver.issueEngagement(request);
       const second = await driver.issueEngagement(request);
+      expect(decideGate({ ...policy, assignment: 'required' }, eligible(), 'alice').kind).toBe(
+        'request_permission'
+      );
       expect(first.kind).toBe('awaiting_contributor');
       expect(second).toMatchObject({ kind: 'awaiting_contributor', reconciliation: 'absent' });
       await driver.resume();
@@ -266,6 +271,8 @@ describe('gate table', () => {
       expect(reopenedJournal.read().length).toBe(recordCount + 1);
       expect(fake.calls.every((c) => c.method === 'GET' && c.token === undefined)).toBe(true);
       expect(fs.readdirSync(deps.bodyDirectory)).toHaveLength(1);
+      expect(linkConstruction).toHaveBeenCalledTimes(1);
+      linkConstruction.mockRestore();
       reopenedJournal.close();
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
