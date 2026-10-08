@@ -239,6 +239,9 @@ describe('gate table', () => {
       { ...policy, directPr: 'unknown' },
       { ...policy, reason: 'unknown' },
       { ...policy, citations: null },
+      { ...policy, draftRequired: undefined },
+      { ...policy, receiptBlockAllowed: 'unknown' },
+      { ...policy, baselineFailuresPermitted: null },
     ])
       expect(decideGate(p as PolicyAssessment, eligible(), 'alice').kind).toBe('hand_off');
     expect(decideGate(policy, { kind: 'unknown' }, 'alice').kind).toBe('hand_off');

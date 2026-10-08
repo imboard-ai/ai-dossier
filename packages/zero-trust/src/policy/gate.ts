@@ -265,9 +265,35 @@ export function decideGate(
     const assignment = policy.assignment;
     const directPr = policy.directPr;
     const reason = policy.reason;
+    const flags = [
+      policy.draftRequired,
+      policy.receiptBlockAllowed,
+      policy.baselineFailuresPermitted,
+    ];
+    if (
+      flags.some((flag) => typeof flag !== 'boolean') ||
+      !Array.isArray(policy.citations) ||
+      policy.citations.length > 128
+    )
+      throw new Error();
     const citations = policy.citations.map((c) =>
       Object.freeze({ path: c.path, line: c.line, ruleId: c.ruleId, excerpt: c.excerpt })
     );
+    for (const c of citations) {
+      if (
+        typeof c.path !== 'string' ||
+        !c.path ||
+        typeof c.ruleId !== 'string' ||
+        !c.ruleId ||
+        typeof c.excerpt !== 'string' ||
+        !Number.isSafeInteger(c.line) ||
+        c.line < 1
+      )
+        throw new Error();
+      assertNoSecrets(c.path);
+      assertNoSecrets(c.ruleId);
+      assertNoSecrets(c.excerpt);
+    }
     if (
       !isGitHubLogin(login) ||
       ![
