@@ -37,7 +37,7 @@ Test paths include any `test/`, `tests/`, `__tests__/` component, `*.test.*`,
 pytest skip/skipif/xfail decorators and skip calls, and unittest skip/skipIf/skipUnless.
 Modified tests compare textual `expect(`, `assert` and `self.assert*` counts.
 The scanner permits whitespace (including Python explicit line continuations)
-between marker tokens and after decorator `@`, and is conservative:
+between marker tokens and after decorator `@` (LF, CRLF and bare CR), and is conservative:
 comments, literals and moved lines can produce findings. Marker matches use full
 candidate context and must overlap an added line or cross a deletion-created
 junction, including multiline markers assembled entirely from retained lines.
@@ -56,7 +56,8 @@ blobs and blobs above 1 MiB hand off, including removed blobs.
 limits must be nonnegative safe integers. Ordinary directory entries do not count
 as files; file mode changes do. Lines count additions plus deletions, preserving
 terminators (including terminal-newline changes). A bounded LCS diff removes equal
-prefix/suffix and examines up to 1,000,000 cells per file; larger comparisons use
+prefix/suffix and examines up to 1,000,000 cells across the whole review; comparisons
+exceeding the remaining work budget use
 a conservative delete/add diff of the remaining lines. It can over-count, never
 under-count; uncertain oversized/binary bytes already hand off. No I/O, network,
 model review, credential access, lifecycle change or shipping grant is performed.

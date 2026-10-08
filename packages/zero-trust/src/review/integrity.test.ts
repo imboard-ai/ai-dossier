@@ -222,6 +222,7 @@ describe('deterministic candidate scope/test integrity', () => {
     '\t',
     '\\\n',
     ' \\\r\n  ',
+    '\\\r',
   ])('Python lexical gap %j in disabling markers is detected', (gap) => {
     for (const marker of [
       `@${gap}unittest${gap}.${gap}skip("reason")`,
@@ -249,6 +250,7 @@ describe('deterministic candidate scope/test integrity', () => {
   it.each([
     'self\\\n.assertEqual(1, 1)\n',
     'self \\\r\n .assertTrue(True)\n',
+    'self\\\r.assertTrue(False)\r',
   ])('continued Python assertion %j is counted on both sides', (assertion) => {
     const path = 'test_.py';
     expect(codes(input({ [path]: assertion }, { [path]: 'pass\n' }))).toContain(
@@ -422,6 +424,17 @@ describe('deterministic candidate scope/test integrity', () => {
     expect(codes({ ...value, limits: { maxChangedLines: count } })).not.toContain(
       'patch_too_large'
     );
+  });
+  it('bounds aggregate diff work across multiple allowed files without under-counting', () => {
+    const before = `old\n${'shared\n'.repeat(990)}old-end\n`;
+    const after = `new\n${'shared\n'.repeat(990)}new-end\n`;
+    const single = input({ 'a.ts': before }, { 'a.ts': after });
+    expect(codes({ ...single, limits: { maxChangedLines: 4 } })).toEqual([]);
+    const multiple = input({ 'a.ts': before, 'b.ts': before }, { 'a.ts': after, 'b.ts': after });
+    // A per-file cap would spend nearly a million cells twice and pass at 8.
+    // The aggregate cap switches the second file to conservative delete/add.
+    expect(codes({ ...multiple, limits: { maxChangedLines: 8 } })).toEqual(['patch_too_large']);
+    expect(codes({ ...multiple, limits: { maxChangedLines: 1988 } })).toEqual([]);
   });
   it('line default boundary and conservative bounded-diff fallback', () => {
     expect(codes(input({}, { 'a.ts': 'a\n'.repeat(1000) }))).not.toContain('patch_too_large');

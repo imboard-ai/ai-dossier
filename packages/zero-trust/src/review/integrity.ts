@@ -48,7 +48,7 @@ const CONFIG =
 const GENERATED = /(?:^|\/)(?:dist|build)(?:\/|$)|\.min\.js$|\.map$/u;
 // Python explicit line continuations are lexical gaps too. Match raw source so
 // coordinates still correspond to the line diff rather than a normalized copy.
-const GAP = String.raw`(?:\s|\\\r?\n)*`;
+const GAP = String.raw`(?:\s|\\(?:\r\n|\r|\n))*`;
 const DISABLED = new RegExp(
   String.raw`\b(?:it|describe|test)${GAP}\.${GAP}skip${GAP}\(|\b(?:xit|xdescribe)${GAP}\(|\.${GAP}only${GAP}\(|\bit${GAP}\.${GAP}todo${GAP}\(|@${GAP}pytest${GAP}\.${GAP}mark${GAP}\.${GAP}(?:skip(?:if)?|xfail)\b|\bpytest${GAP}\.${GAP}skip${GAP}\(|@${GAP}unittest${GAP}\.${GAP}skip\b|\bunittest${GAP}\.${GAP}(?:skipIf|skipUnless)\b`,
   'u'
@@ -88,8 +88,9 @@ interface LineDiff {
   added: string;
   ranges: readonly (readonly [number, number])[];
   junctions: readonly number[];
+  cells: number;
 }
-function diff(before: string, after: string): LineDiff {
+function diff(before: string, after: string, remainingCells: number): LineDiff {
   const a = lines(before);
   const b = lines(after);
   const offsets = [0];
@@ -105,12 +106,14 @@ function diff(before: string, after: string): LineDiff {
   const old = a.slice(start, endA);
   const next = b.slice(start, endB);
   // Bounded conservative fallback is a line-based delete/add diff, never a lower bound.
-  if ((old.length + 1) * (next.length + 1) > MAX_DIFF_CELLS)
+  const cells = (old.length + 1) * (next.length + 1);
+  if (cells > remainingCells)
     return {
       count: old.length + next.length,
       added: next.join(''),
       ranges: [[offsets[start], offsets[endB]]],
       junctions: [],
+      cells: 0,
     };
   const width = next.length + 1;
   const table = new Uint32Array((old.length + 1) * width);
@@ -144,6 +147,7 @@ function diff(before: string, after: string): LineDiff {
     added: added.join(''),
     ranges,
     junctions,
+    cells,
   };
 }
 /** Scan full candidate context, including markers split across unchanged/added lines. */
@@ -200,6 +204,8 @@ export function reviewCandidate(input: ReviewCandidateInput): IntegrityReview {
     const next = new Map(candidate.entries.map((entry) => [entry.path, entry]));
     let changedFiles = 0;
     let changedLines = 0;
+    // Bound quadratic work across the whole candidate, not separately per file.
+    let remainingDiffCells = MAX_DIFF_CELLS;
     for (const path of [...new Set([...old.keys(), ...next.keys()])].sort(comparePaths)) {
       const a = old.get(path);
       const b = next.get(path);
@@ -216,7 +222,8 @@ export function reviewCandidate(input: ReviewCandidateInput): IntegrityReview {
       if (GENERATED.test(path) || before === null || after === null)
         add('generated_or_binary', 'Generated, non-UTF-8 or oversized file changed.', path);
       if (before === null || after === null) continue; // Already refuses; do not analyze incomplete bytes.
-      const changes = diff(before, after);
+      const changes = diff(before, after, remainingDiffCells);
+      remainingDiffCells -= changes.cells;
       changedLines += changes.count;
       if (isFile && TEST.test(path)) {
         if (addedDisableMarker(after, changes))
