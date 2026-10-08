@@ -280,7 +280,7 @@ async function observeInvitation(
               !authorized ||
               sameLogin(who, contributor) ||
               url.toLowerCase() === engagementCommentUrl.toLowerCase() ||
-              at <= since
+              (sourceSnapshot ? at < since : at <= since)
             )
               continue;
             if (timestamp(r.updated_at) !== at) {
@@ -334,7 +334,11 @@ async function observeInvitation(
               sourceSeen = true;
               continue;
             }
-            if (at <= since || !sameLogin(assignee, contributor)) continue;
+            // GitHub timestamps have only second precision. On revalidation,
+            // the exact source is handled above; another equal-time observation
+            // cannot safely be declared older and silently discarded.
+            if ((sourceSnapshot ? at < since : at <= since) || !sameLogin(assignee, contributor))
+              continue;
             // Assignment API authorization is the authority evidence; no fabricated association.
             association = 'ASSIGNMENT_EVENT';
             url = r.url;

@@ -1926,6 +1926,8 @@ then checks subsequent answers. Both comment URLs and API assignment-event URLs
 emitted by `checkInvitation` are supported. Missing, edited, identity-mismatched
 or no-longer-authorized sources refuse; assignment evidence also requires the
 contributor to remain assigned. Later authorized declines revoke permission.
+Another authorized observation with the same second-resolution timestamp is
+also evaluated; a timestamp tie never silently preserves permission.
 The freshness probe uses the maintainer association authority floor and does not
 infer issue-author authority. Direct callers of `recheckInvitation` can supply
 an explicit `InvitationPolicy.issueAuthorMayInvite` rule, as with initial observation.

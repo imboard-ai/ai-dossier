@@ -833,7 +833,10 @@ describe('revisions (AC2, AC3, AC5)', () => {
     expect(second.j.read().length).toBe(before);
   });
 
-  it('scenario 16 (maintainer/S5): real freshness probe over GitHubFake blocks a revoked invitation', async () => {
+  it.each([
+    'later-second',
+    'same-second',
+  ])('scenario 16 (maintainer/S5): real freshness probe over GitHubFake blocks a %s revoked invitation', async (when) => {
     const r = await freshnessRig();
     const p = r.probe({
       gated: { ...r.deps.gated, invitation: r.invitation },
@@ -843,6 +846,11 @@ describe('revisions (AC2, AC3, AC5)', () => {
     const admission = { ...admitAll(), policyFresh: p.policyFresh };
     const { t, j } = await revisionRig(admission);
     r.revoke();
+    if (when === 'same-second')
+      Object.assign(r.comments[1] as object, {
+        created_at: '2026-10-06T09:00:00Z',
+        updated_at: '2026-10-06T09:00:00Z',
+      });
     expect(await t.beginRevision()).toMatchObject({ kind: 'blocked', reason: 'admission_policy' });
     expect(j.read().some((entry) => (entry as { type: string }).type === 'revision_started')).toBe(
       false

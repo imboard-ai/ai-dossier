@@ -231,6 +231,39 @@ describe('credential-free permission freshness', () => {
     expect(await p.policyFresh()).toBe(false);
   });
 
+  it.each([
+    false,
+    true,
+  ])('refuses same-second revocation for assignment source=%s', async (assignment) => {
+    const r = await freshnessRig();
+    let invitation = r.invitation;
+    if (assignment) {
+      r.comments.length = 0;
+      r.issue.assignees.push(freshActor('contributor'));
+      r.timeline.push({
+        id: 9,
+        event: 'assigned',
+        actor: freshActor('maintainer'),
+        assignee: freshActor('contributor'),
+        created_at: '2026-10-06T09:00:00Z',
+        url: 'https://api.github.com/repos/up/proj/issues/events/9',
+      });
+      invitation = {
+        ...invitation,
+        association: 'ASSIGNMENT_EVENT',
+        url: 'https://api.github.com/repos/up/proj/issues/events/9',
+      };
+    }
+    const p = r.probe({ gated: { ...r.deps.gated, invitation } });
+    expect(await p.policyFresh()).toBe(true);
+    r.revoke();
+    Object.assign(r.comments[r.comments.length - 1] as object, {
+      created_at: '2026-10-06T09:00:00Z',
+      updated_at: '2026-10-06T09:00:00Z',
+    });
+    expect(await p.check()).toMatchObject({ fresh: false, reasons: ['invitation_revoked'] });
+  });
+
   it('retains an invitation with no later answer or only an unauthorized decline', async () => {
     const r = await freshnessRig();
     const p = r.probe({ gated: { ...r.deps.gated, invitation: r.invitation } });
