@@ -851,6 +851,26 @@ describe('revisions (AC2, AC3, AC5)', () => {
     expect(r.fake.tokens.size).toBe(0);
   });
 
+  it.each([
+    'edited',
+    'deleted',
+  ])('refuses revision without recording when the granting invitation is %s', async (change) => {
+    const r = await freshnessRig();
+    const p = r.probe({ gated: { ...r.deps.gated, invitation: r.invitation } });
+    const { t, j } = await revisionRig({ ...admitAll(), policyFresh: p.policyFresh });
+    await t.resume();
+    if (change === 'deleted') r.comments.length = 0;
+    else
+      Object.assign(r.comments[0] as object, {
+        body: 'Do not proceed.',
+        updated_at: '2026-10-06T10:00:00Z',
+      });
+    const before = j.read().length;
+    await expect(t.beginRevision()).rejects.toMatchObject({ code: 'freshness_unavailable' });
+    expect(j.read()).toHaveLength(before);
+    expect(t.snapshot().run.state).toBe('awaiting_review');
+  });
+
   it('a PR closed mid-revision asks the contributor to reopen it and pushes nothing until then', async () => {
     const { r, up, t, ready } = await revisionRig();
     await ready();

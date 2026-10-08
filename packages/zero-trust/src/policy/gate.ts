@@ -292,6 +292,21 @@ export const GATE_ROWS: readonly GateRow[] = Object.freeze(
   ).map((row) => Object.freeze(row))
 );
 
+/** Internal policy-only projection of the same ordered gate rules. Eligibility
+ * is assessed separately by freshness; no synthetic GitHub evidence is made. */
+export function policyGate(policy: PolicyAssessment, assigned: boolean): GateDecision {
+  const facts: GateFacts = {
+    policy,
+    assigned,
+    eligibility: { kind: 'eligible', reasons: [] },
+    ban: policy.citations.find(
+      (c) => c.ruleId === 'ai-ban-1' || c.ruleId.startsWith('decision:policy-ai@')
+    ),
+  };
+  for (const row of GATE_ROWS) if (row.matches(facts)) return row.decide(facts);
+  return { kind: 'hand_off', reasons: ['unknown_input'] };
+}
+
 /** Assessed, controller-owned inputs only; malformed/unknown inputs never pass. */
 export function decideGate(
   policy: PolicyAssessment,

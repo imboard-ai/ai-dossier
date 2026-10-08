@@ -102,6 +102,50 @@ export async function checkInvitation(
   binding: IssueBinding,
   options: InvitationOptions
 ): Promise<InvitationResult> {
+  return observeInvitation(read, binding, options);
+}
+
+/** Revalidate an admitted comment/assignment source and every later answer.
+ * No persistence callback is called on this freshness-only observation path. */
+export async function recheckInvitation(
+  read: GitHubRead,
+  binding: IssueBinding,
+  evidence: InvitationEvidence,
+  options: Pick<InvitationOptions, 'contributor' | 'issueAuthor' | 'policy'>
+): Promise<InvitationResult> {
+  try {
+    const { actor, association, url, at, policyDigest } = record(evidence);
+    if ([actor, association, url, at, policyDigest].some((value) => typeof value !== 'string'))
+      throw new Error();
+    const source = Object.freeze({
+      actor,
+      association,
+      url,
+      at,
+      policyDigest,
+    }) as InvitationEvidence;
+    return await observeInvitation(
+      read,
+      binding,
+      {
+        ...options,
+        engagementCommentUrl: source.url,
+        engagementAt: source.at,
+        persist: () => {},
+      },
+      source
+    );
+  } catch {
+    return Object.freeze({ kind: 'unknown' });
+  }
+}
+
+async function observeInvitation(
+  read: GitHubRead,
+  binding: IssueBinding,
+  options: InvitationOptions,
+  source?: InvitationEvidence
+): Promise<InvitationResult> {
   try {
     record(options);
     record(binding);
@@ -125,12 +169,39 @@ export async function checkInvitation(
       throw new Error();
     const policyDigest = policy.digest;
     const commentPrefix = `${issueUrl(b)}#issuecomment-`;
+    const assignmentSource = source?.association === 'ASSIGNMENT_EVENT';
     if (
       typeof engagementCommentUrl !== 'string' ||
-      !engagementCommentUrl.toLowerCase().startsWith(commentPrefix.toLowerCase()) ||
-      !/^[1-9]\d*$/u.test(engagementCommentUrl.slice(commentPrefix.length))
+      (assignmentSource
+        ? !new RegExp(
+            `^https://api\\.github\\.com/repos/${b.upstream.owner}/${b.upstream.repo.replace(/[.]/gu, '\\.')}\\/issues/events/[1-9]\\d*$`,
+            'iu'
+          ).test(engagementCommentUrl)
+        : !engagementCommentUrl.toLowerCase().startsWith(commentPrefix.toLowerCase()) ||
+          !/^[1-9]\d*$/u.test(engagementCommentUrl.slice(commentPrefix.length)))
     )
       throw new Error();
+    // Persisted permission must itself carry a valid human/assignment authority.
+    const sourceSnapshot = source
+      ? Object.freeze({
+          actor: source.actor,
+          association: source.association,
+          url: source.url,
+          at: source.at,
+          policyDigest: source.policyDigest,
+        })
+      : undefined;
+    if (
+      sourceSnapshot &&
+      (!isGitHubActorLogin(sourceSnapshot.actor) ||
+        typeof sourceSnapshot.policyDigest !== 'string' ||
+        !/^[a-f0-9]{64}$/u.test(sourceSnapshot.policyDigest) ||
+        (!assignmentSource &&
+          !MAINTAINER_ASSOCIATIONS.includes(sourceSnapshot.association) &&
+          !(policy.issueAuthorMayInvite && sameLogin(sourceSnapshot.actor, issueAuthor))))
+    )
+      throw new Error();
+    let sourceSeen = false;
     const path = `/repos/${encodeURIComponent(b.upstream.owner)}/${encodeURIComponent(b.upstream.repo)}/issues/${b.issue}`;
     const observations: Observation[] = [];
     const identities = new Set<string>();
@@ -189,6 +260,21 @@ export async function checkInvitation(
               isGitHubLogin(who) &&
               (MAINTAINER_ASSOCIATIONS.includes(a) ||
                 (policy.issueAuthorMayInvite && sameLogin(who, issueAuthor)));
+            if (sourceSnapshot && !assignmentSource && sameLogin(url, sourceSnapshot.url)) {
+              if (
+                sourceSeen ||
+                !authorized ||
+                sameLogin(who, contributor) ||
+                !sameLogin(who, sourceSnapshot.actor) ||
+                a !== sourceSnapshot.association ||
+                at !== since ||
+                timestamp(r.updated_at) !== at ||
+                !affirmative.test(body.trim())
+              )
+                throw new Error();
+              sourceSeen = true;
+              continue;
+            }
             // The engagement itself is never its own answer, even if edited later.
             if (
               !authorized ||
@@ -235,6 +321,19 @@ export async function checkInvitation(
                   throw new Error();
               }
             }
+            if (sourceSnapshot && assignmentSource && sameLogin(r.url, sourceSnapshot.url)) {
+              if (
+                sourceSeen ||
+                r.event !== 'assigned' ||
+                !sameLogin(assignee, contributor) ||
+                !sameLogin(who, sourceSnapshot.actor) ||
+                at !== since ||
+                (r.updated_at !== undefined && timestamp(r.updated_at) !== at)
+              )
+                throw new Error();
+              sourceSeen = true;
+              continue;
+            }
             if (at <= since || !sameLogin(assignee, contributor)) continue;
             // Assignment API authorization is the authority evidence; no fabricated association.
             association = 'ASSIGNMENT_EVENT';
@@ -257,6 +356,7 @@ export async function checkInvitation(
     }
     await pages('comments');
     await pages('timeline');
+    if (sourceSnapshot && !sourceSeen) throw new Error();
     if (!observations.length) return Object.freeze({ kind: 'waiting' });
     observations.sort(
       (a, b) =>
@@ -273,7 +373,7 @@ export async function checkInvitation(
         url: last.evidence.url,
         reasonCode: ReasonCode.UpstreamDeclined,
       });
-    await persist(last.evidence);
+    if (!sourceSnapshot) await persist(last.evidence);
     return Object.freeze({
       kind: 'invited',
       evidence: last.evidence,

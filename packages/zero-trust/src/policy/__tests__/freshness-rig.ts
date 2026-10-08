@@ -74,6 +74,17 @@ export async function freshnessRig() {
     policyDigest: deps.gated.policyDigest,
     at: FRESH_AT,
   };
+  const grant = () =>
+    comments.push({
+      id: 1,
+      user: freshActor('maintainer'),
+      author_association: 'MEMBER',
+      html_url: invitation.url,
+      created_at: '2026-10-06T09:00:00Z',
+      updated_at: '2026-10-06T09:00:00Z',
+      body: 'Go ahead.',
+    });
+  grant();
   const revoke = () =>
     comments.push({
       id: 2,
@@ -128,6 +139,7 @@ export async function freshnessRig() {
     set,
     contentPath,
     invitation,
+    grant,
     revoke,
     addPull,
     setFile,

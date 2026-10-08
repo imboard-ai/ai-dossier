@@ -6,9 +6,9 @@ import { assertNoSecrets } from '../redaction';
 import { classifyPolicy, type PolicyAssessment, policyDigest } from './classify';
 import { discoverPolicy } from './discover';
 import { assessIssue } from './eligibility';
-import { decideGate } from './gate';
-import { githubPositiveId, githubRecord } from './github-values';
-import { checkInvitation, type InvitationEvidence } from './invitation';
+import { decideGate, policyGate } from './gate';
+import { githubPositiveId, githubRecord, isGitHubActorLogin } from './github-values';
+import { type InvitationEvidence, recheckInvitation } from './invitation';
 
 export type FreshnessReason =
   | 'policy_changed'
@@ -87,7 +87,7 @@ export function createFreshnessProbe(deps: FreshnessDeps): {
       digest(invitation.policyDigest);
       if (invitation.policyDigest !== snapshot.gated.policyDigest) throw new Error();
       // checkInvitation validates the timestamp and URL before its first read.
-      if (!isGitHubLogin(invitation.actor) || typeof invitation.association !== 'string')
+      if (!isGitHubActorLogin(invitation.actor) || typeof invitation.association !== 'string')
         throw new Error();
     }
     snapshot = freeze({ ...snapshot, upstream: { ...binding.upstream, issue: binding.issue } });
@@ -125,20 +125,32 @@ export function createFreshnessProbe(deps: FreshnessDeps): {
       const policy = unchanged ? gated.policy : classifyPolicy(discovered.files);
       const currentDigest = unchanged ? gated.policyDigest : policyDigest(policy, discovered.files);
       const reasons: FreshnessReason[] = [];
+      const facts = eligibility.facts;
+      const assigned = facts.issue.assignees.some((a) => sameLogin(a.login, contributor));
+      const permission = policyGate(policy, assigned);
+      const invitationApplies = gated.invitation !== undefined && unchanged;
       if (
-        policy.ai === 'banned' ||
-        policy.ai === 'unclear' ||
-        policy.reason !== undefined ||
-        ((policy.ai === 'requires_approval' || policy.directPr === 'discussion_first') &&
-          !gated.invitation)
+        permission.kind !== 'proceed' &&
+        !(
+          permission.kind === 'request_permission' &&
+          policy.assignment === 'required' &&
+          !assigned &&
+          policy.ai !== 'requires_approval' &&
+          policy.directPr !== 'discussion_first'
+        ) &&
+        !(
+          invitationApplies &&
+          (permission.kind === 'request_permission' ||
+            (permission.kind === 'hand_off' &&
+              permission.reasons.length === 1 &&
+              permission.reasons[0] === 'ownership_unclear'))
+        )
       )
         reasons.push('policy_changed');
-      const facts = eligibility.facts;
       if (facts.issue.state === 'closed' || facts.issue.locked) reasons.push('issue_closed');
       if (
         facts.issue.assignees.some((a) => !sameLogin(a.login, contributor)) ||
-        (policy.assignment === 'required' &&
-          !facts.issue.assignees.some((a) => sameLogin(a.login, contributor)))
+        ((policy.assignment === 'required' || gated.policy.assignment === 'required') && !assigned)
       )
         reasons.push('assignment_changed');
       if (
@@ -146,14 +158,14 @@ export function createFreshnessProbe(deps: FreshnessDeps): {
           (pr) =>
             pr.state === 'open' &&
             !pr.merged &&
-            !sameLogin(pr.author.login, contributor) &&
             // A numeric collision in a different repository is not our PR.
             !(
               ownPr &&
               pr.number === ownPr.number &&
               pr.fullName.toLowerCase() === facts.fullName.toLowerCase() &&
               sameLogin(pr.author.login, contributor)
-            )
+            ) &&
+            !sameLogin(pr.author.login, contributor)
         )
       )
         reasons.push('competing_fix');
@@ -166,20 +178,24 @@ export function createFreshnessProbe(deps: FreshnessDeps): {
       )
         reasons.push('issue_ineligible');
       if (gated.invitation) {
-        const invitation = await checkInvitation(
+        const invitation = await recheckInvitation(
           read,
           { upstream, issue: upstream.issue },
+          gated.invitation,
           {
-            engagementCommentUrl: gated.invitation.url,
-            engagementAt: gated.invitation.at,
             contributor,
             issueAuthor: facts.issue.author.login,
             policy: { digest: currentDigest, issueAuthorMayInvite: false },
-            persist: () => {},
           }
         );
         if (invitation.kind === 'unknown' || invitation.kind === 'ambiguous') throw new Error();
         if (invitation.kind === 'declined') reasons.push('invitation_revoked');
+        if (
+          gated.invitation.association === 'ASSIGNMENT_EVENT' &&
+          !assigned &&
+          !reasons.includes('invitation_revoked')
+        )
+          reasons.push('invitation_revoked');
       }
       return freeze({
         fresh: reasons.length === 0,

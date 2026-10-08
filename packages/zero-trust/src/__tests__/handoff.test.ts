@@ -688,6 +688,30 @@ describe('awaiting_contributor hand-off driver', () => {
     expect(r.fake.calls.every((c) => c.method === 'GET' && c.token === undefined)).toBe(true);
   });
 
+  it.each([
+    'edited',
+    'deleted',
+  ])('refuses publication when the original invitation is %s', async (change) => {
+    const r = await freshnessRig();
+    const p = r.probe({
+      contributor: 'alice',
+      gated: { ...r.deps.gated, invitation: r.invitation },
+    });
+    expect(await p.policyFresh()).toBe(true);
+    if (change === 'deleted') r.comments.length = 0;
+    else
+      Object.assign(r.comments[0] as object, {
+        body: 'Do not proceed.',
+        updated_at: '2026-10-06T10:00:00Z',
+      });
+    const d = driver(github({ pulls: [] }).read, shipping, admission(p));
+    const before = journal.read().length;
+    await expect(d.issuePr(prRequest())).rejects.toThrow('admission_policy');
+    expect(d.status()).toBeNull();
+    expect(journal.read()).toHaveLength(before);
+    expect(fs.existsSync(path.join(dir, 'bodies'))).toBe(false);
+  });
+
   it('issues the prefilled PR link durably and enters awaiting_contributor', async () => {
     const gh = github({ pulls: [] });
     const d = driver(gh.read);
