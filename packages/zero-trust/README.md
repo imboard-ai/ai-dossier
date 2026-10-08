@@ -10,6 +10,58 @@ plus ecosystem detection, runtime profiles, command plans and package-proxy poli
 (see the gate 2 section below).
 Publication remains gated on S1 feasibility.
 
+## Durable user checkpoints (#1100)
+
+`checkpointDue(config.checkpoints, point)` tests the user-selected subset; the
+persisted RunStore config is authoritative, defaulting to `[]`. Repository and
+model text never configure checkpoints. `pauseAtCheckpoint(store, run, point,
+bindings, now)` returns the persisted run. Call it at `plan` in planning after
+writing `artifacts/plan.txt` and before `PlanApproved`; `patch` in verifying after
+`CandidateReady` and before verification, with `artifacts/candidate.diff`; and
+`verification` in shipping after `VerificationPassed` and before any push intent,
+with `artifacts/verification.json`. Paths are relative to the run store. The
+controller owns these artifact names and writes the content before invoking the
+checkpoint API. Engagement and publication always remain contributor hand-offs.
+
+Bindings require canonical lowercase SHA-256 `policyDigest` and a run-owned
+`budgetSessionId` (`<runId>-s<positive-safe-integer>`). Plan also requires
+`planDigest`; patch requires a full lowercase Git `candidateSha` (SHA-1 or SHA-256);
+verification requires `candidateSha` and SHA-256 `verificationDigest`. Other
+point-specific fields and unknown keys are refused. The immutable `CheckpointRecord`
+binds those facts, run identity, interrupted phase/history length and creation time
+in its SHA-256 digest. It has `status: open | approved | rejected`, plus `resolvedAt`
+and, on rejection, `rejectionReason`. Records live in the private, lifetime-guarded
+RunStore control journal; `store.checkpoint(point)` reads the restored record.
+The record is fsynced **before** `UserPaused`; reopening between these steps finds
+the record and the pre-pause run. Retrying the pause reuses that exact record.
+Each point pauses once per run; approval does not cause a second pause.
+
+`approveCheckpoint(store, run, { point, digest }, now)` requires the exact open
+record and resumes only its interrupted phase (`ResumePlanning`, `ResumeVerifying`
+or `ResumeShipping`). The controller must call
+`store.recordCheckpointBindings(point, bindings)` after every plan, candidate,
+verification, policy or budget-session change, before any approval attempt. These
+current bindings are durable and compared with the paused record: changed content
+refuses the old approval with `checkpoint_stale`. A mismatch also gives
+`checkpoint_stale`; repeat approval gives `checkpoint_closed`; an unrelated pause
+or non-paused run gives `checkpoint_not_open`. Malformed inputs give
+`checkpoint_invalid`. Diagnostics never echo supplied data.
+
+`rejectCheckpoint(store, run, { point, digest }, reason, now)` validates the same
+open binding, records a nonempty secret-free reason (at most 500 characters), and
+applies `UserCancelled`. Decision and lifecycle continuation are one journal event;
+the existing snapshot-confirmation recovery completes publication after a crash,
+so approval cannot become reusable between the decision and snapshot steps.
+Store persistence failures retain the existing process-lifetime fence.
+
+`checkpointStatus(record)` returns `{ nextPermittedAction }`, naming the point,
+the relevant plan/diff/verification artifact and candidate where applicable, and
+the exact placeholder command `<zt-run> approve --run <runId> --point <point>
+--digest <digest>`. Closed records instead state that no further approval is
+permitted. Both record validation and status enforce the package's secret guard.
+These are local infrastructure APIs for controller/CLI integration; they perform
+no network, model, VM, upstream publication or receipt authorization operations.
+
 ## Community gate and explicit-resume invitation (#1098)
 
 `decideGate(policy: PolicyAssessment, eligibility: Eligibility, contributor)` is

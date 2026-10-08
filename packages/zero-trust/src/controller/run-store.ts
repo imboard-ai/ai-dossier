@@ -16,10 +16,21 @@ import {
   createRun,
   isRecord,
   isRunContinuation,
+  ReasonCode,
   type RunRecord,
   restoreRun,
   sameRunRecord,
+  transitionRun,
 } from '../state';
+import {
+  type CheckpointBindings,
+  type CheckpointPoint,
+  type CheckpointRecord,
+  checkpointBindings,
+  checkpointPhase,
+  restoreCheckpoint,
+  sameCheckpointBindings,
+} from './checkpoint-record';
 import { type RunConfig, RunConfigError, runConfigInput, validateRunConfig } from './config';
 import { contributionIdOf } from './ids';
 
@@ -78,19 +89,81 @@ function pinDirectory(directory: string): number {
   }
 }
 
-function replayControl(journal: Journal): {
+function validateCheckpoint(
+  record: CheckpointRecord,
+  run: RunRecord,
+  config: RunConfig,
+  records: Map<CheckpointPoint, CheckpointRecord>,
+  bindings: Map<CheckpointPoint, CheckpointBindings>,
+  next?: RunRecord
+): void {
+  if (
+    record.runId !== run.runId ||
+    !config.checkpoints.includes(record.point) ||
+    !sameCheckpointBindings(record.bindings, bindings.get(record.point) ?? record.bindings)
+  )
+    fail('invalid_store');
+  const previous = records.get(record.point);
+  if (!next) {
+    if (
+      previous ||
+      !bindings.has(record.point) ||
+      record.status !== 'open' ||
+      record.interruptedState !== run.state ||
+      record.interruptedHistoryLength !== run.history.length ||
+      Date.parse(record.createdAt) < Date.parse(run.updatedAt)
+    )
+      fail('invalid_store');
+  } else {
+    if (
+      !previous ||
+      previous.status !== 'open' ||
+      JSON.stringify(
+        restoreCheckpoint({
+          ...record,
+          status: 'open',
+          resolvedAt: undefined,
+          rejectionReason: undefined,
+        })
+      ) !== JSON.stringify(previous) ||
+      run.state !== 'paused_user' ||
+      run.history.length !== record.interruptedHistoryLength + 1 ||
+      run.history.at(-1)?.from !== record.interruptedState ||
+      record.resolvedAt === undefined ||
+      record.status === 'open'
+    )
+      fail('invalid_store');
+    const reason =
+      record.status === 'rejected'
+        ? ReasonCode.UserCancelled
+        : record.point === 'plan'
+          ? ReasonCode.ResumePlanning
+          : record.point === 'patch'
+            ? ReasonCode.ResumeVerifying
+            : ReasonCode.ResumeShipping;
+    if (!sameRunRecord(transitionRun(run, reason, record.resolvedAt), next)) fail('run_diverged');
+  }
+}
+function replayControl(
+  journal: Journal,
+  config: RunConfig
+): {
   run: RunRecord;
   confirmed?: RunRecord;
   upstreamId?: number;
+  checkpoints: Map<CheckpointPoint, CheckpointRecord>;
+  bindings: Map<CheckpointPoint, CheckpointBindings>;
 } {
   let run: RunRecord | undefined;
   let confirmed: RunRecord | undefined;
   let upstreamId: number | undefined;
+  const checkpoints = new Map<CheckpointPoint, CheckpointRecord>();
+  const bindings = new Map<CheckpointPoint, CheckpointBindings>();
   for (const event of journal.read()) {
     assertSecretFree(event);
     if (isTailRecovery(event)) continue;
     if (!isRecord(event) || event.v !== 1) fail('invalid_store');
-    if (event.type === 'run') {
+    if (event.type === 'run' || event.type === 'checkpoint_resolution') {
       const next = restoreRun(event.run);
       if (
         run
@@ -98,7 +171,27 @@ function replayControl(journal: Journal): {
           : next.history.length !== 0
       )
         fail('run_diverged');
+      if (event.type === 'checkpoint_resolution') {
+        if (!run) fail('invalid_store');
+        const record = restoreCheckpoint(event.record);
+        validateCheckpoint(record, run, config, checkpoints, bindings, next);
+        checkpoints.set(record.point, record);
+      }
       run = next;
+    } else if (
+      event.type === 'checkpoint_bindings' &&
+      run &&
+      confirmed &&
+      sameRunRecord(run, confirmed)
+    ) {
+      checkpointPhase(event.point);
+      const point = event.point as CheckpointPoint;
+      if (!config.checkpoints.includes(point)) fail('invalid_store');
+      bindings.set(point, checkpointBindings(event.bindings, point, run.runId));
+    } else if (event.type === 'checkpoint' && run && confirmed && sameRunRecord(run, confirmed)) {
+      const record = restoreCheckpoint(event.record);
+      validateCheckpoint(record, run, config, checkpoints, bindings);
+      checkpoints.set(record.point, record);
     } else if (
       event.type === 'snapshot' &&
       run &&
@@ -115,7 +208,7 @@ function replayControl(journal: Journal): {
     } else fail('invalid_store');
   }
   if (!run) fail('invalid_store');
-  return { run, confirmed, upstreamId };
+  return { run, confirmed, upstreamId, checkpoints, bindings };
 }
 function confirmSnapshot(journal: Journal, directory: string, run: RunRecord): void {
   const bytes = Buffer.from(JSON.stringify(run));
@@ -161,6 +254,8 @@ export class RunStore {
   private closed = false;
   private poisoned = false;
   private upstreamId: number | undefined;
+  private checkpoints = new Map<CheckpointPoint, CheckpointRecord>();
+  private bindings = new Map<CheckpointPoint, CheckpointBindings>();
   private constructor(
     readonly directory: string,
     readonly contributionId: string,
@@ -279,7 +374,7 @@ export class RunStore {
         fail('invalid_store');
       readPrivate(path.join(directory, 'control', 'events.jsonl'));
       journal = new Journal(path.join(directory, 'control'));
-      const evidence = replayControl(journal);
+      const evidence = replayControl(journal, config);
       if (!sameRunRecord(evidence.run, run)) {
         if (
           !evidence.confirmed ||
@@ -300,6 +395,8 @@ export class RunStore {
         evidence.run
       );
       store.upstreamId = evidence.upstreamId;
+      store.checkpoints = evidence.checkpoints;
+      store.bindings = evidence.bindings;
       return store;
     } catch (error) {
       journal?.close();
@@ -330,6 +427,55 @@ export class RunStore {
       confirmSnapshot(this.journal, `/proc/self/fd/${this.directoryFd}`, run);
     });
     this.current = run;
+  }
+  /** Controller-owned current content; update after any candidate/policy/session edit. */
+  recordCheckpointBindings(point: CheckpointPoint, input: CheckpointBindings): void {
+    this.check();
+    const bindings = checkpointBindings(input, point, this.runId);
+    if (!this.storedConfig.checkpoints.includes(point)) fail('invalid_store');
+    const previous = this.bindings.get(point);
+    if (previous && sameCheckpointBindings(previous, bindings)) return;
+    this.write(() => this.journal.append({ v: 1, type: 'checkpoint_bindings', point, bindings }));
+    this.bindings.set(point, bindings);
+  }
+  currentCheckpointBindings(point: CheckpointPoint): CheckpointBindings | undefined {
+    this.check();
+    checkpointPhase(point);
+    return this.bindings.get(point);
+  }
+  checkpoint(point: CheckpointPoint): CheckpointRecord | undefined {
+    this.check();
+    checkpointPhase(point);
+    return this.checkpoints.get(point);
+  }
+  /** Persist record before UserPaused. The controller lifetime guard covers both steps. */
+  persistCheckpoint(input: CheckpointRecord): void {
+    this.check();
+    const record = restoreCheckpoint(input);
+    validateCheckpoint(record, this.current, this.storedConfig, this.checkpoints, this.bindings);
+    this.write(() => this.journal.append({ v: 1, type: 'checkpoint', record }));
+    this.checkpoints.set(record.point, record);
+  }
+  /** Decision and lifecycle continuation share one durable event; snapshot recovery is
+   * the same as persistRun, so no crash can leave a reusable approval. */
+  resolveCheckpoint(input: CheckpointRecord, next: RunRecord): void {
+    this.check();
+    const record = restoreCheckpoint(input);
+    next = restoreRun(structuredClone(next));
+    validateCheckpoint(
+      record,
+      this.current,
+      this.storedConfig,
+      this.checkpoints,
+      this.bindings,
+      next
+    );
+    this.write(() => {
+      this.journal.append({ v: 1, type: 'checkpoint_resolution', record, run: next });
+      confirmSnapshot(this.journal, `/proc/self/fd/${this.directoryFd}`, next);
+    });
+    this.current = next;
+    this.checkpoints.set(record.point, record);
   }
   recordUpstreamRepositoryId(id: number): void {
     this.check();
