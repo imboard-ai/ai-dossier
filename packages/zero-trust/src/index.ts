@@ -36,7 +36,8 @@ export {
   type EngagementFacts,
   engagementBody as policyEngagementBody,
 } from './policy/engagement';
-export * from './policy/gate';
+export * from './policy/freshness';
+export { decideGate, GATE_ROWS, type GateDecision } from './policy/gate';
 export * from './policy/invitation';
 export * from './policy/rules';
 export * from './receipt/issue';

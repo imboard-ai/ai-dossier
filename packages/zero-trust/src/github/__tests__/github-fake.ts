@@ -2,6 +2,7 @@
  * (docs/reports/evidence/ztfc-github-credentials-probe.jsonl). No network. */
 import { randomBytes } from 'node:crypto';
 import type { GitHubHttp, GitHubRequest, GitHubResponse, OAuthHttp } from '../app-auth';
+import type { GitHubRead } from '../reconcile';
 
 export const CLIENT_ID = 'Iv23fixtureclient';
 export const FORK_ID = 4242;
@@ -22,6 +23,12 @@ interface FakeToken {
 type Override = GitHubResponse | 'throw';
 
 export class GitHubFake {
+  /** Credential-free public reads, separate from the broker's authenticated transport. */
+  readonly publicResponses = new Map<string, { status: number; body: unknown }>();
+  readonly read: GitHubRead = async (path) => {
+    this.calls.push({ method: 'GET', path });
+    return this.publicResponses.get(path) ?? { status: 404, body: null };
+  };
   readonly tokens = new Map<string, FakeToken>();
   readonly calls: { method: string; path: string; body?: unknown; token?: string }[] = [];
   private readonly overrides: { match: string; response: Override; times: number }[] = [];

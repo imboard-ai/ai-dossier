@@ -1889,3 +1889,51 @@ upstream; decision record row 3b), so the run waits for them durably.
 - The authorization code, `state`, access and refresh tokens never appear in an outcome,
   status, error message or the token journal; the object redacts itself in JSON and
   `inspect`. Every refusal carries a fixed next step.
+
+## Permission freshness
+
+`createFreshnessProbe({ read, upstream: { owner, repo, issue }, contributor, gated:
+{ policyDigest, policy, eligibilityDigest, invitation? }, ownPr?: { number } })`
+supplies credential-free, GET-only just-in-time admission for `HandoffAdmission`
+and `RevisionAdmission` after permission has been admitted. Pass its `policyFresh`
+method directly for publication/revision; initial engagement uses a separate
+contact-permission check so that requesting approval does not require prior
+shipping permission. For receipts,
+set `ReceiptContext.policyPermitsShipping` from `await probe.policyFresh()`.
+The controller must provide the already-admitted policy/eligibility snapshot and,
+when permission was granted through an invitation, its `InvitationEvidence`.
+
+Each `check()` reassesses current issue/repository/timeline facts, resolves the
+current default-branch commit, and discovers policy files pinned to that commit.
+An identical `policyDigest` reuses the gated assessment (including typed decisions);
+changed file identities are classified by the restriction-only deterministic floor,
+without a model call or inferred prose permission. A changed digest that still
+permits is recorded in the returned immutable `FreshnessReport`, alongside `head`,
+the current eligibility digest, assessment, `fresh`, and `reasons`.
+
+Reasons include `policy_changed`, `issue_closed` (also locked),
+`assignment_changed`, `competing_fix`, and `invitation_revoked`. Other structured
+ineligibility (private/archived/disabled repository, PR-as-issue, or non-bug issue)
+is `issue_ineligible`. Gated assignment requirements remain enforced alongside
+current requirements. Unknown current ownership refuses unless an unchanged-policy
+invitation independently establishes permission. Contributor-authored PRs do not compete; an `ownPr` numeric
+collision never exempts another author or another repository. A newly required
+approval/discussion requires permission bound to the current digest; an old grant
+cannot authorize new requirements. `recheckInvitation(read, binding, evidence,
+{ contributor, issueAuthor, policy })` shares the invitation observer's bounded
+decoding/authority rules without persistence. It revalidates the original source,
+then checks subsequent answers. Both comment URLs and API assignment-event URLs
+emitted by `checkInvitation` are supported. Missing, edited, identity-mismatched
+or no-longer-authorized sources refuse; assignment evidence also requires the
+contributor to remain assigned. Later authorized declines revoke permission.
+Another authorized observation with the same second-resolution timestamp is
+also evaluated; a timestamp tie never silently preserves permission.
+The freshness probe uses the maintainer association authority floor and does not
+infer issue-author authority. Direct callers of `recheckInvitation` can supply
+an explicit `InvitationPolicy.issueAuthorMayInvite` rule, as with initial observation.
+
+Unknown, malformed, ambiguous, failed or truncated reads throw the sanitized
+`FreshnessUnavailableError` from both methods, even when an earlier read already
+proved staleness. Neither method retries, writes, journals, transitions a run,
+uses credentials, or emits a contributor link. Callers decide what to do with
+the result; stale returns `false`, whereas unavailable remains a refusal.

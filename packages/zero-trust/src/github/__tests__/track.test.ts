@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import { IntentDriver, IntentError, type IntentInput } from '../../intents';
 import type { Journal } from '../../journal';
+import { freshnessRig } from '../../policy/__tests__/freshness-rig';
 import { createRun, ReasonCode, type RunRecord, transitionRun } from '../../state';
 import { forkTarget } from '../fork-ref';
 import { HandoffError, handoffMarker, type PrBinding } from '../handoff';
@@ -830,6 +831,52 @@ describe('revisions (AC2, AC3, AC5)', () => {
     });
     expect(second.t.snapshot().run.state).toBe('awaiting_review');
     expect(second.j.read().length).toBe(before);
+  });
+
+  it.each([
+    'later-second',
+    'same-second',
+  ])('scenario 16 (maintainer/S5): real freshness probe over GitHubFake blocks a %s revoked invitation', async (when) => {
+    const r = await freshnessRig();
+    const p = r.probe({
+      gated: { ...r.deps.gated, invitation: r.invitation },
+      ownPr: { number: 5 },
+    });
+    expect(await p.policyFresh()).toBe(true);
+    const admission = { ...admitAll(), policyFresh: p.policyFresh };
+    const { t, j } = await revisionRig(admission);
+    r.revoke();
+    if (when === 'same-second')
+      Object.assign(r.comments[1] as object, {
+        created_at: '2026-10-06T09:00:00Z',
+        updated_at: '2026-10-06T09:00:00Z',
+      });
+    expect(await t.beginRevision()).toMatchObject({ kind: 'blocked', reason: 'admission_policy' });
+    expect(j.read().some((entry) => (entry as { type: string }).type === 'revision_started')).toBe(
+      false
+    );
+    expect(r.fake.calls.every((c) => c.method === 'GET' && c.token === undefined)).toBe(true);
+    expect(r.fake.tokens.size).toBe(0);
+  });
+
+  it.each([
+    'edited',
+    'deleted',
+  ])('refuses revision without recording when the granting invitation is %s', async (change) => {
+    const r = await freshnessRig();
+    const p = r.probe({ gated: { ...r.deps.gated, invitation: r.invitation } });
+    const { t, j } = await revisionRig({ ...admitAll(), policyFresh: p.policyFresh });
+    await t.resume();
+    if (change === 'deleted') r.comments.length = 0;
+    else
+      Object.assign(r.comments[0] as object, {
+        body: 'Do not proceed.',
+        updated_at: '2026-10-06T10:00:00Z',
+      });
+    const before = j.read().length;
+    await expect(t.beginRevision()).rejects.toMatchObject({ code: 'freshness_unavailable' });
+    expect(j.read()).toHaveLength(before);
+    expect(t.snapshot().run.state).toBe('awaiting_review');
   });
 
   it('a PR closed mid-revision asks the contributor to reopen it and pushes nothing until then', async () => {
