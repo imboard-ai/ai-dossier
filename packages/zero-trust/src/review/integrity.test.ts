@@ -284,6 +284,32 @@ describe('deterministic candidate scope/test integrity', () => {
     expect(codes(input({ 'src/a.ts': 'expect(1);\n' }, { 'src/a.ts': 'it.skip(\n' }))).toEqual([]);
   });
   it.each([
+    '/* lexical comment */',
+    '// lexical comment\n',
+  ])('JavaScript lexical gap %j preserves disabling and assertion evidence', (gap) => {
+    const path = 'a.test.js';
+    for (const marker of [`it${gap}.skip(`, `it.${gap}skip(`, `it.skip${gap}(`]) {
+      expect(codes(input({}, { [path]: marker }))).toContain('test_disabled');
+      expect(
+        codes(input({ [path]: `${marker}\nold\n` }, { [path]: `${marker}\nnew\n` }))
+      ).not.toContain('test_disabled');
+      expect(codes(input({ [path]: marker }, { [path]: 'it("active");' }))).not.toContain(
+        'test_disabled'
+      );
+    }
+    expect(codes(input({ [path]: `expect${gap}(true);\n` }, { [path]: 'pass\n' }))).toContain(
+      'assertions_reduced'
+    );
+  });
+  it('long adversarial comments are screened with bounded lexical work', () => {
+    const content = `# ${'it # expect # self # '.repeat(32000)}\n`;
+    const value = input({}, { 'test_perf.py': content });
+    expect(reviewCandidate(value)).toEqual({ verdict: 'pass', findings: [] });
+    expect(
+      codes(input({ 'test_perf.py': content }, { 'test_perf.py': `${content}it.skip("case");\n` }))
+    ).toContain('test_disabled');
+  });
+  it.each([
     '@(unittest # implicit continuation\n .skip)("reason")',
     '@((unittest).skip)("reason")',
     '@(pytest # implicit continuation\n .mark # next token\n .skip)(reason="reason")',

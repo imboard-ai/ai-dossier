@@ -39,7 +39,9 @@ Modified tests compare textual `expect(`, `assert` and `self.assert*` counts.
 The scanner permits whitespace (including Python explicit line continuations)
 between marker tokens and after decorator `@` (LF, CRLF and bare CR), and
 conservatively admits Python grouping parentheses and implicit-continuation
-comments. The screening is conservative:
+comments, and JavaScript line/block comments. Cached lexical-gap jumps bound
+screening work to linear source scanning rather than backtracking through the
+same long comment for every token. The screening is conservative:
 comments, literals and moved lines can produce findings. Marker matches use full
 candidate context and must overlap an added line or cross a deletion-created
 junction, including multiline markers assembled entirely from retained lines.

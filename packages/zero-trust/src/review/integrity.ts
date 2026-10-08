@@ -46,21 +46,77 @@ const TEST =
 const CONFIG =
   /(?:^|\/)(?:package\.json|package-lock\.json|pyproject\.toml|uv\.lock|requirements[^/]*\.txt|setup\.py|setup\.cfg|tox\.ini|pytest\.ini|conftest\.py|jest\.config\.[^/]*|vitest\.config\.[^/]*|\.mocharc[^/]*|Makefile|Dockerfile|\.gitattributes)$|(?:^|\/)(?:\.github|\.devcontainer)(?:\/|$)/u;
 const GENERATED = /(?:^|\/)(?:dist|build)(?:\/|$)|\.min\.js$|\.map$/u;
-// Python explicit line continuations are lexical gaps too. Match raw source so
-// coordinates still correspond to the line diff rather than a normalized copy.
-// Conservatively admit Python grouping and implicit-continuation comments too.
-// This is textual screening, so grouping need not be balanced to refuse a patch.
-const GAP = String.raw`(?:\s|[()]|\\(?:\r\n|\r|\n)|#[^\r\n]*(?:\r\n|\r|\n|$))*`;
-const DISABLED = new RegExp(
-  String.raw`\b(?:it|describe|test)${GAP}\.${GAP}skip${GAP}\(|\b(?:xit|xdescribe)${GAP}\(|\.${GAP}only${GAP}\(|\bit${GAP}\.${GAP}todo${GAP}\(|@${GAP}pytest${GAP}\.${GAP}mark${GAP}\.${GAP}(?:skip(?:if)?|xfail)\b|\bpytest${GAP}\.${GAP}skip${GAP}\(|@${GAP}unittest${GAP}\.${GAP}skip\b|\bunittest${GAP}\.${GAP}(?:skipIf|skipUnless)\b`,
-  'u'
-);
-const ASSERTION = new RegExp(
-  String.raw`\bexpect${GAP}\(|\bself${GAP}\.${GAP}assert\w*\b|\bassert\b`,
-  'gu'
-);
 const MAX_TEXT_BYTES = 1024 * 1024;
 const MAX_DIFF_CELLS = 1_000_000;
+
+interface Screening {
+  markers: [number, number][];
+  assertions: number;
+}
+/** Cached lexical-gap jumps avoid rescanning long comments at each token. */
+function screen(value: string): Screening {
+  const gap = new Uint32Array(value.length + 1);
+  const callGap = new Uint32Array(value.length + 1);
+  gap[value.length] = callGap[value.length] = value.length;
+  let lineEnd = value.length;
+  let blockEnd = value.length;
+  for (let i = value.length - 1; i >= 0; i--) {
+    if (value.startsWith('*/', i)) blockEnd = i + 2;
+    let end = i;
+    if (/\s/u.test(value[i]) || value[i] === ')') end = i + 1;
+    else if (value[i] === '#' || value.startsWith('//', i)) end = lineEnd;
+    else if (value.startsWith('/*', i)) end = blockEnd;
+    else if (value[i] === '\\' && /[\r\n]/u.test(value[i + 1] ?? ''))
+      end = i + (value.startsWith('\r\n', i + 1) ? 3 : 2);
+    callGap[i] = end === i ? i : callGap[end];
+    gap[i] = value[i] === '(' ? gap[i + 1] : end === i ? i : gap[end];
+    if (value[i] === '\r' || value[i] === '\n') lineEnd = i + 1;
+  }
+  const token = (at: number, name: string): number | null =>
+    value.startsWith(name, at) &&
+    (!/\w/u.test(name[name.length - 1]) || !/\w/u.test(value[at + name.length] ?? ''))
+      ? at + name.length
+      : null;
+  const chain = (at: number, names: readonly string[]): number | null => {
+    for (const name of names) {
+      const end = token(gap[at], name);
+      if (end === null) return null;
+      at = end;
+    }
+    return at;
+  };
+  const call = (at: number | null): number | null =>
+    at !== null && value[callGap[at]] === '(' ? callGap[at] + 1 : null;
+  const markers: [number, number][] = [];
+  let assertions = 0;
+  for (const match of value.matchAll(
+    /\b(?:it|describe|test|xit|xdescribe|pytest|unittest|expect|self|assert)\b|@|\./gu
+  )) {
+    const name = match[0];
+    const at = match.index + name.length;
+    let end: number | null = null;
+    if (name === 'it' || name === 'describe' || name === 'test') {
+      end = call(chain(at, ['.', 'skip']));
+      if (end === null && name === 'it') end = call(chain(at, ['.', 'todo']));
+    } else if (name === 'xit' || name === 'xdescribe') end = call(at);
+    else if (name === '.') end = call(chain(at, ['only']));
+    else if (name === 'pytest') end = call(chain(at, ['.', 'skip']));
+    else if (name === 'unittest')
+      end = chain(at, ['.', 'skipIf']) ?? chain(at, ['.', 'skipUnless']);
+    else if (name === '@') {
+      end = chain(at, ['unittest', '.', 'skip']);
+      for (const marker of ['skip', 'skipif', 'xfail'])
+        end ??= chain(at, ['pytest', '.', 'mark', '.', marker]);
+    }
+    if (end !== null) markers.push([match.index, end]);
+    if (name === 'assert' || (name === 'expect' && call(at) !== null)) assertions++;
+    if (name === 'self') {
+      const dot = chain(at, ['.']);
+      if (dot !== null && /^assert\w*\b/u.test(value.slice(gap[dot], gap[dot] + 64))) assertions++;
+    }
+  }
+  return { markers, assertions };
+}
 
 function summary(raw: JunitSummary | null): JunitSummary | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
@@ -153,25 +209,16 @@ function diff(before: string, after: string, remainingCells: number): LineDiff {
   };
 }
 /** Scan full candidate context, including markers split across unchanged/added lines. */
-function addedDisableMarker(after: string, changes: LineDiff): boolean {
+function addedDisableMarker(markers: Screening['markers'], changes: LineDiff): boolean {
   let range = 0;
   let junction = 0;
-  for (const match of after.matchAll(new RegExp(DISABLED.source, 'gu'))) {
-    while (range < changes.ranges.length && changes.ranges[range][1] <= match.index) range++;
-    if (range < changes.ranges.length && changes.ranges[range][0] < match.index + match[0].length)
-      return true;
-    while (junction < changes.junctions.length && changes.junctions[junction] <= match.index)
-      junction++;
-    if (
-      junction < changes.junctions.length &&
-      changes.junctions[junction] < match.index + match[0].length
-    )
-      return true;
+  for (const [start, end] of markers) {
+    while (range < changes.ranges.length && changes.ranges[range][1] <= start) range++;
+    if (range < changes.ranges.length && changes.ranges[range][0] < end) return true;
+    while (junction < changes.junctions.length && changes.junctions[junction] <= start) junction++;
+    if (junction < changes.junctions.length && changes.junctions[junction] < end) return true;
   }
   return false;
-}
-function assertions(value: string): number {
-  return [...value.matchAll(ASSERTION)].length;
 }
 function result(findings: IntegrityFinding[]): IntegrityReview {
   return Object.freeze({
@@ -228,9 +275,10 @@ export function reviewCandidate(input: ReviewCandidateInput): IntegrityReview {
       remainingDiffCells -= changes.cells;
       changedLines += changes.count;
       if (isFile && TEST.test(path)) {
-        if (addedDisableMarker(after, changes))
+        const candidateScreen = screen(after);
+        if (addedDisableMarker(candidateScreen.markers, changes))
           add('test_disabled', 'Test disabling, focus or todo marker added.', path);
-        if (wasFile && assertions(after) < assertions(before))
+        if (wasFile && candidateScreen.assertions < screen(before).assertions)
           add('assertions_reduced', 'Test assertion count decreased.', path);
       } else if (isFile && /ai-dossier|imboard/u.test(changes.added))
         add('promotional', 'Promotional string added outside tests.', path);
