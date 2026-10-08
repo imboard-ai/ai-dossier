@@ -4,41 +4,57 @@ import { BudgetLedger, budgetTotals } from '../budget';
 import { readPrivate } from '../durable-fs';
 import { replayHandoffs } from '../github/handoff-driver';
 import { replayTrack } from '../github/track';
+import { parseJournalEvents } from '../journal';
 import { isRecoveryEvent } from '../recovery';
 import { assertSecretFree } from '../redaction';
-import { isRunContinuation, type RunRecord } from '../state';
+import { isRunContinuation, ReasonCode, type RunRecord } from '../state';
 import type { RunStore } from './run-store';
+
+export class OutcomeEvidenceError extends Error {
+  constructor(readonly code: 'identity_mismatch' | 'incomplete' | 'recovered') {
+    super('Unknown local outcome evidence');
+  }
+}
 
 /** Do not open Journal here: its constructor creates files and repairs torn tails. */
 function events(directory: string): unknown[] {
-  const text = readPrivate(path.join(directory, 'events.jsonl')).toString('utf8');
-  if (!text || !text.endsWith('\n')) throw new Error('Unknown outcome evidence');
-  const rows: unknown[] = text
-    .slice(0, -1)
-    .split('\n')
-    .map((line) => JSON.parse(line));
+  const rows = parseJournalEvents(readPrivate(path.join(directory, 'events.jsonl')));
+  if (!rows.length) throw new Error('Unknown outcome evidence');
   assertSecretFree(rows);
   // A repaired/truncated journal is not complete statistical evidence either.
-  if (rows.some(isRecoveryEvent)) throw new Error('Unknown outcome evidence');
+  if (rows.some(isRecoveryEvent)) throw new OutcomeEvidenceError('recovered');
   return rows;
 }
 export function readOutcomeHandoffs(store: RunStore, run: RunRecord) {
-  const state = replayHandoffs(events(store.storeDirectory('handoff')));
+  const state = store.withStoreDirectory('handoff', (dir) => replayHandoffs(events(dir)));
   if (state.contributionId !== store.contributionId || !isRunContinuation(state.run, run))
-    throw new Error('Unknown outcome evidence');
+    throw new OutcomeEvidenceError('identity_mismatch');
   return state;
 }
 export function readOutcomeTrack(store: RunStore, run: RunRecord) {
-  const state = replayTrack(events(store.storeDirectory('track')), store.storeDirectory('bodies'));
+  const state = store.withStoreDirectory('track', (dir) =>
+    replayTrack(events(dir), store.storeDirectory('bodies'))
+  );
   if (state.contributionId !== store.contributionId || !isRunContinuation(state.run, run))
-    throw new Error('Unknown outcome evidence');
+    throw new OutcomeEvidenceError('identity_mismatch');
+  // A valid prefix may lag external execution, but never omit the tracker's own
+  // observations already persisted by the controller (complete-line tail loss).
+  const owned = [
+    ReasonCode.ReviewAwaited,
+    ReasonCode.RevisionRequested,
+    ReasonCode.UpstreamAccepted,
+    ReasonCode.ObservedUpstreamMerge,
+    ReasonCode.UpstreamDeclined,
+    ReasonCode.PublicationObserved,
+  ];
+  if (run.history.slice(state.run.history.length).some((e) => owned.includes(e.reasonCode)))
+    throw new OutcomeEvidenceError('incomplete');
   return state;
 }
 export function readOutcomeBudget(store: RunStore) {
-  const state = new BudgetLedger(
-    path.join(store.storeDirectory('budget'), 'ledger.json'),
-    store.contributionId
-  ).snapshot();
+  const state = store.withStoreDirectory('budget', (dir) =>
+    new BudgetLedger(path.join(dir, 'ledger.json'), store.contributionId).snapshot()
+  );
   for (const session of state.sessions) budgetTotals(state, session.id);
   return state;
 }

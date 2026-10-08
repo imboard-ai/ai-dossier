@@ -453,4 +453,151 @@ describe('local contribution outcomes', () => {
     renderMetricsJson(o);
     expect(fetch).not.toHaveBeenCalled();
   });
+
+  it('refuses a complete-line tracker prefix missing a durable revision instead of counting zero', () => {
+    const r = rig();
+    r.shipping();
+    r.step(ReasonCode.PublicationObserved);
+    const t = r.track();
+    t.event({
+      type: 'revision_started',
+      feedback: [{ id: 'review:1', updatedAt: START }],
+      run: r.step(ReasonCode.RevisionRequested),
+    });
+    expect(contributionOutcome(r.store).revisions).toBe(1);
+    const file = path.join(r.store.storeDirectory('track'), 'events.jsonl');
+    const first = fs.readFileSync(file, 'utf8').split('\n')[0];
+    replacePrivate(file, Buffer.from(`${first}\n`));
+    const o = contributionOutcome(r.store);
+    expect(o.revisions).toBe('unknown');
+    expect(o.unknownEvidence).toContainEqual({ source: 'track', reason: 'incomplete' });
+    expect(aggregate([o]).reworkPerSubmitted).toEqual({
+      numerator: 0,
+      denominator: 1,
+      unknown: 1,
+      value: 'unknown',
+    });
+  });
+
+  it('rejects invalid UTF-8 even inside otherwise ignored journal properties', () => {
+    const r = rig();
+    r.shipping();
+    r.step(ReasonCode.PublicationObserved);
+    r.track();
+    const file = path.join(r.store.storeDirectory('track'), 'events.jsonl');
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+    raw.ignored = 'PLACEHOLDER';
+    const text = JSON.stringify(raw);
+    const i = text.indexOf('PLACEHOLDER');
+    replacePrivate(
+      file,
+      Buffer.concat([
+        Buffer.from(text.slice(0, i)),
+        Buffer.from([0xff]),
+        Buffer.from(`${text.slice(i + 11)}\n`),
+      ])
+    );
+    expect(contributionOutcome(r.store)).toMatchObject({
+      outcome: 'unknown',
+      revisions: 'unknown',
+      unknownEvidence: [{ source: 'track', reason: 'corrupt' }],
+    });
+  });
+
+  it('preserves an open outcome through revision verification repair with legitimate external lag', () => {
+    const r = rig();
+    r.shipping();
+    r.step(ReasonCode.PublicationObserved);
+    const t = r.track();
+    t.event({
+      type: 'revision_started',
+      feedback: [{ id: 'review:1', updatedAt: START }],
+      run: r.step(ReasonCode.RevisionRequested),
+    });
+    r.step(ReasonCode.CandidateReady);
+    r.step(ReasonCode.RepairRequired);
+    expect(contributionOutcome(r.store)).toMatchObject({ outcome: 'open', revisions: 1 });
+    expect(aggregate([contributionOutcome(r.store)]).accepted.value).toBe(0);
+  });
+
+  it('counts the valid unknown login case-insensitively while retaining unavailable identity', () => {
+    const a = rig('USD', 'unknown');
+    const b = rig('USD', 'Unknown');
+    const c = rig();
+    c.store.close();
+    const stats = aggregate([
+      contributionOutcome(a.store),
+      contributionOutcome(b.store),
+      contributionOutcome(c.store),
+    ]);
+    expect(stats.repeatUsage).toEqual({ unknown: 2 });
+    expect(stats.unknownContributors).toBe(1);
+  });
+
+  it('refuses malformed public facts and extra newline property names in either renderer', () => {
+    const o = contributionOutcome(rig().store);
+    const injected = { ...o, 'extra\noutcome': 'merged' };
+    expect(() => renderMetricsHuman(injected)).toThrow(MetricsError);
+    expect(() => renderMetricsJson(injected)).toThrow(MetricsError);
+    for (const activeMs of [NaN, Infinity, -1])
+      expect(() => aggregate([{ ...o, activeMs }])).toThrow(MetricsError);
+    expect(() => renderMetricsJson({ ...aggregate([o]), medianActiveMs: NaN })).toThrow(
+      MetricsError
+    );
+    expect(() =>
+      renderMetricsHuman({ ...o, cost: { byCurrency: { BADKEY: {} } } } as never)
+    ).toThrow(MetricsError);
+  });
+
+  it('pins adoption storage and refuses replaced symlink directories without external writes', () => {
+    const r = rig();
+    const dir = r.store.storeDirectory('artifacts');
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'zt-adoption-outside-'));
+    dirs.push(outside);
+    fs.renameSync(dir, `${dir}-original`);
+    fs.symlinkSync(outside, dir);
+    expect(() => recordAdoption(r.store, 'voluntary', START)).toThrow();
+    expect(fs.readdirSync(outside)).toEqual([]);
+    expect(contributionOutcome(r.store).adoptionReported).toBe('unknown');
+    expect(contributionOutcome(r.store).unknownEvidence).toContainEqual({
+      source: 'adoption',
+      reason: 'corrupt',
+    });
+  });
+
+  it('distinguishes missing, corrupt, recovered and identity-mismatch evidence without raw diagnostics', () => {
+    const r = rig();
+    r.shipping();
+    r.step(ReasonCode.PublicationObserved);
+    r.track();
+    const file = path.join(r.store.storeDirectory('track'), 'events.jsonl');
+    const original = fs.readFileSync(file);
+    fs.unlinkSync(file);
+    expect(contributionOutcome(r.store).unknownEvidence).toContainEqual({
+      source: 'track',
+      reason: 'missing',
+    });
+    replacePrivate(file, Buffer.from('{}\n'));
+    expect(contributionOutcome(r.store).unknownEvidence).toContainEqual({
+      source: 'track',
+      reason: 'corrupt',
+    });
+    replacePrivate(
+      file,
+      Buffer.from(
+        original.toString('utf8').replaceAll(r.store.contributionId, 'ztc-0000000000000000')
+      )
+    );
+    expect(contributionOutcome(r.store).unknownEvidence).toContainEqual({
+      source: 'track',
+      reason: 'identity_mismatch',
+    });
+    replacePrivate(file, Buffer.concat([original, Buffer.from('{')]));
+    const j = new Journal(r.store.storeDirectory('track'));
+    j.close();
+    expect(contributionOutcome(r.store).unknownEvidence).toContainEqual({
+      source: 'track',
+      reason: 'recovered',
+    });
+  });
 });

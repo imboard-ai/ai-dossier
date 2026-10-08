@@ -198,6 +198,10 @@ export class Journal {
 function hash(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
+/** Pure strict complete-JSONL decoding; never initializes or repairs a journal. */
+export function parseJournalEvents(bytes: Buffer): unknown[] {
+  return parseComplete(bytes);
+}
 function parseComplete(bytes: Buffer): unknown[] {
   const text = bytes.toString('utf8');
   if (!Buffer.from(text).equals(bytes) || (text && !text.endsWith('\n'))) throw new JournalError();

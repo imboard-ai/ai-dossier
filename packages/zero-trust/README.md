@@ -18,7 +18,11 @@ hand-off/tracker journals through their existing replay APIs. The controller's
 local replay adapter never constructs a network driver or model adapter. Metrics
 imports neither `src/github/` nor `src/model/`; no reporting call contacts a service
 or initializes/repairs a missing or truncated journal. Missing, corrupt, recovered
-or wrong-identity evidence is `unknown`, never zero or an inferred success.
+or wrong-identity hand-off/tracker evidence yields field-specific `unknown` values,
+never zero or an inferred success. Run history follows RunStore's established
+control-journal recovery semantics. `unknownEvidence` retains only fixed source
+and reason codes, never raw errors or journal contents. A tracker prefix may lag
+external execution but cannot omit a tracker-owned transition in durable history.
 Submission comes from the durable publication transition, not acceptance. Only a
 tracker-observed outcome with its recorded SHA counts as merged/declined. Revisions
 count tracker-recorded revision requests, including the currently active revision.
@@ -28,7 +32,10 @@ permission/contributor wait is hand-off; an undecided gate is unknown.
 The result includes contribution/contributor/upstream/issue identity, gate,
 submission/PR URL/outcome/revisions, `activeMs`, four `waitMs` families (maintainer,
 contributor, review, paused), per-currency cost and an optional voluntary adoption
-note. Active states are gating/planning/implementing/verifying/shipping/revising.
+note. `identity: 'known' | 'unknown'` distinguishes availability from the identity
+text (the login `unknown` remains a valid known contributor). Active states are
+gating/planning/implementing/verifying/shipping/revising; status and metrics share
+one lifecycle interval calculator.
 Submitted, awaiting-review and accepted intervals are review wait. Terminal time
 is neither active nor wait. `now` defaults to the last durable transition; pass a
 canonical UTC timestamp or Date to include the current interval.
@@ -43,7 +50,11 @@ reservations yield unknown components rather than an invented allocation.
 `aggregate(outcomes)` accepts one result per distinct contribution (duplicates
 are refused). It returns eligible→submitted, accepted (including merged), merged,
 declined and rework-per-submitted rates with numerator, denominator, unknown count
-and value; empty/uncertain denominators give unknown values. It also returns median
+and value; empty/uncertain denominators give unknown values. Eligible→submitted is
+submitted eligible contributions / eligible contributions. Accepted/merged/declined
+use submitted contributions as denominator; accepted includes merged. Rework is
+total revision requests / submitted contributions, and can exceed one.
+It also returns median
 active time, per-currency average cost per submitted/accepted contribution and
 case-insensitive contributions-per-contributor (`repeatUsage`). Unknown evidence
 is retained rather than silently dropped from statistical results. A known absent
@@ -54,7 +65,14 @@ in private `artifacts/adoption.json` (atomic replacement). `ADOPTION_MAX_LENGTH`
 is 2,000 UTF-16 code units; empty, malformed or secret-shaped notes are refused.
 A missing note is omitted; a corrupt note is unknown. Reporting never infers
 adoption. `renderMetricsHuman` / `renderMetricsJson` contain identical facts;
-human values are JSON-quoted to prevent line spoofing. These APIs do not add CLI
+human values are JSON-quoted to prevent line spoofing. Both renderers and aggregation
+validate public facts, refuse extra keys and invalid numeric values, and preserve
+the same fixed diagnostic facts. RunStore's synchronous `withStoreDirectory(name,
+callback)` pins a private child directory under its held descriptor/fence and closes
+it after the callback; descriptor paths must never escape that callback. Adoption
+reads/writes refuse symlink directory replacement. `parseJournalEvents(bytes)` is
+the shared pure complete-JSONL decoder, including strict UTF-8 validation; it never
+opens or repairs storage. These APIs do not add CLI
 commands or external telemetry.
 
 ## Community gate and explicit-resume invitation (#1098)

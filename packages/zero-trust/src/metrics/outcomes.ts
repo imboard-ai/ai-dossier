@@ -1,6 +1,8 @@
 /** Local PRD §6 facts; reporting never grants permission or performs external I/O. */
 import path from 'node:path';
+import { lifecycleTimes } from '../controller/lifecycle-times';
 import {
+  OutcomeEvidenceError,
   readOutcomeBudget,
   readOutcomeHandoffs,
   readOutcomeTrack,
@@ -8,7 +10,7 @@ import {
 import type { RunStore } from '../controller/run-store';
 import { readPrivate, replacePrivate } from '../durable-fs';
 import { assertNoSecrets, assertSecretFree } from '../redaction';
-import { isRecord, isTimestamp, ReasonCode, type RunState, restoreRun } from '../state';
+import { isRecord, isTimestamp, ReasonCode, restoreRun } from '../state';
 
 export type Known<T> = T | 'unknown';
 export interface CostAmounts {
@@ -21,6 +23,8 @@ export interface CurrencyCost extends CostAmounts {
 }
 export interface ContributionOutcome {
   readonly contributionId: string;
+  /** Availability is separate from text: `unknown` is itself a valid GitHub login. */
+  readonly identity: 'known' | 'unknown';
   readonly contributor: Known<string>;
   readonly upstream: Known<string>;
   readonly issue: Known<number>;
@@ -38,6 +42,17 @@ export interface ContributionOutcome {
   }>;
   readonly cost: { readonly byCurrency: Known<Readonly<Record<string, CurrencyCost>>> };
   readonly adoptionReported?: Known<{ readonly at: string; readonly note: string }>;
+  readonly unknownEvidence: readonly EvidenceDiagnostic[];
+}
+export interface EvidenceDiagnostic {
+  readonly source: 'run' | 'config' | 'handoff' | 'track' | 'budget' | 'time' | 'adoption';
+  readonly reason:
+    | 'missing'
+    | 'corrupt'
+    | 'identity_mismatch'
+    | 'incomplete'
+    | 'recovered'
+    | 'invalid_timestamp';
 }
 export class MetricsError extends Error {
   constructor() {
@@ -45,27 +60,26 @@ export class MetricsError extends Error {
     this.name = 'MetricsError';
   }
 }
-const ACTIVE: readonly RunState[] = [
-  'gating',
-  'planning',
-  'implementing',
-  'verifying',
-  'shipping',
-  'revising',
-];
-const WAIT = {
-  awaiting_maintainer: 'maintainer',
-  awaiting_contributor: 'contributor',
-  submitted: 'review',
-  awaiting_review: 'review',
-  accepted: 'review',
-  paused_user: 'paused',
-} as const;
-
-function attempt<T>(read: () => T): Known<T> {
+function attempt<T>(
+  source: EvidenceDiagnostic['source'],
+  diagnostics: EvidenceDiagnostic[],
+  read: () => T
+): Known<T> {
   try {
     return read();
-  } catch {
+  } catch (error) {
+    const code = (error as { code?: string })?.code;
+    diagnostics.push({
+      source,
+      reason:
+        error instanceof OutcomeEvidenceError
+          ? error.code
+          : source === 'time'
+            ? 'invalid_timestamp'
+            : code === 'ENOENT' || code === 'missing_ledger'
+              ? 'missing'
+              : 'corrupt',
+    });
     return 'unknown';
   }
 }
@@ -134,30 +148,38 @@ function adoption(raw: unknown): { at: string; note: string } {
     throw new MetricsError();
   return { at, note };
 }
-function readAdoption(store: RunStore): ContributionOutcome['adoptionReported'] {
+function readAdoption(
+  store: RunStore,
+  diagnostics: EvidenceDiagnostic[]
+): ContributionOutcome['adoptionReported'] {
   try {
     return adoption(
       JSON.parse(
-        readPrivate(path.join(store.storeDirectory('artifacts'), 'adoption.json')).toString('utf8')
+        store
+          .withStoreDirectory('artifacts', (dir) => readPrivate(path.join(dir, 'adoption.json')))
+          .toString('utf8')
       )
     );
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'ENOENT' ? undefined : 'unknown';
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    diagnostics.push({ source: 'adoption', reason: 'corrupt' });
+    return 'unknown';
   }
 }
 /** Explicit voluntary local note. No telemetry and no automatic adoption inference. */
 export function recordAdoption(store: RunStore, note: string, now: Date | string): void {
   const value = adoption({ at: now instanceof Date ? now.toISOString() : now, note });
-  replacePrivate(
-    path.join(store.storeDirectory('artifacts'), 'adoption.json'),
-    Buffer.from(JSON.stringify(value))
+  store.withStoreDirectory('artifacts', (dir) =>
+    replacePrivate(path.join(dir, 'adoption.json'), Buffer.from(JSON.stringify(value)))
   );
 }
 
 /** `now` defaults to the last durable transition, making repeated reads deterministic. */
 export function contributionOutcome(store: RunStore, now?: Date | string): ContributionOutcome {
+  const unknownEvidence: EvidenceDiagnostic[] = [];
   const unknown: ContributionOutcome = {
     contributionId: store.contributionId,
+    identity: 'unknown',
     contributor: 'unknown',
     upstream: 'unknown',
     issue: 'unknown',
@@ -168,18 +190,19 @@ export function contributionOutcome(store: RunStore, now?: Date | string): Contr
     activeMs: 'unknown',
     waitMs: 'unknown',
     cost: { byCurrency: 'unknown' },
+    unknownEvidence,
   };
-  const run = attempt(() => restoreRun(store.run));
+  const run = attempt('run', unknownEvidence, () => restoreRun(store.run));
   if (run === 'unknown') return unknown;
-  const config = attempt(() => store.config);
+  const config = attempt('config', unknownEvidence, () => store.config);
   if (
     config === 'unknown' ||
     config.issueUrl !== run.upstreamIssue ||
     config.contributor !== run.contributor
   )
     return unknown;
-  const handoffs = attempt(() => readOutcomeHandoffs(store, run));
-  const tracker = attempt(() => readOutcomeTrack(store, run));
+  const handoffs = attempt('handoff', unknownEvidence, () => readOutcomeHandoffs(store, run));
+  const tracker = attempt('track', unknownEvidence, () => readOutcomeTrack(store, run));
   const submitted = run.history.some((e) => e.reasonCode === ReasonCode.PublicationObserved);
   const passed = run.history.some((e) => e.reasonCode === ReasonCode.GatePassed);
   const gated = passed
@@ -192,25 +215,10 @@ export function contributionOutcome(store: RunStore, now?: Date | string): Contr
           )
         ? 'hand_off'
         : 'unknown';
-  const times = attempt(() => {
+  const times = attempt('time', unknownEvidence, () => {
     const end = now instanceof Date ? now.toISOString() : (now ?? run.updatedAt);
     if (!isTimestamp(end) || Date.parse(end) < Date.parse(run.updatedAt)) throw new MetricsError();
-    let state: RunState = 'gating';
-    let start = Date.parse(run.createdAt);
-    let activeMs = 0;
-    const waitMs = { maintainer: 0, contributor: 0, review: 0, paused: 0 };
-    for (const entry of [...run.history, { to: run.state, timestamp: end }]) {
-      const stop = Date.parse(entry.timestamp);
-      const elapsed = stop - start;
-      if (ACTIVE.includes(state)) activeMs = add(activeMs, elapsed);
-      else if (Object.hasOwn(WAIT, state)) {
-        const family = WAIT[state as keyof typeof WAIT];
-        waitMs[family] = add(waitMs[family], elapsed);
-      }
-      state = entry.to;
-      start = stop;
-    }
-    return { activeMs, waitMs };
+    return lifecycleTimes(run, Date.parse(end));
   });
   const observed =
     handoffs === 'unknown'
@@ -232,14 +240,17 @@ export function contributionOutcome(store: RunStore, now?: Date | string): Contr
                 'submitted',
                 'awaiting_review',
                 'revising',
+                'implementing',
                 'verifying',
                 'shipping',
                 'paused_user',
               ].includes(run.state)
             ? 'open'
             : 'unknown';
+  const adoptionReported = readAdoption(store, unknownEvidence);
   const value: ContributionOutcome = {
     contributionId: store.contributionId,
+    identity: 'known',
     contributor: run.contributor,
     upstream: `${config.upstream.owner}/${config.upstream.repo}`,
     issue: config.upstream.issue,
@@ -256,8 +267,9 @@ export function contributionOutcome(store: RunStore, now?: Date | string): Contr
         : tracker.run.history.filter((e) => e.reasonCode === ReasonCode.RevisionRequested).length,
     activeMs: times === 'unknown' ? 'unknown' : times.activeMs,
     waitMs: times === 'unknown' ? 'unknown' : times.waitMs,
-    cost: { byCurrency: attempt(() => costs(store)) },
-    ...(readAdoption(store) === undefined ? {} : { adoptionReported: readAdoption(store) }),
+    cost: { byCurrency: attempt('budget', unknownEvidence, () => costs(store)) },
+    ...(adoptionReported === undefined ? {} : { adoptionReported }),
+    unknownEvidence,
   };
   assertSecretFree(value);
   return value;
@@ -281,6 +293,135 @@ export interface OutcomeAggregate {
   readonly costPerAccepted: Known<Readonly<Record<string, CurrencyCost>>>;
   readonly repeatUsage: Readonly<Record<string, number>>;
   readonly unknownContributors: number;
+}
+function shape(value: unknown, keys: readonly string[]): Record<string, unknown> {
+  if (!isRecord(value) || Object.keys(value).some((k) => !keys.includes(k)))
+    throw new MetricsError();
+  return value;
+}
+function choice(value: unknown, values: readonly unknown[]): void {
+  if (!values.includes(value)) throw new MetricsError();
+}
+function count(value: unknown, allowUnknown = false, integer = true): void {
+  if (allowUnknown && value === 'unknown') return;
+  if (
+    typeof value !== 'number' ||
+    !Number.isFinite(value) ||
+    value < 0 ||
+    (integer && !Number.isSafeInteger(value))
+  )
+    throw new MetricsError();
+}
+function text(value: unknown): void {
+  if (typeof value !== 'string' || !value.trim()) throw new MetricsError();
+}
+function validateCosts(input: unknown, integer: boolean): void {
+  if (input === 'unknown') return;
+  if (!isRecord(input)) throw new MetricsError();
+  for (const [currency, raw] of Object.entries(input)) {
+    if (!/^[A-Z]{3}$/.test(currency)) throw new MetricsError();
+    const row = shape(raw, ['estimatedMinor', 'observedMinor', 'model', 'vm']);
+    for (const part of [
+      row,
+      shape(row.model, ['estimatedMinor', 'observedMinor']),
+      shape(row.vm, ['estimatedMinor', 'observedMinor']),
+    ]) {
+      count(part.estimatedMinor, true, integer);
+      count(part.observedMinor, true, integer);
+    }
+  }
+}
+function safeOutcome(input: unknown): ContributionOutcome {
+  const raw = shape(structuredClone(input), [
+    'contributionId',
+    'identity',
+    'contributor',
+    'upstream',
+    'issue',
+    'gated',
+    'submitted',
+    'prUrl',
+    'outcome',
+    'revisions',
+    'activeMs',
+    'waitMs',
+    'cost',
+    'adoptionReported',
+    'unknownEvidence',
+  ]);
+  assertSecretFree(raw);
+  text(raw.contributionId);
+  text(raw.contributor);
+  text(raw.upstream);
+  choice(raw.identity, ['known', 'unknown']);
+  choice(raw.gated, ['eligible', 'ineligible', 'hand_off', 'unknown']);
+  choice(raw.submitted, [true, false, 'unknown']);
+  choice(raw.outcome, ['open', 'accepted', 'merged', 'declined', 'none', 'unknown']);
+  count(raw.issue, true);
+  count(raw.revisions, true);
+  count(raw.activeMs, true);
+  if (raw.prUrl !== undefined) text(raw.prUrl);
+  if (raw.waitMs !== 'unknown') {
+    const waits = shape(raw.waitMs, ['maintainer', 'contributor', 'review', 'paused']);
+    for (const key of ['maintainer', 'contributor', 'review', 'paused']) count(waits[key]);
+  }
+  validateCosts(shape(raw.cost, ['byCurrency']).byCurrency, true);
+  if (raw.adoptionReported !== undefined && raw.adoptionReported !== 'unknown')
+    adoption(raw.adoptionReported);
+  if (!Array.isArray(raw.unknownEvidence)) throw new MetricsError();
+  for (const entry of raw.unknownEvidence) {
+    const d = shape(entry, ['source', 'reason']);
+    choice(d.source, ['run', 'config', 'handoff', 'track', 'budget', 'time', 'adoption']);
+    choice(d.reason, [
+      'missing',
+      'corrupt',
+      'identity_mismatch',
+      'incomplete',
+      'recovered',
+      'invalid_timestamp',
+    ]);
+  }
+  return raw as unknown as ContributionOutcome;
+}
+function safeAggregate(input: unknown): OutcomeAggregate {
+  const raw = shape(structuredClone(input), [
+    'contributions',
+    'eligibleToSubmitted',
+    'accepted',
+    'merged',
+    'declined',
+    'reworkPerSubmitted',
+    'medianActiveMs',
+    'costPerSubmitted',
+    'costPerAccepted',
+    'repeatUsage',
+    'unknownContributors',
+  ]);
+  assertSecretFree(raw);
+  count(raw.contributions);
+  count(raw.unknownContributors);
+  count(raw.medianActiveMs, true, false);
+  for (const key of [
+    'eligibleToSubmitted',
+    'accepted',
+    'merged',
+    'declined',
+    'reworkPerSubmitted',
+  ]) {
+    const r = shape(raw[key], ['numerator', 'denominator', 'unknown', 'value']);
+    count(r.numerator);
+    count(r.denominator);
+    count(r.unknown);
+    count(r.value, true, false);
+  }
+  validateCosts(raw.costPerSubmitted, false);
+  validateCosts(raw.costPerAccepted, false);
+  if (!isRecord(raw.repeatUsage)) throw new MetricsError();
+  for (const [login, total] of Object.entries(raw.repeatUsage)) {
+    if (!/^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/.test(login)) throw new MetricsError();
+    count(total);
+  }
+  return raw as unknown as OutcomeAggregate;
 }
 function rate(numerator: number, denominator: number, unknown: number): Rate {
   return {
@@ -317,7 +458,7 @@ function averageCost(
 }
 /** One outcome per contribution, never one per resumed session. Duplicate IDs are refused. */
 export function aggregate(input: readonly ContributionOutcome[]): OutcomeAggregate {
-  const outcomes = structuredClone(input);
+  const outcomes = input.map(safeOutcome);
   assertSecretFree(outcomes);
   if (new Set(outcomes.map((o) => o.contributionId)).size !== outcomes.length)
     throw new MetricsError();
@@ -332,7 +473,7 @@ export function aggregate(input: readonly ContributionOutcome[]): OutcomeAggrega
   const middle = Math.floor(sorted.length / 2);
   const repeatUsage: Record<string, number> = Object.create(null);
   for (const o of outcomes)
-    if (o.contributor !== 'unknown') {
+    if (o.identity === 'known') {
       const login = o.contributor.toLowerCase();
       repeatUsage[login] = add(repeatUsage[login] ?? 0, 1);
     }
@@ -370,11 +511,14 @@ export function aggregate(input: readonly ContributionOutcome[]): OutcomeAggrega
     costPerSubmitted: unknownSubmission ? 'unknown' : averageCost(submitted),
     costPerAccepted: unknownOutcome ? 'unknown' : averageCost(accepted),
     repeatUsage,
-    unknownContributors: outcomes.filter((o) => o.contributor === 'unknown').length,
+    unknownContributors: outcomes.filter((o) => o.identity === 'unknown').length,
   };
 }
 export function renderMetricsJson(value: ContributionOutcome | OutcomeAggregate): string {
-  const snapshot = structuredClone(value);
+  const snapshot =
+    isRecord(value) && Object.hasOwn(value, 'contributionId')
+      ? safeOutcome(value)
+      : safeAggregate(value);
   assertSecretFree(snapshot);
   return JSON.stringify(snapshot, null, 2);
 }

@@ -195,6 +195,26 @@ export class RunStore {
     if (!Number.isSafeInteger(n) || n <= 0) fail('invalid_store');
     return `${this.runId}-s${n}`;
   }
+  /** Synchronous local operation under this store's held fence and a pinned child directory.
+   * The callback must not retain the descriptor path beyond its lifetime. */
+  withStoreDirectory<T>(
+    name: (typeof RUN_STORE_DIRECTORIES)[number],
+    work: (directory: string) => T
+  ): T {
+    this.check();
+    if (!RUN_STORE_DIRECTORIES.includes(name)) fail('invalid_store');
+    const fd = fs.openSync(
+      `/proc/self/fd/${this.directoryFd}/${name}`,
+      fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW
+    );
+    try {
+      const stat = fs.fstatSync(fd);
+      if (stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o700) fail('invalid_store');
+      return work(`/proc/self/fd/${fd}`);
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
   static create(root: string, input: RunConfig, now: Date | string): RunStore {
     const config = validateRunConfig(runConfigInput(input));
     if (config.resumeRunId !== undefined) fail('invalid_run_id');
