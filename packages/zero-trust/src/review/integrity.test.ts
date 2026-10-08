@@ -248,6 +248,8 @@ describe('deterministic candidate scope/test integrity', () => {
     }
   });
   it.each([
+    '(self # implicit continuation\n .assertTrue)(True)\n',
+    '(self) .assertEqual(1, 1)\n',
     'self\\\n.assertEqual(1, 1)\n',
     'self \\\r\n .assertTrue(True)\n',
     'self\\\r.assertTrue(False)\r',
@@ -280,6 +282,26 @@ describe('deterministic candidate scope/test integrity', () => {
   });
   it('ordinary source assertions/skip text are not treated as test integrity', () => {
     expect(codes(input({ 'src/a.ts': 'expect(1);\n' }, { 'src/a.ts': 'it.skip(\n' }))).toEqual([]);
+  });
+  it.each([
+    '@(unittest # implicit continuation\n .skip)("reason")',
+    '@((unittest).skip)("reason")',
+    '@(pytest # implicit continuation\n .mark # next token\n .skip)(reason="reason")',
+    '@((pytest).mark.xfail)(reason="reason")',
+  ])('grouped Python decorator %j is screened without losing raw offsets', (marker) => {
+    const path = 'test_case.py';
+    expect(
+      codes(input({ [path]: 'assert True\n' }, { [path]: `${marker}\nassert True\n` }))
+    ).toContain('test_disabled');
+    expect(
+      codes(input({ [path]: `${marker}\nassert True\n` }, { [path]: `${marker}\nassert False\n` }))
+    ).not.toContain('test_disabled');
+    expect(
+      codes(input({ [path]: `${marker}\nassert True\n` }, { [path]: 'assert True\n' }))
+    ).not.toContain('test_disabled');
+    const before = marker.replace(' # implicit continuation\n', '\nremoved\n');
+    if (before !== marker)
+      expect(codes(input({ [path]: before }, { [path]: marker }))).toContain('test_disabled');
   });
   it.each([
     'suites',

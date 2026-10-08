@@ -48,7 +48,9 @@ const CONFIG =
 const GENERATED = /(?:^|\/)(?:dist|build)(?:\/|$)|\.min\.js$|\.map$/u;
 // Python explicit line continuations are lexical gaps too. Match raw source so
 // coordinates still correspond to the line diff rather than a normalized copy.
-const GAP = String.raw`(?:\s|\\(?:\r\n|\r|\n))*`;
+// Conservatively admit Python grouping and implicit-continuation comments too.
+// This is textual screening, so grouping need not be balanced to refuse a patch.
+const GAP = String.raw`(?:\s|[()]|\\(?:\r\n|\r|\n)|#[^\r\n]*(?:\r\n|\r|\n|$))*`;
 const DISABLED = new RegExp(
   String.raw`\b(?:it|describe|test)${GAP}\.${GAP}skip${GAP}\(|\b(?:xit|xdescribe)${GAP}\(|\.${GAP}only${GAP}\(|\bit${GAP}\.${GAP}todo${GAP}\(|@${GAP}pytest${GAP}\.${GAP}mark${GAP}\.${GAP}(?:skip(?:if)?|xfail)\b|\bpytest${GAP}\.${GAP}skip${GAP}\(|@${GAP}unittest${GAP}\.${GAP}skip\b|\bunittest${GAP}\.${GAP}(?:skipIf|skipUnless)\b`,
   'u'

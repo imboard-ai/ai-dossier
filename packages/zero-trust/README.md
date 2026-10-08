@@ -37,7 +37,9 @@ Test paths include any `test/`, `tests/`, `__tests__/` component, `*.test.*`,
 pytest skip/skipif/xfail decorators and skip calls, and unittest skip/skipIf/skipUnless.
 Modified tests compare textual `expect(`, `assert` and `self.assert*` counts.
 The scanner permits whitespace (including Python explicit line continuations)
-between marker tokens and after decorator `@` (LF, CRLF and bare CR), and is conservative:
+between marker tokens and after decorator `@` (LF, CRLF and bare CR), and
+conservatively admits Python grouping parentheses and implicit-continuation
+comments. The screening is conservative:
 comments, literals and moved lines can produce findings. Marker matches use full
 candidate context and must overlap an added line or cross a deletion-created
 junction, including multiline markers assembled entirely from retained lines.
