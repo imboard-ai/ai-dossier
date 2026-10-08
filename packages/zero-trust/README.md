@@ -114,7 +114,9 @@ turn and stop outcome.
 Successful plan/candidate persistence writes only a tentative `checkpoint` and
 revalidates liveness before returning. **No transcript entry establishes success
 authority**; the returned proposal and later verification/controller state own
-that decision. Failed outcomes write `stop` events. A timed-out arbitrary sink
+that decision. Success-checkpoint persistence is bounded by remaining active time
+and checked again before returning; the separate durability allowance applies only
+to stop recording. Failed outcomes write `stop` events. A timed-out arbitrary sink
 may append late, so entries carry a controller-assigned monotonic `sequence`;
 read them in logical sequence order, never infer a verdict from the physical tail.
 Persistence failure/timeout permanently invalidates workspace reuse, including

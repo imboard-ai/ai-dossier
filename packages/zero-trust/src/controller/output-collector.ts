@@ -57,7 +57,7 @@ export class OutputCollector {
     this.dropped = true;
   }
 
-  /** True once anything was dropped at the cap; `outputs()` then refuses. */
+  /** True after local overflow or explicitly incomplete upstream capture; `outputs()` refuses. */
   get truncated(): boolean {
     return this.dropped;
   }

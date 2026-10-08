@@ -181,6 +181,7 @@ interface LoopTracking {
   code?: string;
   finish?: () => void;
   ownsWorkspace?: boolean;
+  remaining?: () => number;
 }
 
 async function loop(
@@ -235,6 +236,7 @@ async function loop(
     lastNow = at;
     return Math.floor(ceiling - account.elapsedMs - (at - started));
   };
+  tracking.remaining = remaining;
   let persistenceFailed = false;
   const record = async (turn: number, event: string, data: unknown): Promise<void> => {
     try {
@@ -379,8 +381,10 @@ async function loop(
               throw new Error('invalid_worker_output');
             ctx.collector.append(stdout);
             ctx.collector.append(stderr);
+            if (truncated) ctx.collector.markIncomplete();
             if (timedOut) throw new WorkerDeadline(activeRemaining <= ctx.limits.commandTimeoutMs);
             if (exitCode === null) {
+              ctx.collector.markIncomplete();
               invalidateProvisionedVm(ctx.adapter, ctx.vm);
               return { kind: 'hand_off', reason: 'worker_inconclusive' };
             }
@@ -439,8 +443,7 @@ async function loop(
   } catch (error) {
     if (tracking.stage === 'worker_write_file' || tracking.stage === 'worker_exec')
       invalidateProvisionedVm(ctx.adapter, ctx.vm);
-    if (tracking.stage === 'worker_exec' && !(error instanceof WorkerDeadline))
-      ctx.collector.markIncomplete();
+    if (tracking.stage === 'worker_exec') ctx.collector.markIncomplete();
     tracking.code = error instanceof BrokerError ? 'broker_failure' : 'controller_failure';
     if (error instanceof ActiveTimeExpired)
       return { kind: 'budget_exhausted', reason: 'active_time' };
@@ -499,6 +502,7 @@ async function runLoop(
     const success = () => result.kind === 'candidate' || result.kind === 'plan';
     const recordStop = async (event: 'checkpoint' | 'stop') => {
       const data = result.kind === 'candidate' ? { kind: result.kind, meta: result.meta } : result;
+      const active = event === 'checkpoint' ? (tracking.remaining?.() ?? 0) : Infinity;
       return bounded(
         async () =>
           ctx.persist(
@@ -511,12 +515,18 @@ async function runLoop(
               data,
             })
           ),
-        TERMINAL_TRANSCRIPT_TIMEOUT_MS,
-        new Error('terminal_persistence_timeout')
+        Math.min(TERMINAL_TRANSCRIPT_TIMEOUT_MS, active),
+        active <= TERMINAL_TRANSCRIPT_TIMEOUT_MS
+          ? new ActiveTimeExpired()
+          : new Error('terminal_persistence_timeout')
       );
     };
     const validateSuccess = () => {
       if (!success()) return;
+      if ((tracking.remaining?.() ?? 0) <= 0) {
+        result = { kind: 'budget_exhausted', reason: 'active_time' };
+        return;
+      }
       try {
         assertProvisionedVm(ctx.adapter, ctx.vm);
       } catch {
@@ -532,8 +542,17 @@ async function runLoop(
       // Success stays a tentative checkpoint: even a late append cannot establish
       // authoritative success after the persistence deadline has failed closed.
       if (!success()) await recordStop('stop');
-    } catch {
+    } catch (error) {
       invalidateProvisionedVm(ctx.adapter, ctx.vm);
+      if (error instanceof ActiveTimeExpired) {
+        result = { kind: 'budget_exhausted', reason: 'active_time' };
+        try {
+          await recordStop('stop');
+        } catch {
+          /* Preserve the already-stopped outcome. */
+        }
+        return result;
+      }
       return success() ? { kind: 'hand_off', reason: 'persistence_failed' } : result;
     }
     return result;

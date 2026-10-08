@@ -968,7 +968,8 @@ describe('provider-neutral admitted controller loop', () => {
         reason: timedOut ? 'command_timeout' : 'worker_inconclusive',
       });
       expect(model.requests).toHaveLength(1);
-      expect(ctx.collector.outputs()).toContain('inconclusive output');
+      expect(ctx.collector.bytes).toBe(Buffer.byteLength('inconclusive output'));
+      expect(() => ctx.collector.outputs()).toThrow();
       expect(await runImplementation(ctx, { plan: PLAN })).toEqual({
         kind: 'hand_off',
         reason: 'loop_failed',
@@ -1088,5 +1089,138 @@ describe('provider-neutral admitted controller loop', () => {
     release?.();
     expect((await owner).kind).toBe('candidate');
     expect(model.requests).toHaveLength(1);
+  });
+  it.each([
+    true,
+    false,
+  ])('truncated timeout/null-exit evidence cannot be consumed: timedOut=%s', async (timedOut) => {
+    const { ctx, adapter, model } = await setup([call(exec), call(META)]);
+    adapter.on(['npm', 'test'], { timedOut, exitCode: null, truncated: true, stdout: 'partial' });
+    const result = await runImplementation(ctx, { plan: PLAN });
+    expect(result.kind).toBe('hand_off');
+    expect(ctx.collector.truncated).toBe(true);
+    expect(() => ctx.collector.outputs()).toThrow();
+    expect(model.requests).toHaveLength(1);
+  });
+  it('supervisory exec timeout without returned output is incomplete boundary evidence', async () => {
+    const { ctx, adapter } = await setup([call(exec)]);
+    vi.spyOn(adapter, 'exec').mockImplementation(async () => new Promise<never>(() => {}));
+    expect(
+      await runImplementation(
+        { ...ctx, now: () => new Date(), limits: { ...ctx.limits, commandTimeoutMs: 1000 } },
+        { plan: PLAN }
+      )
+    ).toEqual({ kind: 'hand_off', reason: 'command_timeout' });
+    expect(ctx.collector.truncated).toBe(true);
+    expect(() => ctx.collector.outputs()).toThrow();
+  });
+  it.each([
+    'planning',
+    'implementing',
+  ] as const)('delayed success checkpoint respects remaining active time in %s', async (phase) => {
+    const { ctx, model } = await setup([
+      call(phase === 'planning' ? { kind: 'submit_plan', text: PLAN.text } : META),
+    ]);
+    const options = {
+      ...ctx,
+      now: () => new Date(),
+      limits: { ...ctx.limits, activeMinutes: 0.002 },
+      persist: async (entry: string) => {
+        if (JSON.parse(entry).event === 'checkpoint') await new Promise((r) => setTimeout(r, 250));
+      },
+    };
+    expect(
+      await (phase === 'planning'
+        ? runPlanning(options)
+        : runImplementation(options, { plan: PLAN }))
+    ).toEqual({ kind: 'budget_exhausted', reason: 'active_time' });
+    expect(model.requests).toHaveLength(1);
+  });
+  it.each([
+    'scripted',
+    'openai',
+  ] as const)('the same hostile, budget, turn and active limits hold through distinct %s adapter', async (transport) => {
+    vi.stubEnv('LOOP_MATRIX_KEY', 'controller-only-fixture');
+    for (const scenario of ['hostile', 'budget', 'turn', 'active']) {
+      const first = call(scenario === 'hostile' ? { ...exec, repo: 'override' } : exec);
+      if (scenario === 'budget') first.usage = { inputTokens: 20_000, outputTokens: 1 };
+      const responses = [first, call({ kind: 'hand_off', reason: 'stop' })];
+      const fixture = await setup(responses);
+      const fetcher = vi.fn<typeof fetch>().mockImplementation(async () => {
+        const response = responses.shift();
+        if (!response || response.kind !== 'tool_calls') throw new Error('fixture exhausted');
+        return new Response(
+          JSON.stringify({
+            choices: [
+              {
+                finish_reason: 'tool_calls',
+                message: {
+                  content: null,
+                  tool_calls: response.calls.map((c) => ({
+                    id: c.id,
+                    type: 'function',
+                    function: { name: c.name, arguments: JSON.stringify(c.arguments) },
+                  })),
+                },
+              },
+            ],
+            usage: {
+              prompt_tokens: response.usage?.inputTokens,
+              completion_tokens: response.usage?.outputTokens,
+            },
+          })
+        );
+      });
+      const model =
+        transport === 'scripted'
+          ? fixture.model
+          : new OpenAICompatibleAdapter({
+              model: fixture.model.id,
+              endpoint: 'https://provider.example/v1/',
+              apiKeyEnv: 'LOOP_MATRIX_KEY',
+              fetch: fetcher,
+            });
+      const original = model.complete.bind(model);
+      const provider = vi.spyOn(model, 'complete');
+      let at = Date.parse(TIME);
+      if (scenario === 'active') {
+        provider.mockImplementation(async (request) => {
+          const result = await original(request);
+          at += 60_000;
+          return result;
+        });
+      }
+      if (scenario === 'budget')
+        fixture.ledger.startSession({
+          id: 'limited',
+          ceiling: { currency: 'USD', minor: 100_000 },
+          cleanupAllowance: 100,
+          tokenLimit: 30_000,
+          timeLimitMs: 120 * 60_000,
+        });
+      const ctx = {
+        ...fixture.ctx,
+        model,
+        sessionId: scenario === 'budget' ? 'limited' : fixture.ctx.sessionId,
+        maxTurns: scenario === 'turn' ? 1 : 60,
+        now: () => new Date(at),
+        limits: { ...fixture.ctx.limits, activeMinutes: scenario === 'active' ? 1 : 120 },
+      };
+      const result = await runImplementation(ctx, { plan: PLAN });
+      expect(result).toEqual(
+        scenario === 'hostile'
+          ? { kind: 'hand_off', reason: 'stop' }
+          : scenario === 'turn'
+            ? { kind: 'turns_exhausted' }
+            : { kind: 'budget_exhausted', reason: scenario === 'active' ? 'active_time' : 'budget' }
+      );
+      expect(provider).toHaveBeenCalledTimes(scenario === 'hostile' ? 2 : 1);
+      if (transport === 'openai')
+        expect(fetcher).toHaveBeenCalledTimes(scenario === 'hostile' ? 2 : 1);
+      expect(fixture.adapter.execs()).toHaveLength(
+        scenario === 'budget' || scenario === 'turn' ? 1 : 0
+      );
+      provider.mockRestore();
+    }
   });
 });
