@@ -29,6 +29,7 @@ export function agentTools(phase: AgentPhase): readonly ModelTool[] {
         name: 'propose_action',
         description: 'Propose one bounded action to the controller; never grants authority.',
         parameters: {
+          type: 'object',
           oneOf: [
             action('worker_exec', {
               profile: { enum: ['node', 'python'] },

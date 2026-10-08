@@ -48,6 +48,7 @@ import {
   QEMU_ENV,
   TIMEOUT_SCALE,
 } from './qemu-args';
+import { invalidateProvisionedVm } from './workspace-lifecycle';
 
 export const AGENT_SOURCE_PATH = path.join(__dirname, '..', '..', 'vm-guest', 'agent.py');
 export const KILL_SWITCH_FILE = 'KILL_SWITCH';
@@ -753,6 +754,7 @@ export class LocalQemuAdapter implements VmAdapter {
   /** One attempt. Never signals a PID whose start token (or, without a recorded
    * PID, whose own command line) does not prove it is this VM's QEMU. */
   async destroy(handle: Pick<VmHandle, 'vmId' | 'runId'>): Promise<void> {
+    invalidateProvisionedVm(this, handle);
     if (!VM_ID.test(handle.vmId)) throw new Error('Invalid VM ID');
     this.clients.get(handle.vmId)?.close();
     this.clients.delete(handle.vmId);

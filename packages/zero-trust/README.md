@@ -56,6 +56,9 @@ instances and seeded from persisted run state on resume; persist its `elapsedMs`
 after each phase. Only time inside loops is charged; idle hand-off time is excluded.
 Accounts reject concurrent entry (`session_busy`), and the loop holds an exclusive
 workspace lease. The caller retains the ledger and active account across repairs.
+Re-entry on the same live VM retains its controller-held overlay, so previously
+admitted writes do not disappear when a turn/budget stop is resumed. Its original
+baseline digest must still match; a new baseline requires fresh provisioning.
 The ceiling is checked before every turn/worker operation and bounds asynchronous
 transcript writes too. Non-finite or backward clocks refuse progress. Model
 calls are capped at 60 seconds or the remaining active time, whichever is smaller;
@@ -78,7 +81,11 @@ exclusive loop ownership and returns its release function; evidence execution
 refuses a leased handle. `releaseWorkspace` invalidates proof immediately so a
 pending loop cannot continue after teardown. `abortProvisionedVm` invalidates
 proof and awaits destruction on a supervisory worker deadline. The caller owns
-teardown/retries at every stop/checkpoint. Provisioned-handle proof is process-local;
+teardown/retries at every stop/checkpoint.
+The supported local-QEMU and fake adapters invalidate the shared lifecycle proof
+before direct destruction begins, and `finishBoundary` does so before quiescence
+for every adapter. A boundary-finalized VM cannot be reused by the model loop.
+Provisioned-handle proof is process-local;
 resume provisions a fresh workspace. `repairOf` is appended only as untrusted
 failure-summary data. The caller must first enforce `assertRepairAllowed` and
 provide the failed candidate as `baseManifest` in a freshly provisioned workspace.
@@ -97,7 +104,12 @@ off as `output_truncated` rather than allowing partial evidence to pass.
 
 Transcript events include start data, detached model responses, admitted actions,
 rejections, action replies and terminal stop events with controller-defined stage,
-turn and stop outcome. Stop persistence has a separate
+turn and stop outcome.
+Success persistence first writes a tentative `checkpoint`, revalidates liveness,
+then writes the actual `stop`. Teardown during either write produces a final
+failure stop, rather than leaving a candidate-success tail that disagrees with
+the returned outcome. The lease/account remain held through terminal persistence.
+Stop persistence has a separate
 `TERMINAL_TRANSCRIPT_TIMEOUT_MS = 1000` durability allowance after active expiry;
 a failed sink is not recursively asked to report itself.
 Terminal persistence failure preserves an already-stopped outcome, but cannot

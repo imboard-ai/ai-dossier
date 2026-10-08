@@ -48,6 +48,12 @@ import {
 } from '../vm/adapter';
 import { assertProfileBaked } from '../vm/profile';
 import { teardownVm } from '../vm/teardown';
+import {
+  acquireWorkspaceLease,
+  invalidateProvisionedVm,
+  isProvisionedVm,
+  registerProvisionedVm,
+} from '../vm/workspace-lifecycle';
 import type { OutputCollector } from './output-collector';
 
 /** Cap on the log excerpt kept in evidence, in UTF-16 code units (the tail of the log). */
@@ -224,27 +230,26 @@ export interface RegressionRunEvidence {
 
 /** Workspaces that passed the phase-switch check and are not yet released. */
 const PROVEN = new WeakSet<ProvisionedWorkspace>();
-const PROVEN_VMS = new WeakMap<VmHandle, VmAdapter>();
-const LEASED_VMS = new WeakSet<VmHandle>();
 
 /** The model loop may use only a live handle from this adapter's completed provisioning. */
 export function assertProvisionedVm(adapter: VmAdapter, vm: VmHandle): void {
-  if (PROVEN_VMS.get(vm) !== adapter) throw new EvidencePlanError('workspace_unproven');
+  if (!isProvisionedVm(adapter, vm)) throw new EvidencePlanError('workspace_unproven');
 }
 
 /** Exclusive model-loop ownership; release/teardown invalidates proof immediately,
  * even while the owner awaits a provider or persistence callback. */
 export function leaseProvisionedVm(adapter: VmAdapter, vm: VmHandle): () => void {
-  assertProvisionedVm(adapter, vm);
-  if (LEASED_VMS.has(vm)) throw new EvidencePlanError('workspace_unproven');
-  LEASED_VMS.add(vm);
-  return () => LEASED_VMS.delete(vm);
+  try {
+    return acquireWorkspaceLease(adapter, vm);
+  } catch {
+    throw new EvidencePlanError('workspace_unproven');
+  }
 }
 
 /** A supervisory worker deadline must quiesce the guest, never merely abandon its promise.
  * Caller still owns bounded cleanup retries and lifecycle persistence on destroy failure. */
 export async function abortProvisionedVm(adapter: VmAdapter, vm: VmHandle): Promise<void> {
-  PROVEN_VMS.delete(vm);
+  invalidateProvisionedVm(adapter, vm);
   await adapter.destroy(vm);
 }
 
@@ -405,7 +410,7 @@ export async function releaseWorkspace(
   cause?: unknown
 ): Promise<void> {
   PROVEN.delete(workspace);
-  PROVEN_VMS.delete(workspace.vm);
+  invalidateProvisionedVm(adapter, workspace.vm);
   await destroyVm(adapter, workspace.vm, lifecycle, cause);
 }
 
@@ -520,7 +525,7 @@ export async function provisionWorkspace(options: ProvisionOptions): Promise<Pro
         phaseSwitch: Object.freeze({ attempt: 'package-proxy-after-provisioning', refusedWith }),
       });
       PROVEN.add(workspace);
-      PROVEN_VMS.set(vm, adapter);
+      registerProvisionedVm(adapter, vm);
       return workspace;
     }
   } catch (error) {

@@ -15,6 +15,7 @@ import {
 import { recordProfileSelection, selectProfile } from '../ecosystem/profiles';
 import { ScriptedModel } from '../model/__tests__/scripted-model';
 import { ModelError, type ModelResult } from '../model/adapter';
+import { OpenAICompatibleAdapter } from '../model/openai-compatible';
 import { assertNoSecrets } from '../redaction';
 import { createRun } from '../state';
 import { DEFAULT_LIMITS } from '../vm/adapter';
@@ -835,5 +836,106 @@ describe('provider-neutral admitted controller loop', () => {
       data: { kind: 'hand_off', reason: 'loop_failed' },
     });
     expect(transcript.join('')).not.toContain(SECRET);
+  });
+  it('retains admitted overlay writes across stopped-loop re-entry on the same workspace', async () => {
+    const { ctx, adapter, model } = await setup([
+      call({ kind: 'worker_write_file', path: 'src/duration.js', content: 'held fix' }),
+      call(META),
+    ]);
+    expect(await runImplementation({ ...ctx, maxTurns: 1 }, { plan: PLAN })).toEqual({
+      kind: 'turns_exhausted',
+    });
+    const result = await runImplementation(ctx, { plan: PLAN });
+    if (result.kind !== 'candidate') throw new Error('candidate missing');
+    const manifest = result.overlay.materialize(path.join(temp(), 'candidate'));
+    expect(manifest.entries.find((entry) => entry.path === 'src/duration.js')?.bytes).toBe(
+      Buffer.from('held fix').toString('base64')
+    );
+    expect(adapter.calls.map((c) => c.op)).toEqual(['putFile']);
+    expect(model.requests).toHaveLength(2);
+    expect(
+      await runImplementation(
+        { ...ctx, baseManifest: { ...BASE, digest: 'altered' } },
+        { plan: PLAN }
+      )
+    ).toEqual({ kind: 'hand_off', reason: 'loop_failed' });
+  });
+  it.each([
+    'checkpoint',
+    'stop',
+  ])('release during terminal %s persistence leaves failure as the durable tail', async (event) => {
+    const { ctx, adapter, model, workspace, lifecycle } = await setup([call(META)]);
+    const entries: string[] = [];
+    let released = false;
+    const result = await runImplementation(
+      {
+        ...ctx,
+        persist: async (entry) => {
+          const decoded = JSON.parse(entry);
+          entries.push(entry);
+          if (decoded.event === event && !released) {
+            released = true;
+            await releaseWorkspace(adapter, workspace, lifecycle);
+          }
+        },
+      },
+      { plan: PLAN }
+    );
+    expect(result).toEqual({ kind: 'hand_off', reason: 'loop_failed' });
+    expect(JSON.parse(entries.at(-1) ?? '{}')).toMatchObject({ event: 'stop', data: result });
+    expect(model.requests).toHaveLength(1);
+    expect(adapter.calls.map((c) => c.op)).toEqual(['destroy']);
+  });
+  it('direct VM destruction invalidates proof before any later model call', async () => {
+    const { ctx, adapter, model } = await setup([call(META)]);
+    await adapter.destroy(ctx.vm);
+    adapter.calls.splice(0);
+    expect(await runImplementation(ctx, { plan: PLAN })).toEqual({
+      kind: 'hand_off',
+      reason: 'loop_failed',
+    });
+    expect(model.requests).toEqual([]);
+    expect(adapter.calls).toEqual([]);
+  });
+  it('serialized loop tool schemas reach the OpenAI-compatible transport with an object root', async () => {
+    vi.stubEnv('LOOP_FIXTURE_KEY', 'controller-only-fixture');
+    const { ctx, adapter } = await setup([]);
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async (_url, request) => {
+      const body = JSON.parse(request?.body as string);
+      expect(body.tools[0].function.parameters.type).toBe('object');
+      expect(body.tools[0].function.parameters.oneOf.length).toBeGreaterThan(0);
+      return new Response(
+        JSON.stringify({
+          choices: [
+            {
+              finish_reason: 'tool_calls',
+              message: {
+                content: null,
+                tool_calls: [
+                  {
+                    id: 'call-1',
+                    type: 'function',
+                    function: {
+                      name: 'propose_action',
+                      arguments: JSON.stringify({ kind: 'submit_plan', text: PLAN.text }),
+                    },
+                  },
+                ],
+              },
+            },
+          ],
+          usage: { prompt_tokens: 10, completion_tokens: 10 },
+        })
+      );
+    });
+    const model = new OpenAICompatibleAdapter({
+      model: ctx.model.id,
+      endpoint: 'https://provider.example/v1/',
+      apiKeyEnv: 'LOOP_FIXTURE_KEY',
+      fetch: fetcher,
+    });
+    expect(await runPlanning({ ...ctx, model })).toEqual(PLAN);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(adapter.calls).toEqual([]);
   });
 });

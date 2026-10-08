@@ -6,7 +6,7 @@ import {
 } from '../authority';
 import type { BudgetLedger } from '../budget';
 import type { BudgetRate } from '../budget-types';
-import { CanonicalError, type SourceManifest, sha256 } from '../canonical/export';
+import { CanonicalError, type SourceManifest, sha256, validateManifest } from '../canonical/export';
 import { type ModelAdapter, ModelError, type ModelMessage } from '../model/adapter';
 import { BudgetExhaustedError, meteredComplete } from '../model/metered';
 import { assertNoSecrets, assertSecretFree, REDACTED, redactedExcerpt } from '../redaction';
@@ -47,6 +47,18 @@ export class ActiveTimeBudget {
   }
 }
 const ACTIVE_TIME = new WeakMap<BudgetLedger, Map<string, ActiveTimeBudget>>();
+const OVERLAYS = new WeakMap<VmHandle, WorkspaceOverlay>();
+function workspaceOverlay(ctx: AgentLoopContext): WorkspaceOverlay {
+  const base = validateManifest(ctx.baseManifest);
+  const held = OVERLAYS.get(ctx.vm);
+  if (held) {
+    if (held.base.digest !== base.digest) throw new Error('workspace_base_changed');
+    return held;
+  }
+  const overlay = new WorkspaceOverlay(base);
+  OVERLAYS.set(ctx.vm, overlay);
+  return overlay;
+}
 function activeTime(ctx: AgentLoopContext): ActiveTimeBudget {
   if (ctx.activeTime) return ctx.activeTime;
   let sessions = ACTIVE_TIME.get(ctx.ledger);
@@ -232,7 +244,7 @@ async function loop(
   };
   try {
     release = leaseProvisionedVm(ctx.adapter, ctx.vm);
-    const overlay = new WorkspaceOverlay(ctx.baseManifest);
+    const overlay = workspaceOverlay(ctx);
     const messages: ModelMessage[] = [
       { role: 'user', content: untrustedFrame('issue', ctx.issue) },
     ];
@@ -442,13 +454,14 @@ async function runLoop(
 ): Promise<PlanningResult | ImplementationResult> {
   const tracking: LoopTracking = { turn: 0, stage: 'startup' };
   try {
-    const result = await loop(ctx, phase, input, tracking);
+    let result = await loop(ctx, phase, input, tracking);
     // A failed sink is never recursively asked to report its own failure. Stopping
     // events get a separate small durability allowance even after active expiry.
     if (result.kind === 'hand_off' && result.reason === 'persistence_failed') return result;
-    const data = result.kind === 'candidate' ? { kind: result.kind, meta: result.meta } : result;
-    try {
-      await bounded(
+    const success = () => result.kind === 'candidate' || result.kind === 'plan';
+    const recordStop = async (event: 'checkpoint' | 'stop') => {
+      const data = result.kind === 'candidate' ? { kind: result.kind, meta: result.meta } : result;
+      return bounded(
         async () =>
           ctx.persist(
             safeRecord({
@@ -456,24 +469,36 @@ async function runLoop(
               turn: tracking.turn,
               stage: tracking.stage,
               code: tracking.code,
-              event: 'stop',
+              event,
               data,
             })
           ),
         TERMINAL_TRANSCRIPT_TIMEOUT_MS,
         new Error('terminal_persistence_timeout')
       );
-    } catch {
-      return result.kind === 'candidate' || result.kind === 'plan'
-        ? { kind: 'hand_off', reason: 'persistence_failed' }
-        : result;
-    }
-    if (result.kind === 'candidate' || result.kind === 'plan') {
+    };
+    const validateSuccess = () => {
+      if (!success()) return;
       try {
         assertProvisionedVm(ctx.adapter, ctx.vm);
       } catch {
-        return { kind: 'hand_off', reason: 'loop_failed' };
+        result = { kind: 'hand_off', reason: 'loop_failed' };
       }
+    };
+    try {
+      if (success()) {
+        // A pre-validation write is tentative, never a durable success outcome.
+        await recordStop('checkpoint');
+        validateSuccess();
+      }
+      await recordStop('stop');
+      const wasSuccess = success();
+      validateSuccess();
+      // Teardown can land while even the final stop write is awaited. Append the
+      // actual failure as the last outcome; never leave a success as durable tail.
+      if (wasSuccess && !success()) await recordStop('stop');
+    } catch {
+      return success() ? { kind: 'hand_off', reason: 'persistence_failed' } : result;
     }
     return result;
   } finally {

@@ -22,6 +22,7 @@ describe('controller-authored prompts', () => {
   ] as const)('offers closed stage-specific proposals for %s', (phase) => {
     const tools = agentTools(phase);
     expect(tools).toHaveLength(1);
+    expect(tools[0].function.parameters).toMatchObject({ type: 'object' });
     const schema = tools[0].function.parameters as {
       oneOf: {
         additionalProperties: boolean;
