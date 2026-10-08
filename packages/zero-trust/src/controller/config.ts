@@ -155,6 +155,12 @@ function signer(file: string): void {
 
 /** Only trusted controller input; never model/repository input. No environment values read. */
 export function validateRunConfig(raw: unknown): RunConfig {
+  const config = validateStoredRunConfig(raw);
+  signer(config.signerKeyFile);
+  return config;
+}
+/** Pure stored configuration validation; reporting needs no signing readiness. */
+export function validateStoredRunConfig(raw: unknown): RunConfig {
   let snapshot: unknown;
   try {
     snapshot = structuredClone(raw);
@@ -288,7 +294,6 @@ export function validateRunConfig(raw: unknown): RunConfig {
     r.resumeRunId === undefined ? undefined : text(r.resumeRunId, 'invalid_resume_run_id');
   if (resumeRunId !== undefined && !contributionIdOf(resumeRunId)) fail('invalid_resume_run_id');
   const signerKeyFile = path.resolve(text(r.signerKeyFile, 'invalid_signer_key'));
-  signer(signerKeyFile);
   return {
     issueUrl,
     upstream: { ...binding.upstream, issue: binding.issue },

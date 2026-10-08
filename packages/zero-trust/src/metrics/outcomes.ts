@@ -7,7 +7,8 @@ import {
   readOutcomeHandoffs,
   readOutcomeTrack,
 } from '../controller/outcome-records';
-import type { RunStore } from '../controller/run-store';
+import { RunEvidenceError, type RunStore } from '../controller/run-store';
+import { dataDescriptors } from '../data-descriptors';
 import { readPrivate } from '../durable-fs';
 import { isGitHubLogin } from '../github-login';
 import { assertNoSecrets, assertSecretFree } from '../redaction';
@@ -72,17 +73,19 @@ function attempt<T>(
   } catch (error) {
     const code = (error as { code?: string })?.code;
     diagnostics.push({
-      source,
+      source: error instanceof RunEvidenceError ? error.source : source,
       reason:
         error instanceof OutcomeEvidenceError
           ? error.code
           : source === 'time'
             ? 'invalid_timestamp'
-            : code === 'identity_mismatch'
-              ? 'identity_mismatch'
-              : code === 'ENOENT' || code === 'missing_ledger'
-                ? 'missing'
-                : 'corrupt',
+            : code === 'persistence_uncertain'
+              ? 'incomplete'
+              : ['identity_mismatch', 'missing', 'incomplete', 'recovered'].includes(code ?? '')
+                ? (code as EvidenceDiagnostic['reason'])
+                : code === 'ENOENT' || code === 'missing_ledger'
+                  ? 'missing'
+                  : 'corrupt',
     });
     return 'unknown';
   }
@@ -197,10 +200,9 @@ export function contributionOutcome(store: RunStore, now?: Date | string): Contr
     cost: { byCurrency: 'unknown' },
     unknownEvidence,
   };
-  const config = attempt('config', unknownEvidence, () => store.validateConfigEvidence());
-  if (config === 'unknown') return unknown;
-  const run = attempt('run', unknownEvidence, () => store.validateEvidence());
-  if (run === 'unknown') return unknown;
+  const evidence = attempt('run', unknownEvidence, () => store.validateOutcomeEvidence());
+  if (evidence === 'unknown') return unknown;
+  const { config, run } = evidence;
   if (config.issueUrl !== run.upstreamIssue || config.contributor !== run.contributor)
     return unknown;
   const handoffs = attempt('handoff', unknownEvidence, () => readOutcomeHandoffs(store, run));
@@ -337,6 +339,16 @@ function validateCosts(input: unknown, integer: boolean): void {
       count(part.estimatedMinor, true, integer);
       count(part.observedMinor, true, integer);
     }
+    for (const field of ['estimatedMinor', 'observedMinor']) {
+      const total = row[field];
+      const model = (row.model as Record<string, unknown>)[field];
+      const vm = (row.vm as Record<string, unknown>)[field];
+      if (typeof total === 'number' && typeof model === 'number' && typeof vm === 'number') {
+        const sum = model + vm;
+        const tolerance = integer ? 0 : Number.EPSILON * Math.max(1, sum, total) * 4;
+        if (!Number.isFinite(sum) || Math.abs(total - sum) > tolerance) throw new MetricsError();
+      }
+    }
   }
 }
 /** Preserve original container authority: structuredClone erases class prototypes.
@@ -346,26 +358,22 @@ function snapshotFacts(input: unknown): unknown {
   let nodes = 0;
   function copy(value: unknown, depth: number): unknown {
     if (++nodes > 20000 || depth > 12) throw new MetricsError();
-    if (value === null || ['string', 'boolean', 'number'].includes(typeof value)) return value;
-    if (!plainRecord(value) && !Array.isArray(value)) throw new MetricsError();
-    if (Array.isArray(value) && Object.getPrototypeOf(value) !== Array.prototype)
-      throw new MetricsError();
-    const result: Record<string, unknown> | unknown[] = Array.isArray(value)
-      ? []
-      : Object.create(null);
-    for (const key of Reflect.ownKeys(value)) {
-      if (Array.isArray(value) && key === 'length') continue;
-      const descriptor = Object.getOwnPropertyDescriptor(value, key);
-      if (
-        typeof key !== 'string' ||
-        !descriptor ||
-        !('value' in descriptor) ||
-        !descriptor.enumerable
-      )
-        throw new MetricsError();
+    if (
+      value === undefined ||
+      value === null ||
+      ['string', 'boolean', 'number'].includes(typeof value)
+    )
+      return value;
+    if (typeof value !== 'object') throw new MetricsError();
+    const { array, keys, descriptors } = dataDescriptors(value, true);
+    const result: Record<string, unknown> | unknown[] = array ? [] : Object.create(null);
+    for (const key of keys) {
+      if (array && key === 'length') continue;
+      const descriptor = descriptors[key];
       Object.defineProperty(result, key, {
         value: copy(descriptor.value, depth + 1),
         enumerable: true,
+        configurable: true,
       });
     }
     return result;
@@ -413,6 +421,7 @@ function safeOutcome(input: unknown): ContributionOutcome {
   count(raw.revisions, true);
   count(raw.activeMs, true);
   if (raw.prUrl !== undefined) text(raw.prUrl);
+  else delete raw.prUrl;
   if (raw.waitMs !== 'unknown') {
     const waits = shape(raw.waitMs, ['maintainer', 'contributor', 'review', 'paused']);
     for (const key of ['maintainer', 'contributor', 'review', 'paused']) count(waits[key]);
@@ -420,6 +429,7 @@ function safeOutcome(input: unknown): ContributionOutcome {
   validateCosts(shape(raw.cost, ['byCurrency']).byCurrency, true);
   if (raw.adoptionReported !== undefined && raw.adoptionReported !== 'unknown')
     adoption(raw.adoptionReported);
+  else if (raw.adoptionReported === undefined) delete raw.adoptionReported;
   if (!Array.isArray(raw.unknownEvidence)) throw new MetricsError();
   for (const entry of raw.unknownEvidence) {
     const d = shape(entry, ['source', 'reason']);
@@ -490,6 +500,11 @@ function safeAggregate(input: unknown): OutcomeAggregate {
     (raw.merged as Rate).numerator > (raw.accepted as Rate).numerator ||
     add((raw.accepted as Rate).numerator, (raw.declined as Rate).numerator) >
       (raw.accepted as Rate).denominator ||
+    add(
+      add((raw.accepted as Rate).numerator, (raw.declined as Rate).numerator),
+      (raw.accepted as Rate).unknown
+    ) > contributions ||
+    (raw.eligibleToSubmitted as Rate).numerator > (raw.accepted as Rate).denominator ||
     (raw.merged as Rate).unknown !== (raw.accepted as Rate).unknown ||
     (raw.declined as Rate).unknown !== (raw.accepted as Rate).unknown
   )
@@ -531,7 +546,9 @@ function averageCost(
 }
 /** One outcome per contribution, never one per resumed session. Duplicate IDs are refused. */
 export function aggregate(input: readonly ContributionOutcome[]): OutcomeAggregate {
-  const outcomes = input.map(safeOutcome);
+  const cohort = snapshotFacts(input);
+  if (!Array.isArray(cohort)) throw new MetricsError();
+  const outcomes = cohort.map(safeOutcome);
   assertSecretFree(outcomes);
   if (new Set(outcomes.map((o) => o.contributionId)).size !== outcomes.length)
     throw new MetricsError();
@@ -588,10 +605,11 @@ export function aggregate(input: readonly ContributionOutcome[]): OutcomeAggrega
   };
 }
 export function renderMetricsJson(value: ContributionOutcome | OutcomeAggregate): string {
+  const detached = snapshotFacts(value);
   const snapshot =
-    isRecord(value) && Object.hasOwn(value, 'contributionId')
-      ? safeOutcome(value)
-      : safeAggregate(value);
+    isRecord(detached) && Object.hasOwn(detached, 'contributionId')
+      ? safeOutcome(detached)
+      : safeAggregate(detached);
   assertSecretFree(snapshot);
   return JSON.stringify(snapshot, null, 2);
 }

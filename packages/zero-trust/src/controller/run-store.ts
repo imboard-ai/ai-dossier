@@ -34,7 +34,13 @@ import {
   restoreCheckpoint,
   sameCheckpointBindings,
 } from './checkpoint-record';
-import { type RunConfig, RunConfigError, runConfigInput, validateRunConfig } from './config';
+import {
+  type RunConfig,
+  RunConfigError,
+  runConfigInput,
+  validateRunConfig,
+  validateStoredRunConfig,
+} from './config';
 import { contributionIdOf } from './ids';
 
 export const RUN_STORE_DIRECTORIES = Object.freeze([
@@ -58,6 +64,15 @@ export type RunStoreErrorCode =
   | 'resume_identity_mismatch'
   | 'persistence_uncertain'
   | 'store_closed';
+export class RunEvidenceError extends Error {
+  constructor(
+    readonly source: 'run' | 'config',
+    readonly code: 'missing' | 'corrupt' | 'incomplete' | 'recovered'
+  ) {
+    super('Unknown durable run evidence');
+    this.name = 'RunEvidenceError';
+  }
+}
 export class RunStoreError extends Error {
   constructor(readonly code: RunStoreErrorCode) {
     super(`Run store refused (${code})`);
@@ -69,6 +84,20 @@ function fail(code: RunStoreErrorCode): never {
 }
 function hash(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
+}
+function readStoredConfig(pinned: string): RunConfig {
+  const bytes = readPrivate(path.join(pinned, 'config.json'));
+  if (hash(bytes) !== strictUtf8(readPrivate(path.join(pinned, 'config.sha256'))))
+    fail('invalid_store');
+  return validateStoredRunConfig(parseStrictUtf8Json(bytes));
+}
+function refuseEvidence(source: 'run' | 'config', error: unknown): never {
+  if (error instanceof RunEvidenceError) throw error;
+  const code = (error as NodeJS.ErrnoException)?.code;
+  throw new RunEvidenceError(
+    source,
+    code === 'ENOENT' ? 'missing' : code === 'run_diverged' ? 'incomplete' : 'corrupt'
+  );
 }
 
 /** Pin every ancestor before descending: later writes cannot follow a replacement. */
@@ -305,15 +334,26 @@ export class RunStore {
   /** Read current durable evidence under the lifetime fence, without repair or writes.
    * Cached state is an equality constraint, never independent reporting evidence. */
   validateEvidence(): RunRecord {
+    try {
+      return this.validateOutcomeEvidence().run;
+    } catch {
+      fail('invalid_store');
+    }
+  }
+  /** One fresh config/run read for local outcomes, preserving fixed source/reason diagnostics. */
+  validateOutcomeEvidence(): { config: RunConfig; run: RunRecord } {
+    const config = this.validateConfigEvidence();
+    return { config, run: this.readRunEvidence(config) };
+  }
+  private readRunEvidence(config: RunConfig): RunRecord {
     this.check();
     try {
-      this.validateConfigEvidence();
       const pinned = `/proc/self/fd/${this.directoryFd}`;
       const events = this.withStoreDirectory('control', (dir) =>
         parseJournalEvents(readPrivate(path.join(dir, 'events.jsonl')))
       );
-      if (events.some(isRecoveryEvent)) fail('invalid_store');
-      const evidence = replayControl(events, this.storedConfig);
+      if (events.some(isRecoveryEvent)) throw new RunEvidenceError('run', 'recovered');
+      const evidence = replayControl(events, config);
       const snapshot = restoreRun(parseStrictUtf8Json(readPrivate(path.join(pinned, 'run.json'))));
       assertSecretFree(snapshot);
       if (
@@ -327,8 +367,8 @@ export class RunStore {
       )
         fail('run_diverged');
       return snapshot;
-    } catch {
-      fail('invalid_store');
+    } catch (error) {
+      refuseEvidence('run', error);
     }
   }
   /** Fresh, strict config/digest evidence through the held directory descriptor. */
@@ -336,14 +376,11 @@ export class RunStore {
     this.check();
     try {
       const pinned = `/proc/self/fd/${this.directoryFd}`;
-      const bytes = readPrivate(path.join(pinned, 'config.json'));
-      if (hash(bytes) !== strictUtf8(readPrivate(path.join(pinned, 'config.sha256'))))
-        fail('invalid_store');
-      const config = validateRunConfig(parseStrictUtf8Json(bytes));
+      const config = readStoredConfig(pinned);
       if (JSON.stringify(config) !== JSON.stringify(this.storedConfig)) fail('run_diverged');
       return config;
-    } catch {
-      fail('invalid_store');
+    } catch (error) {
+      refuseEvidence('config', error);
     }
   }
   get config(): RunConfig {
@@ -474,10 +511,8 @@ export class RunStore {
       directoryFd = pinDirectory(directory);
       const pinned = `/proc/self/fd/${directoryFd}`;
       guard = acquire(pinned);
-      const bytes = readPrivate(path.join(pinned, 'config.json'));
-      if (hash(bytes) !== strictUtf8(readPrivate(path.join(pinned, 'config.sha256'))))
-        fail('invalid_store');
-      const config = validateRunConfig(parseStrictUtf8Json(bytes));
+      const config = readStoredConfig(pinned);
+      validateRunConfig(runConfigInput(config));
       const raw = parseStrictUtf8Json(readPrivate(path.join(pinned, 'run.json')));
       assertSecretFree(raw);
       const run = restoreRun(raw);

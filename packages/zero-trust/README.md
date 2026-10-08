@@ -88,7 +88,16 @@ reconciliation. Native async callbacks are rejected before invocation; returned 
 are refused and their rejections consumed. Snapshot validation refuses accessor properties
 and non-plain containers before copying; snapshot failures expose only fixed errors.
 `RunStore.validateConfigEvidence()` checks fresh strict config/digest against the cached
-configuration without writes. `parseJournalEvents(bytes)` is
+configuration without writes or reopening the signing key. `RunStore.validateOutcomeEvidence()`
+returns one freshly validated `{ config, run }` pair with fixed source/reason errors;
+`validateEvidence()` retains its fixed RunStore error boundary. Execution admission still
+requires the signing key. `validateStoredRunConfig(raw)` performs only schema/semantic
+validation; `validateRunConfig(raw)` also checks execution signing readiness. The combined
+evidence API throws `RunEvidenceError` with `source: 'run' | 'config'` and one fixed
+`code: 'missing' | 'corrupt' | 'incomplete' | 'recovered'`, never raw evidence or causes.
+Budget reporting acquires the existing transaction guard read-only
+and refuses an unresolved owner, never initializing or reclaiming it; uncertain publication
+yields unknown costs until ledger reconciliation. `parseJournalEvents(bytes)` is
 the shared pure complete-JSONL decoder, including strict UTF-8 validation; it never
 opens or repairs storage. These APIs do not add CLI
 commands or external telemetry.

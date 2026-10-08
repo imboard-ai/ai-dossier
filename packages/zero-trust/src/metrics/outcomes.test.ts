@@ -10,6 +10,7 @@ import { RunStore } from '../controller/run-store';
 import { replacePrivate } from '../durable-fs';
 import { handoffMarker } from '../github/handoff';
 import { Journal } from '../journal';
+import { withStoreLock } from '../lock';
 import { ReasonCode, transitionRun } from '../state';
 import {
   ADOPTION_MAX_LENGTH,
@@ -175,6 +176,170 @@ afterEach(() => {
 });
 
 describe('local contribution outcomes', () => {
+  it('snapshots outer cohorts and renderer discrimination without invoking accessors or echoing traps', () => {
+    let invoked = 0;
+    const cohort = Object.defineProperty([], '0', {
+      enumerable: true,
+      get() {
+        invoked++;
+        throw new Error('ghp_demo');
+      },
+    });
+    const proxy = new Proxy(
+      {},
+      {
+        getOwnPropertyDescriptor() {
+          throw new Error('ghp_demo');
+        },
+      }
+    );
+    for (const call of [
+      () => aggregate(cohort),
+      () => renderMetricsJson(proxy as never),
+      () => renderMetricsHuman(proxy as never),
+    ]) {
+      expect(call).toThrow(MetricsError);
+      try {
+        call();
+      } catch (error) {
+        expect((error as Error).message).toBe('Invalid local outcome metrics');
+      }
+    }
+    expect(invoked).toBe(0);
+  });
+  it('rejects lossy arrays but normalizes only recognized absent optional fields', () => {
+    const o = contributionOutcome(rig().store);
+    for (const evidence of [Array(2), Object.assign([], { extra: 'discarded' })]) {
+      const input = { ...o, unknownEvidence: evidence };
+      expect(() => aggregate([input])).toThrow(MetricsError);
+      expect(() => renderMetricsJson(input)).toThrow(MetricsError);
+      expect(() => renderMetricsHuman(input)).toThrow(MetricsError);
+    }
+    expect(renderMetricsJson({ ...o, prUrl: undefined, adoptionReported: undefined })).toBe(
+      renderMetricsJson(o)
+    );
+    expect(aggregate([{ ...o, prUrl: undefined }])).toEqual(aggregate([o]));
+  });
+  it('rejects contradictory known costs and cohort membership, preserving fractional averages', () => {
+    const r = rig();
+    r.shipping();
+    r.step(ReasonCode.PublicationObserved);
+    r.track();
+    r.spend(1, 1);
+    const o = contributionOutcome(r.store);
+    const contradictory = {
+      estimatedMinor: 1,
+      observedMinor: 1,
+      model: { estimatedMinor: 9, observedMinor: 9 },
+      vm: { estimatedMinor: 9, observedMinor: 9 },
+    };
+    expect(() => aggregate([{ ...o, cost: { byCurrency: { USD: contradictory } } }])).toThrow(
+      MetricsError
+    );
+    const stats = aggregate([o]);
+    const emptyRate = { numerator: 0, denominator: 0, unknown: 0, value: 'unknown' as const };
+    const overlap = { numerator: 1, denominator: 1, unknown: 1, value: 'unknown' as const };
+    for (const value of [
+      { ...stats, accepted: overlap, merged: overlap, declined: { ...overlap, numerator: 0 } },
+      {
+        ...stats,
+        accepted: emptyRate,
+        merged: emptyRate,
+        declined: emptyRate,
+        reworkPerSubmitted: emptyRate,
+      },
+      { ...stats, costPerSubmitted: { USD: contradictory } },
+    ])
+      for (const render of [renderMetricsJson, renderMetricsHuman])
+        expect(() => render(value)).toThrow(MetricsError);
+    const currency = {
+      estimatedMinor: 0.3,
+      observedMinor: 0.3,
+      model: { estimatedMinor: 0.1, observedMinor: 0.1 },
+      vm: { estimatedMinor: 0.2, observedMinor: 0.2 },
+    };
+    expect(() =>
+      renderMetricsJson({ ...stats, costPerSubmitted: { USD: currency } })
+    ).not.toThrow();
+  });
+  it('reads config evidence once without requiring a retired signer and diagnoses missing evidence', () => {
+    const r = rig();
+    fs.unlinkSync(r.store.config.signerKeyFile);
+    const original = fs.openSync;
+    const reads: string[] = [];
+    vi.spyOn(fs, 'openSync').mockImplementation((file, flags, mode) => {
+      if (typeof file === 'string') reads.push(file);
+      return original(file, flags, mode);
+    });
+    expect(contributionOutcome(r.store).identity).toBe('known');
+    expect(reads.filter((file) => file.endsWith('/config.json'))).toHaveLength(1);
+    expect(reads.filter((file) => file.endsWith('/config.sha256'))).toHaveLength(1);
+    fs.unlinkSync(path.join(r.store.directory, 'config.json'));
+    expect(contributionOutcome(r.store).unknownEvidence).toContainEqual({
+      source: 'config',
+      reason: 'missing',
+    });
+    const second = rig();
+    fs.unlinkSync(path.join(second.store.directory, 'control/events.jsonl'));
+    expect(contributionOutcome(second.store).unknownEvidence).toContainEqual({
+      source: 'run',
+      reason: 'missing',
+    });
+  });
+  it('refuses reporting an unsettled budget publication after directory fsync uncertainty', () => {
+    const r = rig();
+    const row = r.ledger.reserve(r.store.budgetSessionId(1), {
+      money: { currency: 'USD', minor: 10 },
+      tokens: 1,
+      timeMs: 1,
+      rates: [r.rate],
+    });
+    const original = fs.fsyncSync;
+    const rename = fs.renameSync;
+    let renamed = false;
+    vi.spyOn(fs, 'renameSync').mockImplementation((a, b) => {
+      const result = rename(a, b);
+      if (b === r.ledger.file) renamed = true;
+      return result;
+    });
+    vi.spyOn(fs, 'fsyncSync').mockImplementation((fd) => {
+      if (renamed && fs.fstatSync(fd).isDirectory()) throw new Error('injected');
+      return original(fd);
+    });
+    expect(() =>
+      r.ledger.settle(row.id, {
+        money: { currency: 'USD', minor: 8 },
+        tokens: 1,
+        timeMs: 1,
+        source: 'fixture',
+      })
+    ).toThrow();
+    vi.restoreAllMocks();
+    expect(renamed).toBe(true);
+    expect(contributionOutcome(r.store)).toMatchObject({
+      cost: { byCurrency: 'unknown' },
+      unknownEvidence: expect.arrayContaining([{ source: 'budget', reason: 'incomplete' }]),
+    });
+  });
+  it('refuses concurrent budget publication without reclaiming or writing evidence', () => {
+    const r = rig();
+    withStoreLock(
+      `${r.ledger.file}.lock`,
+      0,
+      () => {
+        throw new Error('unexpected reclaim');
+      },
+      () => {
+        const write = vi.spyOn(fs, 'writeSync');
+        const rename = vi.spyOn(fs, 'renameSync');
+        expect(contributionOutcome(r.store).cost.byCurrency).toBe('unknown');
+        expect(write).not.toHaveBeenCalled();
+        expect(rename).not.toHaveBeenCalled();
+        vi.restoreAllMocks();
+      }
+    );
+    expect(contributionOutcome(r.store).cost.byCurrency).not.toBe('unknown');
+  });
   it.each([
     'deleted',
     'corrupt',
