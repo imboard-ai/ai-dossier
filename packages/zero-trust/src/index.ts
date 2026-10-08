@@ -23,6 +23,7 @@ export * from './github/reconcile';
 export * from './github/track';
 export * from './intents';
 export * from './journal';
+export * from './metrics/outcomes';
 export * from './model/adapter';
 export * from './model/metered';
 export * from './model/openai-compatible';

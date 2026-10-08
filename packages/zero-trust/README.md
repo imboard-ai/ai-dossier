@@ -10,6 +10,53 @@ plus ecosystem detection, runtime profiles, command plans and package-proxy poli
 (see the gate 2 section below).
 Publication remains gated on S1 feasibility.
 
+## Local outcome metrics (#1103)
+
+`contributionOutcome(store, now?)` reads the locked `RunStore` history, the existing
+`budget/ledger.json` through `BudgetLedger.snapshot()` / `budgetTotals`, and the
+hand-off/tracker journals through their existing replay APIs. The controller's
+local replay adapter never constructs a network driver or model adapter. Metrics
+imports neither `src/github/` nor `src/model/`; no reporting call contacts a service
+or initializes/repairs a missing or truncated journal. Missing, corrupt, recovered
+or wrong-identity evidence is `unknown`, never zero or an inferred success.
+Submission comes from the durable publication transition, not acceptance. Only a
+tracker-observed outcome with its recorded SHA counts as merged/declined. Revisions
+count tracker-recorded revision requests, including the currently active revision.
+Gate passage is eligible; a pre-passage policy block is ineligible; a gating
+permission/contributor wait is hand-off; an undecided gate is unknown.
+
+The result includes contribution/contributor/upstream/issue identity, gate,
+submission/PR URL/outcome/revisions, `activeMs`, four `waitMs` families (maintainer,
+contributor, review, paused), per-currency cost and an optional voluntary adoption
+note. Active states are gating/planning/implementing/verifying/shipping/revising.
+Submitted, awaiting-review and accepted intervals are review wait. Terminal time
+is neither active nor wait. `now` defaults to the last durable transition; pass a
+canonical UTC timestamp or Date to include the current interval.
+
+Cost is in accounting-currency minor units after recorded ledger FX; currencies
+are never combined. Estimated amounts include non-released reservations;
+provider observations stay separate, and unobserved spend is unknown. Model/VM
+components each expose estimated and observed amounts. Token/model-resource rates
+identify model rows; `vm_increment` identifies VM rows. Mixed or unattributable
+reservations yield unknown components rather than an invented allocation.
+
+`aggregate(outcomes)` accepts one result per distinct contribution (duplicates
+are refused). It returns eligible→submitted, accepted (including merged), merged,
+declined and rework-per-submitted rates with numerator, denominator, unknown count
+and value; empty/uncertain denominators give unknown values. It also returns median
+active time, per-currency average cost per submitted/accepted contribution and
+case-insensitive contributions-per-contributor (`repeatUsage`). Unknown evidence
+is retained rather than silently dropped from statistical results. A known absent
+currency contributes zero to that currency's average across the selected cohort.
+
+`recordAdoption(store, note, now)` records only explicitly supplied voluntary text
+in private `artifacts/adoption.json` (atomic replacement). `ADOPTION_MAX_LENGTH`
+is 2,000 UTF-16 code units; empty, malformed or secret-shaped notes are refused.
+A missing note is omitted; a corrupt note is unknown. Reporting never infers
+adoption. `renderMetricsHuman` / `renderMetricsJson` contain identical facts;
+human values are JSON-quoted to prevent line spoofing. These APIs do not add CLI
+commands or external telemetry.
+
 ## Community gate and explicit-resume invitation (#1098)
 
 `decideGate(policy: PolicyAssessment, eligibility: Eligibility, contributor)` is
