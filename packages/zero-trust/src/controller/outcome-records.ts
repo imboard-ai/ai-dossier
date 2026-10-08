@@ -7,8 +7,9 @@ import { replayTrack } from '../github/track';
 import { parseJournalEvents } from '../journal';
 import { isRecoveryEvent } from '../recovery';
 import { assertSecretFree } from '../redaction';
-import { isRunContinuation, ReasonCode, type RunRecord } from '../state';
+import { isRunContinuation, type RunRecord } from '../state';
 import type { RunStore } from './run-store';
+import { isTrackerContinuation } from './tracker-continuation';
 
 export class OutcomeEvidenceError extends Error {
   constructor(readonly code: 'identity_mismatch' | 'incomplete' | 'recovered') {
@@ -39,21 +40,12 @@ export function readOutcomeTrack(store: RunStore, run: RunRecord) {
     throw new OutcomeEvidenceError('identity_mismatch');
   // A valid prefix may lag external execution, but never omit the tracker's own
   // observations already persisted by the controller (complete-line tail loss).
-  const owned = [
-    ReasonCode.ReviewAwaited,
-    ReasonCode.RevisionRequested,
-    ReasonCode.UpstreamAccepted,
-    ReasonCode.ObservedUpstreamMerge,
-    ReasonCode.UpstreamDeclined,
-    ReasonCode.PublicationObserved,
-  ];
-  if (run.history.slice(state.run.history.length).some((e) => owned.includes(e.reasonCode)))
-    throw new OutcomeEvidenceError('incomplete');
+  if (!isTrackerContinuation(state.run, run)) throw new OutcomeEvidenceError('incomplete');
   return state;
 }
 export function readOutcomeBudget(store: RunStore) {
   const state = store.withStoreDirectory('budget', (dir) =>
-    new BudgetLedger(path.join(dir, 'ledger.json'), store.contributionId).snapshot()
+    BudgetLedger.readOnlySnapshot(path.join(dir, 'ledger.json'), store.contributionId)
   );
   for (const session of state.sessions) budgetTotals(state, session.id);
   return state;

@@ -9,8 +9,10 @@ import {
 } from '../controller/outcome-records';
 import type { RunStore } from '../controller/run-store';
 import { readPrivate, replacePrivate } from '../durable-fs';
+import { isGitHubLogin } from '../github-login';
 import { assertNoSecrets, assertSecretFree } from '../redaction';
-import { isRecord, isTimestamp, ReasonCode, restoreRun } from '../state';
+import { isRecord, isTimestamp, ReasonCode } from '../state';
+import { parseStrictUtf8Json } from '../strict-utf8';
 
 export type Known<T> = T | 'unknown';
 export interface CostAmounts {
@@ -76,9 +78,11 @@ function attempt<T>(
           ? error.code
           : source === 'time'
             ? 'invalid_timestamp'
-            : code === 'ENOENT' || code === 'missing_ledger'
-              ? 'missing'
-              : 'corrupt',
+            : code === 'identity_mismatch'
+              ? 'identity_mismatch'
+              : code === 'ENOENT' || code === 'missing_ledger'
+                ? 'missing'
+                : 'corrupt',
     });
     return 'unknown';
   }
@@ -135,7 +139,7 @@ function costs(store: RunStore): Readonly<Record<string, CurrencyCost>> {
 }
 export const ADOPTION_MAX_LENGTH = 2000;
 function adoption(raw: unknown): { at: string; note: string } {
-  if (!isRecord(raw)) throw new MetricsError();
+  if (!plainRecord(raw)) throw new MetricsError();
   const { at, note } = raw;
   if (typeof note === 'string') assertNoSecrets(note);
   if (
@@ -153,16 +157,19 @@ function readAdoption(
   diagnostics: EvidenceDiagnostic[]
 ): ContributionOutcome['adoptionReported'] {
   try {
-    return adoption(
-      JSON.parse(
-        store
-          .withStoreDirectory('artifacts', (dir) => readPrivate(path.join(dir, 'adoption.json')))
-          .toString('utf8')
-      )
-    );
+    return store.withStoreDirectory('artifacts', (dir) => {
+      try {
+        return adoption(parseStrictUtf8Json(readPrivate(path.join(dir, 'adoption.json'))));
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+        throw error;
+      }
+    });
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-    diagnostics.push({ source: 'adoption', reason: 'corrupt' });
+    diagnostics.push({
+      source: 'adoption',
+      reason: (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'missing' : 'corrupt',
+    });
     return 'unknown';
   }
 }
@@ -192,7 +199,7 @@ export function contributionOutcome(store: RunStore, now?: Date | string): Contr
     cost: { byCurrency: 'unknown' },
     unknownEvidence,
   };
-  const run = attempt('run', unknownEvidence, () => restoreRun(store.run));
+  const run = attempt('run', unknownEvidence, () => store.validateEvidence());
   if (run === 'unknown') return unknown;
   const config = attempt('config', unknownEvidence, () => store.config);
   if (
@@ -295,9 +302,15 @@ export interface OutcomeAggregate {
   readonly unknownContributors: number;
 }
 function shape(value: unknown, keys: readonly string[]): Record<string, unknown> {
-  if (!isRecord(value) || Object.keys(value).some((k) => !keys.includes(k)))
+  if (!plainRecord(value) || Object.keys(value).some((k) => !keys.includes(k)))
     throw new MetricsError();
   return value;
+}
+function plainRecord(value: unknown): value is Record<string, unknown> {
+  return (
+    isRecord(value) &&
+    (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null)
+  );
 }
 function choice(value: unknown, values: readonly unknown[]): void {
   if (!values.includes(value)) throw new MetricsError();
@@ -317,7 +330,7 @@ function text(value: unknown): void {
 }
 function validateCosts(input: unknown, integer: boolean): void {
   if (input === 'unknown') return;
-  if (!isRecord(input)) throw new MetricsError();
+  if (!plainRecord(input)) throw new MetricsError();
   for (const [currency, raw] of Object.entries(input)) {
     if (!/^[A-Z]{3}$/.test(currency)) throw new MetricsError();
     const row = shape(raw, ['estimatedMinor', 'observedMinor', 'model', 'vm']);
@@ -354,6 +367,7 @@ function safeOutcome(input: unknown): ContributionOutcome {
   text(raw.contributor);
   text(raw.upstream);
   choice(raw.identity, ['known', 'unknown']);
+  if (raw.identity === 'known' && !isGitHubLogin(raw.contributor)) throw new MetricsError();
   choice(raw.gated, ['eligible', 'ineligible', 'hand_off', 'unknown']);
   choice(raw.submitted, [true, false, 'unknown']);
   choice(raw.outcome, ['open', 'accepted', 'merged', 'declined', 'none', 'unknown']);
@@ -413,12 +427,17 @@ function safeAggregate(input: unknown): OutcomeAggregate {
     count(r.denominator);
     count(r.unknown);
     count(r.value, true, false);
+    if (
+      r.value !== rate(r.numerator as number, r.denominator as number, r.unknown as number).value ||
+      (key !== 'reworkPerSubmitted' && (r.numerator as number) > (r.denominator as number))
+    )
+      throw new MetricsError();
   }
   validateCosts(raw.costPerSubmitted, false);
   validateCosts(raw.costPerAccepted, false);
-  if (!isRecord(raw.repeatUsage)) throw new MetricsError();
+  if (!plainRecord(raw.repeatUsage)) throw new MetricsError();
   for (const [login, total] of Object.entries(raw.repeatUsage)) {
-    if (!/^[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?$/.test(login)) throw new MetricsError();
+    if (!isGitHubLogin(login) || login !== login.toLowerCase()) throw new MetricsError();
     count(total);
   }
   return raw as unknown as OutcomeAggregate;

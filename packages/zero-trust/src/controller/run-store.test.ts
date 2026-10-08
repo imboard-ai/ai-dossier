@@ -88,6 +88,35 @@ afterEach(() => {
 });
 
 describe('RunStore', () => {
+  it('validates durable evidence non-mutatingly and refuses snapshot mismatch', () => {
+    const { store } = rig();
+    const write = vi.spyOn(fs, 'writeSync');
+    const replace = vi.spyOn(fs, 'renameSync');
+    expect(store.validateEvidence()).toEqual(store.run);
+    expect(write).not.toHaveBeenCalled();
+    expect(replace).not.toHaveBeenCalled();
+    const snapshot = path.join(store.directory, 'run.json');
+    fs.writeFileSync(
+      snapshot,
+      JSON.stringify(transitionRun(store.run, ReasonCode.GatePassed, LATER))
+    );
+    expect(() => store.validateEvidence()).toThrow(RunStoreError);
+  });
+
+  it('refuses thenables at runtime and in the synchronous callback contract', () => {
+    const { store } = rig();
+    // @ts-expect-error Async callbacks cannot outlive the pinned descriptor.
+    expect(() => store.withStoreDirectory('artifacts', async () => 1)).toThrow(RunStoreError);
+    // @ts-expect-error Structural Promise-like callbacks are also refused.
+    expect(() => store.withStoreDirectory('artifacts', () => Promise.resolve(1))).toThrow(
+      RunStoreError
+    );
+    expect(() =>
+      // biome-ignore lint/suspicious/noThenProperty: Deliberate hostile thenable verifies runtime refusal.
+      store.withStoreDirectory('artifacts', (() => ({ then: () => 1 })) as () => unknown)
+    ).toThrow(RunStoreError);
+    expect(store.withStoreDirectory('artifacts', () => 1)).toBe(1);
+  });
   it('creates every dedicated private directory and durable config/run then restores', () => {
     const { root, config, store } = rig();
     expect(store.contributionId).toMatch(/^ztc-[a-f0-9]{16}$/u);

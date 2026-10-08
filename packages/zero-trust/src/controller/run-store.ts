@@ -8,9 +8,9 @@ import {
   replacePrivate,
   syncDirectory,
 } from '../durable-fs';
-import { Journal } from '../journal';
+import { Journal, parseJournalEvents } from '../journal';
 import { lockDescriptor, StoreLockedError } from '../lock';
-import { isTailRecovery } from '../recovery';
+import { isRecoveryEvent, isTailRecovery } from '../recovery';
 import { assertSecretFree } from '../redaction';
 import {
   createRun,
@@ -20,6 +20,7 @@ import {
   restoreRun,
   sameRunRecord,
 } from '../state';
+import { parseStrictUtf8Json, strictUtf8 } from '../strict-utf8';
 import { type RunConfig, RunConfigError, runConfigInput, validateRunConfig } from './config';
 import { contributionIdOf } from './ids';
 
@@ -78,7 +79,7 @@ function pinDirectory(directory: string): number {
   }
 }
 
-function replayControl(journal: Journal): {
+function replayControl(events: unknown[]): {
   run: RunRecord;
   confirmed?: RunRecord;
   upstreamId?: number;
@@ -86,7 +87,7 @@ function replayControl(journal: Journal): {
   let run: RunRecord | undefined;
   let confirmed: RunRecord | undefined;
   let upstreamId: number | undefined;
-  for (const event of journal.read()) {
+  for (const event of events) {
     assertSecretFree(event);
     if (isTailRecovery(event)) continue;
     if (!isRecord(event) || event.v !== 1) fail('invalid_store');
@@ -177,6 +178,28 @@ export class RunStore {
     this.check();
     return this.current;
   }
+  /** Read current durable evidence under the lifetime fence, without repair or writes.
+   * Cached state is an equality constraint, never independent reporting evidence. */
+  validateEvidence(): RunRecord {
+    this.check();
+    const pinned = `/proc/self/fd/${this.directoryFd}`;
+    const events = this.withStoreDirectory('control', (dir) =>
+      parseJournalEvents(readPrivate(path.join(dir, 'events.jsonl')))
+    );
+    if (events.some(isRecoveryEvent)) fail('invalid_store');
+    const evidence = replayControl(events);
+    const snapshot = restoreRun(parseStrictUtf8Json(readPrivate(path.join(pinned, 'run.json'))));
+    assertSecretFree(snapshot);
+    if (
+      !evidence.confirmed ||
+      !sameRunRecord(evidence.confirmed, evidence.run) ||
+      !sameRunRecord(evidence.run, snapshot) ||
+      !sameRunRecord(snapshot, this.current) ||
+      evidence.upstreamId !== this.upstreamId
+    )
+      fail('run_diverged');
+    return snapshot;
+  }
   get config(): RunConfig {
     this.check();
     return structuredClone(this.storedConfig);
@@ -199,7 +222,7 @@ export class RunStore {
    * The callback must not retain the descriptor path beyond its lifetime. */
   withStoreDirectory<T>(
     name: (typeof RUN_STORE_DIRECTORIES)[number],
-    work: (directory: string) => T
+    work: (directory: string) => T & (T extends PromiseLike<unknown> ? never : unknown)
   ): T {
     this.check();
     if (!RUN_STORE_DIRECTORIES.includes(name)) fail('invalid_store');
@@ -210,7 +233,15 @@ export class RunStore {
     try {
       const stat = fs.fstatSync(fd);
       if (stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o700) fail('invalid_store');
-      return work(`/proc/self/fd/${fd}`);
+      const value = work(`/proc/self/fd/${fd}`);
+      if (
+        value !== null &&
+        (typeof value === 'object' || typeof value === 'function') &&
+        'then' in value &&
+        typeof value.then === 'function'
+      )
+        fail('invalid_store');
+      return value;
     } finally {
       fs.closeSync(fd);
     }
@@ -285,10 +316,10 @@ export class RunStore {
       const pinned = `/proc/self/fd/${directoryFd}`;
       guard = acquire(pinned);
       const bytes = readPrivate(path.join(pinned, 'config.json'));
-      if (hash(bytes) !== readPrivate(path.join(pinned, 'config.sha256')).toString('utf8'))
+      if (hash(bytes) !== strictUtf8(readPrivate(path.join(pinned, 'config.sha256'))))
         fail('invalid_store');
-      const config = validateRunConfig(JSON.parse(bytes.toString('utf8')));
-      const raw: unknown = JSON.parse(readPrivate(path.join(pinned, 'run.json')).toString('utf8'));
+      const config = validateRunConfig(parseStrictUtf8Json(bytes));
+      const raw = parseStrictUtf8Json(readPrivate(path.join(pinned, 'run.json')));
       assertSecretFree(raw);
       const run = restoreRun(raw);
       if (
@@ -299,7 +330,7 @@ export class RunStore {
         fail('invalid_store');
       readPrivate(path.join(directory, 'control', 'events.jsonl'));
       journal = new Journal(path.join(directory, 'control'));
-      const evidence = replayControl(journal);
+      const evidence = replayControl(journal.read());
       if (!sameRunRecord(evidence.run, run)) {
         if (
           !evidence.confirmed ||

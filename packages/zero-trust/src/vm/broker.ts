@@ -4,6 +4,7 @@
 import type { Duplex } from 'node:stream';
 import { assertNoSecrets } from '../redaction';
 import { isRecord } from '../state';
+import { parseStrictUtf8Json } from '../strict-utf8';
 import {
   BrokerError,
   type ContainerProfile,
@@ -250,7 +251,7 @@ export class BrokerClient {
     }
     let frame: unknown;
     try {
-      frame = JSON.parse(line.toString('utf8'));
+      frame = parseStrictUtf8Json(line);
     } catch {
       this.taint('malformed_frame');
       return;

@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import * as path from 'node:path';
 import { assertDirectoryAncestors, publishPrivate, readPrivate, syncDirectory } from './durable-fs';
 import { isTailRecovery, type TailRecovery } from './recovery';
+import { parseStrictUtf8Json, strictUtf8 } from './strict-utf8';
 
 const openPaths = new Set<string>();
 
@@ -85,7 +86,7 @@ export class Journal {
     const markerPath = `${this.filePath}.recovery`;
     let marker: TailRecovery | undefined;
     try {
-      const value: unknown = JSON.parse(readPrivate(markerPath).toString('utf8'));
+      const value = parseStrictUtf8Json(readPrivate(markerPath));
       if (!isTailRecovery(value)) throw new JournalError();
       marker = value;
     } catch (error) {
@@ -100,7 +101,7 @@ export class Journal {
       const tail = bytes.subarray(offset);
       let parsed = false;
       try {
-        JSON.parse(tail.toString('utf8'));
+        parseStrictUtf8Json(tail);
         parsed = true;
       } catch {
         // Only an unparseable, unterminated final line qualifies.
@@ -203,8 +204,8 @@ export function parseJournalEvents(bytes: Buffer): unknown[] {
   return parseComplete(bytes);
 }
 function parseComplete(bytes: Buffer): unknown[] {
-  const text = bytes.toString('utf8');
-  if (!Buffer.from(text).equals(bytes) || (text && !text.endsWith('\n'))) throw new JournalError();
+  const text = strictUtf8(bytes);
+  if (text && !text.endsWith('\n')) throw new JournalError();
   return text
     ? text
         .slice(0, -1)

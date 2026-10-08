@@ -20,6 +20,7 @@ import {
   StorePersistenceError,
   withStoreLock,
 } from './lock';
+import { parseStrictUtf8Json } from './strict-utf8';
 
 function integer(n: number, label: string, positive = false): void {
   if (!Number.isSafeInteger(n) || n < (positive ? 1 : 0)) {
@@ -337,6 +338,40 @@ export function isBudgetSessionExhausted(state: BudgetState, sessionId: string):
 
 /** Controller-owned LOCAL filesystem ledger. Opening is read-only and never resets history. */
 export class BudgetLedger {
+  /** Non-mutating snapshot through a caller-pinned path. Never canonicalize it:
+   * resolving /proc/self/fd back to a name discards descriptor authority. */
+  static readOnlySnapshot(file: string, contributionId: string): BudgetState {
+    let bytes: Buffer;
+    try {
+      const fd = fs.openSync(
+        file,
+        fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK
+      );
+      try {
+        const stat = fs.fstatSync(fd);
+        if (
+          !stat.isFile() ||
+          stat.nlink !== 1 ||
+          stat.uid !== process.getuid?.() ||
+          (stat.mode & 0o077) !== 0
+        )
+          throw new BudgetError('corrupt_ledger', 'Ledger must be a private regular file');
+        bytes = fs.readFileSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+        throw new BudgetError('missing_ledger', 'Budget ledger missing; never reset on resume');
+      throw error;
+    }
+    try {
+      return validate(parseStrictUtf8Json(bytes), contributionId);
+    } catch (error) {
+      if (error instanceof BudgetError) throw error;
+      throw new BudgetError('corrupt_ledger', 'Unreadable budget ledger; reconciliation required');
+    }
+  }
   readonly file: string;
   private writeUncertain = false;
   private readonly resumePending = new Set<string>();
@@ -408,30 +443,7 @@ export class BudgetLedger {
   }
 
   snapshot(): BudgetState {
-    let raw: string;
-    try {
-      const fd = fs.openSync(
-        this.file,
-        fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK
-      );
-      try {
-        if (!fs.fstatSync(fd).isFile())
-          throw new BudgetError('corrupt_ledger', 'Ledger must be a regular file');
-        raw = fs.readFileSync(fd, 'utf8');
-      } finally {
-        fs.closeSync(fd);
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT')
-        throw new BudgetError('missing_ledger', 'Budget ledger missing; never reset on resume');
-      throw error;
-    }
-    try {
-      return validate(JSON.parse(raw), this.contributionId);
-    } catch (error) {
-      if (error instanceof BudgetError) throw error;
-      throw new BudgetError('corrupt_ledger', 'Unreadable budget ledger; reconciliation required');
-    }
+    return BudgetLedger.readOnlySnapshot(this.file, this.contributionId);
   }
 
   startSession(input: BudgetSession): void {

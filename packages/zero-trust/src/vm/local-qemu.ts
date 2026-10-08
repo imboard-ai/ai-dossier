@@ -10,7 +10,8 @@ import { privateDir, readPrivate, replacePrivate } from '../durable-fs';
 import type { Journal } from '../journal';
 import { processStartToken } from '../lock';
 import { assertNoSecrets } from '../redaction';
-import { ReasonCode, type RunRecord, transitionRun } from '../state';
+import { isRecord, ReasonCode, type RunRecord, transitionRun } from '../state';
+import { parseStrictUtf8Json } from '../strict-utf8';
 import {
   type Accelerator,
   type AcceleratorRequest,
@@ -321,7 +322,7 @@ export class LocalQemuAdapter implements VmAdapter {
     const agent = this.options.agentSource ?? fs.readFileSync(AGENT_SOURCE_PATH, 'utf8');
     let raw: unknown;
     try {
-      raw = JSON.parse(readPrivate(file).toString('utf8'));
+      raw = parseStrictUtf8Json(readPrivate(file));
     } catch (error) {
       const missing = (error as NodeJS.ErrnoException).code === 'ENOENT';
       throw new UnsupportedEnvironmentError(
@@ -1007,7 +1008,8 @@ export class LocalQemuAdapter implements VmAdapter {
     }
     let engaged: { reason?: unknown; at?: unknown } = {};
     try {
-      engaged = JSON.parse((seen as Buffer).toString('utf8'));
+      const raw = parseStrictUtf8Json(seen as Buffer);
+      if (isRecord(raw)) engaged = raw;
     } catch {
       // unreadable marker: released without its original reason
     }

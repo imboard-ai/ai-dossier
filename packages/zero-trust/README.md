@@ -67,7 +67,14 @@ A missing note is omitted; a corrupt note is unknown. Reporting never infers
 adoption. `renderMetricsHuman` / `renderMetricsJson` contain identical facts;
 human values are JSON-quoted to prevent line spoofing. Both renderers and aggregation
 validate public facts, refuse extra keys and invalid numeric values, and preserve
-the same fixed diagnostic facts. RunStore's synchronous `withStoreDirectory(name,
+the same facts in both formats. Per-contribution reports retain fixed source/reason
+diagnostics; aggregates retain uncertainty counts and unknown statistics, not source
+diagnostics. Every report validates the complete durable control journal and snapshot
+against the cached run under the held fence using `RunStore.validateEvidence()`;
+missing, corrupt, recovered or mismatched evidence cannot yield cached success.
+Evidence JSON is decoded with fatal UTF-8 validation. Budget reporting uses
+`BudgetLedger.readOnlySnapshot(file, contributionId)` through the pinned directory
+without resolving it back to a mutable pathname. RunStore's synchronous `withStoreDirectory(name,
 callback)` pins a private child directory under its held descriptor/fence and closes
 it after the callback; descriptor paths must never escape that callback. Adoption
 reads/writes refuse symlink directory replacement. `parseJournalEvents(bytes)` is

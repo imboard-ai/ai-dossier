@@ -57,7 +57,12 @@ export function assembleStatus(parts: StatusParts): StatusRecord {
   const run = restoreRun(parts.run);
   const now = Date.parse(parts.now instanceof Date ? parts.now.toISOString() : parts.now);
   if (!Number.isFinite(now) || now < Date.parse(run.updatedAt)) throw new InvalidStatusError();
-  const activeTimeMs = lifecycleTimes(run, now).activeMs;
+  let activeTimeMs: number;
+  try {
+    activeTimeMs = lifecycleTimes(run, now).activeMs;
+  } catch {
+    throw new InvalidStatusError();
+  }
   const session = parts.budget.sessions.find((s) => s.id === parts.sessionId);
   if (!session || parts.budget.contributionId !== contributionIdOf(run.runId))
     throw new InvalidStatusError();

@@ -6,6 +6,7 @@
  * edits, withdrawal and reopening are contributor actions the run confirms by reading the
  * PR again; it never writes upstream and never claims what it has not observed. */
 import path from 'node:path';
+import { isTrackerContinuation } from '../controller/tracker-continuation';
 import { writePrivateFile } from '../durable-fs';
 import { type IntentInput, isAdmitted, WriteBlockedError } from '../intents';
 import type { Journal } from '../journal';
@@ -588,32 +589,11 @@ function sameText(a: string | null, b: string): boolean {
   return (a ?? '').replace(/\r\n?/gu, '\n').trimEnd() === b.replace(/\r\n?/gu, '\n').trimEnd();
 }
 
-/** Lifecycle steps recorded elsewhere (isolated revision, verification, pause, failures).
- * PR outcomes, review and revision edges are the tracker's own: only its reads record them. */
-const EXTERNAL_REASONS: readonly ReasonCode[] = Object.freeze([
-  ReasonCode.CandidateReady,
-  ReasonCode.VerificationPassed,
-  ReasonCode.RepairRequired,
-  ReasonCode.UserPaused,
-  ReasonCode.ResumeRevising,
-  ReasonCode.ResumeVerifying,
-  ReasonCode.ResumeShipping,
-  ReasonCode.PolicyBlocked,
-  ReasonCode.UnsupportedEnvironment,
-  ReasonCode.ExecutionFailed,
-  ReasonCode.UserCancelled,
-  ReasonCode.CleanupFailed,
-  ReasonCode.CleanupCompleted,
-]);
-
 /** The same controller run or an exact forward continuation, advanced only by external
  * steps. */
 function continuation(previous: RunRecord, value: unknown): RunRecord {
   const run = restoreRun(value);
-  if (!isRunContinuation(previous, run)) throw new TrackError('run_diverged');
-  const added = run.history.slice(previous.history.length);
-  const owned = added.find((entry) => !EXTERNAL_REASONS.includes(entry.reasonCode));
-  if (owned) throw new TrackError('run_diverged', `tracker-owned:${owned.reasonCode}`);
+  if (!isTrackerContinuation(previous, run)) throw new TrackError('run_diverged');
   return run;
 }
 

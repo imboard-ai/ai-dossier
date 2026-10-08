@@ -12,6 +12,7 @@ import {
   type LockOwner,
   type LockRecovery,
 } from './recovery';
+import { parseStrictUtf8Json } from './strict-utf8';
 
 export class StoreLockedError extends Error {
   constructor() {
@@ -176,7 +177,7 @@ export function withStoreLock<T>(
       );
       privateFile(ownerFd);
       if (fs.fstatSync(ownerFd).size > 4096) throw new StoreLockedError();
-      const owner: unknown = JSON.parse(fs.readFileSync(ownerFd, 'utf8'));
+      const owner = parseStrictUtf8Json(fs.readFileSync(ownerFd));
       if (!isLockOwner(owner)) throw new StoreLockedError();
       if (owner.pidNamespace !== pidNamespace()) throw new StoreLockedError();
       const token = processStartToken(owner.pid);

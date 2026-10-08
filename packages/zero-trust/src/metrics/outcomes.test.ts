@@ -175,6 +175,132 @@ afterEach(() => {
 });
 
 describe('local contribution outcomes', () => {
+  it.each([
+    'deleted',
+    'truncated',
+    'corrupt',
+    'complete-prefix',
+  ])('refuses cached success after control evidence is %s', (mode) => {
+    const r = rig();
+    r.shipping();
+    r.step(ReasonCode.PublicationObserved);
+    const t = r.track();
+    t.event({
+      type: 'outcome',
+      outcome: 'merged',
+      headSha: t.sha,
+      run: r.step(ReasonCode.ObservedUpstreamMerge),
+    });
+    expect(contributionOutcome(r.store).outcome).toBe('merged');
+    const file = path.join(r.store.storeDirectory('control'), 'events.jsonl');
+    const bytes = fs.readFileSync(file);
+    if (mode === 'deleted') fs.unlinkSync(file);
+    else if (mode === 'corrupt') fs.writeFileSync(file, '{');
+    else if (mode === 'truncated') fs.writeFileSync(file, bytes.subarray(0, -3));
+    else fs.writeFileSync(file, bytes.subarray(0, bytes.indexOf(10, bytes.indexOf(10) + 1) + 1));
+    const outcome = contributionOutcome(r.store);
+    expect(outcome.outcome).toBe('unknown');
+    expect(outcome.activeMs).toBe('unknown');
+    expect(outcome.unknownEvidence).toContainEqual(expect.objectContaining({ source: 'run' }));
+    expect(aggregate([outcome]).merged.value).toBe('unknown');
+  });
+
+  it('refuses invalid UTF-8 inside an otherwise valid budget JSON string', () => {
+    const r = rig();
+    r.spend();
+    const file = path.join(r.store.storeDirectory('budget'), 'ledger.json');
+    const bytes = fs.readFileSync(file);
+    bytes[bytes.indexOf(Buffer.from('fixture-provider'))] = 0xff;
+    fs.writeFileSync(file, bytes);
+    expect(contributionOutcome(r.store).cost.byCurrency).toBe('unknown');
+  });
+
+  it('refuses invalid UTF-8 inside an otherwise valid adoption JSON string', () => {
+    const r = rig();
+    recordAdoption(r.store, 'voluntary note', START);
+    const file = path.join(r.store.storeDirectory('artifacts'), 'adoption.json');
+    const bytes = fs.readFileSync(file);
+    bytes[bytes.indexOf(Buffer.from('voluntary'))] = 0xff;
+    fs.writeFileSync(file, bytes);
+    expect(contributionOutcome(r.store).adoptionReported).toBe('unknown');
+  });
+
+  it('keeps budget descriptor authority across a path-replacement race', () => {
+    const r = rig();
+    r.spend(10, 8);
+    const directory = r.store.storeDirectory('budget');
+    const moved = `${directory}-original`;
+    const original = fs.realpathSync;
+    const value = r.ledger.snapshot();
+    let replaced = false;
+    const swap = () => {
+      if (replaced) return;
+      replaced = true;
+      fs.renameSync(directory, moved);
+      fs.mkdirSync(directory, { mode: 0o700 });
+      fs.writeFileSync(
+        path.join(directory, 'ledger.json'),
+        JSON.stringify({ ...value, reservations: [] }),
+        { mode: 0o600 }
+      );
+    };
+    vi.spyOn(fs, 'realpathSync').mockImplementation((input, options) => {
+      const resolved = original(input, options);
+      if (
+        typeof input === 'string' &&
+        input.startsWith('/proc/self/fd/') &&
+        resolved === directory
+      ) {
+        swap();
+      }
+      return resolved;
+    });
+    const open = fs.openSync;
+    vi.spyOn(fs, 'openSync').mockImplementation((input, flags, mode) => {
+      if (typeof input === 'string' && /^\/proc\/self\/fd\/\d+\/ledger\.json$/.test(input)) swap();
+      return open(input, flags, mode);
+    });
+    expect(contributionOutcome(r.store).cost.byCurrency).toMatchObject({
+      USD: { estimatedMinor: 10, observedMinor: 8 },
+    });
+    expect(replaced).toBe(true);
+  });
+
+  it('keeps unreadable artifact directories unknown and preserves budget identity diagnostics', () => {
+    const r = rig();
+    fs.rmdirSync(r.store.storeDirectory('artifacts'));
+    expect(contributionOutcome(r.store)).toMatchObject({
+      adoptionReported: 'unknown',
+      unknownEvidence: expect.arrayContaining([{ source: 'adoption', reason: 'missing' }]),
+    });
+    const file = path.join(r.store.storeDirectory('budget'), 'ledger.json');
+    const ledger = JSON.parse(fs.readFileSync(file, 'utf8'));
+    ledger.contributionId = 'ztc-0000000000000000';
+    fs.writeFileSync(file, JSON.stringify(ledger));
+    expect(contributionOutcome(r.store).unknownEvidence).toContainEqual({
+      source: 'budget',
+      reason: 'identity_mismatch',
+    });
+  });
+
+  it('refuses noncanonical contributors, opaque dictionaries and inconsistent rate facts', () => {
+    const o = contributionOutcome(rig().store);
+    for (const contributor of ['not a login', 'a--b', 'a'.repeat(40)])
+      expect(() => aggregate([{ ...o, contributor }])).toThrow(MetricsError);
+    for (const byCurrency of [new Date(), new Map(), []])
+      expect(() => aggregate([{ ...o, cost: { byCurrency } }] as never)).toThrow(MetricsError);
+    const stats = aggregate([o]);
+    expect(() =>
+      renderMetricsJson({
+        ...stats,
+        merged: { numerator: 1, denominator: 1, unknown: 0, value: 0 },
+      })
+    ).toThrow(MetricsError);
+    expect(() => renderMetricsJson({ ...stats, repeatUsage: new Map() } as never)).toThrow(
+      MetricsError
+    );
+  });
+
   it('derives six real-store outcomes and cohort rates without conflating submission and acceptance', () => {
     const ineligible = rig();
     ineligible.step(ReasonCode.PolicyBlocked);
