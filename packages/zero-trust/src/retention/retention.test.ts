@@ -29,6 +29,7 @@ const verificationMetadata = {
   captureReport: true,
   tests: 2,
   failures: 0,
+  skipped: 0,
   durationMs: 100,
 };
 function hashes(directory: string) {
@@ -695,6 +696,7 @@ describe('sanitized contribution export and evidence', () => {
           suites: null,
           tests: null,
           failures: null,
+          skipped: null,
           log,
           evidence,
         },

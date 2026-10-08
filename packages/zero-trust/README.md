@@ -1033,7 +1033,12 @@ hide corrupt or divergent selected files.
   then deletion. Both maintenance records live beside the immutable `run.json`.
   `ContributionSummary` (`ztfc-summary-v1`) contains public links, verified and
   observed outcome SHAs, receipt digests, evidence-derived outcome, conservative
-  per-session costs and the exact sweep manifest. `snapshotExpired: true` is
+  per-session costs, the exact sweep manifest and frozen selected-source provenance
+  (`evidence`: original run bytes plus each source's byte length and digest).
+  The reader verifies retained journal prefixes and unchanged non-journal evidence,
+  reconstructs historical facts, and checks the current confirmed run is an allowed
+  observation/stop continuation. Current selected sources are independently validated
+  for status/export. `snapshotExpired: true` is
   monotonic: even a crash before the separate marker lands prevents resume.
   Every protected file remains byte-for-byte unchanged: run/config/control and
   all intents, handoff, track, tokens, push-ledger, nonces, budget, VM, profile
@@ -1064,12 +1069,18 @@ hide corrupt or divergent selected files.
   edge is checked, so batching continuation with a later cancellation cannot bypass
   expiry. Observed public status, decline, cancellation, failure, pause and cleanup
   transitions remain permitted. Read-only open/status/export remain possible.
+  Replay checks still require the original artifact identities/digests and reject new
+  artifacts; permitted confirmed observations do not invalidate frozen summary facts.
   Resuming work requires fresh acquisition/reconstruction and independent
   verification in a **fresh run**, never clearing expiry on the old snapshot.
 - `RunStore.withPinnedDirectory(work)` runs synchronous trusted controller
   maintenance against the pinned contribution directory while its lifetime guard
   is held, and refuses a closed, poisoned or replaced store. It is not a worker
   API; never retain the descriptor path or start asynchronous work in the callback.
+  Preflight filesystem failures become fixed `RunStoreError('invalid_store')` diagnostics,
+  without native paths/messages/causes. `RunStore.assertObservationContinuation(prior)`
+  validates a historical run against the current confirmed run, refusing identity/history
+  divergence or any new edge that requires an unexpired snapshot (`run_diverged`).
 
 ### Selected evidence persistence convention
 
@@ -1095,7 +1106,7 @@ artifacts for authority, invents records, or auto-persists returned evidence:
 | Record | Controller-owned payload |
 |---|---|
 | `receipt-evidence.json` | At most 128 complete `SignedReceipt` envelopes returned by `issueReceipt`; receipt schema remains `ztfc-receipt-v2`. Parsed receipt identities, canonical SHA-256 digests and Ed25519 signatures are verified offline. Signature verification is integrity evidence, not trusted-key or current shipping authorization. |
-| `verification-evidence.json` | `{ runId, candidateSha, records }`; `records` are at most 128 actual `CommandRecord` values returned by the evidence runner. Each `evidence` must match id, argv, status, supervised exit code, suite count and log digest. Status is reclassified using the producer's classifier, with timeout/signal, report counts and capture mode checked. Truncated output cannot establish success. Only receipt-style metadata is exported, with `verified` calculated by `evidenceVerified`. |
+| `verification-evidence.json` | `{ runId, candidateSha, records }`; `records` are at most 128 actual `CommandRecord` values returned by the evidence runner. Each `evidence` must match id, argv, status, supervised exit code, suite count and log digest. Status is reclassified using the producer's classifier, with timeout/signal, report counts (including supervised `skipped`) and capture mode checked. Missing skipped counts in legacy records fail closed; they never default to zero. All-skipped reports remain inconclusive. Truncated output cannot establish success. Only receipt-style metadata is exported, with `verified` calculated by `evidenceVerified`. |
 | `portfolio-evidence.json` | `{ runId, disclosure, policyCitations }`; a present file requires a disclosure string and citations array, at most 128 actual policy assessment citations (`path`, positive `line`, `ruleId`, `excerpt`). Only a missing file yields null disclosure/citations. Missing fields in a present file fail closed; prose and defaults cannot replace them. |
 
 Every selected JSON record is bounded to 1 MiB before allocation and must be valid
@@ -1106,7 +1117,9 @@ never uses forgiving journal recovery. The **aggregate verification array** is a
 most 128 entries: one per receipt plus one for a present standalone verification
 source (even with empty commands). Thus 128 receipts plus that source is refused
 before sweep publication. The exact serialized summary is preflighted against its
-4-MiB reader cap before summary, expiry or deletion; 1-MiB export bounds still apply
+4-MiB reader cap before summary, expiry or deletion. The complete prospective portable
+bundle is also preflighted before expiry, using the same schema, consistency and size
+checks as export. Export bounds still apply
 to the portable bundle, whose summary excludes the manifest. Inventory streams
 directory entries and bulk hashes, capped per contribution at 20,000 entries,
 64 directory levels, 256 MiB per file and 1 GiB total file bytes; the root allows
@@ -1131,6 +1144,12 @@ prepared body file paths are excluded. All output strings are scanned again.
 `EXPORT_SCHEMA` is the versioned public JSON Schema and the runtime validator's
 source of truth. `validateContributionExport(input)` rejects unknown fields,
 non-JSON values/accessors and bundles beyond the 1-MiB strict snapshot bound,
+strings beyond 8,192 UTF-16 code units, more than 20,000 JSON nodes or depth 12,
+and more than 128 cost sessions. Persisted sources below the raw byte limit may
+still exceed these portable bounds; controllers should preflight exportable evidence
+before persisting it. Canonical snapshot limit failures report `invalid-input` at
+`export`; schema/semantic refusals report `invalid-evidence` at `evidence`.
+It also rejects
 malformed structures, secret strings, invalid run/history, contradictory status,
 receipt run/contribution/contributor/issue bindings, full signature metadata,
 offline Ed25519 integrity, verification consistency and summary identities, returning
@@ -1144,8 +1163,10 @@ pinned without following symlinks; output uses exclusive creation at mode 0600,
 fsyncs its file and parent directory, and never overwrites any existing leaf.
 An output write/fsync failure is an error, not a successful export; the exclusive
 partial file is left for the caller to inspect rather than overwritten on retry.
-Read-only status after expiry retains the original immutable run and tracking
-evidence, and the export status includes `snapshotExpired` explicitly.
+The exported summary retains expiry-time facts; current status/run and observed
+outcome can advance through permitted confirmed lifecycle observations. Historical
+non-null PR/verified/outcome SHAs must agree with current observations, and terminal
+historical outcomes cannot change. Export status includes `snapshotExpired` explicitly.
 
 ### Maintenance diagnostics and recovery
 

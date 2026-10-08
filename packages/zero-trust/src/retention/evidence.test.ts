@@ -2,12 +2,44 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 import { createFixtures, NOW, signedReceipt, verificationSource } from '../../fixtures/retention';
-import { contributionEvidence } from './evidence';
+import { contributionEvidence, type EvidenceSnapshot, historicalEvidence } from './evidence';
 import { exportContribution } from './export';
 import { planSweep } from './retention';
 
 const { rig, cleanup } = createFixtures();
 afterEach(cleanup);
+it('historical evidence validates captured source prefixes and refuses altered provenance', () => {
+  const r = rig();
+  const snapshot: EvidenceSnapshot = { run: '', sources: {} };
+  const facts = contributionEvidence(r.store, r.directory, snapshot);
+  expect(historicalEvidence(r.store, r.directory, snapshot)).toEqual(facts);
+  for (const change of [
+    (s: EvidenceSnapshot) => {
+      s.sources['config.json'].digest = 'a'.repeat(64);
+    },
+    (s: EvidenceSnapshot) => {
+      s.sources['config.json'].length++;
+    },
+    (s: EvidenceSnapshot) => {
+      s.sources['config.json'].length = -1;
+    },
+    (s: EvidenceSnapshot) => {
+      s.sources['unselected.json'] = { length: 0, digest: 'a'.repeat(64) };
+    },
+    (s: EvidenceSnapshot) => {
+      delete s.sources['config.json'];
+    },
+    (s: EvidenceSnapshot) => {
+      s.run = '{}';
+    },
+  ]) {
+    const corrupt = structuredClone(snapshot);
+    change(corrupt);
+    expect(() => historicalEvidence(r.store, r.directory, corrupt)).toThrow();
+  }
+  fs.unlinkSync(path.join(r.directory, 'config.json'));
+  expect(() => historicalEvidence(r.store, r.directory, snapshot)).toThrow();
+});
 it('absent tracker/portfolio sources stay unknown; present portfolio requires both fields', () => {
   const r = rig();
   expect(contributionEvidence(r.store, r.directory)).toMatchObject({

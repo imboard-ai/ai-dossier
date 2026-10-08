@@ -32,6 +32,7 @@ export function verificationSource(runId: string) {
         captureReport: true,
         tests: 2,
         failures: 0,
+        skipped: 0,
         durationMs: 100,
         id: 'test',
         argv: 'npm test',

@@ -135,15 +135,7 @@ export function optionalBytes(root: string, relative: string, limit = RECORD_BYT
     }
     const bytes = boundedRead(file, limit);
     const after = fs.lstatSync(file);
-    if (
-      before.dev !== after.dev ||
-      before.ino !== after.ino ||
-      before.size !== after.size ||
-      before.mtimeMs !== after.mtimeMs ||
-      before.ctimeMs !== after.ctimeMs ||
-      bytes.length !== after.size
-    )
-      refuse();
+    if (!sameInode(before, after) || bytes.length !== after.size) refuse();
     return bytes;
   };
   return parent === '.' ? read(root) : inDirectory(root, parent, read);

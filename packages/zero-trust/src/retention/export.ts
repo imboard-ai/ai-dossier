@@ -21,7 +21,7 @@ import {
   sha,
   text,
 } from './portable';
-import { readContributionSummary } from './retention';
+import { type ContributionSummary, readContributionSummary } from './retention';
 
 export const EXPORT_VERSION = 'ztfc-export-v1' as const;
 const statusSchema = object({
@@ -200,10 +200,13 @@ export function validateContributionExport(input: unknown): ContributionExport {
       input.summary &&
       (input.summary.runId !== run.runId ||
         input.summary.upstreamIssue !== run.upstreamIssue ||
-        input.summary.pr !== input.pr ||
-        input.summary.outcome !== input.outcome ||
-        input.summary.verifiedSha !== input.status.verifiedSha ||
-        input.summary.outcomeSha !== input.status.outcomeSha ||
+        (input.summary.pr !== null && input.summary.pr !== input.pr) ||
+        (['merged', 'declined'].includes(input.summary.outcome) &&
+          input.summary.outcome !== input.outcome) ||
+        (input.summary.verifiedSha !== null &&
+          input.summary.verifiedSha !== input.status.verifiedSha) ||
+        (input.summary.outcomeSha !== null &&
+          input.summary.outcomeSha !== input.status.outcomeSha) ||
         JSON.stringify(input.summary.costTotals) !== JSON.stringify(input.status.costTotals) ||
         JSON.stringify(input.summary.receiptDigests) !==
           JSON.stringify(input.receipts.map((r) => r.digest)))
@@ -212,39 +215,48 @@ export function validateContributionExport(input: unknown): ContributionExport {
     return structuredClone(input);
   });
 }
+/** Shared no-write preflight: expiry cannot publish evidence the export cannot represent. */
+export function preflightExport(
+  store: RunStore,
+  facts: ReturnType<typeof contributionEvidence>,
+  persisted: ContributionSummary | null
+): ContributionExport {
+  const summary: ContributionExport['summary'] = persisted
+    ? {
+        schemaVersion: 'ztfc-summary-v1',
+        runId: store.runId,
+        snapshotExpired: true,
+        ...portableFacts(persisted.facts),
+        links: persisted.facts.links,
+        receiptDigests: persisted.facts.receiptDigests,
+      }
+    : null;
+  return validateContributionExport({
+    schemaVersion: EXPORT_VERSION,
+    run: structuredClone(store.run),
+    status: {
+      state: store.run.state,
+      ...portableFacts(facts),
+      snapshotExpired: persisted !== null,
+    },
+    summary,
+    receipts: facts.receipts,
+    verification: facts.verification,
+    pr: facts.pr,
+    outcome: facts.outcome,
+    disclosure: facts.disclosure,
+    policyCitations: facts.policyCitations,
+  });
+}
 /** Offline export. The caller's RunStore owns the guard for the complete operation. */
 export function exportContribution(store: RunStore, outFile: string): ContributionExport {
   return maintenanceBoundary('export', () =>
     store.withPinnedDirectory((root) => {
-      const facts = contributionEvidence(store, root);
-      const persisted = readContributionSummary(store);
-      if (persisted && JSON.stringify(persisted.facts) !== JSON.stringify(facts)) refuse();
-      const summary: ContributionExport['summary'] = persisted
-        ? {
-            schemaVersion: 'ztfc-summary-v1',
-            runId: store.runId,
-            snapshotExpired: true,
-            ...portableFacts(facts),
-            links: facts.links,
-            receiptDigests: facts.receiptDigests,
-          }
-        : null;
-      const bundle = validateContributionExport({
-        schemaVersion: EXPORT_VERSION,
-        run: structuredClone(store.run),
-        status: {
-          state: store.run.state,
-          ...portableFacts(facts),
-          snapshotExpired: persisted !== null,
-        },
-        summary,
-        receipts: facts.receipts,
-        verification: facts.verification,
-        pr: facts.pr,
-        outcome: facts.outcome,
-        disclosure: facts.disclosure,
-        policyCitations: facts.policyCitations,
-      });
+      const bundle = preflightExport(
+        store,
+        contributionEvidence(store, root),
+        readContributionSummary(store)
+      );
       // Pin the destination's ancestors too; O_EXCL never follows/overwrites a leaf.
       outFile = path.resolve(outFile);
       assertDirectoryAncestors(path.dirname(outFile));

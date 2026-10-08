@@ -1,7 +1,7 @@
-import { createPublicKey, verify } from 'node:crypto';
-import { type SignatureResult, toSpkiPem } from '@ai-dossier/core';
+import type { SignatureResult } from '@ai-dossier/core';
+import { receiptIntegrity } from '../receipt/integrity';
 import { receiptDigest, type SignedReceipt } from '../receipt/issue';
-import { canonicalJson, parseReceipt } from '../receipt/schema';
+import { parseReceipt } from '../receipt/schema';
 import { isRecord, isTimestamp, type RunRecord } from '../state';
 import { refuse } from './files';
 
@@ -27,6 +27,7 @@ export function offlineReceipt(
 ): SignedReceipt {
   if (
     !isRecord(input) ||
+    typeof input.digest !== 'string' ||
     Object.keys(input).sort().join(',') !== 'digest,receipt,signature' ||
     !isRecord(input.signature)
   )
@@ -60,7 +61,11 @@ export function offlineReceipt(
       : {}),
   };
   try {
-    const receipt = parseReceipt(input.receipt);
+    const receipt = receiptIntegrity({
+      receipt: parseReceipt(input.receipt),
+      digest: input.digest,
+      signature,
+    });
     const issue = /^https:\/\/github\.com\/[^/]+\/[^/]+\/issues\/([1-9][0-9]*)$/u.exec(
       run.upstreamIssue
     );
@@ -70,13 +75,7 @@ export function offlineReceipt(
       receipt.contributionId !== contributionId ||
       receipt.contributor !== run.contributor ||
       receipt.issue !== Number(issue[1]) ||
-      input.digest !== receiptDigest(receipt) ||
-      !verify(
-        null,
-        Buffer.from(canonicalJson(receipt)),
-        createPublicKey(toSpkiPem(signature.public_key)),
-        Buffer.from(signature.signature, 'base64')
-      )
+      input.digest !== receiptDigest(receipt)
     )
       refuse();
     return { receipt, digest: receiptDigest(receipt), signature };

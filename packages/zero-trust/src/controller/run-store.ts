@@ -345,27 +345,36 @@ export class RunStore {
   /** Synchronous maintenance under the lifetime guard; never expose a worker path. */
   withPinnedDirectory<T>(work: (directory: string) => T): T {
     this.check();
-    const named = fs.lstatSync(this.directory);
-    const pinned = fs.fstatSync(this.directoryFd);
-    if (named.isSymbolicLink() || named.dev !== pinned.dev || named.ino !== pinned.ino)
-      fail('invalid_store');
-    const directory = `/proc/self/fd/${this.directoryFd}`;
-    const raw = parseStored(boundedRead(path.join(directory, 'run.json')));
-    if (!sameRunRecord(restoreRun(raw), this.current)) fail('run_diverged');
-    const config = boundedRead(path.join(directory, 'config.json'));
-    if (
-      hash(config) !== this.configDigest ||
-      hash(config) !== boundedRead(path.join(directory, 'config.sha256')).toString()
-    )
-      fail('invalid_store');
-    const evidence = replayControl({ read: () => readControl(directory) }, this.storedConfig);
-    if (
-      !evidence.confirmed ||
-      !sameRunRecord(evidence.run, evidence.confirmed) ||
-      !sameRunRecord(evidence.run, this.current)
-    )
-      fail('run_diverged');
+    const directory = this.maintenanceDirectory();
     return work(directory);
+  }
+  private maintenanceDirectory(): string {
+    try {
+      const named = fs.lstatSync(this.directory);
+      const pinned = fs.fstatSync(this.directoryFd);
+      if (named.isSymbolicLink() || named.dev !== pinned.dev || named.ino !== pinned.ino)
+        fail('invalid_store');
+      const directory = `/proc/self/fd/${this.directoryFd}`;
+      const raw = parseStored(boundedRead(path.join(directory, 'run.json')));
+      if (!sameRunRecord(restoreRun(raw), this.current)) fail('run_diverged');
+      const config = boundedRead(path.join(directory, 'config.json'));
+      if (
+        hash(config) !== this.configDigest ||
+        hash(config) !== boundedRead(path.join(directory, 'config.sha256')).toString()
+      )
+        fail('invalid_store');
+      const evidence = replayControl({ read: () => readControl(directory) }, this.storedConfig);
+      if (
+        !evidence.confirmed ||
+        !sameRunRecord(evidence.run, evidence.confirmed) ||
+        !sameRunRecord(evidence.run, this.current)
+      )
+        fail('run_diverged');
+      return directory;
+    } catch (error) {
+      if (error instanceof RunStoreError) throw error;
+      fail('invalid_store');
+    }
   }
   assertResumable(): void {
     this.withPinnedDirectory((directory) => {
@@ -376,7 +385,9 @@ export class RunStore {
             fail('invalid_store');
           fail('snapshot_expired');
         } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+          if (error instanceof RunStoreError) throw error;
+          fail('invalid_store');
         }
       }
     });
@@ -533,14 +544,7 @@ export class RunStore {
     if (this.closed) fail('store_closed');
     if (this.poisoned) fail('persistence_uncertain');
   }
-  persistRun(input: RunRecord): void {
-    this.check();
-    input = structuredClone(input);
-    assertSecretFree(input);
-    const run = restoreRun(input);
-    if (!isRunContinuation(this.current, run)) fail('run_diverged');
-    if (sameRunRecord(this.current, run)) return;
-    // Check every edge, including a multi-edge batch ending in cancellation.
+  private requiresSnapshot(prior: RunRecord, run: RunRecord): boolean {
     const observations = new Set([
       ReasonCode.PublicationObserved,
       ReasonCode.EngagementObserved,
@@ -556,12 +560,26 @@ export class RunStore {
       ReasonCode.CleanupCompleted,
       ReasonCode.UserPaused,
     ]);
-    if (
-      run.history
-        .slice(this.current.history.length)
-        .some((event) => !observations.has(event.reasonCode))
-    )
-      this.assertResumable();
+    return run.history
+      .slice(prior.history.length)
+      .some((event) => !observations.has(event.reasonCode));
+  }
+  /** Retained evidence may precede only observation/stop transitions after expiry. */
+  assertObservationContinuation(prior: RunRecord): void {
+    this.check();
+    prior = restoreRun(prior);
+    if (!isRunContinuation(prior, this.current) || this.requiresSnapshot(prior, this.current))
+      fail('run_diverged');
+  }
+  persistRun(input: RunRecord): void {
+    this.check();
+    input = structuredClone(input);
+    assertSecretFree(input);
+    const run = restoreRun(input);
+    if (!isRunContinuation(this.current, run)) fail('run_diverged');
+    if (sameRunRecord(this.current, run)) return;
+    // Check every edge, including a multi-edge batch ending in cancellation.
+    if (this.requiresSnapshot(this.current, run)) this.assertResumable();
     validateCheckpointContinuation(this.current, run, this.checkpoints);
     this.write(() => {
       this.journal.append({ v: 1, type: 'run', run });

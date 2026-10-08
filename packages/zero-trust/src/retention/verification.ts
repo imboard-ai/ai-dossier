@@ -49,11 +49,11 @@ export function parseVerification(raw: unknown, runId: string) {
           Number(record.exitCode) > 255))
     )
       refuse();
-    const counts = [record.suites, record.tests, record.failures];
+    const counts = [record.suites, record.tests, record.failures, record.skipped];
     if (
       counts.some((value) => value !== null) &&
       (counts.some((value) => !Number.isSafeInteger(value) || Number(value) < 0) ||
-        Number(record.failures) > Number(record.tests))
+        Number(record.failures) + Number(record.skipped) > Number(record.tests))
     )
       refuse();
     if (!record.captureReport && counts.some((value) => value !== null)) refuse();
@@ -71,7 +71,7 @@ export function parseVerification(raw: unknown, runId: string) {
                     suites: Number(record.suites),
                     tests: Number(record.tests),
                     failures: Number(record.failures),
-                    skipped: 0,
+                    skipped: Number(record.skipped),
                   },
           };
     if (

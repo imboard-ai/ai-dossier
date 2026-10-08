@@ -1,11 +1,11 @@
-import { Ed25519Verifier, isSupportedPublicKey, publicKeysMatch } from '@ai-dossier/core';
+import { isSupportedPublicKey, publicKeysMatch } from '@ai-dossier/core';
 import { type Intent, idempotencyKey, MAX_ATTEMPT_SEQUENCE } from '../intents';
 import { type BoundaryEvidence, isCleanHeldVerdict } from '../vm/evidence';
-import { receiptDigest, type SignedReceipt } from './issue';
+import { receiptIntegrity } from './integrity';
+import type { SignedReceipt } from './issue';
 import type { ReceiptNonceStore } from './nonces';
 import {
   canonicalJson,
-  parseReceipt,
   type Receipt,
   ReceiptError,
   type ShippingGrant,
@@ -81,12 +81,7 @@ export async function verifyReceipt(
 ): Promise<Receipt> {
   const envelope = snapshotJson(input);
   const expected = snapshotJson(context);
-  const receipt = parseReceipt(envelope.receipt);
-  if (
-    Object.keys(envelope).sort().join(',') !== 'digest,receipt,signature' ||
-    envelope.digest !== receiptDigest(receipt)
-  )
-    throw new ReceiptError('digest_mismatch');
+  const receipt = receiptIntegrity(envelope);
   const signature = envelope.signature;
   if (
     !signature ||
@@ -94,10 +89,7 @@ export async function verifyReceipt(
     typeof signature.public_key !== 'string' ||
     typeof signature.signature !== 'string' ||
     !isSupportedPublicKey(trustedControllerKey) ||
-    !publicKeysMatch(signature.public_key, trustedControllerKey) ||
-    Buffer.from(signature.signature, 'base64').toString('base64') !== signature.signature ||
-    Buffer.from(signature.signature, 'base64').length !== 64 ||
-    !(await new Ed25519Verifier().verify(canonicalJson(receipt), signature)).valid
+    !publicKeysMatch(signature.public_key, trustedControllerKey)
   )
     throw new ReceiptError('bad_signature');
   const clock = now();

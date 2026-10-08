@@ -159,6 +159,7 @@ export interface CommandRecord {
   readonly suites: number | null;
   readonly tests: number | null;
   readonly failures: number | null;
+  readonly skipped: number | null;
   readonly status: CommandStatus;
   readonly durationMs: number;
   readonly captureReport: boolean;
@@ -340,6 +341,7 @@ async function execute(
     suites: summary?.suites ?? null,
     tests: summary?.tests ?? null,
     failures: summary?.failures ?? null,
+    skipped: summary?.skipped ?? null,
     status: evidence.status,
     durationMs: result.durationMs,
     captureReport: command.captureReport,

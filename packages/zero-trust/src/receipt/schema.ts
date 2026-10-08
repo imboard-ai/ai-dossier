@@ -1,5 +1,6 @@
 import Ajv from 'ajv';
 import { assertNoSecrets } from '../redaction';
+import { object } from '../schema-object';
 
 export const RECEIPT_VERSION = 'ztfc-receipt-v2' as const;
 export const RECEIPT_TTL_MS = 15 * 60 * 1000;
@@ -63,14 +64,6 @@ const sha = { type: 'string', pattern: '^[a-f0-9]{40}$' };
 const digest = { type: 'string', pattern: '^[a-f0-9]{64}$' };
 const positive = { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER };
 const time = { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$' };
-function object(properties: Record<string, unknown>) {
-  return {
-    type: 'object',
-    additionalProperties: false,
-    required: Object.keys(properties),
-    properties,
-  };
-}
 /** The exported schema is also the runtime validator's single source of truth. */
 export const RECEIPT_SCHEMA = object({
   schemaVersion: { const: RECEIPT_VERSION },

@@ -1,15 +1,13 @@
 import type { ContributionEvidence } from './evidence';
 
+export { object } from '../schema-object';
+
+import { object } from '../schema-object';
+
 export const text = { type: 'string', maxLength: 8192 };
 export const sha = { type: 'string', pattern: '^[a-f0-9]{40}$' };
 export const hash = { type: 'string', pattern: '^[a-f0-9]{64}$' };
 export const nullable = (schema: object) => ({ anyOf: [schema, { type: 'null' }] });
-export const object = (properties: Record<string, unknown>) => ({
-  type: 'object',
-  additionalProperties: false,
-  required: Object.keys(properties),
-  properties,
-});
 const number = { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER };
 export const outcome = { enum: ['unknown', 'awaiting_review', 'merged', 'declined', 'blocked'] };
 export const portableFields = {

@@ -4,7 +4,8 @@ import { RunStore } from '../controller/run-store';
 import { assertDirectoryAncestors, publishPrivate } from '../durable-fs';
 import { assertSecretFree } from '../redaction';
 import { maintenanceBoundary } from './errors';
-import { contributionEvidence } from './evidence';
+import { contributionEvidence, type EvidenceSnapshot, historicalEvidence } from './evidence';
+import { preflightExport } from './export';
 import {
   digest,
   directoryEntries,
@@ -45,6 +46,7 @@ export interface ContributionSummary {
   readonly snapshotExpired: true;
   readonly facts: ReturnType<typeof contributionEvidence>;
   readonly sweep: SweepContribution;
+  readonly evidence: EvidenceSnapshot;
 }
 const issuedPlans = new WeakMap<SweepPlan, string>();
 export function readContributionSummary(store: RunStore): ContributionSummary | null {
@@ -88,8 +90,7 @@ export function readContributionSummary(store: RunStore): ContributionSummary | 
       const paths = new Set<string>();
       for (const file of raw.sweep.files) {
         if (
-          !/^artifacts\/(?!.*(?:^|\/)\.\.?\/)[^\\]+$/u.test(file.path) ||
-          file.path.split('/').some((c: string) => !c || c === '.' || c === '..') ||
+          !validArtifactPath(file.path) ||
           !/^[a-f0-9]{64}$/u.test(file.sha256) ||
           ![file.dev, file.ino, file.size].every((n) => Number.isSafeInteger(n) && n >= 0) ||
           !Number.isFinite(file.mtimeMs)
@@ -99,7 +100,10 @@ export function readContributionSummary(store: RunStore): ContributionSummary | 
         paths.add(file.path);
       }
       if (raw.facts.evidenceDigest !== raw.sweep.evidenceDigest) invalidSummary();
-      if (JSON.stringify(raw.facts) !== JSON.stringify(contributionEvidence(store, root)))
+      contributionEvidence(store, root);
+      if (
+        JSON.stringify(raw.facts) !== JSON.stringify(historicalEvidence(store, root, raw.evidence))
+      )
         invalidSummary();
       const marker = optionalBytes(root, '.snapshot-expired');
       if (marker) {
@@ -151,7 +155,8 @@ export function planSweep(root: string, now: Date | string, retentionDays?: numb
           const activity = Math.max(Date.parse(store.run.updatedAt), scan.activity);
           const days = retentionDays ?? store.config.retentionDays;
           if (activity >= Date.parse(at) - days * 86400000) return;
-          const facts = contributionEvidence(store, directory);
+          const evidence: EvidenceSnapshot = { run: '', sources: {} };
+          const facts = contributionEvidence(store, directory, evidence);
           const stat = fs.statSync(directory);
           const planned: SweepContribution = {
             runId: store.runId,
@@ -163,13 +168,16 @@ export function planSweep(root: string, now: Date | string, retentionDays?: numb
             evidenceDigest: facts.evidenceDigest,
             files: scan.artifacts,
           };
-          summaryBytes({
+          const proposed: ContributionSummary = {
             schemaVersion: 'ztfc-summary-v1',
             runId: store.runId,
             snapshotExpired: true,
             facts,
             sweep: planned,
-          });
+            evidence,
+          };
+          summaryBytes(proposed);
+          preflightExport(store, facts, proposed);
           contributions.push(planned);
         });
       } finally {
@@ -188,9 +196,21 @@ export function planSweep(root: string, now: Date | string, retentionDays?: numb
 }
 function summaryBytes(summary: ContributionSummary): Buffer {
   assertSecretFree(summary);
+  const paths = new Set<string>();
+  for (const file of summary.sweep.files) {
+    if (!validArtifactPath(file.path) || paths.has(file.path)) refuse('invalid-summary', 'summary');
+    paths.add(file.path);
+  }
   const bytes = Buffer.from(JSON.stringify(summary));
   jsonRecord(bytes, SUMMARY_BYTES);
   return bytes;
+}
+function validArtifactPath(name: string): boolean {
+  return (
+    typeof name === 'string' &&
+    /^artifacts\/[^\\]+$/u.test(name) &&
+    !name.split('/').some((part) => !part || part === '.' || part === '..')
+  );
 }
 type FaultPoint = 'summary' | 'expired' | 'quarantined' | 'deleted';
 function publishExpiry(
@@ -225,13 +245,11 @@ function revalidateSweep(
     stat.dev !== planned.dev ||
     stat.ino !== planned.ino ||
     store.run.state === 'blocked_cleanup' ||
-    (prior &&
-      (JSON.stringify(prior.sweep) !== JSON.stringify(planned) ||
-        JSON.stringify(prior.facts) !== JSON.stringify(facts))) ||
-    scan.protectedDigest !== planned.protectedDigest ||
-    facts.evidenceDigest !== planned.evidenceDigest ||
-    activity > planned.activity ||
-    (!prior && activity !== planned.activity) ||
+    (prior && JSON.stringify(prior.sweep) !== JSON.stringify(planned)) ||
+    (!prior &&
+      (scan.protectedDigest !== planned.protectedDigest ||
+        facts.evidenceDigest !== planned.evidenceDigest ||
+        activity !== planned.activity)) ||
     (override ?? store.config.retentionDays) !== planned.retentionDays ||
     planned.activity >= Date.parse(now) - planned.retentionDays * 86400000
   )
@@ -280,13 +298,17 @@ export function applySweep(plan: SweepPlan, fault?: (point: FaultPoint) => void)
               plan.now,
               plan.retentionDays
             );
+            const evidence: EvidenceSnapshot = { run: '', sources: {} };
+            if (!prior) contributionEvidence(store, root, evidence);
             const summary: ContributionSummary = prior ?? {
               schemaVersion: 'ztfc-summary-v1',
               runId: store.runId,
               snapshotExpired: true,
               facts,
               sweep: planned,
+              evidence,
             };
+            preflightExport(store, facts, summary);
             publishExpiry(root, summary, notify);
             withQuarantine(root, (quarantine) => {
               for (const file of planned.files) {

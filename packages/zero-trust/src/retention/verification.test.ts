@@ -1,6 +1,72 @@
-import { expect, it } from 'vitest';
-import { verificationSource } from '../../fixtures/retention';
+import path from 'node:path';
+import { afterEach, expect, it } from 'vitest';
+import { createFixtures, NOW, SHA, verificationSource } from '../../fixtures/retention';
+import { FakeVmAdapter } from '../__tests__/fake-vm';
+import { exportSource } from '../canonical/export';
+import { baselineEvidence } from '../controller/evidence-runner';
+import { OutputCollector } from '../controller/output-collector';
+import { buildCommandPlan } from '../ecosystem/commands';
+import { detectEcosystem, sourceFilesFromManifest } from '../ecosystem/detect';
+import { recordProfileSelection, selectProfile } from '../ecosystem/profiles';
+import { WORKER_RELAY } from '../vm/qemu-args';
+import { exportContribution } from './export';
 import { parseVerification } from './verification';
+
+const { rig, cleanup } = createFixtures();
+afterEach(cleanup);
+it.each([
+  1, 2,
+])('actual producer retains %i skipped tests and cannot acquire an invented passing verdict', async (skipped) => {
+  const r = rig();
+  const manifest = exportSource(path.join(__dirname, '../../fixtures/ecosystem/npm/base'));
+  const detection = detectEcosystem(sourceFilesFromManifest(manifest));
+  if (!detection.supported) throw new Error('unsupported fixture');
+  const selection = selectProfile(detection);
+  if (!selection.ok) throw new Error('missing profile');
+  const relay = `http://${WORKER_RELAY.host}:${WORKER_RELAY.port}/`;
+  const adapter = new FakeVmAdapter((request) =>
+    request.report
+      ? {
+          exitCode: 0,
+          report: Buffer.from(
+            `<testsuites><testsuite name="suite" tests="2" failures="0" skipped="${skipped}"><testcase name="a"><skipped/></testcase><testcase name="b">${skipped === 2 ? '<skipped/>' : ''}</testcase></testsuite></testsuites>`
+          ),
+        }
+      : {}
+  );
+  const produced = await baselineEvidence({
+    adapter,
+    runId: r.runId,
+    manifest,
+    plan: buildCommandPlan('npm', { npmRegistry: relay, pypiIndex: `${relay}index/` }),
+    limits: { vcpus: 1, memoryMiB: 512, diskGiB: 1, commandTimeoutMs: 1000 },
+    profileRecord: recordProfileSelection(r.store.storeDirectory('profile'), r.runId, selection),
+    proxyTarget: WORKER_RELAY,
+    collector: new OutputCollector(),
+    lifecycle: {
+      run: r.store.run,
+      now: () => new Date(NOW),
+      observeRun: () => {},
+      sleep: async () => {},
+    },
+  });
+  const records = produced.records.filter((record) => record.captureReport);
+  expect(records[0].skipped).toBe(skipped);
+  expect(records[0].status).toBe(skipped === 2 ? 'inconclusive' : 'passed');
+  const source = { runId: r.runId, candidateSha: SHA, records };
+  r.write('verification-evidence.json', source);
+  expect(exportContribution(r.store, path.join(r.temp, 'honest')).verification?.[0].verified).toBe(
+    skipped !== 2
+  );
+  const corrupt = structuredClone(source);
+  if (skipped === 2) {
+    Object.assign(corrupt.records[0], { status: 'passed' });
+    corrupt.records[0].evidence.status = 'passed';
+    expect(() => parseVerification(corrupt, r.runId)).toThrow();
+  }
+  delete (corrupt.records[0] as unknown as Record<string, unknown>).skipped;
+  expect(() => parseVerification(corrupt, r.runId)).toThrow();
+});
 
 it('reclassifies passed, failed, setup, timeout and signal records using producer facts', () => {
   const raw = verificationSource('run'),
@@ -21,7 +87,7 @@ it('reclassifies passed, failed, setup, timeout and signal records using produce
   const setup = verificationSource('run');
   const s: Record<string, unknown> = setup.records[0];
   s.captureReport = false;
-  s.suites = s.tests = s.failures = null;
+  s.suites = s.tests = s.failures = s.skipped = null;
   setup.records[0].evidence.suites = 'unknown';
   expect(parseVerification(setup, 'run').commands[0].status).toBe('passed');
   expect(parseVerification(setup, 'run').verified).toBe(false);

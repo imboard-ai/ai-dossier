@@ -5,18 +5,33 @@ import { replayTrack } from '../github/track';
 import type { SignedReceipt } from '../receipt/issue';
 import type { CommandEvidence } from '../receipt/schema';
 import { assertSecretFree } from '../redaction';
-import { isRunContinuation } from '../state';
+import { isRunContinuation, restoreRun } from '../state';
 import { digest, JOURNAL_BYTES, jsonRecord, optionalBytes, refuse, strictJsonLines } from './files';
 import { offlineReceipt } from './offline-receipt';
 import { parsePortfolio } from './portfolio';
 import { parseVerification } from './verification';
 
 /** Bounded selected sources only; no credential/replay store or environment. */
-export function contributionEvidence(store: RunStore, root: string): ContributionEvidence {
+export interface EvidenceSnapshot {
+  run: string;
+  sources: Record<string, { length: number; digest: string }>;
+}
+type EvidenceStore = Pick<RunStore, 'run' | 'runId' | 'contributionId'>;
+export function contributionEvidence(
+  store: EvidenceStore,
+  root: string,
+  snapshot?: EvidenceSnapshot,
+  read: (name: string) => Buffer | null = (name) =>
+    optionalBytes(root, name, name.endsWith('jsonl') ? JOURNAL_BYTES : undefined)
+): ContributionEvidence {
   const sources: Record<string, string> = {};
   const select = (name: string) => {
-    const bytes = optionalBytes(root, name, name.endsWith('jsonl') ? JOURNAL_BYTES : undefined);
+    const bytes = read(name);
     if (bytes) sources[name] = digest(bytes);
+    if (bytes && snapshot) {
+      snapshot.sources[name] = { length: bytes.length, digest: digest(bytes) };
+      if (name === 'run.json') snapshot.run = bytes.toString('utf8');
+    }
     return bytes;
   };
   // Scan raw snapshots before any projection, including discarded fields.
@@ -132,6 +147,48 @@ export function contributionEvidence(store: RunStore, root: string): Contributio
   };
   assertSecretFree(result);
   return result;
+}
+/** Verify frozen selected sources, with append-only prefixes for confirmed journals.
+ * Current sources are validated separately; a new journal cannot rewrite the old facts. */
+export function historicalEvidence(store: RunStore, root: string, snapshot: EvidenceSnapshot) {
+  if (!snapshot || typeof snapshot.run !== 'string' || !snapshot.sources)
+    refuse('invalid-summary', 'summary');
+  const runBytes = Buffer.from(snapshot.run);
+  const run = restoreRun(jsonRecord(runBytes));
+  store.assertObservationContinuation(run);
+  const seen = new Set<string>();
+  const facts = contributionEvidence(
+    { run, runId: run.runId, contributionId: store.contributionId },
+    root,
+    undefined,
+    (name) => {
+      seen.add(name);
+      const anchor = snapshot.sources[name];
+      if (!anchor) return null;
+      if (
+        !Number.isSafeInteger(anchor.length) ||
+        anchor.length < 0 ||
+        !/^[a-f0-9]{64}$/u.test(anchor.digest)
+      )
+        refuse('invalid-summary', 'summary');
+      const current =
+        name === 'run.json'
+          ? runBytes
+          : optionalBytes(root, name, name.endsWith('jsonl') ? JOURNAL_BYTES : undefined);
+      if (
+        !current ||
+        current.length < anchor.length ||
+        (!name.endsWith('jsonl') && current.length !== anchor.length)
+      )
+        refuse('invalid-summary', 'summary');
+      const prefix = current.subarray(0, anchor.length);
+      if (digest(prefix) !== anchor.digest) refuse('invalid-summary', 'summary');
+      return prefix;
+    }
+  );
+  if (Object.keys(snapshot.sources).some((name) => !seen.has(name)))
+    refuse('invalid-summary', 'summary');
+  return facts;
 }
 export interface ContributionEvidence {
   upstreamIssue: string;

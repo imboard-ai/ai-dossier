@@ -50,8 +50,15 @@ export * from './receipt/render';
 export * from './receipt/schema';
 export * from './receipt/verify';
 export * from './redaction';
-export * from './retention/errors';
-export * from './retention/export';
+export type { MaintenanceCode, MaintenanceStage } from './retention/errors';
+export { MaintenanceError } from './retention/errors';
+export type { ContributionExport } from './retention/export';
+export {
+  EXPORT_SCHEMA,
+  EXPORT_VERSION,
+  exportContribution,
+  validateContributionExport,
+} from './retention/export';
 export * from './retention/retention';
 export * from './review/integrity';
 export * from './state';
