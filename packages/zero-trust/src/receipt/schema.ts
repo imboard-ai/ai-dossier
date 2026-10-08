@@ -127,6 +127,9 @@ export const RECEIPT_SCHEMA = object({
   verified: { type: 'boolean' },
 });
 const validate = new Ajv({ strict: true }).compile<Receipt>(RECEIPT_SCHEMA);
+const validateCommands = new Ajv({ strict: true }).compile<CommandEvidence[]>(
+  RECEIPT_SCHEMA.properties.commands
+);
 
 /** Reject accessors, custom prototypes, sparse arrays and lossy/non-JSON values.
  * Copy before any async boundary; nothing can change between validation/signing/use. */
@@ -204,6 +207,14 @@ export function evidenceVerified(commands: CommandEvidence[]): boolean {
     )
   );
 }
+/** Receipt and standalone verification share command shape and unique identity. */
+export function parseCommandEvidence(input: unknown): CommandEvidence[] {
+  const copy = snapshotJson(input);
+  if (!validateCommands(copy)) throw new ReceiptError('invalid_schema');
+  if (new Set(copy.map((command) => command.id)).size !== copy.length)
+    throw new ReceiptError('invalid_evidence');
+  return copy;
+}
 export function parseReceipt(input: unknown): Receipt {
   const copy = snapshotJson(input);
   if (!validate(copy)) throw new ReceiptError('invalid_schema');
@@ -213,8 +224,7 @@ export function parseReceipt(input: unknown): Receipt {
     receipt.verified !== evidenceVerified(receipt.commands)
   )
     throw new ReceiptError('invalid_evidence');
-  if (new Set(receipt.commands.map((c) => c.id)).size !== receipt.commands.length)
-    throw new ReceiptError('invalid_evidence');
+  parseCommandEvidence(receipt.commands);
   const issued = Date.parse(receipt.issuedAt);
   const expires = Date.parse(receipt.expiresAt);
   if (

@@ -1,5 +1,5 @@
 /** Closed objects require every declared property in both receipt and portable schemas. */
-export function object(properties: Record<string, unknown>) {
+export function object<T extends Record<string, unknown>>(properties: T) {
   return {
     type: 'object',
     additionalProperties: false,

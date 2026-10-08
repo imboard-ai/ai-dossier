@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 import { createFixtures, NOW, SHA, verificationSource } from '../../fixtures/retention';
@@ -9,11 +10,33 @@ import { buildCommandPlan } from '../ecosystem/commands';
 import { detectEcosystem, sourceFilesFromManifest } from '../ecosystem/detect';
 import { recordProfileSelection, selectProfile } from '../ecosystem/profiles';
 import { WORKER_RELAY } from '../vm/qemu-args';
-import { exportContribution } from './export';
+import { exportContribution, validateContributionExport } from './export';
+import { planSweep } from './retention';
 import { parseVerification } from './verification';
 
 const { rig, cleanup } = createFixtures();
 afterEach(cleanup);
+it('duplicate standalone command IDs refuse parsing, public validation, output and expiry', () => {
+  const r = rig();
+  const source = verificationSource(r.runId);
+  r.write('verification-evidence.json', source);
+  const good = exportContribution(r.store, path.join(r.temp, 'valid'));
+  const tampered = structuredClone(good);
+  if (!tampered.verification) throw new Error('missing fixture verification');
+  tampered.verification[0].commands.push(structuredClone(tampered.verification[0].commands[0]));
+  expect(() => validateContributionExport(tampered)).toThrow();
+  source.records.push(structuredClone(source.records[0]));
+  expect(() => parseVerification(source, r.runId)).toThrow();
+  r.write('verification-evidence.json', source);
+  expect(() => exportContribution(r.store, path.join(r.temp, 'duplicate'))).toThrow();
+  expect(fs.existsSync(path.join(r.temp, 'duplicate'))).toBe(false);
+  const file = r.artifact();
+  r.close();
+  expect(() => planSweep(r.root, NOW)).toThrow();
+  expect(fs.readFileSync(file, 'utf8')).toBe('snapshot bytes');
+  expect(fs.existsSync(path.join(r.directory, 'summary.json'))).toBe(false);
+  expect(fs.existsSync(path.join(r.directory, '.snapshot-expired'))).toBe(false);
+});
 it.each([
   1, 2,
 ])('actual producer retains %i skipped tests and cannot acquire an invented passing verdict', async (skipped) => {

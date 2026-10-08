@@ -1,12 +1,8 @@
-import Ajv from 'ajv';
 import { type CommandOutcome, classifyCommand } from '../ecosystem/classify';
-import { type CommandEvidence, evidenceVerified, RECEIPT_SCHEMA } from '../receipt/schema';
+import { evidenceVerified, parseCommandEvidence } from '../receipt/schema';
 import { isRecord } from '../state';
 import { refuse } from './files';
 
-const validateCommands = new Ajv({ strict: true }).compile<CommandEvidence[]>(
-  RECEIPT_SCHEMA.properties.commands as object
-);
 /** Reclassify actual producer facts; a claimed passed status is never sufficient. */
 export function parseVerification(raw: unknown, runId: string) {
   if (
@@ -81,11 +77,11 @@ export function parseVerification(raw: unknown, runId: string) {
       refuse();
     return record.evidence;
   });
-  if (!validateCommands(commands)) refuse();
+  const validated = parseCommandEvidence(commands);
   return {
     receiptDigest: null,
     candidateSha: raw.candidateSha,
-    verified: evidenceVerified(commands),
-    commands,
+    verified: evidenceVerified(validated),
+    commands: validated,
   };
 }

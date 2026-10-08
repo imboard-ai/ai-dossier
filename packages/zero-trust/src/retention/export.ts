@@ -4,7 +4,12 @@ import Ajv from 'ajv';
 import { contributionIdOf } from '../controller/ids';
 import type { RunStore } from '../controller/run-store';
 import { assertDirectoryAncestors, syncDirectory } from '../durable-fs';
-import { canonicalJson, evidenceVerified, RECEIPT_SCHEMA } from '../receipt/schema';
+import {
+  canonicalJson,
+  evidenceVerified,
+  parseCommandEvidence,
+  RECEIPT_SCHEMA,
+} from '../receipt/schema';
 import { assertSecretFree } from '../redaction';
 import { type RunRecord, restoreRun } from '../state';
 import { maintenanceBoundary } from './errors';
@@ -185,6 +190,7 @@ export function validateContributionExport(input: unknown): ContributionExport {
         refuse();
     }
     for (const record of input.verification ?? []) {
+      parseCommandEvidence(record.commands);
       if (record.verified !== evidenceVerified(record.commands)) refuse();
       if (record.receiptDigest !== null) {
         const envelope = input.receipts.find((r) => r.digest === record.receiptDigest);

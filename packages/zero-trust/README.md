@@ -1106,7 +1106,7 @@ artifacts for authority, invents records, or auto-persists returned evidence:
 | Record | Controller-owned payload |
 |---|---|
 | `receipt-evidence.json` | At most 128 complete `SignedReceipt` envelopes returned by `issueReceipt`; receipt schema remains `ztfc-receipt-v2`. Parsed receipt identities, canonical SHA-256 digests and Ed25519 signatures are verified offline. Signature verification is integrity evidence, not trusted-key or current shipping authorization. |
-| `verification-evidence.json` | `{ runId, candidateSha, records }`; `records` are at most 128 actual `CommandRecord` values returned by the evidence runner. Each `evidence` must match id, argv, status, supervised exit code, suite count and log digest. Status is reclassified using the producer's classifier, with timeout/signal, report counts (including supervised `skipped`) and capture mode checked. Missing skipped counts in legacy records fail closed; they never default to zero. All-skipped reports remain inconclusive. Truncated output cannot establish success. Only receipt-style metadata is exported, with `verified` calculated by `evidenceVerified`. |
+| `verification-evidence.json` | `{ runId, candidateSha, records }`; `records` are 1–128 actual verification-phase `CommandRecord` values returned by the evidence runner, with unique command IDs. Each `evidence` must match id, argv, status, supervised exit code, suite count and log digest. Status is reclassified using the producer's classifier, with timeout/signal, report counts (including supervised `skipped`) and capture mode checked. Missing skipped counts in legacy records fail closed; they never default to zero. All-skipped reports remain inconclusive. Truncated output cannot establish success. Only receipt-style metadata is exported, with `verified` calculated by `evidenceVerified`. Omit the optional source to represent absent verification; a present empty command array is invalid. |
 | `portfolio-evidence.json` | `{ runId, disclosure, policyCitations }`; a present file requires a disclosure string and citations array, at most 128 actual policy assessment citations (`path`, positive `line`, `ruleId`, `excerpt`). Only a missing file yields null disclosure/citations. Missing fields in a present file fail closed; prose and defaults cannot replace them. |
 
 Every selected JSON record is bounded to 1 MiB before allocation and must be valid
@@ -1115,7 +1115,7 @@ reads detect growth and replacement. Journals are capped at 16 MiB, 10,000 recor
 and 1 MiB per newline-terminated line. Blank/torn lines are refused; maintenance
 never uses forgiving journal recovery. The **aggregate verification array** is at
 most 128 entries: one per receipt plus one for a present standalone verification
-source (even with empty commands). Thus 128 receipts plus that source is refused
+source. Thus 128 receipts plus that source is refused
 before sweep publication. The exact serialized summary is preflighted against its
 4-MiB reader cap before summary, expiry or deletion. The complete prospective portable
 bundle is also preflighted before expiry, using the same schema, consistency and size
@@ -1148,8 +1148,9 @@ strings beyond 8,192 UTF-16 code units, more than 20,000 JSON nodes or depth 12,
 and more than 128 cost sessions. Persisted sources below the raw byte limit may
 still exceed these portable bounds; controllers should preflight exportable evidence
 before persisting it. Canonical snapshot limit failures report `invalid-input` at
-`export`; schema/semantic refusals report `invalid-evidence` at `evidence`.
-It also rejects
+`export`; schema and explicit consistency refusals report `invalid-evidence` at
+`evidence`, while lifecycle-decoder failures report `invalid-evidence` at `export`.
+The export validator also rejects
 malformed structures, secret strings, invalid run/history, contradictory status,
 receipt run/contribution/contributor/issue bindings, full signature metadata,
 offline Ed25519 integrity, verification consistency and summary identities, returning
@@ -1158,6 +1159,9 @@ an observed PR and outcome SHA; unknown has no observed outcome SHA. Historical 
 and verified SHA observations can survive later cancellation/blocking, but cannot
 be promoted to a merge/decline claim. Offline receipt integrity never changes
 trusted-key or expiry authority in shipping.
+`parseCommandEvidence(input)` is the shared detached receipt/standalone command parser:
+it validates the receipt command schema (1–128 records) and unique command IDs,
+throwing fixed `ReceiptError('invalid_schema'|'invalid_evidence')` refusals.
 Validation completes **before** opening the destination. Output ancestors are
 pinned without following symlinks; output uses exclusive creation at mode 0600,
 fsyncs its file and parent directory, and never overwrites any existing leaf.
