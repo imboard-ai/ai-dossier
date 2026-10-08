@@ -1,17 +1,18 @@
 import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import {
-  assertDirectoryAncestors,
-  privateDir,
-  readPrivate,
-  replacePrivate,
-  syncDirectory,
-} from '../durable-fs';
+import { assertDirectoryAncestors, privateDir, replacePrivate, syncDirectory } from '../durable-fs';
 import { Journal } from '../journal';
 import { lockDescriptor, StoreLockedError } from '../lock';
 import { isTailRecovery } from '../recovery';
-import { assertSecretFree } from '../redaction';
+import { assertSecretFree, SecretRedactionError } from '../redaction';
+import {
+  boundedRead,
+  JOURNAL_BYTES,
+  jsonRecord,
+  SUMMARY_BYTES,
+  strictJsonLines,
+} from '../retention/files';
 import {
   createRun,
   isRecord,
@@ -72,8 +73,9 @@ function hash(bytes: Buffer): string {
 function parseStored(bytes: Buffer): unknown {
   let raw: unknown;
   try {
-    raw = JSON.parse(bytes.toString('utf8'));
-  } catch {
+    raw = jsonRecord(bytes, SUMMARY_BYTES);
+  } catch (error) {
+    if (error instanceof SecretRedactionError) throw error;
     return fail('invalid_store');
   }
   assertSecretFree(raw);
@@ -258,21 +260,12 @@ function readControl(directory: string): unknown[] {
   try {
     const pinned = `/proc/self/fd/${fd}`;
     try {
-      readPrivate(path.join(pinned, 'events.jsonl.recovery'));
+      fs.lstatSync(path.join(pinned, 'events.jsonl.recovery'));
       fail('invalid_store');
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
-    const bytes = readPrivate(path.join(pinned, 'events.jsonl'));
-    const text = bytes.toString('utf8');
-    if (!text || !bytes.equals(Buffer.from(text)) || !text.endsWith('\n')) fail('invalid_store');
-    return text
-      .slice(0, -1)
-      .split('\n')
-      .map((line) => {
-        if (Buffer.byteLength(line) > 1024 * 1024) fail('invalid_store');
-        return parseStored(Buffer.from(line));
-      });
+    return strictJsonLines(boundedRead(path.join(pinned, 'events.jsonl'), JOURNAL_BYTES));
   } finally {
     fs.closeSync(fd);
   }
@@ -357,12 +350,12 @@ export class RunStore {
     if (named.isSymbolicLink() || named.dev !== pinned.dev || named.ino !== pinned.ino)
       fail('invalid_store');
     const directory = `/proc/self/fd/${this.directoryFd}`;
-    const raw = parseStored(readPrivate(path.join(directory, 'run.json')));
+    const raw = parseStored(boundedRead(path.join(directory, 'run.json')));
     if (!sameRunRecord(restoreRun(raw), this.current)) fail('run_diverged');
-    const config = readPrivate(path.join(directory, 'config.json'));
+    const config = boundedRead(path.join(directory, 'config.json'));
     if (
       hash(config) !== this.configDigest ||
-      hash(config) !== readPrivate(path.join(directory, 'config.sha256')).toString()
+      hash(config) !== boundedRead(path.join(directory, 'config.sha256')).toString()
     )
       fail('invalid_store');
     const evidence = replayControl({ read: () => readControl(directory) }, this.storedConfig);
@@ -378,7 +371,7 @@ export class RunStore {
     this.withPinnedDirectory((directory) => {
       for (const name of ['summary.json', '.snapshot-expired']) {
         try {
-          const raw = parseStored(readPrivate(path.join(directory, name)));
+          const raw = parseStored(boundedRead(path.join(directory, name), SUMMARY_BYTES));
           if (!isRecord(raw) || raw.runId !== this.runId || raw.snapshotExpired !== true)
             fail('invalid_store');
           fail('snapshot_expired');
@@ -475,11 +468,11 @@ export class RunStore {
       directoryFd = pinDirectory(directory);
       const pinned = `/proc/self/fd/${directoryFd}`;
       guard = acquire(pinned, !options.readOnly);
-      const bytes = readPrivate(path.join(pinned, 'config.json'));
-      if (hash(bytes) !== readPrivate(path.join(pinned, 'config.sha256')).toString('utf8'))
+      const bytes = boundedRead(path.join(pinned, 'config.json'));
+      if (hash(bytes) !== boundedRead(path.join(pinned, 'config.sha256')).toString('utf8'))
         fail('invalid_store');
       const config = validateRunConfig(JSON.parse(bytes.toString('utf8')));
-      const raw: unknown = JSON.parse(readPrivate(path.join(pinned, 'run.json')).toString('utf8'));
+      const raw: unknown = JSON.parse(boundedRead(path.join(pinned, 'run.json')).toString('utf8'));
       assertSecretFree(raw);
       const run = restoreRun(raw);
       if (
@@ -492,7 +485,7 @@ export class RunStore {
         const records = readControl(pinned);
         journal = { read: () => records, append: () => fail('invalid_store'), close: () => {} };
       } else {
-        readPrivate(path.join(directory, 'control', 'events.jsonl'));
+        boundedRead(path.join(directory, 'control', 'events.jsonl'), JOURNAL_BYTES);
         journal = new Journal(path.join(directory, 'control'));
       }
       const evidence = replayControl(journal, config);
@@ -547,6 +540,28 @@ export class RunStore {
     const run = restoreRun(input);
     if (!isRunContinuation(this.current, run)) fail('run_diverged');
     if (sameRunRecord(this.current, run)) return;
+    // Check every edge, including a multi-edge batch ending in cancellation.
+    const observations = new Set([
+      ReasonCode.PublicationObserved,
+      ReasonCode.EngagementObserved,
+      ReasonCode.ReviewAwaited,
+      ReasonCode.UpstreamAccepted,
+      ReasonCode.ObservedUpstreamMerge,
+      ReasonCode.UpstreamDeclined,
+      ReasonCode.PolicyBlocked,
+      ReasonCode.UnsupportedEnvironment,
+      ReasonCode.ExecutionFailed,
+      ReasonCode.UserCancelled,
+      ReasonCode.CleanupFailed,
+      ReasonCode.CleanupCompleted,
+      ReasonCode.UserPaused,
+    ]);
+    if (
+      run.history
+        .slice(this.current.history.length)
+        .some((event) => !observations.has(event.reasonCode))
+    )
+      this.assertResumable();
     validateCheckpointContinuation(this.current, run, this.checkpoints);
     this.write(() => {
       this.journal.append({ v: 1, type: 'run', run });
@@ -587,6 +602,7 @@ export class RunStore {
   resolveCheckpoint(input: CheckpointRecord, next: RunRecord): void {
     this.check();
     const record = restoreCheckpoint(input);
+    if (record.status === 'approved') this.assertResumable();
     next = restoreRun(structuredClone(next));
     validateCheckpoint(
       record,

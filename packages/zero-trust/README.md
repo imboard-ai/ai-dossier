@@ -634,7 +634,7 @@ Snapshot reads/writes are anchored to a pinned directory descriptor; replacing
 an ancestor cannot redirect publication. Lock contention/unavailable kernel
 locking raises `StoreLockedError`. Other store refusals have non-echoing
 `RunStoreError.code`: `invalid_store`, `invalid_run_id`, `run_diverged`,
-`resume_identity_mismatch`, `persistence_uncertain`, `store_closed`. Stored
+`resume_identity_mismatch`, `snapshot_expired`, `persistence_uncertain`, `store_closed`. Stored
 configuration failures preserve their typed `RunConfigError`, including an
 unavailable signer key. Failed first creation preserves incomplete private
 evidence rather than deleting it. `RUN_STORE_DIRECTORIES` exports the allowlist.
@@ -1038,9 +1038,15 @@ hide corrupt or divergent selected files.
   Every protected file remains byte-for-byte unchanged: run/config/control and
   all intents, handoff, track, tokens, push-ledger, nonces, budget, VM, profile
   and prepared body evidence. No journal is compacted or discarded.
-- Each removable leaf is atomically moved to a deterministic private maintenance
-  name **within its original artifact directory**, identity/digest-checked, then
-  unlinked. The rename and deletion are followed by directory fsync. A crash
+- Each removable leaf is atomically moved to a deterministic name in the pinned
+  controller-owned **`.retention-quarantine/` beside `artifacts/`**, owned by the
+  controller and mode 0700. This storage is never available to a worker by architecture.
+  The regular inode is streamed through a no-follow descriptor, identity/digest-checked,
+  and its final named identity is checked again immediately before unlink. POSIX
+  has no unlink-by-descriptor; the private parent and exclusive lifetime guard are
+  essential authority, not isolation against an arbitrary same-UID controller attacker.
+  Mismatched moved bytes are retained in quarantine for recovery, never deleted;
+  unplanned leaves are never consumed. Both rename parents and deletion are fsynced. A crash
   after isolation is replayable; a swapped leaf is retained and refused. These
   temporary names are recognized only by the durable manifest. Already missing
   files are tolerated only after durable expiry evidence exists. Partial and
@@ -1053,8 +1059,11 @@ hide corrupt or divergent selected files.
   present marker, corrupt metadata, mismatched identity/digests and invalid
   manifests are refused. `assertResumable(store)` delegates to
   `RunStore.assertResumable()`; expired snapshots throw `RunStoreError('snapshot_expired')`.
-  The real `RunStore.assertResumeMatches` path enforces this before resume
-  identity/provider checks. Read-only open/status/export remain possible.
+  `RunStore.assertResumeMatches`, ordinary `persistRun` active transitions and actual
+  checkpoint approval enforce this before any journal writes. Every added history
+  edge is checked, so batching continuation with a later cancellation cannot bypass
+  expiry. Observed public status, decline, cancellation, failure, pause and cleanup
+  transitions remain permitted. Read-only open/status/export remain possible.
   Resuming work requires fresh acquisition/reconstruction and independent
   verification in a **fresh run**, never clearing expiry on the old snapshot.
 - `RunStore.withPinnedDirectory(work)` runs synchronous trusted controller
@@ -1068,7 +1077,8 @@ This slice consumes actual producer records, independently of the metrics slice.
 `PrTracker` and `HandoffDriver` already persist `track/events.jsonl` and
 `handoff/events.jsonl`: raw events are scanned, then their existing replay
 validators establish identity, history, public links and outcome facts. A missing
-tracker outcome is **unknown**, never inferred merged from a lifecycle label.
+tracker file is **unknown**, never inferred merged from a lifecycle label. A valid
+pending tracker reports `awaiting_review`, or `blocked` when its replay says so.
 `BudgetLedger` snapshots live at `budget/ledger.json`. The new
 `validateBudgetSnapshot(raw, contributionId)` validates/detaches a pinned raw
 snapshot using the ledger's existing validation, without reopening a path or
@@ -1085,11 +1095,22 @@ artifacts for authority, invents records, or auto-persists returned evidence:
 | Record | Controller-owned payload |
 |---|---|
 | `receipt-evidence.json` | At most 128 complete `SignedReceipt` envelopes returned by `issueReceipt`; receipt schema remains `ztfc-receipt-v2`. Parsed receipt identities, canonical SHA-256 digests and Ed25519 signatures are verified offline. Signature verification is integrity evidence, not trusted-key or current shipping authorization. |
-| `verification-evidence.json` | `{ runId, candidateSha, records }`; `records` are at most 128 actual `CommandRecord` values returned by the evidence runner. Each `evidence` must match the record's id, argv, status, exit code, suite count and log digest. The command evidence schema is validated; only receipt-style metadata is exported, with `verified` calculated by `evidenceVerified`. |
-| `portfolio-evidence.json` | `{ runId, disclosure, policyCitations }`; disclosure is the actual LLM disclosure text supplied with the prepared PR; citations are at most 128 actual policy assessment citations (`path`, positive `line`, `ruleId`, `excerpt`). Missing disclosure/citations are null; they are never reconstructed from arbitrary prose or fabricated defaults. |
+| `verification-evidence.json` | `{ runId, candidateSha, records }`; `records` are at most 128 actual `CommandRecord` values returned by the evidence runner. Each `evidence` must match id, argv, status, supervised exit code, suite count and log digest. Status is reclassified using the producer's classifier, with timeout/signal, report counts and capture mode checked. Truncated output cannot establish success. Only receipt-style metadata is exported, with `verified` calculated by `evidenceVerified`. |
+| `portfolio-evidence.json` | `{ runId, disclosure, policyCitations }`; a present file requires a disclosure string and citations array, at most 128 actual policy assessment citations (`path`, positive `line`, `ruleId`, `excerpt`). Only a missing file yields null disclosure/citations. Missing fields in a present file fail closed; prose and defaults cannot replace them. |
 
-Every selected JSON record is bounded to 1 MiB and must be valid UTF-8; every
-selected journal line is subject to that bound and must be newline terminated.
+Every selected JSON record is bounded to 1 MiB before allocation and must be valid
+UTF-8. Metadata and pinned regular no-follow inode checks precede reads; bounded
+reads detect growth and replacement. Journals are capped at 16 MiB, 10,000 records,
+and 1 MiB per newline-terminated line. Blank/torn lines are refused; maintenance
+never uses forgiving journal recovery. The **aggregate verification array** is at
+most 128 entries: one per receipt plus one for a present standalone verification
+source (even with empty commands). Thus 128 receipts plus that source is refused
+before sweep publication. The exact serialized summary is preflighted against its
+4-MiB reader cap before summary, expiry or deletion; 1-MiB export bounds still apply
+to the portable bundle, whose summary excludes the manifest. Inventory streams
+directory entries and bulk hashes, capped per contribution at 20,000 entries,
+64 directory levels, 256 MiB per file and 1 GiB total file bytes; the root allows
+10,000 contributions. Unsupported inventories/manifests fail before destructive effects.
 Raw strings (including discarded fields and verification log excerpts) are
 scanned with `assertNoSecrets` **before** projection. Missing optional sources
 remain unknown/null. Corrupt, truncated, unreadable or secret-bearing selected
@@ -1111,7 +1132,13 @@ prepared body file paths are excluded. All output strings are scanned again.
 source of truth. `validateContributionExport(input)` rejects unknown fields,
 non-JSON values/accessors and bundles beyond the 1-MiB strict snapshot bound,
 malformed structures, secret strings, invalid run/history, contradictory status,
-receipt identities/digests and summary identities, returning a detached bundle.
+receipt run/contribution/contributor/issue bindings, full signature metadata,
+offline Ed25519 integrity, verification consistency and summary identities, returning
+a detached bundle. Merged/declined outcomes require the matching lifecycle state,
+an observed PR and outcome SHA; unknown has no observed outcome SHA. Historical PR
+and verified SHA observations can survive later cancellation/blocking, but cannot
+be promoted to a merge/decline claim. Offline receipt integrity never changes
+trusted-key or expiry authority in shipping.
 Validation completes **before** opening the destination. Output ancestors are
 pinned without following symlinks; output uses exclusive creation at mode 0600,
 fsyncs its file and parent directory, and never overwrites any existing leaf.
@@ -1119,6 +1146,26 @@ An output write/fsync failure is an error, not a successful export; the exclusiv
 partial file is left for the caller to inspect rather than overwritten on retry.
 Read-only status after expiry retains the original immutable run and tracking
 evidence, and the export status includes `snapshotExpired` explicitly.
+
+### Maintenance diagnostics and recovery
+
+`MaintenanceError` exposes only fixed `code` and `stage` values; no raw filesystem
+message, path, cause or selected source text is echoed. Known-safe `RunStoreError`
+and `SecretRedactionError` retain their existing semantics. Injected fault-hook
+exceptions propagate intentionally at durable crash boundaries.
+
+| Code | Action |
+|---|---|
+| `invalid-input` | Correct the root, timestamp, retention override or portable input. |
+| `stale-plan` | Close active controllers and obtain a fresh plan; inspect changed or quarantined inodes before recovery. Never delete mismatched held bytes. |
+| `invalid-evidence` | Repair/recover the producing controller's confirmed evidence; missing optional evidence cannot substitute for corrupt present evidence. |
+| `invalid-summary` | Recover the durable summary/marker pair and manifest; never clear expiry to reuse a snapshot. |
+| `size-limit` | Use a supported bounded evidence/inventory format before maintenance; no oversized summary is published. |
+| `io-error` | Check storage availability/permissions or use a fresh export destination; an exclusive partial output is preserved. |
+
+Stages are the fixed names `input`, `read`, `inventory`, `evidence`, `summary`,
+`revalidate`, `delete` and `export`. A valid crash prefix can be replanned/replayed;
+a stale/invalid prefix requires controller recovery rather than blind deletion.
 
 ## Development commands
 

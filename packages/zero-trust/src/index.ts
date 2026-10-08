@@ -50,6 +50,7 @@ export * from './receipt/render';
 export * from './receipt/schema';
 export * from './receipt/verify';
 export * from './redaction';
+export * from './retention/errors';
 export * from './retention/export';
 export * from './retention/retention';
 export * from './review/integrity';
