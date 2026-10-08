@@ -45,8 +45,14 @@ injected `persist(evidence)`. `policy` has the controller's current policy `dige
 does not grant authority. It reads bound issue comments and timeline pages,
 100 entries/page, at most 10 pages per endpoint. Identity URLs are validated as
 data, never followed; incomplete, malformed, duplicate, failed, secret-bearing or
-truncated reads give `unknown`. Both endpoints must complete before persistence.
+truncated relevant reads give `unknown`. Non-assignment timeline event kinds are
+ignored after checking record shape, truncation flags and string-valued `event`;
+their other fields are not decoded or secret-scanned. Both endpoints must complete before persistence.
 Page observations and caller facts are detached before subsequent awaits.
+Supplied REST comment `url`/`issue_url` identity fields must agree with the bound
+issue and comment ID. Authorized responses require valid `updated_at` metadata;
+missing edit evidence is `unknown`. Valid GitHub App bot identities are supported
+as data, including issue authors, but bot comments never grant invitation authority.
 
 Only responses strictly after engagement are considered. The contributor's own
 comment and engagement comment are excluded. Whole, unqualified affirmative

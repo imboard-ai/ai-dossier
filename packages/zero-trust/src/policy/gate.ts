@@ -1,4 +1,4 @@
-import { isGitHubLogin } from '../github/handoff';
+import { isGitHubLogin, sameLogin } from '../github/handoff';
 import { assertNoSecrets } from '../redaction';
 import { ReasonCode } from '../state';
 import type { PolicyAssessment, PolicyCitation } from './classify';
@@ -26,84 +26,94 @@ interface GateFacts {
   assigned: boolean;
   ban?: PolicyCitation;
 }
+interface GateRow {
+  readonly id: string;
+  readonly matches: (facts: GateFacts) => boolean;
+  readonly decide: (facts: GateFacts) => GateDecision;
+}
 
 /** First matching row wins. No row performs I/O, emits a comment or changes state. */
-export const GATE_ROWS = Object.freeze([
-  {
-    id: 'ai_banned',
-    matches: (f: GateFacts) => f.policy.ai === 'banned',
-    decide: (f: GateFacts): GateDecision =>
-      f.ban
-        ? {
-            kind: 'terminate',
-            reason: 'ai_banned',
-            citation: f.ban,
-            reasonCode: ReasonCode.PolicyBlocked,
-          }
-        : { kind: 'hand_off', reasons: ['ban_citation_missing'] },
-  },
-  {
-    id: 'ineligible',
-    matches: (f: GateFacts) => f.eligibility.kind === 'ineligible',
-    decide: (f: GateFacts): GateDecision => ({
-      kind: 'ineligible',
-      reasons: Object.freeze([...f.eligibility.reasons]),
-      reasonCode: ReasonCode.PolicyBlocked,
-    }),
-  },
-  {
-    id: 'policy_refused',
-    matches: (f: GateFacts) => f.policy.reason !== undefined,
-    decide: (): GateDecision => ({ kind: 'hand_off', reasons: ['policy_unknown'] }),
-  },
-  {
-    id: 'eligibility_hand_off',
-    matches: (f: GateFacts) => f.eligibility.kind === 'hand_off',
-    decide: (f: GateFacts): GateDecision => ({
-      kind: 'hand_off',
-      reasons: Object.freeze([...f.eligibility.reasons]),
-    }),
-  },
-  {
-    id: 'ai_unclear',
-    matches: (f: GateFacts) => f.policy.ai === 'unclear',
-    decide: (): GateDecision => ({ kind: 'hand_off', reasons: ['ai_unclear'] }),
-  },
-  {
-    id: 'ownership_unclear',
-    matches: (f: GateFacts) => f.policy.assignment === 'unclear' && f.policy.directPr === 'unclear',
-    decide: (): GateDecision => ({ kind: 'hand_off', reasons: ['ownership_unclear'] }),
-  },
-  {
-    id: 'ai_approval',
-    matches: (f: GateFacts) => f.policy.ai === 'requires_approval',
-    decide: (): GateDecision => ({
-      kind: 'request_permission',
-      reasonCode: ReasonCode.PermissionRequired,
-    }),
-  },
-  {
-    id: 'assignment_required',
-    matches: (f: GateFacts) => f.policy.assignment === 'required' && !f.assigned,
-    decide: (): GateDecision => ({
-      kind: 'request_permission',
-      reasonCode: ReasonCode.PermissionRequired,
-    }),
-  },
-  {
-    id: 'discussion_first',
-    matches: (f: GateFacts) => f.policy.directPr === 'discussion_first',
-    decide: (): GateDecision => ({
-      kind: 'request_permission',
-      reasonCode: ReasonCode.PermissionRequired,
-    }),
-  },
-  {
-    id: 'proceed',
-    matches: (): boolean => true,
-    decide: (): GateDecision => ({ kind: 'proceed' }),
-  },
-]);
+export const GATE_ROWS: readonly GateRow[] = Object.freeze(
+  (
+    [
+      {
+        id: 'ai_banned',
+        matches: (f: GateFacts) => f.policy.ai === 'banned',
+        decide: (f: GateFacts): GateDecision =>
+          f.ban
+            ? {
+                kind: 'terminate',
+                reason: 'ai_banned',
+                citation: f.ban,
+                reasonCode: ReasonCode.PolicyBlocked,
+              }
+            : { kind: 'hand_off', reasons: ['ban_citation_missing'] },
+      },
+      {
+        id: 'ineligible',
+        matches: (f: GateFacts) => f.eligibility.kind === 'ineligible',
+        decide: (f: GateFacts): GateDecision => ({
+          kind: 'ineligible',
+          reasons: Object.freeze([...f.eligibility.reasons]),
+          reasonCode: ReasonCode.PolicyBlocked,
+        }),
+      },
+      {
+        id: 'policy_refused',
+        matches: (f: GateFacts) => f.policy.reason !== undefined,
+        decide: (): GateDecision => ({ kind: 'hand_off', reasons: ['policy_unknown'] }),
+      },
+      {
+        id: 'eligibility_hand_off',
+        matches: (f: GateFacts) => f.eligibility.kind === 'hand_off',
+        decide: (f: GateFacts): GateDecision => ({
+          kind: 'hand_off',
+          reasons: Object.freeze([...f.eligibility.reasons]),
+        }),
+      },
+      {
+        id: 'ai_unclear',
+        matches: (f: GateFacts) => f.policy.ai === 'unclear',
+        decide: (): GateDecision => ({ kind: 'hand_off', reasons: ['ai_unclear'] }),
+      },
+      {
+        id: 'ownership_unclear',
+        matches: (f: GateFacts) =>
+          f.policy.assignment === 'unclear' && f.policy.directPr === 'unclear',
+        decide: (): GateDecision => ({ kind: 'hand_off', reasons: ['ownership_unclear'] }),
+      },
+      {
+        id: 'ai_approval',
+        matches: (f: GateFacts) => f.policy.ai === 'requires_approval',
+        decide: (): GateDecision => ({
+          kind: 'request_permission',
+          reasonCode: ReasonCode.PermissionRequired,
+        }),
+      },
+      {
+        id: 'assignment_required',
+        matches: (f: GateFacts) => f.policy.assignment === 'required' && !f.assigned,
+        decide: (): GateDecision => ({
+          kind: 'request_permission',
+          reasonCode: ReasonCode.PermissionRequired,
+        }),
+      },
+      {
+        id: 'discussion_first',
+        matches: (f: GateFacts) => f.policy.directPr === 'discussion_first',
+        decide: (): GateDecision => ({
+          kind: 'request_permission',
+          reasonCode: ReasonCode.PermissionRequired,
+        }),
+      },
+      {
+        id: 'proceed',
+        matches: (): boolean => true,
+        decide: (): GateDecision => ({ kind: 'proceed' }),
+      },
+    ] satisfies GateRow[]
+  ).map((row) => Object.freeze(row))
+);
 
 /** Assessed, controller-owned inputs only; malformed/unknown inputs never pass. */
 export function decideGate(
@@ -140,13 +150,13 @@ export function decideGate(
     if (
       !Array.isArray(eligibility.reasons) ||
       eligibility.reasons.some((r) => typeof r !== 'string') ||
-      eligibility.facts.contributor.toLowerCase() !== login.toLowerCase()
+      !sameLogin(eligibility.facts.contributor, login)
     )
       throw new Error();
     const assignees = eligibility.facts.issue.assignees.map((a) => a.login);
     if (assignees.some((a) => !isGitHubLogin(a))) throw new Error();
     // Even a contradictory caller-supplied eligible snapshot cannot erase ownership.
-    const competing = assignees.some((a) => a.toLowerCase() !== login.toLowerCase());
+    const competing = assignees.some((a) => !sameLogin(a, login));
     const e =
       competing && eligibility.kind === 'eligible'
         ? { ...eligibility, kind: 'hand_off' as const, reasons: ['competing_assignee' as const] }
@@ -167,7 +177,7 @@ export function decideGate(
     const facts: GateFacts = {
       policy: { ...policy, ai, assignment, directPr, reason, citations },
       eligibility: e,
-      assigned: assignees.some((a) => a.toLowerCase() === login.toLowerCase()),
+      assigned: assignees.some((a) => sameLogin(a, login)),
       ban,
     };
     for (const row of GATE_ROWS) if (row.matches(facts)) return Object.freeze(row.decide(facts));

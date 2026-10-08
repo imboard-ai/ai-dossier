@@ -51,6 +51,73 @@ function rig(comments: unknown[] = [], events: unknown[] = []) {
 }
 
 describe('explicit resume invitation', () => {
+  it('accepts validated bot data without giving bot comments authority', async () => {
+    const bot = {
+      login: 'automation[bot]',
+      html_url: 'https://github.com/apps/automation',
+      type: 'Bot',
+    };
+    const r = rig([{ ...comment('Go ahead', 'MEMBER', 'other', 13), user: bot }, comment()]);
+    expect(
+      (await checkInvitation(r.read, binding, { ...r.options, issueAuthor: bot.login })).kind
+    ).toBe('invited');
+    const onlyBot = rig([{ ...comment('Go ahead', 'OWNER'), user: bot }]);
+    expect(
+      (
+        await checkInvitation(onlyBot.read, binding, {
+          ...onlyBot.options,
+          issueAuthor: bot.login,
+          policy: { ...onlyBot.options.policy, issueAuthorMayInvite: true },
+        })
+      ).kind
+    ).toBe('waiting');
+    const malformed = rig([{ ...comment(), user: { ...bot, type: 'User' } }]);
+    expect((await checkInvitation(malformed.read, binding, malformed.options)).kind).toBe(
+      'unknown'
+    );
+  });
+  it('refuses absent edit metadata and contradictory supplied REST identities', async () => {
+    for (const patch of [
+      { updated_at: undefined },
+      { updated_at: 'invalid' },
+      { issue_url: 'https://api.github.com/repos/up/proj/issues/9' },
+      { url: 'https://api.github.com/repos/other/proj/issues/comments/12' },
+      { url: 12 },
+    ]) {
+      const r = rig([{ ...comment(), ...patch }]);
+      expect((await checkInvitation(r.read, binding, r.options)).kind).toBe('unknown');
+      expect(r.persist).not.toHaveBeenCalled();
+    }
+    const r = rig([
+      {
+        ...comment(),
+        issue_url: 'https://api.github.com/repos/up/proj/issues/8',
+        url: 'https://api.github.com/repos/up/proj/issues/comments/12',
+      },
+    ]);
+    expect((await checkInvitation(r.read, binding, r.options)).kind).toBe('invited');
+  });
+  it('requires a primitive digest and detaches options before reads', async () => {
+    const r = rig([comment()]);
+    const malformed = {
+      ...r.options,
+      policy: { digest: ['d'.repeat(64)], issueAuthorMayInvite: false },
+    };
+    expect(
+      (await checkInvitation(r.read, binding, malformed as unknown as InvitationOptions)).kind
+    ).toBe('unknown');
+    expect(r.calls).toHaveLength(0);
+    const options = { ...r.options, policy: { ...r.options.policy } };
+    const read: GitHubRead = async (p) => {
+      options.policy.digest = 'e'.repeat(64);
+      options.policy.issueAuthorMayInvite = true;
+      return r.read(p);
+    };
+    expect(await checkInvitation(read, binding, options)).toMatchObject({
+      kind: 'invited',
+      evidence: { policyDigest: 'd'.repeat(64) },
+    });
+  });
   it.each([
     'OWNER',
     'MEMBER',

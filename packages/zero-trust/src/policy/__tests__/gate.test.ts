@@ -86,6 +86,15 @@ const rows: { id: string; p: Partial<PolicyAssessment>; e?: Eligibility; kind: s
 ];
 
 describe('gate table', () => {
+  it('freezes every table row so consumers cannot weaken a ban', () => {
+    for (const row of GATE_ROWS) {
+      expect(Object.isFrozen(row)).toBe(true);
+      expect(() => Object.assign(row, { decide: () => ({ kind: 'proceed' }) })).toThrow();
+    }
+    expect(
+      decideGate({ ...policy, ai: 'banned', citations: [citation] }, eligible(), 'alice').kind
+    ).toBe('terminate');
+  });
   it('has an independently specified case for every ordered row', () =>
     expect(GATE_ROWS.map((r) => r.id)).toEqual(rows.map((r) => r.id)));
   it.each(rows)('$id', ({ p, e, kind }) =>
