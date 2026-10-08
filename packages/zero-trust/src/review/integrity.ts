@@ -153,6 +153,7 @@ function lines(value: string): string[] {
 interface LineDiff {
   count: number;
   added: string;
+  removed: string;
   ranges: readonly (readonly [number, number])[];
   junctions: readonly number[];
   cells: number;
@@ -178,6 +179,7 @@ function diff(before: string, after: string, remainingCells: number): LineDiff {
     return {
       count: old.length + next.length,
       added: next.join(''),
+      removed: old.join(''),
       ranges: [[offsets[start], offsets[endB]]],
       junctions: old.length ? [offsets[start], offsets[endB]] : [],
       cells: 0,
@@ -191,6 +193,7 @@ function diff(before: string, after: string, remainingCells: number): LineDiff {
           ? 1 + table[(i + 1) * width + j + 1]
           : Math.max(table[(i + 1) * width + j], table[i * width + j + 1]);
   const added: string[] = [];
+  const removed: string[] = [];
   const ranges: [number, number][] = [];
   const junctions: number[] = [];
   let i = 0;
@@ -201,7 +204,7 @@ function diff(before: string, after: string, remainingCells: number): LineDiff {
       j++;
     } else if (i < old.length && table[(i + 1) * width + j] >= table[i * width + j + 1]) {
       junctions.push(offsets[start + j]);
-      i++;
+      removed.push(old[i++]);
     } else {
       ranges.push([offsets[start + j], offsets[start + j + 1]]);
       added.push(next[j++]);
@@ -212,6 +215,7 @@ function diff(before: string, after: string, remainingCells: number): LineDiff {
   return {
     count: old.length + next.length - 2 * table[0],
     added: added.join(''),
+    removed: [...removed, ...old.slice(i)].join(''),
     ranges,
     junctions,
     cells,
@@ -219,6 +223,9 @@ function diff(before: string, after: string, remainingCells: number): LineDiff {
 }
 /** Scan full candidate context, including markers split across unchanged/added lines. */
 function addedDisableMarker(markers: Screening['markers'], changes: LineDiff): boolean {
+  // Textual screening cannot prove a retained marker stayed inert when a patch
+  // removes comment/string delimiters. Refuse this ambiguous context change.
+  if (markers.length && /\/\*|\*\/|['"`]/u.test(changes.removed)) return true;
   let range = 0;
   let junction = 0;
   for (const [start, end, receiverOutsideSpan] of markers) {

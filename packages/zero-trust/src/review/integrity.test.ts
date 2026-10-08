@@ -332,6 +332,22 @@ describe('deterministic candidate scope/test integrity', () => {
       )
     ).toContain('test_disabled');
   });
+  it.each([
+    ['test_case.py', '"""', '@unittest.skip("reason")\n', '"""'],
+    ['test_case.py', "'''", '@unittest.skipIf(True, "reason")\n', "'''"],
+    ['a.test.js', '/*', 'it.skip("case");\n', '*/'],
+    ['a.test.js', '/*', 'xit("case");\n', '*/'],
+  ])('delimiter deletions activating retained marker in %s refuse ambiguous context', (path, open, marker, close) => {
+    const before = `${open}\n${marker}${close}\nassert True\n`;
+    const after = `${marker}assert True\n`;
+    expect(codes(input({ [path]: before }, { [path]: after }))).toContain('test_disabled');
+    expect(codes(input({ [path]: `${before}old\n` }, { [path]: `${before}new\n` }))).not.toContain(
+      'test_disabled'
+    );
+    expect(codes(input({ [path]: before }, { [path]: 'assert True\n' }))).not.toContain(
+      'test_disabled'
+    );
+  });
   it('ordinary source assertions/skip text are not treated as test integrity', () => {
     expect(codes(input({ 'src/a.ts': 'expect(1);\n' }, { 'src/a.ts': 'it.skip(\n' }))).toEqual([]);
   });
