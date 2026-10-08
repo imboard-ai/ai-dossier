@@ -24,7 +24,10 @@ never zero or an inferred success. Reporting does not repair control evidence.
 and reason codes, never raw errors or journal contents. A tracker prefix may lag
 external execution but cannot omit a tracker-owned transition in durable history.
 Submission comes from the durable publication transition, not acceptance. Only a
-tracker-observed outcome with its recorded SHA counts as merged/declined. Revisions
+tracker-observed outcome with its recorded SHA counts as merged/declined. This includes
+a structurally recorded `observedMergeSha` when upstream merges during revision:
+the tracker remains execution-blocked, while metrics count the observed merge. Legacy
+revision blocks without that SHA remain unknown, never inferred from reason text. Revisions
 count tracker-recorded revision requests, including the currently active revision.
 Gate passage is eligible; a pre-passage policy block is ineligible; a gating
 permission/contributor wait is hand-off; an undecided gate is unknown.

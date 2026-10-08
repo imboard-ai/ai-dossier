@@ -3,12 +3,14 @@
  * that is URL-encoded and bounded and cannot move the target. */
 import { createHash } from 'node:crypto';
 import { isGitHubLogin } from '../github-login';
+import { isRepoName } from '../github-target';
 import { CONTRIBUTOR_CONFIRMED_OPERATIONS, type IntentInput, idempotencyKey } from '../intents';
 import type { CommandEvidence } from '../receipt/schema';
 import { assertNoSecrets } from '../redaction';
 import { assertContentPolicy, HandoffError, untrustedText } from './text';
 
 export { isGitHubLogin } from '../github-login';
+export { isRepoName } from '../github-target';
 export { HandoffError } from './text';
 
 /** Conservative prefill ceiling; GitHub and browsers reject longer URLs inconsistently. */
@@ -34,12 +36,6 @@ export interface PrBinding {
 export interface IssueBinding {
   readonly upstream: RepoBinding;
   readonly issue: number;
-}
-
-const REPO = /^[A-Za-z0-9._-]{1,100}$/u;
-
-export function isRepoName(value: unknown): value is string {
-  return typeof value === 'string' && REPO.test(value) && value !== '.' && value !== '..';
 }
 
 /** GitHub logins and repository names compare case-insensitively. */

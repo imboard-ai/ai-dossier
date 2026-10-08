@@ -11,6 +11,7 @@ import { RunEvidenceError, type RunStore } from '../controller/run-store';
 import { dataDescriptors } from '../data-descriptors';
 import { readPrivate } from '../durable-fs';
 import { isGitHubLogin } from '../github-login';
+import { isPullRequestTarget, isRepositoryTarget } from '../github-target';
 import { assertNoSecrets, assertSecretFree } from '../redaction';
 import { isRecord, isTimestamp, ReasonCode } from '../state';
 import { parseStrictUtf8Json } from '../strict-utf8';
@@ -198,6 +199,7 @@ export function contributionOutcome(store: RunStore, now?: Date | string): Contr
     activeMs: 'unknown',
     waitMs: 'unknown',
     cost: { byCurrency: 'unknown' },
+    adoptionReported: 'unknown',
     unknownEvidence,
   };
   const evidence = attempt('run', unknownEvidence, () => store.validateOutcomeEvidence());
@@ -234,23 +236,25 @@ export function contributionOutcome(store: RunStore, now?: Date | string): Contr
     ? 'none'
     : tracker === 'unknown'
       ? 'unknown'
-      : tracker.run.state === 'merged' || tracker.run.state === 'declined'
-        ? tracker.outcomeSha
-          ? tracker.run.state
-          : 'unknown'
-        : run.state === 'accepted'
-          ? 'accepted'
-          : [
-                'submitted',
-                'awaiting_review',
-                'revising',
-                'implementing',
-                'verifying',
-                'shipping',
-                'paused_user',
-              ].includes(run.state)
-            ? 'open'
-            : 'unknown';
+      : tracker.blockedReason === 'merged_during_revision' && tracker.outcomeSha
+        ? 'merged'
+        : tracker.run.state === 'merged' || tracker.run.state === 'declined'
+          ? tracker.outcomeSha
+            ? tracker.run.state
+            : 'unknown'
+          : run.state === 'accepted'
+            ? 'accepted'
+            : [
+                  'submitted',
+                  'awaiting_review',
+                  'revising',
+                  'implementing',
+                  'verifying',
+                  'shipping',
+                  'paused_user',
+                ].includes(run.state)
+              ? 'open'
+              : 'unknown';
   const adoptionReported = readAdoption(store, unknownEvidence);
   const value: ContributionOutcome = {
     contributionId: store.contributionId,
@@ -429,10 +433,21 @@ function safeOutcome(input: unknown): ContributionOutcome {
   )
     throw new MetricsError();
   count(raw.issue, true);
+  if (raw.issue === 0 || (raw.upstream !== 'unknown' && !isRepositoryTarget(raw.upstream)))
+    throw new MetricsError();
   count(raw.revisions, true);
   count(raw.activeMs, true);
-  if (raw.prUrl !== undefined) text(raw.prUrl);
-  else delete raw.prUrl;
+  if (raw.prUrl !== undefined) {
+    text(raw.prUrl);
+    if (
+      raw.prUrl !== 'unknown' &&
+      !isPullRequestTarget(
+        raw.prUrl,
+        raw.upstream === 'unknown' ? undefined : (raw.upstream as string)
+      )
+    )
+      throw new MetricsError();
+  } else delete raw.prUrl;
   if (raw.waitMs !== 'unknown') {
     const waits = shape(raw.waitMs, ['maintainer', 'contributor', 'review', 'paused']);
     for (const key of ['maintainer', 'contributor', 'review', 'paused']) count(waits[key]);
@@ -499,6 +514,29 @@ function safeAggregate(input: unknown): OutcomeAggregate {
   }
   validateCosts(raw.costPerSubmitted, false);
   validateCosts(raw.costPerAccepted, false);
+  const submitted = (raw.accepted as Rate).denominator;
+  const knownOutcomes = add((raw.accepted as Rate).numerator, (raw.declined as Rate).numerator);
+  const outcomeUnknown = (raw.accepted as Rate).unknown;
+  const reworkUnknown = (raw.reworkPerSubmitted as Rate).unknown;
+  const minimumUnknownSubmission = Math.max(
+    0,
+    outcomeUnknown - (submitted - knownOutcomes),
+    reworkUnknown - submitted
+  );
+  const maximumUnknownSubmission = Math.min(
+    outcomeUnknown,
+    contributions - submitted,
+    reworkUnknown
+  );
+  if (
+    minimumUnknownSubmission > maximumUnknownSubmission ||
+    (minimumUnknownSubmission > 0 && raw.costPerSubmitted !== 'unknown') ||
+    (raw.eligibleToSubmitted as Rate).denominator - (raw.eligibleToSubmitted as Rate).numerator >
+      contributions - submitted ||
+    submitted >
+      add((raw.eligibleToSubmitted as Rate).numerator, (raw.eligibleToSubmitted as Rate).unknown)
+  )
+    throw new MetricsError();
   if (
     (contributions === 0 && raw.medianActiveMs !== 'unknown') ||
     ((raw.accepted as Rate).unknown > 0 && raw.costPerAccepted !== 'unknown') ||

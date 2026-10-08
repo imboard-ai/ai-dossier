@@ -908,7 +908,7 @@ describe('revisions (AC2, AC3, AC5)', () => {
   });
 
   it('a merge during a revision ends it: blocked, nothing pushed, said plainly', async () => {
-    const { r, up, t, ready } = await revisionRig();
+    const { r, up, t, j, ready } = await revisionRig();
     await ready();
     Object.assign(up.pr(), { state: 'closed', merged: true });
     const push = vi.fn((i: IntentInput) => r.driver.execute(i));
@@ -918,6 +918,8 @@ describe('revisions (AC2, AC3, AC5)', () => {
     });
     expect(push).not.toHaveBeenCalled();
     expect(t.status().nextPermittedAction).toMatch(/Merged upstream .* while a revision/u);
+    expect(t.snapshot().outcomeSha).toBe(SHA1);
+    expect(replayTrack(j.read()).outcomeSha).toBe(SHA1);
   });
 
   it('a title or body edit is a contributor action confirmed only by a read (AC3)', async () => {

@@ -176,6 +176,103 @@ afterEach(() => {
 });
 
 describe('local contribution outcomes', () => {
+  it('retains unknown adoption when recorded notes cannot be bound to current evidence', () => {
+    const r = rig();
+    recordAdoption(r.store, 'voluntary', START);
+    expect(contributionOutcome(r.store).adoptionReported).toMatchObject({ note: 'voluntary' });
+    fs.unlinkSync(path.join(r.store.directory, 'config.json'));
+    expect(contributionOutcome(r.store).adoptionReported).toBe('unknown');
+    r.store.close();
+    expect(contributionOutcome(r.store).adoptionReported).toBe('unknown');
+  });
+  it('validates target identities and feasibility of shared cohort membership', () => {
+    const r = rig();
+    r.shipping();
+    r.step(ReasonCode.PublicationObserved);
+    const track = r.track();
+    track.event({
+      type: 'outcome',
+      outcome: 'merged',
+      headSha: track.sha,
+      run: r.step(ReasonCode.ObservedUpstreamMerge),
+    });
+    const o = contributionOutcome(r.store);
+    for (const patch of [
+      { issue: 0 },
+      { upstream: 'not a repository' },
+      { upstream: 'a/b/c' },
+      { prUrl: 'https://github.com/other/repo/pull/1' },
+      { prUrl: 'not a PR' },
+    ]) {
+      const value = { ...o, ...patch };
+      expect(() => aggregate([value])).toThrow(MetricsError);
+      for (const render of [renderMetricsJson, renderMetricsHuman])
+        expect(() => render(value)).toThrow(MetricsError);
+    }
+    const stats = aggregate([o]);
+    const unknown = contributionOutcome(rig().store); // a valid pre-submission outcome
+    const closed = rig().store;
+    closed.close();
+    const uncertain = aggregate([o, contributionOutcome(closed)]);
+    for (const value of [
+      { ...stats, eligibleToSubmitted: { numerator: 0, denominator: 1, unknown: 0, value: 0 } },
+      {
+        ...stats,
+        eligibleToSubmitted: {
+          numerator: 0,
+          denominator: 0,
+          unknown: 0,
+          value: 'unknown' as const,
+        },
+      },
+      { ...uncertain, reworkPerSubmitted: { numerator: 0, denominator: 1, unknown: 0, value: 0 } },
+      { ...uncertain, costPerSubmitted: {} },
+      {
+        ...aggregate([unknown]),
+        reworkPerSubmitted: { numerator: 0, denominator: 0, unknown: 1, value: 'unknown' as const },
+      },
+    ])
+      for (const render of [renderMetricsJson, renderMetricsHuman])
+        expect(() => render(value)).toThrow(MetricsError);
+    for (const value of [stats, uncertain, aggregate([unknown])])
+      expect(() => renderMetricsJson(value)).not.toThrow();
+  });
+  it('counts tracker-observed merge during revision without granting execution continuation', () => {
+    const r = rig();
+    r.shipping();
+    r.step(ReasonCode.PublicationObserved);
+    const t = r.track();
+    t.event({
+      type: 'revision_started',
+      feedback: [{ id: 'review:1', updatedAt: START }],
+      run: r.step(ReasonCode.RevisionRequested),
+    });
+    const blocked = r.step(ReasonCode.PolicyBlocked);
+    t.event({
+      type: 'blocked',
+      reason: 'merged_during_revision',
+      observedMergeSha: t.sha,
+      run: blocked,
+    });
+    expect(r.store.run.state).toBe('blocked');
+    expect(contributionOutcome(r.store).outcome).toBe('merged');
+    expect(aggregate([contributionOutcome(r.store)]).merged.value).toBe(1);
+    const legacy = rig();
+    legacy.shipping();
+    legacy.step(ReasonCode.PublicationObserved);
+    const lt = legacy.track();
+    lt.event({
+      type: 'revision_started',
+      feedback: [{ id: 'review:1', updatedAt: START }],
+      run: legacy.step(ReasonCode.RevisionRequested),
+    });
+    lt.event({
+      type: 'blocked',
+      reason: 'merged_during_revision',
+      run: legacy.step(ReasonCode.PolicyBlocked),
+    });
+    expect(contributionOutcome(legacy.store).outcome).toBe('unknown');
+  });
   it('refuses secret-bearing extra snapshot evidence before restoring known fields', () => {
     const r = rig();
     r.shipping();
