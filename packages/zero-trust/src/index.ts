@@ -5,6 +5,7 @@ export * from './canonical/acquire';
 export * from './canonical/export';
 export * from './canonical/reconstruct';
 export * from './controller/agent-loop';
+export * from './controller/checkpoints';
 export * from './controller/config';
 export * from './controller/evidence-runner';
 export * from './controller/output-collector';
