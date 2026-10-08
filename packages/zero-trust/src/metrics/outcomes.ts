@@ -8,7 +8,7 @@ import {
   readOutcomeTrack,
 } from '../controller/outcome-records';
 import type { RunStore } from '../controller/run-store';
-import { readPrivate, replacePrivate } from '../durable-fs';
+import { readPrivate } from '../durable-fs';
 import { isGitHubLogin } from '../github-login';
 import { assertNoSecrets, assertSecretFree } from '../redaction';
 import { isRecord, isTimestamp, ReasonCode } from '../state';
@@ -176,9 +176,7 @@ function readAdoption(
 /** Explicit voluntary local note. No telemetry and no automatic adoption inference. */
 export function recordAdoption(store: RunStore, note: string, now: Date | string): void {
   const value = adoption({ at: now instanceof Date ? now.toISOString() : now, note });
-  store.withStoreDirectory('artifacts', (dir) =>
-    replacePrivate(path.join(dir, 'adoption.json'), Buffer.from(JSON.stringify(value)))
-  );
+  store.replaceArtifact('adoption.json', Buffer.from(JSON.stringify(value)));
 }
 
 /** `now` defaults to the last durable transition, making repeated reads deterministic. */
@@ -199,14 +197,11 @@ export function contributionOutcome(store: RunStore, now?: Date | string): Contr
     cost: { byCurrency: 'unknown' },
     unknownEvidence,
   };
+  const config = attempt('config', unknownEvidence, () => store.validateConfigEvidence());
+  if (config === 'unknown') return unknown;
   const run = attempt('run', unknownEvidence, () => store.validateEvidence());
   if (run === 'unknown') return unknown;
-  const config = attempt('config', unknownEvidence, () => store.config);
-  if (
-    config === 'unknown' ||
-    config.issueUrl !== run.upstreamIssue ||
-    config.contributor !== run.contributor
-  )
+  if (config.issueUrl !== run.upstreamIssue || config.contributor !== run.contributor)
     return unknown;
   const handoffs = attempt('handoff', unknownEvidence, () => readOutcomeHandoffs(store, run));
   const tracker = attempt('track', unknownEvidence, () => readOutcomeTrack(store, run));
@@ -344,8 +339,45 @@ function validateCosts(input: unknown, integer: boolean): void {
     }
   }
 }
+/** Preserve original container authority: structuredClone erases class prototypes.
+ * Like receipt snapshots, inspect data descriptors without invoking getters/toJSON.
+ * Metrics permit finite fractional averages and null-prototype dictionaries. */
+function snapshotFacts(input: unknown): unknown {
+  let nodes = 0;
+  function copy(value: unknown, depth: number): unknown {
+    if (++nodes > 20000 || depth > 12) throw new MetricsError();
+    if (value === null || ['string', 'boolean', 'number'].includes(typeof value)) return value;
+    if (!plainRecord(value) && !Array.isArray(value)) throw new MetricsError();
+    if (Array.isArray(value) && Object.getPrototypeOf(value) !== Array.prototype)
+      throw new MetricsError();
+    const result: Record<string, unknown> | unknown[] = Array.isArray(value)
+      ? []
+      : Object.create(null);
+    for (const key of Reflect.ownKeys(value)) {
+      if (Array.isArray(value) && key === 'length') continue;
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (
+        typeof key !== 'string' ||
+        !descriptor ||
+        !('value' in descriptor) ||
+        !descriptor.enumerable
+      )
+        throw new MetricsError();
+      Object.defineProperty(result, key, {
+        value: copy(descriptor.value, depth + 1),
+        enumerable: true,
+      });
+    }
+    return result;
+  }
+  try {
+    return copy(input, 0);
+  } catch {
+    throw new MetricsError();
+  }
+}
 function safeOutcome(input: unknown): ContributionOutcome {
-  const raw = shape(structuredClone(input), [
+  const raw = shape(snapshotFacts(input), [
     'contributionId',
     'identity',
     'contributor',
@@ -371,6 +403,12 @@ function safeOutcome(input: unknown): ContributionOutcome {
   choice(raw.gated, ['eligible', 'ineligible', 'hand_off', 'unknown']);
   choice(raw.submitted, [true, false, 'unknown']);
   choice(raw.outcome, ['open', 'accepted', 'merged', 'declined', 'none', 'unknown']);
+  if (
+    (raw.submitted === false && !['none', 'unknown'].includes(raw.outcome as string)) ||
+    (raw.submitted === true && raw.outcome === 'none') ||
+    (raw.submitted === 'unknown' && raw.outcome !== 'unknown')
+  )
+    throw new MetricsError();
   count(raw.issue, true);
   count(raw.revisions, true);
   count(raw.activeMs, true);
@@ -398,7 +436,7 @@ function safeOutcome(input: unknown): ContributionOutcome {
   return raw as unknown as ContributionOutcome;
 }
 function safeAggregate(input: unknown): OutcomeAggregate {
-  const raw = shape(structuredClone(input), [
+  const raw = shape(snapshotFacts(input), [
     'contributions',
     'eligibleToSubmitted',
     'accepted',
@@ -415,6 +453,7 @@ function safeAggregate(input: unknown): OutcomeAggregate {
   count(raw.contributions);
   count(raw.unknownContributors);
   count(raw.medianActiveMs, true, false);
+  const contributions = raw.contributions as number;
   for (const key of [
     'eligibleToSubmitted',
     'accepted',
@@ -429,17 +468,32 @@ function safeAggregate(input: unknown): OutcomeAggregate {
     count(r.value, true, false);
     if (
       r.value !== rate(r.numerator as number, r.denominator as number, r.unknown as number).value ||
-      (key !== 'reworkPerSubmitted' && (r.numerator as number) > (r.denominator as number))
+      (key !== 'reworkPerSubmitted' && (r.numerator as number) > (r.denominator as number)) ||
+      (r.denominator as number) > contributions ||
+      (r.unknown as number) > contributions ||
+      (key !== 'eligibleToSubmitted' && r.denominator !== (raw.accepted as Rate).denominator)
     )
       throw new MetricsError();
   }
   validateCosts(raw.costPerSubmitted, false);
   validateCosts(raw.costPerAccepted, false);
   if (!plainRecord(raw.repeatUsage)) throw new MetricsError();
+  let knownContributors = 0;
   for (const [login, total] of Object.entries(raw.repeatUsage)) {
     if (!isGitHubLogin(login) || login !== login.toLowerCase()) throw new MetricsError();
     count(total);
+    if (total === 0) throw new MetricsError();
+    knownContributors = add(knownContributors, total as number);
   }
+  if (
+    add(knownContributors, raw.unknownContributors as number) !== contributions ||
+    (raw.merged as Rate).numerator > (raw.accepted as Rate).numerator ||
+    add((raw.accepted as Rate).numerator, (raw.declined as Rate).numerator) >
+      (raw.accepted as Rate).denominator ||
+    (raw.merged as Rate).unknown !== (raw.accepted as Rate).unknown ||
+    (raw.declined as Rate).unknown !== (raw.accepted as Rate).unknown
+  )
+    throw new MetricsError();
   return raw as unknown as OutcomeAggregate;
 }
 function rate(numerator: number, denominator: number, unknown: number): Rate {

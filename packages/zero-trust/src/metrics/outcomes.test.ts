@@ -1,4 +1,4 @@
-import { generateKeyPairSync } from 'node:crypto';
+import { createHash, generateKeyPairSync } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -175,6 +175,127 @@ afterEach(() => {
 });
 
 describe('local contribution outcomes', () => {
+  it.each([
+    'deleted',
+    'corrupt',
+    'invalid-byte',
+    'digest-deleted',
+    'digest-corrupt',
+    'changed',
+  ])('refuses cached success when current config evidence is %s', (mode) => {
+    const r = rig();
+    r.shipping();
+    r.step(ReasonCode.PublicationObserved);
+    const t = r.track();
+    t.event({
+      type: 'outcome',
+      outcome: 'merged',
+      headSha: t.sha,
+      run: r.step(ReasonCode.ObservedUpstreamMerge),
+    });
+    expect(contributionOutcome(r.store).outcome).toBe('merged');
+    const file = path.join(r.store.directory, 'config.json');
+    const digest = path.join(r.store.directory, 'config.sha256');
+    if (mode === 'deleted') fs.unlinkSync(file);
+    else if (mode === 'digest-deleted') fs.unlinkSync(digest);
+    else if (mode === 'digest-corrupt') fs.writeFileSync(digest, '0'.repeat(64));
+    else if (mode === 'corrupt') fs.writeFileSync(file, '{');
+    else {
+      let bytes = fs.readFileSync(file);
+      if (mode === 'invalid-byte') bytes[bytes.indexOf(Buffer.from('fixture'))] = 0xff;
+      else {
+        const config = JSON.parse(bytes.toString());
+        config.budget.ceilingMinor += 1;
+        bytes = Buffer.from(JSON.stringify(config));
+      }
+      fs.writeFileSync(file, bytes);
+      fs.writeFileSync(digest, createHash('sha256').update(bytes).digest('hex'));
+    }
+    const outcome = contributionOutcome(r.store);
+    expect(outcome).toMatchObject({
+      identity: 'unknown',
+      submitted: 'unknown',
+      outcome: 'unknown',
+      cost: { byCurrency: 'unknown' },
+    });
+    expect(outcome.unknownEvidence.length).toBeGreaterThan(0);
+    expect(aggregate([outcome]).merged.value).toBe('unknown');
+  });
+
+  it('contains snapshot exceptions and refuses original class dictionaries', () => {
+    const o = contributionOutcome(rig().store);
+    const stats = aggregate([o]);
+    class Dictionary {}
+    for (const value of [
+      { ...o, cost: { byCurrency: new Dictionary() } },
+      { ...stats, repeatUsage: new Dictionary() },
+      { ...o, activeMs: () => 'ghp_demo' },
+      { ...stats, medianActiveMs: () => 'ghp_demo' },
+      Object.defineProperty({ ...o }, 'activeMs', {
+        get() {
+          throw new Error('ghp_demo');
+        },
+      }),
+      Object.defineProperty({ ...stats }, 'medianActiveMs', {
+        get() {
+          throw new Error('ghp_demo');
+        },
+      }),
+    ]) {
+      for (const render of [renderMetricsJson, renderMetricsHuman]) {
+        let error: unknown;
+        try {
+          render(value as never);
+        } catch (caught) {
+          error = caught;
+        }
+        expect(error).toBeInstanceOf(MetricsError);
+        expect((error as Error).message).toBe('Invalid local outcome metrics');
+        expect((error as Error).cause).toBeUndefined();
+      }
+    }
+  });
+
+  it('refuses contradictory contribution and cohort facts while permitting rework above one', () => {
+    const o = contributionOutcome(rig().store);
+    expect(() => aggregate([{ ...o, submitted: false, outcome: 'merged' }])).toThrow(MetricsError);
+    expect(() => aggregate([{ ...o, submitted: true, outcome: 'none' }])).toThrow(MetricsError);
+    const stats = aggregate([o]);
+    for (const patch of [
+      { contributions: 0 },
+      { unknownContributors: 2 },
+      { repeatUsage: { contributor: 2 } },
+      { merged: { numerator: 1, denominator: 1, value: 1, unknown: 0 } },
+      { eligibleToSubmitted: { numerator: 0, denominator: 2, value: 0, unknown: 0 } },
+    ])
+      expect(() => renderMetricsJson({ ...stats, ...patch })).toThrow(MetricsError);
+    const submitted = {
+      ...o,
+      gated: 'eligible' as const,
+      submitted: true,
+      outcome: 'open' as const,
+      revisions: 3,
+    };
+    expect(() => renderMetricsJson(aggregate([submitted]))).not.toThrow();
+  });
+
+  it('latches uncertain adoption publication after rename and directory fsync failure', () => {
+    const r = rig();
+    const original = fs.fsyncSync;
+    vi.spyOn(fs, 'fsyncSync').mockImplementation((fd) => {
+      if (fs.fstatSync(fd).isDirectory()) throw new Error('injected EIO');
+      return original(fd);
+    });
+    expect(() => recordAdoption(r.store, 'first', START)).toThrow();
+    vi.restoreAllMocks();
+    expect(contributionOutcome(r.store).outcome).toBe('unknown');
+    expect(() => recordAdoption(r.store, 'second', START)).toThrow();
+    expect(
+      JSON.parse(fs.readFileSync(path.join(r.store.directory, 'artifacts/adoption.json'), 'utf8'))
+        .note
+    ).toBe('first');
+  });
+
   it.each([
     'deleted',
     'truncated',
@@ -481,7 +602,7 @@ describe('local contribution outcomes', () => {
     expect(contributionOutcome(r.store).cost.byCurrency).toBe('unknown');
     replacePrivate(file, Buffer.from('{}'));
     expect(contributionOutcome(r.store).cost.byCurrency).toBe('unknown');
-    vi.spyOn(r.store, 'config', 'get').mockImplementation(() => {
+    vi.spyOn(r.store, 'validateConfigEvidence').mockImplementation(() => {
       throw new Error('unreadable');
     });
     expect(contributionOutcome(r.store).submitted).toBe('unknown');

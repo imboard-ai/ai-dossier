@@ -12,7 +12,7 @@ import {
   type EstimateRequest,
   type Money,
 } from './budget-types';
-import { replacePrivate } from './durable-fs';
+import { readPrivate, replacePrivate } from './durable-fs';
 import {
   lockRecoveries,
   recordLockReclaim,
@@ -343,27 +343,14 @@ export class BudgetLedger {
   static readOnlySnapshot(file: string, contributionId: string): BudgetState {
     let bytes: Buffer;
     try {
-      const fd = fs.openSync(
-        file,
-        fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK
-      );
-      try {
-        const stat = fs.fstatSync(fd);
-        if (
-          !stat.isFile() ||
-          stat.nlink !== 1 ||
-          stat.uid !== process.getuid?.() ||
-          (stat.mode & 0o077) !== 0
-        )
+      bytes = readPrivate(file, (stat) => {
+        if (stat.uid !== process.getuid?.())
           throw new BudgetError('corrupt_ledger', 'Ledger must be a private regular file');
-        bytes = fs.readFileSync(fd);
-      } finally {
-        fs.closeSync(fd);
-      }
+      });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT')
         throw new BudgetError('missing_ledger', 'Budget ledger missing; never reset on resume');
-      throw error;
+      throw new BudgetError('corrupt_ledger', 'Unreadable budget ledger; reconciliation required');
     }
     try {
       return validate(parseStrictUtf8Json(bytes), contributionId);

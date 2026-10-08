@@ -204,12 +204,16 @@ export function parseJournalEvents(bytes: Buffer): unknown[] {
   return parseComplete(bytes);
 }
 function parseComplete(bytes: Buffer): unknown[] {
-  const text = strictUtf8(bytes);
-  if (text && !text.endsWith('\n')) throw new JournalError();
-  return text
-    ? text
-        .slice(0, -1)
-        .split('\n')
-        .map((line) => JSON.parse(line))
-    : [];
+  try {
+    const text = strictUtf8(bytes);
+    if (text && !text.endsWith('\n')) throw new JournalError();
+    return text
+      ? text
+          .slice(0, -1)
+          .split('\n')
+          .map((line) => JSON.parse(line))
+      : [];
+  } catch {
+    throw new JournalError();
+  }
 }

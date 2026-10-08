@@ -391,9 +391,7 @@ export class LocalQemuAdapter implements VmAdapter {
     if (!VM_ID.test(vmId)) return null;
     const vmDir = path.join(this.vmsDir, vmId);
     try {
-      const record = JSON.parse(
-        readPrivate(path.join(vmDir, 'vm.json')).toString('utf8')
-      ) as VmRecord;
+      const record = parseStrictUtf8Json(readPrivate(path.join(vmDir, 'vm.json'))) as VmRecord;
       const valid =
         record.vmId === vmId &&
         record.vmDir === vmDir &&

@@ -69,7 +69,10 @@ human values are JSON-quoted to prevent line spoofing. Both renderers and aggreg
 validate public facts, refuse extra keys and invalid numeric values, and preserve
 the same facts in both formats. Per-contribution reports retain fixed source/reason
 diagnostics; aggregates retain uncertainty counts and unknown statistics, not source
-diagnostics. Every report validates the complete durable control journal and snapshot
+diagnostics. Only `contributionOutcome(store, now?)` rereads durable evidence; regenerate
+outcomes before aggregation or rendering when fresh facts are needed. Aggregation and
+renderers validate the supplied snapshots, not storage. Derivation validates the current
+strict config and its digest as well as the complete durable control journal and snapshot
 against the cached run under the held fence using `RunStore.validateEvidence()`;
 missing, corrupt, recovered or mismatched evidence cannot yield cached success.
 Evidence JSON is decoded with fatal UTF-8 validation. Budget reporting uses
@@ -78,7 +81,14 @@ without resolving it back to a mutable pathname. RunStore's synchronous `withSto
 callback)` pins a private child directory under its held descriptor/fence and closes
 it after the callback; Promise-like returns are refused by types and thenables
 are refused at runtime. Descriptor paths must never escape that callback. Adoption
-reads/writes refuse symlink directory replacement. `parseJournalEvents(bytes)` is
+reads/writes refuse symlink directory replacement. `RunStore.replaceArtifact(name, bytes)`
+publishes a basename atomically under the held descriptor and retains the lifetime fence
+on uncertain persistence; reporting and subsequent writes then refuse until process-death
+reconciliation. Native async callbacks are rejected before invocation; returned thenables
+are refused and their rejections consumed. Snapshot validation refuses accessor properties
+and non-plain containers before copying; snapshot failures expose only fixed errors.
+`RunStore.validateConfigEvidence()` checks fresh strict config/digest against the cached
+configuration without writes. `parseJournalEvents(bytes)` is
 the shared pure complete-JSONL decoder, including strict UTF-8 validation; it never
 opens or repairs storage. These APIs do not add CLI
 commands or external telemetry.
@@ -873,9 +883,9 @@ Contents can dereference an in-repository symlink and return a normal file respo
 this API assesses that returned pinned content at its logical policy path, not Git
 tree modes. No additional tree reads or repository-controlled URLs are followed.
 
-Owner and repository names use the shared GitHub binding validators (1–39 ASCII
-alphanumeric login characters with optional single hyphens between them, up to
-77 total characters without trailing/consecutive hyphens; repository at most 100 ASCII
+Owner and repository names use the shared GitHub binding validators (1–39 total ASCII
+login characters, alphanumeric with optional single hyphens between them, without
+trailing/consecutive hyphens; repository at most 100 ASCII
 letters/digits/underscore/dot/hyphen, excluding `.` and `..`). `POLICY_TEMPLATE_DIRECTORY`
 and `POLICY_TEMPLATE_LIMIT` export the directory and 20-file cap. Template names
 are 1–120 ASCII letters/digits/underscore/dot/space/hyphen, excluding `.` and `..`.

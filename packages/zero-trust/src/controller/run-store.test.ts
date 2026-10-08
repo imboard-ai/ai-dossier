@@ -6,7 +6,8 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { compiledFixture } from '../__tests__/compiled-fixture';
 import { replacePrivate } from '../durable-fs';
-import { Journal } from '../journal';
+import { isGitHubLogin } from '../github-login';
+import { Journal, JournalError, parseJournalEvents } from '../journal';
 import { StoreLockedError } from '../lock';
 import { SecretRedactionError } from '../redaction';
 import { ReasonCode, transitionRun } from '../state';
@@ -88,6 +89,48 @@ afterEach(() => {
 });
 
 describe('RunStore', () => {
+  it('contains public evidence decoder errors without raw input or causes', () => {
+    for (const bytes of [Buffer.from('ghp_demo\n'), Buffer.from([0xff, 10])]) {
+      expect(() => parseJournalEvents(bytes)).toThrow(JournalError);
+      try {
+        parseJournalEvents(bytes);
+      } catch (error) {
+        expect(String(error)).not.toContain('ghp_demo');
+        expect((error as Error).cause).toBeUndefined();
+      }
+    }
+    const { store } = rig();
+    fs.writeFileSync(path.join(store.directory, 'run.json'), 'ghp_demo');
+    expect(() => store.validateEvidence()).toThrow(RunStoreError);
+    try {
+      store.validateEvidence();
+    } catch (error) {
+      expect(String(error)).not.toContain('ghp_demo');
+      expect((error as Error).cause).toBeUndefined();
+    }
+  });
+
+  it('keeps the synchronous callback process alive when async work rejects', () => {
+    const { root, store } = rig();
+    const id = store.runId;
+    store.close();
+    const module = compiledFixture(path.dirname(root), 'controller/run-store');
+    const script = `const {RunStore}=require(process.argv[3]);const s=RunStore.open(process.argv[1],process.argv[2]);let called=false;for(const work of [async()=>{called=true;throw Error('async')},()=>Promise.reject(Error('returned')),()=>({then(resolve,reject){reject(Error('thenable'))}})]){try{s.withStoreDirectory('artifacts',work);throw Error('accepted')}catch(e){if(e.code!=='invalid_store')throw e}}if(called)throw Error('async invoked');setTimeout(()=>{s.close();process.stdout.write('survived')},50);`;
+    const result = spawnSync(
+      process.execPath,
+      ['--unhandled-rejections=strict', '-e', script, root, id, module],
+      { encoding: 'utf8', timeout: 30000 }
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe('survived');
+  });
+
+  it('counts every hyphen in the canonical login length boundary', () => {
+    expect(isGitHubLogin('a'.repeat(39))).toBe(true);
+    expect(isGitHubLogin(`${'a-'.repeat(19)}a`)).toBe(true);
+    expect(isGitHubLogin('a'.repeat(40))).toBe(false);
+    expect(isGitHubLogin(`${'a-'.repeat(20)}a`)).toBe(false);
+  });
   it('validates durable evidence non-mutatingly and refuses snapshot mismatch', () => {
     const { store } = rig();
     const write = vi.spyOn(fs, 'writeSync');

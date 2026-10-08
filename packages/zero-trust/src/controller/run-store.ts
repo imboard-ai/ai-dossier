@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { types } from 'node:util';
 import {
   assertDirectoryAncestors,
   privateDir,
@@ -305,25 +306,45 @@ export class RunStore {
    * Cached state is an equality constraint, never independent reporting evidence. */
   validateEvidence(): RunRecord {
     this.check();
-    const pinned = `/proc/self/fd/${this.directoryFd}`;
-    const events = this.withStoreDirectory('control', (dir) =>
-      parseJournalEvents(readPrivate(path.join(dir, 'events.jsonl')))
-    );
-    if (events.some(isRecoveryEvent)) fail('invalid_store');
-    const evidence = replayControl(events, this.storedConfig);
-    const snapshot = restoreRun(parseStrictUtf8Json(readPrivate(path.join(pinned, 'run.json'))));
-    assertSecretFree(snapshot);
-    if (
-      !evidence.confirmed ||
-      !sameRunRecord(evidence.confirmed, evidence.run) ||
-      !sameRunRecord(evidence.run, snapshot) ||
-      !sameRunRecord(snapshot, this.current) ||
-      evidence.upstreamId !== this.upstreamId ||
-      JSON.stringify([...evidence.checkpoints]) !== JSON.stringify([...this.checkpoints]) ||
-      JSON.stringify([...evidence.bindings]) !== JSON.stringify([...this.bindings])
-    )
-      fail('run_diverged');
-    return snapshot;
+    try {
+      this.validateConfigEvidence();
+      const pinned = `/proc/self/fd/${this.directoryFd}`;
+      const events = this.withStoreDirectory('control', (dir) =>
+        parseJournalEvents(readPrivate(path.join(dir, 'events.jsonl')))
+      );
+      if (events.some(isRecoveryEvent)) fail('invalid_store');
+      const evidence = replayControl(events, this.storedConfig);
+      const snapshot = restoreRun(parseStrictUtf8Json(readPrivate(path.join(pinned, 'run.json'))));
+      assertSecretFree(snapshot);
+      if (
+        !evidence.confirmed ||
+        !sameRunRecord(evidence.confirmed, evidence.run) ||
+        !sameRunRecord(evidence.run, snapshot) ||
+        !sameRunRecord(snapshot, this.current) ||
+        evidence.upstreamId !== this.upstreamId ||
+        JSON.stringify([...evidence.checkpoints]) !== JSON.stringify([...this.checkpoints]) ||
+        JSON.stringify([...evidence.bindings]) !== JSON.stringify([...this.bindings])
+      )
+        fail('run_diverged');
+      return snapshot;
+    } catch {
+      fail('invalid_store');
+    }
+  }
+  /** Fresh, strict config/digest evidence through the held directory descriptor. */
+  validateConfigEvidence(): RunConfig {
+    this.check();
+    try {
+      const pinned = `/proc/self/fd/${this.directoryFd}`;
+      const bytes = readPrivate(path.join(pinned, 'config.json'));
+      if (hash(bytes) !== strictUtf8(readPrivate(path.join(pinned, 'config.sha256'))))
+        fail('invalid_store');
+      const config = validateRunConfig(parseStrictUtf8Json(bytes));
+      if (JSON.stringify(config) !== JSON.stringify(this.storedConfig)) fail('run_diverged');
+      return config;
+    } catch {
+      fail('invalid_store');
+    }
   }
   get config(): RunConfig {
     this.check();
@@ -351,6 +372,7 @@ export class RunStore {
   ): T {
     this.check();
     if (!RUN_STORE_DIRECTORIES.includes(name)) fail('invalid_store');
+    if (types.isAsyncFunction(work)) fail('invalid_store');
     const fd = fs.openSync(
       `/proc/self/fd/${this.directoryFd}/${name}`,
       fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW
@@ -364,12 +386,24 @@ export class RunStore {
         (typeof value === 'object' || typeof value === 'function') &&
         'then' in value &&
         typeof value.then === 'function'
-      )
+      ) {
+        // Consume a rejected returned promise before refusing its escaped lifetime.
+        void Promise.resolve(value).catch(() => {});
         fail('invalid_store');
+      }
       return value;
     } finally {
       fs.closeSync(fd);
     }
+  }
+  /** Atomic private artifact publication with the store's persistence-uncertainty latch.
+   * A failed publication retains the lifetime fence; reporting and further writes refuse it. */
+  replaceArtifact(name: string, bytes: Buffer): void {
+    this.check();
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/.test(name)) fail('invalid_store');
+    this.withStoreDirectory('artifacts', (dir) =>
+      this.write(() => replacePrivate(path.join(dir, name), bytes))
+    );
   }
   static create(root: string, input: RunConfig, now: Date | string): RunStore {
     const config = validateRunConfig(runConfigInput(input));
