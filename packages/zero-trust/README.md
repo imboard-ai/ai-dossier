@@ -10,6 +10,108 @@ plus ecosystem detection, runtime profiles, command plans and package-proxy poli
 (see the gate 2 section below).
 Publication remains gated on S1 feasibility.
 
+## Admitted planning and implementation loop (#1101)
+
+`runPlanning(ctx)` and `runImplementation(ctx, { plan, repairOf? })` drive the same
+provider-neutral controller loop. `AgentLoopContext` supplies `adapter: VmAdapter`,
+the exact live `vm: VmHandle` returned by `provisionWorkspace`, `model: ModelAdapter`,
+`ledger: BudgetLedger`, `sessionId`, pinned `rates: BudgetRate[]`, `limits` with
+`commandTimeoutMs` and `activeMinutes`, `binding: AuthorityBinding`, `issue: { title,
+body }`, `baseManifest: SourceManifest`, `collector: OutputCollector`, `now: () =>
+Date`, and an awaited controller-owned `persist(entry: string)` transcript sink.
+`maxTurns?` is a trusted caller override. The loop calls `meteredComplete` internally:
+pass the selected model adapter, with no worker-held model credentials or gateway.
+
+Planning returns `AgentPlan` (`{ kind: 'plan', text, digest }`, SHA-256 of exact UTF-8
+text). Implementation revalidates that plan and returns `{ kind: 'candidate',
+overlay: WorkspaceOverlay, meta: CandidateMetadata }`. Either phase can return
+`{ kind: 'hand_off', reason }`, `{ kind: 'budget_exhausted', reason: 'budget' |
+'active_time' }`, or `{ kind: 'turns_exhausted' }`. Defaults are
+`DEFAULT_PLANNING_TURNS = 15` and `DEFAULT_IMPLEMENTATION_TURNS = 60`. Each model
+response counts one turn and must contain exactly one `propose_action` tool call;
+text-only, malformed, empty or multiple-call answers hand off as
+`model_invalid_response`. No model-specific branches or weaker adapter fallback exist.
+
+`admitModelAction` adds `submit_plan { text }` (UTF-8 `MAX_PLAN_BYTES = 8192`) and
+`candidate_ready { title, cause, scope, limitations }` (title ≤256 UTF-16 code units,
+cause/scope ≤`MAX_CANDIDATE_TEXT_CHARS = 4096` each, ≤10 limitations of ≤500 units).
+Both reject extra fields, malformed values and credential patterns. Candidate
+metadata is untrusted prose, not verification evidence; `buildPrContent` bounds it
+again with independently verified receipt facts. Publication is controller-driven:
+`request_publication` is an `unexpected_action` in both phases. Planning also
+refuses writes/candidate declarations, and implementation refuses plan submission.
+Authority rejection codes are returned to the model; five consecutive rejections
+give `hand_off/model_noncompliant`, while a successfully executed admitted action
+resets the streak. An operational failure never silently retries.
+
+Each model call reserves through the real ledger before invoking the provider.
+A denial gives `budget_exhausted/budget` without another call. The active wall-clock
+ceiling is measured from loop entry and checked before every turn and before
+worker operations; the caller retains the run/session ledger across planning,
+implementation and repairs. Non-finite or backward clocks refuse progress. Model
+calls are capped at 60 seconds or the remaining active time, whichever is smaller;
+worker commands use `network: 'none'`, the admitted profile, an empty environment,
+and at most `limits.commandTimeoutMs` or the remaining active time. Insufficient
+time for the broker's one-second minimum stops with `active_time`. Model-profile
+values and process environment variables are never forwarded into exec.
+
+`assertProvisionedVm(adapter, vm)` refuses handles not produced by that adapter's
+completed provisioning or released with `releaseWorkspace`; the loop calls it
+before any model or worker operation and never creates a VM. The caller owns
+teardown at every stop/checkpoint. Provisioned-handle proof is process-local;
+resume provisions a fresh workspace. `repairOf` is appended only as untrusted
+failure-summary data. The caller must first enforce `assertRepairAllowed` and
+provide the failed candidate as `baseManifest` in a freshly provisioned workspace.
+
+`AGENT_SYSTEM`, `agentTools(phase: AgentPhase)` and `untrustedFrame(label, data)`
+provide controller-authored prompts/schemas and JSON-framed untrusted issue, plan,
+repair and worker-output data. Prompts require a minimal fix, regression coverage,
+no stash, formatting/dependency churn or promotional artifacts; deterministic
+admission is authoritative. Exec stdout/stderr go in full to `OutputCollector`
+for boundary evaluation; only a UTF-8-safe combined tail of at most
+`MAX_WORKER_REPLY_BYTES = 16384` is returned to the model, inside an explicit
+untrusted frame with observed exit/timeout facts. Entire outputs are scanned before
+excerpting, and secret-shaped output becomes `[redacted]`; raw collected evidence
+is retained for boundary checks. Broker truncation or collector overflow hands
+off as `output_truncated` rather than allowing partial evidence to pass.
+
+Transcript events include start data, detached model responses, admitted actions,
+rejections and action replies. Every entry is scanned with `assertNoSecrets`
+(including nested primitive strings); a secret-shaped entry is stored as literal
+`[redacted]`. Secret proposals are rejected and omitted from subsequent requests.
+Secret-bearing initial issue/repair data is recorded redacted and refuses the loop
+before a provider call. A throwing/rejecting transcript sink gives
+`hand_off/persistence_failed`, without further effects. Non-model unexpected
+failures return fixed `loop_failed`; provider failures retain only their bounded
+`ModelError.code`. Provider/worker exception text never enters the result or sink.
+
+### Controller-held source overlay
+
+`new WorkspaceOverlay(baseManifest)` revalidates and freezes the exact baseline.
+`write(path, content)` admits bounded secret-free UTF-8 contents after
+`assertWorkspacePath` and canonical combined-manifest validation. Rewrites replace
+only that path; existing executable modes are preserved and new files are
+non-executable. `executable(path)` reports the held mode for VM mirroring.
+`testFiles()` returns byte-sorted written paths matching the shared
+`isTestPath(path)` scope-review rules: `test/`, `tests/`, `__tests__/`, `*.test.*`,
+`*.spec.*`, `test_*.py`, `*_test.py`. It does not include untouched baseline tests.
+File/directory, case/Unicode collisions, canonical Git paths and source-size
+limits are rejected before changing the overlay.
+
+Each admitted loop write updates this overlay and mirrors those exact bytes with
+`putFile` so later commands can see them. The loop never calls `getFile` to build
+a candidate. `overlay.materialize(directory)` requires an absent directory under
+a controller-owned parent, creates it privately (0700), writes only base plus
+overlay files (0600, or 0700 for executables), then returns `exportSource`'s
+candidate manifest and checks its digest against the held source. Existing trees
+and symlinks are refused; callers retain/remove their own private materialization
+directories, including partial ones after I/O failure. Binary baseline blobs and
+empty directories are preserved. Bytes created, deleted or changed by repository
+processes in the VM never enter the candidate. **File deletion and executable-mode
+changes are unsupported in MVP**; shell-produced generated files are not adopted.
+A candidate still requires canonical reconstruction, fresh regression/full-suite
+verification, scope review, boundary evidence and receipt admission before shipping.
+
 ## Community gate and explicit-resume invitation (#1098)
 
 `decideGate(policy: PolicyAssessment, eligibility: Eligibility, contributor)` is

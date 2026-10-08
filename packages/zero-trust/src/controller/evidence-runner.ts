@@ -224,6 +224,12 @@ export interface RegressionRunEvidence {
 
 /** Workspaces that passed the phase-switch check and are not yet released. */
 const PROVEN = new WeakSet<ProvisionedWorkspace>();
+const PROVEN_VMS = new WeakMap<VmHandle, VmAdapter>();
+
+/** The model loop may use only a live handle from this adapter's completed provisioning. */
+export function assertProvisionedVm(adapter: VmAdapter, vm: VmHandle): void {
+  if (PROVEN_VMS.get(vm) !== adapter) throw new EvidencePlanError('workspace_unproven');
+}
 
 /** Refuses any command whose phase or network is not its phase's one network:
  * provisioning only on the package proxy, verification only with none. */
@@ -368,6 +374,7 @@ export async function releaseWorkspace(
   cause?: unknown
 ): Promise<void> {
   PROVEN.delete(workspace);
+  PROVEN_VMS.delete(workspace.vm);
   await destroyVm(adapter, workspace.vm, lifecycle, cause);
 }
 
@@ -482,6 +489,7 @@ export async function provisionWorkspace(options: ProvisionOptions): Promise<Pro
         phaseSwitch: Object.freeze({ attempt: 'package-proxy-after-provisioning', refusedWith }),
       });
       PROVEN.add(workspace);
+      PROVEN_VMS.set(vm, adapter);
       return workspace;
     }
   } catch (error) {
