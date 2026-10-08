@@ -775,7 +775,7 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
         ];
         for (const [label, command] of cases) {
           const record = await runPlanned(
-            adapter,
+            options.adapter,
             workspace,
             { ...command, id: `npm-test-${label}` },
             collector
@@ -790,7 +790,7 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
           expect(record.status, label).toBe('inconclusive');
         }
       } finally {
-        await releaseWorkspace(adapter, workspace, options.lifecycle);
+        await releaseWorkspace(options.adapter, workspace, options.lifecycle);
         fs.rmSync(repo.dir, { recursive: true, force: true });
       }
       // Scenario 7: the inconclusive verdicts feed the cap: two repairs, then failed.

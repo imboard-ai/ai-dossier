@@ -15,7 +15,7 @@ import { type ProfileRecord, recordProfileSelection, selectProfile } from '../ec
 import { Journal } from '../journal';
 import { SecretRedactionError } from '../redaction';
 import { createRun, ReasonCode as R, type RunRecord, transitionRun } from '../state';
-import { BrokerError, type ExecRequest, VmCleanupError } from '../vm/adapter';
+import { BrokerError, type ExecRequest, type VmAdapter, VmCleanupError } from '../vm/adapter';
 import { WORKER_RELAY } from '../vm/qemu-args';
 import {
   assertPlanNetworks,
@@ -225,6 +225,39 @@ describe('baselineEvidence and regressionEvidence (scenario 6)', () => {
 });
 
 describe('runPlanned classification (scenario 7)', () => {
+  it('keeps producer decorator identity and separates complete capture from an inconclusive timeout', async () => {
+    const { adapter, options, collector } = setup();
+    const decorated: VmAdapter = {
+      create: (spec) => adapter.create(spec),
+      exec: (vm, request) => adapter.exec(vm, request),
+      putFile: (vm, file, bytes, executable) => adapter.putFile(vm, file, bytes, executable),
+      getFile: (vm, file) => adapter.getFile(vm, file),
+      endProvisioning: (vm) => adapter.endProvisioning(vm),
+      destroy: (vm) => adapter.destroy(vm),
+      listByRun: (run) => adapter.listByRun(run),
+    };
+    const workspace = await provisionWorkspace({
+      ...options,
+      adapter: decorated,
+      manifest: BASE,
+      plan: PLAN,
+    });
+    await expect(runPlanned(adapter, workspace, testCommand(), collector)).rejects.toThrow(
+      'workspace_unproven'
+    );
+    adapter.on(testCommand().argv, {
+      timedOut: true,
+      stdout: 'complete captured prefix',
+      report: junit(1),
+    });
+    const record = await runPlanned(decorated, workspace, testCommand(), collector);
+    expect(record.status).toBe('inconclusive');
+    expect(record.timedOut).toBe(true);
+    expect(collector.truncated).toBe(false);
+    expect(collector.outputs()).toContain('complete captured prefix');
+    await releaseWorkspace(decorated, workspace, options.lifecycle);
+    expect(adapter.liveVms()).toEqual([]);
+  });
   async function classify(script: Parameters<FakeVmAdapter['on']>[1]) {
     const { adapter, options, collector } = setup();
     adapter.on(testCommand().argv, script);
