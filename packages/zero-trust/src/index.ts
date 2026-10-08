@@ -12,6 +12,8 @@ export * from './controller/output-collector';
 export * from './controller/prompts';
 export * from './controller/run-store';
 export * from './controller/status';
+export * from './controller/verification-record';
+export * from './controller/verifier';
 export * from './controller/workspace-overlay';
 export * from './decision/decide';
 export * from './decision/providers/external';

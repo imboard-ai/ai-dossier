@@ -71,6 +71,22 @@ export function publishPrivate(file: string, bytes: Buffer): void {
   replacePrivate(file, bytes);
 }
 
+/** Write-once, also between concurrent writers: the fsynced temporary file is hard-linked
+ * to `file`, which fails with `EEXIST` (rethrown) rather than replacing anything. */
+export function createPrivateOnce(file: string, bytes: Buffer): void {
+  const tmp = path.join(path.dirname(file), `.zt-write-${randomUUID()}`);
+  const fd = fs.openSync(tmp, 'wx', 0o600);
+  try {
+    fs.writeFileSync(fd, bytes);
+    fs.fsyncSync(fd);
+    fs.linkSync(tmp, file);
+  } finally {
+    fs.closeSync(fd);
+    fs.rmSync(tmp, { force: true });
+  }
+  syncDirectory(path.dirname(file));
+}
+
 /** Writes `name` into a private (0700) controller directory, created if needed, by atomic
  * replacement; returns the file's path. */
 export function writePrivateFile(directory: string, name: string, bytes: Buffer): string {
