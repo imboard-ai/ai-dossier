@@ -103,9 +103,12 @@ export async function checkInvitation(
   options: InvitationOptions
 ): Promise<InvitationResult> {
   try {
+    record(options);
+    record(binding);
+    record(binding.upstream);
     const b = issueBinding(binding);
     const { engagementCommentUrl, engagementAt, contributor, issueAuthor, persist } = options;
-    const rawPolicy = options.policy;
+    const rawPolicy = record(options.policy);
     const policy = Object.freeze({
       digest: rawPolicy.digest,
       issueAuthorMayInvite: rawPolicy.issueAuthorMayInvite,
@@ -120,6 +123,7 @@ export async function checkInvitation(
       typeof persist !== 'function'
     )
       throw new Error();
+    const policyDigest = policy.digest;
     const commentPrefix = `${issueUrl(b)}#issuecomment-`;
     if (
       typeof engagementCommentUrl !== 'string' ||
@@ -241,7 +245,7 @@ export async function checkInvitation(
             actor: who,
             association,
             url,
-            policyDigest: policy.digest,
+            policyDigest,
             at,
           });
           assertNoSecrets(JSON.stringify(evidence));

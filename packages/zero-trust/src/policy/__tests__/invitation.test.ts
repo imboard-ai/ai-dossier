@@ -52,6 +52,18 @@ function rig(comments: unknown[] = [], events: unknown[] = []) {
 }
 
 describe('explicit resume invitation', () => {
+  it('does not discard truncation metadata on controller authority inputs', async () => {
+    const r = rig([comment('Go ahead', 'NONE', 'reporter')]);
+    const result = await checkInvitation(r.read, binding, {
+      ...r.options,
+      policy: { ...r.options.policy, issueAuthorMayInvite: true, truncated: true },
+    } as InvitationOptions);
+    expect(result).toEqual({ kind: 'unknown' });
+    expect(r.calls).toHaveLength(0);
+    expect(r.persist).not.toHaveBeenCalled();
+    const sparse = rig(new Array(1));
+    expect((await checkInvitation(sparse.read, binding, sparse.options)).kind).toBe('unknown');
+  });
   it('keeps permission independent of a consumer-mutated core authority Set', async () => {
     const shared = TRUSTED_AUTHOR_ASSOCIATIONS as Set<string>;
     const prior = new Set(shared);

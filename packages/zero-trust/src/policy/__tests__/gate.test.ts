@@ -87,6 +87,26 @@ const rows: { id: string; p: Partial<PolicyAssessment>; e?: Eligibility; kind: s
 ];
 
 describe('gate table', () => {
+  it('refuses sparse evidence collections including assigned contributor plus an unknown assignee', () => {
+    const e = eligible();
+    for (const key of ['labels', 'assignees'])
+      expect(
+        decideGate(
+          policy,
+          { ...e, facts: { ...e.facts, issue: { ...e.facts.issue, [key]: new Array(1) } } },
+          'alice'
+        ).kind
+      ).toBe('hand_off');
+    const assignees = [{ login: 'alice', url: 'https://github.com/alice' }];
+    assignees.length = 2;
+    expect(
+      decideGate(
+        { ...policy, assignment: 'required' },
+        { ...e, facts: { ...e.facts, issue: { ...e.facts.issue, assignees } } },
+        'alice'
+      ).kind
+    ).toBe('hand_off');
+  });
   it('cannot erase non-bug labels or accept an explicitly truncated policy', () => {
     const e = eligible();
     expect(

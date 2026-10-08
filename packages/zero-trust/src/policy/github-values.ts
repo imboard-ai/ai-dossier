@@ -19,6 +19,8 @@ export function githubArray(value: unknown, cap: number): unknown[] {
     ('truncated' in value && value.truncated !== false)
   )
     throw new Error();
+  for (let index = 0; index < value.length; index++)
+    if (!Object.hasOwn(value, index)) throw new Error();
   return value;
 }
 export function isGitHubActorLogin(value: unknown): value is string {
