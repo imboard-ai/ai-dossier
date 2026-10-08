@@ -12,6 +12,7 @@ import type {
   VmSpec,
 } from '../vm/adapter';
 import { BrokerError, VmCleanupError } from '../vm/adapter';
+import { invalidateProvisionedVm } from '../vm/workspace-lifecycle';
 
 export interface FakeExecScript {
   readonly exitCode?: number | null;
@@ -144,6 +145,7 @@ export class FakeVmAdapter implements VmAdapter {
   }
 
   async destroy(handle: Pick<VmHandle, 'vmId' | 'runId'>): Promise<void> {
+    invalidateProvisionedVm(this, handle);
     this.calls.push({ op: 'destroy', vmId: handle.vmId });
     if (this.failDestroy > 0) {
       this.failDestroy--;

@@ -12,6 +12,7 @@ import { parseStrictUtf8Json } from '../strict-utf8';
 import { BrokerError, type ContainerProfile, type VmAdapter, type VmHandle } from './adapter';
 import { MAX_FILE_BYTES, validateRequest } from './broker';
 import { type BoundaryInput, evaluateBoundary, parseReport, parseReports } from './evidence';
+import { invalidateProvisionedVm } from './workspace-lifecycle';
 
 export const HOST_ENFORCED = new Set([
   'host-env',
@@ -515,6 +516,7 @@ async function quiesceAndDrain(state: SessionState, timeoutMs: number) {
       throw new BoundaryOperationError('quiesce', 'unavailable');
     const adapter = state.adapter;
     const vm = state.vm;
+    invalidateProvisionedVm(adapter, vm);
     await boundedBoundary(() => adapter.destroy(vm), timeoutMs, 'quiesce');
     await boundedBoundary(() => state.planted.drain(), timeoutMs, 'drain');
   } catch (error) {

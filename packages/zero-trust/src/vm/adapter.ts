@@ -64,6 +64,9 @@ export interface ExecRequest {
   /** Relative to the worker workspace. */
   readonly cwd?: string;
   readonly timeoutMs?: number;
+  /** Optional controller wall-clock cap after accelerator scaling. The controller
+   * supervises the entire RPC and quiesces the VM if it exceeds this bound. */
+  readonly wallTimeoutMs?: number;
   /** Default `none`. `package_proxy` is refused outside the provisioning phase. */
   readonly network?: ExecNetwork;
   /** Controller-set environment for the worker command. */

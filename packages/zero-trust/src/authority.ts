@@ -22,6 +22,8 @@ export type AdmittedAction =
       readonly argv: readonly string[];
     }
   | { readonly kind: 'worker_write_file'; readonly path: string; readonly content: string }
+  | { readonly kind: 'submit_plan'; readonly text: string }
+  | ({ readonly kind: 'candidate_ready' } & CandidateMetadata)
   | {
       readonly kind: 'request_publication';
       readonly intent: IntentInput;
@@ -29,6 +31,13 @@ export type AdmittedAction =
       readonly body: string;
     }
   | { readonly kind: 'hand_off'; readonly reason: string };
+
+export interface CandidateMetadata {
+  readonly title: string;
+  readonly cause: string;
+  readonly scope: string;
+  readonly limitations: readonly string[];
+}
 
 export class AuthorityError extends Error {
   constructor(readonly code: string) {
@@ -40,10 +49,14 @@ export class AuthorityError extends Error {
 const MAX_TITLE_CHARS = 256;
 const MAX_BODY_CHARS = 65536;
 const MAX_REASON_CHARS = 2000;
+export const MAX_PLAN_BYTES = 8 * 1024;
+export const MAX_CANDIDATE_TEXT_BYTES = 4 * 1024;
 
 const FIELDS: Readonly<Record<AdmittedAction['kind'], readonly string[]>> = Object.freeze({
   worker_exec: ['kind', 'profile', 'argv'],
   worker_write_file: ['kind', 'path', 'content'],
+  submit_plan: ['kind', 'text'],
+  candidate_ready: ['kind', 'title', 'cause', 'scope', 'limitations'],
   request_publication: ['kind', 'operation', 'title', 'body'],
   hand_off: ['kind', 'reason'],
 });
@@ -60,6 +73,34 @@ function text(value: unknown, max: number): string {
     throw new AuthorityError('credential_material');
   }
   return value;
+}
+
+function byteText(value: unknown, max: number): string {
+  const result = text(value, max);
+  if (Buffer.byteLength(result, 'utf8') > max) throw new AuthorityError('invalid_field');
+  return result;
+}
+
+/** Shared controller write policy for authority admission and direct overlay consumers. */
+export function admitWorkspaceWrite(
+  file: unknown,
+  value: unknown
+): { path: string; content: string } {
+  let path: string;
+  try {
+    path = assertWorkspacePath(file);
+  } catch {
+    throw new AuthorityError('invalid_field');
+  }
+  if (typeof value !== 'string' || Buffer.byteLength(value) > MAX_FILE_BYTES)
+    throw new AuthorityError('invalid_field');
+  try {
+    assertNoSecrets(path);
+    assertNoSecrets(value);
+  } catch {
+    throw new AuthorityError('credential_material');
+  }
+  return { path, content: value };
 }
 
 export function admitModelAction(proposal: unknown, binding: AuthorityBinding): AdmittedAction {
@@ -84,22 +125,7 @@ export function admitModelAction(proposal: unknown, binding: AuthorityBinding): 
       }
     }
     case 'worker_write_file': {
-      let path: string;
-      try {
-        path = assertWorkspacePath(raw.path);
-      } catch {
-        throw new AuthorityError('invalid_field');
-      }
-      const content = raw.content;
-      if (typeof content !== 'string' || Buffer.byteLength(content) > MAX_FILE_BYTES)
-        throw new AuthorityError('invalid_field');
-      // Written files can end up in the published candidate commit.
-      try {
-        assertNoSecrets(content);
-      } catch {
-        throw new AuthorityError('credential_material');
-      }
-      return { kind, path, content };
+      return { kind, ...admitWorkspaceWrite(raw.path, raw.content) };
     }
     case 'request_publication': {
       const operation = raw.operation;
@@ -117,6 +143,21 @@ export function admitModelAction(proposal: unknown, binding: AuthorityBinding): 
         },
         title: text(raw.title, MAX_TITLE_CHARS),
         body: text(raw.body, MAX_BODY_CHARS),
+      };
+    }
+    case 'submit_plan': {
+      return { kind, text: byteText(raw.text, MAX_PLAN_BYTES) };
+    }
+    case 'candidate_ready': {
+      const limitations = raw.limitations;
+      if (!Array.isArray(limitations) || limitations.length > 10)
+        throw new AuthorityError('invalid_field');
+      return {
+        kind,
+        title: text(raw.title, MAX_TITLE_CHARS),
+        cause: byteText(raw.cause, MAX_CANDIDATE_TEXT_BYTES),
+        scope: byteText(raw.scope, MAX_CANDIDATE_TEXT_BYTES),
+        limitations: limitations.map((item) => text(item, 500)),
       };
     }
     case 'hand_off':

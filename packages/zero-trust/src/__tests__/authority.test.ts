@@ -244,6 +244,74 @@ describe('admitModelAction — hostile proposals from a compliant model (AC2 / s
 });
 
 describe('admitModelAction — admitted actions are controller-bound', () => {
+  it.each([
+    'cause',
+    'scope',
+  ])('enforces the exact UTF-8 byte boundary for candidate %s', (field) => {
+    const meta = {
+      kind: 'candidate_ready',
+      title: 'Fix',
+      cause: 'Cause',
+      scope: 'Scope',
+      limitations: [],
+    };
+    const atLimit = { ...meta, [field]: 'é'.repeat(2048) };
+    expect(admitModelAction(atLimit, BINDING)).toEqual(atLimit);
+    expect(admitCode({ ...meta, [field]: 'é'.repeat(2049) })).toBe('invalid_field');
+    expect(admitCode({ ...meta, [field]: '界'.repeat(4096) })).toBe('invalid_field');
+  });
+  const meta = {
+    kind: 'candidate_ready',
+    title: 'Fix',
+    cause: 'Cause',
+    scope: 'Scope',
+    limitations: ['No deletion'],
+  };
+  it('admits a byte-bounded plan and bounded candidate metadata with detached limitations', () => {
+    expect(admitModelAction({ kind: 'submit_plan', text: 'é'.repeat(4096) }, BINDING)).toEqual({
+      kind: 'submit_plan',
+      text: 'é'.repeat(4096),
+    });
+    const proposal = {
+      ...meta,
+      title: 'x'.repeat(256),
+      cause: 'x'.repeat(4096),
+      scope: 'x'.repeat(4096),
+      limitations: Array.from({ length: 10 }, () => 'x'.repeat(500)),
+    };
+    const admitted = admitModelAction(proposal, BINDING);
+    expect(admitted).toEqual(proposal);
+    proposal.limitations.push('late mutation');
+    expect(admitted).not.toEqual(proposal);
+  });
+  it.each([
+    { kind: 'submit_plan', text: 'x'.repeat(8193) },
+    { kind: 'submit_plan', text: 'é'.repeat(4097) },
+    { kind: 'submit_plan', text: 1 },
+    { ...meta, title: 'x'.repeat(257) },
+    { ...meta, cause: 'x'.repeat(4097) },
+    { ...meta, scope: 'x'.repeat(4097) },
+    { ...meta, limitations: Array.from({ length: 11 }, () => 'x') },
+    { ...meta, limitations: ['x'.repeat(501)] },
+    { ...meta, limitations: [1] },
+    { ...meta, limitations: null },
+  ])('rejects malformed or oversized plan/candidate %#', (proposal) => {
+    expect(admitCode(proposal)).toBe('invalid_field');
+  });
+  it.each(['target', 'repo', 'token'])('refuses extra %s on both new actions', (field) => {
+    for (const proposal of [{ kind: 'submit_plan', text: 'plan' }, meta])
+      expect(admitCode({ ...proposal, [field]: 'override' })).toBe('unexpected_field');
+  });
+  it('rejects credential material in every new text field and write path', () => {
+    expect(admitCode({ kind: 'submit_plan', text: FAKE_PAT })).toBe('credential_material');
+    for (const field of ['title', 'cause', 'scope', 'limitations'])
+      expect(admitCode({ ...meta, [field]: field === 'limitations' ? [FAKE_PAT] : FAKE_PAT })).toBe(
+        'credential_material'
+      );
+    expect(admitCode({ kind: 'worker_write_file', path: FAKE_PAT, content: 'x' })).toBe(
+      'credential_material'
+    );
+  });
   it.each(
     SHIPPING_KINDS.map((k) => [k])
   )('%s intent target always equals the binding target', (operation) => {

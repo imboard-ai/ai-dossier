@@ -13,14 +13,14 @@ Publication remains gated on S1 feasibility.
 ## Local outcome metrics (#1103)
 
 `contributionOutcome(store, now?)` reads the locked `RunStore` history, the existing
-`budget/ledger.json` through `BudgetLedger.snapshot()` / `budgetTotals`, and the
+`budget/ledger.json` through `BudgetLedger.readOnlySnapshot()` / `budgetTotals`, and the
 hand-off/tracker journals through their existing replay APIs. The controller's
 local replay adapter never constructs a network driver or model adapter. Metrics
 imports neither `src/github/` nor `src/model/`; no reporting call contacts a service
 or initializes/repairs a missing or truncated journal. Missing, corrupt, recovered
 or wrong-identity hand-off/tracker evidence yields field-specific `unknown` values,
-never zero or an inferred success. Run history follows RunStore's established
-control-journal recovery semantics. `unknownEvidence` retains only fixed source
+never zero or an inferred success. Reporting does not repair control evidence.
+`unknownEvidence` retains only fixed source
 and reason codes, never raw errors or journal contents. A tracker prefix may lag
 external execution but cannot omit a tracker-owned transition in durable history.
 Submission comes from the durable publication transition, not acceptance. Only a
@@ -76,11 +76,239 @@ Evidence JSON is decoded with fatal UTF-8 validation. Budget reporting uses
 `BudgetLedger.readOnlySnapshot(file, contributionId)` through the pinned directory
 without resolving it back to a mutable pathname. RunStore's synchronous `withStoreDirectory(name,
 callback)` pins a private child directory under its held descriptor/fence and closes
-it after the callback; descriptor paths must never escape that callback. Adoption
+it after the callback; Promise-like returns are refused by types and thenables
+are refused at runtime. Descriptor paths must never escape that callback. Adoption
 reads/writes refuse symlink directory replacement. `parseJournalEvents(bytes)` is
 the shared pure complete-JSONL decoder, including strict UTF-8 validation; it never
 opens or repairs storage. These APIs do not add CLI
 commands or external telemetry.
+
+## Admitted planning and implementation loop (#1101)
+
+`runPlanning(ctx)` and `runImplementation(ctx, { plan, repairOf? })` drive the same
+provider-neutral controller loop. `AgentLoopContext` supplies `adapter: VmAdapter`,
+the exact live `vm: VmHandle` returned by `provisionWorkspace`, `model: ModelAdapter`,
+`ledger: BudgetLedger`, `sessionId`, pinned `rates: BudgetRate[]`, `limits` with
+`commandTimeoutMs` and `activeMinutes`, `binding: AuthorityBinding`, `issue: { title,
+body }`, `baseManifest: SourceManifest`, `collector: OutputCollector`, `now: () =>
+Date`, and an awaited controller-owned `persist(entry: string)` transcript sink.
+`maxTurns?` is a trusted caller override. Optional `activeTime: ActiveTimeBudget`
+provides explicit run-wide active accounting. `cleanupTimeoutMs?` bounds supervisory
+deadline teardown (default `DEFAULT_LOOP_CLEANUP_TIMEOUT_MS = 5000`); timeout does
+not claim guest quiescence. The loop calls `meteredComplete` internally:
+pass the selected model adapter, with no worker-held model credentials or gateway.
+
+Planning returns `AgentPlan` (`{ kind: 'plan', text, digest }`, SHA-256 of exact UTF-8
+text). Implementation revalidates that plan and returns `{ kind: 'candidate',
+overlay: WorkspaceOverlay, meta: CandidateMetadata }`. Either phase can return
+`{ kind: 'hand_off', reason }`, `{ kind: 'budget_exhausted', reason: 'budget' |
+'active_time' }`, or `{ kind: 'turns_exhausted' }`. Defaults are
+`DEFAULT_PLANNING_TURNS = 15` and `DEFAULT_IMPLEMENTATION_TURNS = 60`. Each model
+response counts one turn and must contain exactly one `propose_action` tool call;
+text-only, malformed, empty or multiple-call answers hand off as
+`model_invalid_response`. No model-specific branches or weaker adapter fallback exist.
+
+`admitModelAction` adds `submit_plan { text }` (UTF-8 `MAX_PLAN_BYTES = 8192`) and
+`candidate_ready { title, cause, scope, limitations }` (title ≤256 UTF-16 code units,
+cause/scope ≤`MAX_CANDIDATE_TEXT_BYTES = 4096` UTF-8 bytes each, ≤10 limitations of ≤500 units).
+Both reject extra fields, malformed values and credential patterns. Candidate
+metadata is untrusted prose, not verification evidence; `buildPrContent` bounds it
+again with independently verified receipt facts. Publication is controller-driven:
+`request_publication` is an `unexpected_action` in both phases. Planning also
+refuses writes/candidate declarations, and implementation refuses plan submission.
+Authority rejection codes are returned to the model; five consecutive rejections
+give `hand_off/model_noncompliant`, while a successfully executed admitted action
+resets the streak. An operational failure never silently retries.
+
+Each model call reserves through the real ledger before invoking the provider.
+A denial gives `budget_exhausted/budget` without another call. The active wall-clock
+ceiling is shared across planning, implementation and repairs. By default a
+process-local account is keyed by ledger object and session ID. An explicit
+`new ActiveTimeBudget(elapsedMs = 0)` account can be retained across fresh ledger/VM
+instances and seeded from persisted run state on resume; persist its `elapsedMs`
+after each phase. Only time inside loops is charged; idle hand-off time is excluded.
+Accounts reject concurrent entry (`session_busy`), and the loop holds an exclusive
+workspace lease. The caller retains the ledger and active account across repairs.
+Re-entry on the same live VM retains its controller-held overlay, so previously
+admitted writes do not disappear when a turn/budget stop is resumed. Its original
+baseline digest must still match; a new baseline requires fresh provisioning.
+The ceiling is checked before every turn/worker operation and bounds asynchronous
+transcript writes too. Non-finite or backward clocks refuse progress. Model
+calls are capped at 60 seconds or the remaining active time, whichever is smaller;
+worker commands use `network: 'none'`, the admitted profile, an empty environment,
+and at most `limits.commandTimeoutMs` or the remaining active time. Controller-only
+`ExecRequest.wallTimeoutMs` caps the guest timeout after TCG scaling; the loop also
+supervises the entire exec/put RPC, including queue and broker grace. Expiry
+invalidates provisioning proof and awaits VM destruction to quiesce work. Active
+expiry is `budget_exhausted/active_time`; a shorter command ceiling is
+`hand_off/command_timeout`. Failed deadline teardown is `hand_off/cleanup_failed`,
+and caller-owned cleanup must retry/persist the blocked lifecycle. Insufficient
+time for the broker's one-second minimum stops with `active_time`. Model-profile
+values and process environment variables are never forwarded into exec.
+
+`assertProvisionedVm(adapter, vm)` refuses handles not produced by that adapter's
+completed provisioning or released with `releaseWorkspace`; the loop calls it
+before every model or worker operation, after awaited boundaries and before
+successful terminal returns; it never creates a VM. `leaseProvisionedVm` acquires
+exclusive loop ownership and returns its release function; evidence execution
+refuses a leased handle. `releaseWorkspace` invalidates proof immediately so a
+pending loop cannot continue after teardown. `abortProvisionedVm` invalidates
+proof and awaits destruction on a supervisory worker deadline. The caller owns
+teardown/retries at every stop/checkpoint.
+The supported local-QEMU and fake adapters invalidate the shared lifecycle proof
+before direct destruction begins, and `finishBoundary` does so before quiescence
+for every adapter. A boundary-finalized VM cannot be reused by the model loop.
+Provisioned-handle proof is process-local;
+resume provisions a fresh workspace. `repairOf` is appended only as untrusted
+failure-summary data. The caller must first enforce `assertRepairAllowed` and
+provide the failed candidate as `baseManifest` in a freshly provisioned workspace.
+
+`AGENT_SYSTEM`, `agentTools(phase: AgentPhase)` and `untrustedFrame(label, data)`
+provide controller-authored prompts/schemas and JSON-framed untrusted issue, plan,
+repair and worker-output data. Prompts require a minimal fix, regression coverage,
+no stash, formatting/dependency churn or promotional artifacts; deterministic
+admission is authoritative. Exec stdout/stderr go in full to `OutputCollector`
+for boundary evaluation; only a UTF-8-safe combined tail of at most
+`MAX_WORKER_REPLY_BYTES = 16384` is returned to the model, inside an explicit
+untrusted frame with observed exit/timeout facts. Entire outputs are scanned before
+excerpting, and secret-shaped output becomes `[redacted]`; raw collected evidence
+is retained for boundary checks. Broker truncation or collector overflow hands
+off as `output_truncated` rather than allowing partial evidence to pass.
+`OutputCollector.markIncomplete()` permanently records broker-side capture loss
+even below the collector's own cap, so boundary consumption refuses partial scans.
+Truncation, malformed results and uncertain exec failures fence workspace reuse;
+uncertain exec failures use bounded quiescence before returning, with
+`cleanup_failed` when it cannot be established. A refused concurrent contender
+does not acquire transcript or lifecycle authority and cannot invalidate its owner.
+
+Transcript events include start data, detached model responses, admitted actions,
+rejections, action replies and terminal stop events with controller-defined stage,
+turn and stop outcome.
+Successful plan/candidate persistence writes only a tentative `checkpoint` and
+revalidates liveness before returning. **No transcript entry establishes success
+authority**; the returned proposal and later verification/controller state own
+that decision. Success-checkpoint persistence is bounded by remaining active time
+and checked again before returning; the separate durability allowance applies only
+to stop recording. Failed outcomes write `stop` events. A timed-out arbitrary sink
+may append late, so entries carry a controller-assigned monotonic `sequence`;
+read them in logical sequence order, never infer a verdict from the physical tail.
+Persistence failure/timeout permanently invalidates workspace reuse, including
+after a delayed append resolves. The lease/account remain held through terminal persistence.
+Stop persistence has a separate
+`TERMINAL_TRANSCRIPT_TIMEOUT_MS = 1000` durability allowance after active expiry;
+a failed sink is not recursively asked to report itself.
+Terminal persistence failure preserves an already-stopped outcome, but cannot
+turn a candidate/plan into success. Diagnostic codes are controller-defined
+(`broker_failure`, `provider_failure`, `controller_failure`), never exception text.
+Every entry is scanned with `assertNoSecrets`
+(including nested primitive strings); a secret-shaped entry is stored as literal
+`[redacted]`. Secret proposals are rejected and omitted from subsequent requests.
+Secret-bearing initial issue/repair data is recorded redacted and refuses the loop
+before a provider call. A throwing/rejecting transcript sink gives
+`hand_off/persistence_failed`, without further effects; a stalled sink is bounded
+by remaining active time and late completion cannot resume the loop. Active-limited
+model timeouts give `budget_exhausted/active_time`, while provider timeouts with
+active allowance remaining retain `hand_off/model_timeout`. Non-model unexpected
+failures return fixed `loop_failed`; provider failures retain only their bounded
+`ModelError.code`. Provider/worker exception text never enters the result or sink.
+
+### Controller-held source overlay
+
+`new WorkspaceOverlay(baseManifest)` revalidates and freezes the exact baseline.
+`write(path, content)` uses the shared `admitWorkspaceWrite(path, content)` authority
+validator, including filename/content secret scans, bounded UTF-8 contents after
+`assertWorkspacePath` and canonical combined-manifest validation. Rewrites replace
+only that path; existing executable modes are preserved and new files are
+non-executable. `executable(path)` reports the held mode for VM mirroring.
+`testFiles()` returns byte-sorted written paths matching the shared
+`isTestPath(path)` scope-review rules: `test/`, `tests/`, `__tests__/`, `*.test.*`,
+`*.spec.*`, `test_*.py`, `*_test.py`. It does not include untouched baseline tests.
+File/directory, case/Unicode collisions, canonical Git paths and source-size
+limits are rejected before changing the overlay.
+
+Each admitted loop write updates this overlay and mirrors those exact bytes with
+`putFile` so later commands can see them. The loop never calls `getFile` to build
+a candidate. Failed/uncertain mirroring invalidates workspace reuse; admitted
+bytes remain privately recorded for controller recovery, requiring fresh provisioning.
+An adapter-reported timeout is also an inconclusive stop with no further model
+call; ambiguous null exits stop as `worker_inconclusive` and fence reuse.
+Direct overlay/authority writes permit at most 1 MiB
+of content, but the OpenAI-compatible model transport caps the **entire serialized
+tool argument at 64 KiB**, including JSON envelope and escaping. Complete-file
+rewrites exceeding that smaller transport bound give `model_invalid_response`;
+they cannot be delivered through that transport. The larger overlay limit does
+not widen transport admission. `overlay.materialize(directory)` requires an absent directory under
+a controller-owned parent, creates it privately (0700), writes only base plus
+overlay files (0600, or 0700 for executables), then returns `exportSource`'s
+candidate manifest and checks its digest against the held source. Existing trees
+and symlinks are refused; callers retain/remove their own private materialization
+directories, including partial ones after I/O failure. Binary baseline blobs and
+empty directories are preserved. Bytes created, deleted or changed by repository
+processes in the VM never enter the candidate. **File deletion and executable-mode
+changes are unsupported in MVP**; shell-produced generated files are not adopted.
+A candidate still requires canonical reconstruction, fresh regression/full-suite
+verification, scope review, boundary evidence and receipt admission before shipping.
+
+## Durable user checkpoints (#1100)
+
+`checkpointDue(config.checkpoints, point)` tests the user-selected subset; the
+persisted RunStore config is authoritative, defaulting to `[]`. Repository and
+model text never configure checkpoints. `pauseAtCheckpoint(store, run, point,
+bindings, now)` returns the persisted run. Call it at `plan` in planning after
+writing `artifacts/plan.txt` and before `PlanApproved`; `patch` in verifying after
+`CandidateReady` and before verification, with `artifacts/candidate.diff`; and
+`verification` in shipping after `VerificationPassed` and before any push intent,
+with `artifacts/verification.json`. Paths are relative to the run store. The
+controller owns these artifact names and writes the content before invoking the
+checkpoint API. Engagement and publication always remain contributor hand-offs.
+
+Bindings require canonical lowercase SHA-256 `policyDigest` and a run-owned
+`budgetSessionId` (`<runId>-s<positive-safe-integer>`). Plan also requires
+`planDigest`; patch requires a full lowercase Git `candidateSha` (SHA-1 or SHA-256);
+verification requires `candidateSha` and SHA-256 `verificationDigest`. Other
+point-specific fields and unknown keys are refused. The immutable `CheckpointRecord`
+binds those facts, run identity, interrupted phase/history length and creation time
+in its SHA-256 digest. It has `status: open | approved | rejected`, plus `resolvedAt`
+and, on rejection, `rejectionReason`. Records live in the private, lifetime-guarded
+RunStore control journal; `store.checkpoint(point)` reads the restored record.
+The record is fsynced **before** `UserPaused`; reopening between these steps finds
+the record and the pre-pause run. Retrying the pause reuses that exact record.
+Each point pauses once per run; approval does not cause a second pause.
+
+`approveCheckpoint(store, run, { point, digest }, now)` requires the exact open
+record and resumes only its interrupted phase (`ResumePlanning`, `ResumeVerifying`
+or `ResumeShipping`). The controller must call
+`store.recordCheckpointBindings(point, bindings)` after every plan, candidate,
+verification, policy or budget-session change, before any approval attempt. These
+current bindings are durable and compared with the paused record: changed content
+refuses the old approval with `checkpoint_stale`. A mismatch also gives
+`checkpoint_stale`; repeat approval gives `checkpoint_closed`; an unrelated pause
+or non-paused run gives `checkpoint_not_open`. Malformed inputs give
+`checkpoint_invalid`, including uncloneable input, invalid dates and malformed
+digest strings. Secret-bearing input retains the non-echoing `SecretRedactionError`.
+Diagnostics never echo supplied data. Generic `persistRun` and journal replay
+cannot bypass an open checkpoint boundary or resume its pause; approval must use
+the checkpoint resolution event. Ordinary failure/cancellation remains permitted.
+
+`rejectCheckpoint(store, run, { point, digest }, reason, now)` validates the exact
+open record and paused phase, even if current content is stale, records a nonempty
+secret-free reason (at most 500 characters), and
+applies `UserCancelled`. Decision and lifecycle continuation are one journal event;
+the existing snapshot-confirmation recovery completes publication after a crash,
+so approval cannot become reusable between the decision and snapshot steps.
+Store persistence failures retain the existing process-lifetime fence.
+
+`checkpointStatus(record, currentBindings?)` returns `{ nextPermittedAction }`, naming the point,
+the relevant plan/diff/verification artifact and candidate where applicable, and
+the exact placeholder command `<zt-run> approve --run <runId> --point <point>
+--digest <digest>`. Closed records instead state that no further approval is
+permitted. Pass `store.currentCheckpointBindings(record.point)` for live status:
+stale content instead shows the exact reject placeholder and permits cancellation,
+never approval. Without current bindings, status describes the recorded content
+only; the approval API always checks durable freshness. Both record validation
+and status enforce the package's secret guard.
+These are local infrastructure APIs for controller/CLI integration; they perform
+no network, model, VM, upstream publication or receipt authorization operations.
 
 ## Community gate and explicit-resume invitation (#1098)
 

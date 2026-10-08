@@ -43,6 +43,10 @@ export interface ReviewCandidateInput {
 
 const TEST =
   /(?:^|\/)(?:test|tests|__tests__)\/|\.(?:test|spec)\.[^/]*$|(?:^|\/)test_[^/]*\.py$|_test\.py$/u;
+/** Shared path rules for scope integrity and regression overlay selection. */
+export function isTestPath(path: string): boolean {
+  return TEST.test(path);
+}
 const CONFIG =
   /(?:^|\/)(?:package\.json|package-lock\.json|pyproject\.toml|uv\.lock|requirements[^/]*\.txt|setup\.py|setup\.cfg|tox\.ini|pytest\.ini|conftest\.py|jest\.config\.[^/]*|vitest\.config\.[^/]*|\.mocharc[^/]*|Makefile|Dockerfile|\.gitattributes)$|(?:^|\/)(?:\.github|\.devcontainer)(?:\/|$)/u;
 const GENERATED = /(?:^|\/)(?:dist|build)(?:\/|$)|\.min\.js$|\.map$/u;

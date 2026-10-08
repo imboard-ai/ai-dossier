@@ -48,6 +48,12 @@ import {
 } from '../vm/adapter';
 import { assertProfileBaked } from '../vm/profile';
 import { teardownVm } from '../vm/teardown';
+import {
+  acquireWorkspaceLease,
+  invalidateProvisionedVm,
+  isProvisionedVm,
+  registerProvisionedVm,
+} from '../vm/workspace-lifecycle';
 import type { OutputCollector } from './output-collector';
 
 /** Cap on the log excerpt kept in evidence, in UTF-16 code units (the tail of the log). */
@@ -225,6 +231,28 @@ export interface RegressionRunEvidence {
 /** Workspaces that passed the phase-switch check and are not yet released. */
 const PROVEN = new WeakSet<ProvisionedWorkspace>();
 
+/** The model loop may use only a live handle from this adapter's completed provisioning. */
+export function assertProvisionedVm(adapter: VmAdapter, vm: VmHandle): void {
+  if (!isProvisionedVm(adapter, vm)) throw new EvidencePlanError('workspace_unproven');
+}
+
+/** Exclusive model-loop ownership; release/teardown invalidates proof immediately,
+ * even while the owner awaits a provider or persistence callback. */
+export function leaseProvisionedVm(adapter: VmAdapter, vm: VmHandle): () => void {
+  try {
+    return acquireWorkspaceLease(adapter, vm);
+  } catch {
+    throw new EvidencePlanError('workspace_unproven');
+  }
+}
+
+/** A supervisory worker deadline must quiesce the guest, never merely abandon its promise.
+ * Caller still owns bounded cleanup retries and lifecycle persistence on destroy failure. */
+export async function abortProvisionedVm(adapter: VmAdapter, vm: VmHandle): Promise<void> {
+  invalidateProvisionedVm(adapter, vm);
+  await adapter.destroy(vm);
+}
+
 /** Refuses any command whose phase or network is not its phase's one network:
  * provisioning only on the package proxy, verification only with none. */
 export function assertPlanNetworks(plan: CommandPlan): void {
@@ -294,6 +322,9 @@ async function execute(
   });
   collector.append(result.stdout);
   collector.append(result.stderr);
+  // A supervised timeout/signal is semantically inconclusive, but its returned
+  // streams may still be complete. Capture loss is an independent broker fact.
+  if (result.truncated) collector.markIncomplete();
   if (command.captureReport) collector.append(result.report);
   const summary = command.captureReport ? parseJunitReport(result.report) : null;
   const outcome = outcomeOf(result, summary);
@@ -333,7 +364,21 @@ export async function runPlanned(
 ): Promise<CommandRecord> {
   if (!PROVEN.has(workspace)) throw new EvidencePlanError('workspace_unproven');
   assertCommandPhase(command, 'verification');
-  return execute(adapter, workspace.vm, workspace.profile, command, collector, options);
+  const release = leaseProvisionedVm(adapter, workspace.vm);
+  try {
+    const record = await execute(
+      adapter,
+      workspace.vm,
+      workspace.profile,
+      command,
+      collector,
+      options
+    );
+    assertProvisionedVm(adapter, workspace.vm);
+    return record;
+  } finally {
+    release();
+  }
 }
 
 /** One bounded teardown; a blocked one throws `VmCleanupError` with `cause` set to the
@@ -368,6 +413,7 @@ export async function releaseWorkspace(
   cause?: unknown
 ): Promise<void> {
   PROVEN.delete(workspace);
+  invalidateProvisionedVm(adapter, workspace.vm);
   await destroyVm(adapter, workspace.vm, lifecycle, cause);
 }
 
@@ -482,6 +528,7 @@ export async function provisionWorkspace(options: ProvisionOptions): Promise<Pro
         phaseSwitch: Object.freeze({ attempt: 'package-proxy-after-provisioning', refusedWith }),
       });
       PROVEN.add(workspace);
+      registerProvisionedVm(adapter, vm);
       return workspace;
     }
   } catch (error) {
