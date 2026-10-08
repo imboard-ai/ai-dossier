@@ -322,7 +322,9 @@ async function execute(
   });
   collector.append(result.stdout);
   collector.append(result.stderr);
-  if (result.truncated || result.timedOut || result.exitCode === null) collector.markIncomplete();
+  // A supervised timeout/signal is semantically inconclusive, but its returned
+  // streams may still be complete. Capture loss is an independent broker fact.
+  if (result.truncated) collector.markIncomplete();
   if (command.captureReport) collector.append(result.report);
   const summary = command.captureReport ? parseJunitReport(result.report) : null;
   const outcome = outcomeOf(result, summary);
