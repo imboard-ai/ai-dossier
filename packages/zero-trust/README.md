@@ -45,20 +45,29 @@ current bindings are durable and compared with the paused record: changed conten
 refuses the old approval with `checkpoint_stale`. A mismatch also gives
 `checkpoint_stale`; repeat approval gives `checkpoint_closed`; an unrelated pause
 or non-paused run gives `checkpoint_not_open`. Malformed inputs give
-`checkpoint_invalid`. Diagnostics never echo supplied data.
+`checkpoint_invalid`, including uncloneable input, invalid dates and malformed
+digest strings. Secret-bearing input retains the non-echoing `SecretRedactionError`.
+Diagnostics never echo supplied data. Generic `persistRun` and journal replay
+cannot bypass an open checkpoint boundary or resume its pause; approval must use
+the checkpoint resolution event. Ordinary failure/cancellation remains permitted.
 
-`rejectCheckpoint(store, run, { point, digest }, reason, now)` validates the same
-open binding, records a nonempty secret-free reason (at most 500 characters), and
+`rejectCheckpoint(store, run, { point, digest }, reason, now)` validates the exact
+open record and paused phase, even if current content is stale, records a nonempty
+secret-free reason (at most 500 characters), and
 applies `UserCancelled`. Decision and lifecycle continuation are one journal event;
 the existing snapshot-confirmation recovery completes publication after a crash,
 so approval cannot become reusable between the decision and snapshot steps.
 Store persistence failures retain the existing process-lifetime fence.
 
-`checkpointStatus(record)` returns `{ nextPermittedAction }`, naming the point,
+`checkpointStatus(record, currentBindings?)` returns `{ nextPermittedAction }`, naming the point,
 the relevant plan/diff/verification artifact and candidate where applicable, and
 the exact placeholder command `<zt-run> approve --run <runId> --point <point>
 --digest <digest>`. Closed records instead state that no further approval is
-permitted. Both record validation and status enforce the package's secret guard.
+permitted. Pass `store.currentCheckpointBindings(record.point)` for live status:
+stale content instead shows the exact reject placeholder and permits cancellation,
+never approval. Without current bindings, status describes the recorded content
+only; the approval API always checks durable freshness. Both record validation
+and status enforce the package's secret guard.
 These are local infrastructure APIs for controller/CLI integration; they perform
 no network, model, VM, upstream publication or receipt authorization operations.
 

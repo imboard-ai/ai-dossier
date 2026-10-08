@@ -28,7 +28,7 @@ const LATER = '2026-10-08T00:00:01.000Z';
 const roots: string[] = [];
 const stores: RunStore[] = [];
 const POINTS: CheckpointPoint[] = ['plan', 'patch', 'verification'];
-function rig(points: CheckpointPoint[] = POINTS) {
+function rig(points: CheckpointPoint[] | null = POINTS) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zt-checkpoints-'));
   roots.push(root);
   const signerKeyFile = path.join(root, 'signer.pem');
@@ -82,7 +82,7 @@ function rig(points: CheckpointPoint[] = POINTS) {
       privateKeyEnv: 'APP_KEY',
       clientSecretEnv: 'APP_SECRET',
     },
-    checkpoints: points,
+    ...(points === null ? {} : { checkpoints: points }),
   });
   const directory = path.join(root, 'runs');
   const store = RunStore.create(directory, config, AT);
@@ -125,6 +125,126 @@ afterEach(() => {
 });
 
 describe('durable checkpoints', () => {
+  it.each(POINTS)('%s refuses wrong approvals without any durable mutation', (point) => {
+    let { store, directory } = rig();
+    phase(store, point);
+    pauseAtCheckpoint(store, store.run, point, bindings(store, point), AT);
+    const run = store.run;
+    const record = store.checkpoint(point);
+    const journal = path.join(store.directory, 'control/events.jsonl');
+    const bytes = fs.readFileSync(journal);
+    expect(() =>
+      approveCheckpoint(store, store.run, { point, digest: '0'.repeat(64) }, AT)
+    ).toThrow(new CheckpointError('checkpoint_stale'));
+    expect(store.run).toEqual(run);
+    expect(store.checkpoint(point)).toEqual(record);
+    expect(fs.readFileSync(journal)).toEqual(bytes);
+    store = reopen(directory, store);
+    expect(store.run).toEqual(run);
+    expect(store.checkpoint(point)).toEqual(record);
+    expect(fs.readFileSync(journal)).toEqual(bytes);
+  });
+
+  it('refuses direct and multi-edge resume bypasses live and on replay', () => {
+    let { store, directory } = rig();
+    phase(store, 'verification');
+    pauseAtCheckpoint(store, store.run, 'verification', bindings(store, 'verification'), AT);
+    const resumed = transitionRun(store.run, R.ResumeShipping, AT);
+    const advanced = transitionRun(resumed, R.PublicationObserved, AT);
+    const journal = path.join(store.directory, 'control/events.jsonl');
+    const bytes = fs.readFileSync(journal);
+    for (const next of [resumed, advanced]) {
+      expect(() => store.persistRun(next)).toThrow(RunStoreError);
+      expect(store.run.state).toBe('paused_user');
+      expect(fs.readFileSync(journal)).toEqual(bytes);
+    }
+    store = reopen(directory, store);
+    const id = store.runId;
+    store.close();
+    fs.appendFileSync(journal, `${JSON.stringify({ v: 1, type: 'run', run: advanced })}\n`);
+    expect(() => RunStore.open(directory, id)).toThrow(RunStoreError);
+  });
+
+  it('an open pre-pause record prevents skipping the boundary but allows cancellation', () => {
+    const { store } = rig();
+    phase(store, 'plan');
+    const data = bindings(store, 'plan');
+    store.recordCheckpointBindings('plan', data);
+    store.persistCheckpoint(newCheckpoint(store.run, 'plan', data, AT));
+    expect(() => store.persistRun(transitionRun(store.run, R.PlanApproved, AT))).toThrow(
+      RunStoreError
+    );
+    store.persistRun(transitionRun(store.run, R.UserCancelled, AT));
+    expect(store.run.state).toBe('cancelled');
+  });
+
+  it('malformed inputs give fixed secret-free diagnostics without writes', () => {
+    const { store } = rig();
+    phase(store, 'plan');
+    pauseAtCheckpoint(store, store.run, 'plan', bindings(store, 'plan'), AT);
+    const marker = 'supplied-private-marker';
+    const bad = { extra: () => marker };
+    const getter = {
+      get extra() {
+        throw new Error(marker);
+      },
+    };
+    const journal = path.join(store.directory, 'control/events.jsonl');
+    const bytes = fs.readFileSync(journal);
+    const record = store.checkpoint('plan');
+    const calls = [
+      () => checkpointBindings(bad, 'plan', store.runId),
+      () => restoreCheckpoint(bad),
+      () => restoreCheckpoint(getter),
+      () => approveCheckpoint(store, store.run, { ...answer(store, 'plan'), ...bad } as never, AT),
+      () => approveCheckpoint(store, store.run, { point: 'plan', digest: 'bad' }, AT),
+      () => pauseAtCheckpoint(store, store.run, 'plan', bindings(store, 'plan'), new Date(NaN)),
+      () => approveCheckpoint(store, store.run, answer(store, 'plan'), new Date(NaN)),
+      () => rejectCheckpoint(store, store.run, answer(store, 'plan'), 'reason', new Date(NaN)),
+    ];
+    for (const call of calls) {
+      try {
+        call();
+        throw new Error('expected refusal');
+      } catch (error) {
+        expect(error).toEqual(new CheckpointError('checkpoint_invalid'));
+        expect(String(error)).not.toContain(marker);
+        expect((error as Error).stack).not.toContain(marker);
+        expect((error as Error).cause).toBeUndefined();
+        assertNoSecrets(String(error));
+      }
+    }
+    expect(store.checkpoint('plan')).toEqual(record);
+    expect(fs.readFileSync(journal)).toEqual(bytes);
+  });
+
+  it.each(POINTS)('%s permits durable rejection of stale content, never approval', (point) => {
+    let { store, directory } = rig();
+    phase(store, point);
+    const data = bindings(store, point);
+    pauseAtCheckpoint(store, store.run, point, data, AT);
+    const approval = answer(store, point);
+    const changed = { ...data, policyDigest: 'e'.repeat(64) };
+    store.recordCheckpointBindings(point, changed);
+    store = reopen(directory, store);
+    const run = store.run;
+    const journal = path.join(store.directory, 'control/events.jsonl');
+    const bytes = fs.readFileSync(journal);
+    expect(() => approveCheckpoint(store, store.run, approval, LATER)).toThrow(
+      new CheckpointError('checkpoint_stale')
+    );
+    expect(store.run).toEqual(run);
+    expect(fs.readFileSync(journal)).toEqual(bytes);
+    const status = checkpointStatus(store.checkpoint(point) as never, changed);
+    expect(status.nextPermittedAction).toContain('is stale; reject');
+    assertNoSecrets(status.nextPermittedAction);
+    rejectCheckpoint(store, store.run, approval, 'obsolete content', LATER);
+    store = reopen(directory, store);
+    expect(store.run.state).toBe('cancelled');
+    expect(store.checkpoint(point)?.status).toBe('rejected');
+    expect(store.checkpoint(point)?.rejectionReason).toBe('obsolete content');
+  });
+
   it.each(
     POINTS
   )('%s pauses once, persists before the pause, resumes exactly and stays closed', (point) => {
@@ -198,19 +318,27 @@ describe('durable checkpoints', () => {
   });
 
   it('default config runs fake steps through shipping without records, ignoring mutated config copies', () => {
-    const { store, directory } = rig([]);
+    const { store, directory } = rig(null);
+    expect(store.config.checkpoints).toEqual([]);
     const configCopy = store.config;
     (configCopy.checkpoints as CheckpointPoint[]).push('plan');
     store.persistRun(transitionRun(store.run, R.GatePassed, AT));
+    const planning = store.run;
     pauseAtCheckpoint(store, store.run, 'plan', bindings(store, 'plan'), AT);
+    expect(store.run).toEqual(planning);
     store.persistRun(transitionRun(store.run, R.PlanApproved, AT));
     store.persistRun(transitionRun(store.run, R.CandidateReady, AT));
+    const verifying = store.run;
     pauseAtCheckpoint(store, store.run, 'patch', bindings(store, 'patch'), AT);
+    expect(store.run).toEqual(verifying);
     store.persistRun(transitionRun(store.run, R.VerificationPassed, AT));
+    const shipping = store.run;
     pauseAtCheckpoint(store, store.run, 'verification', bindings(store, 'verification'), AT);
+    expect(store.run).toEqual(shipping);
     expect(store.run.state).toBe('shipping');
     const opened = reopen(directory, store);
     for (const point of POINTS) expect(opened.checkpoint(point)).toBeUndefined();
+    expect(opened.run.history.some((event) => event.reasonCode === R.UserPaused)).toBe(false);
     expect(
       fs.readFileSync(path.join(opened.directory, 'control/events.jsonl'), 'utf8')
     ).not.toContain('checkpoint');
@@ -238,11 +366,21 @@ describe('durable checkpoints', () => {
       ...(change === 'plan' ? { planDigest: 'e'.repeat(64) } : {}),
     });
     store = reopen(directory, store);
+    const run = store.run;
+    const record = store.checkpoint(point);
+    const journal = path.join(store.directory, 'control/events.jsonl');
+    const bytes = fs.readFileSync(journal);
     expect(() => approveCheckpoint(store, store.run, approval, LATER)).toThrow(
       new CheckpointError('checkpoint_stale')
     );
     expect(store.run.state).toBe('paused_user');
     expect(store.checkpoint(point)?.status).toBe('open');
+    expect(store.run).toEqual(run);
+    expect(store.checkpoint(point)).toEqual(record);
+    expect(fs.readFileSync(journal)).toEqual(bytes);
+    store = reopen(directory, store);
+    expect(store.run).toEqual(run);
+    expect(store.checkpoint(point)).toEqual(record);
   });
 
   it('refuses mismatched digest, wrong point, stale run snapshot, wrong phase and invalid time', () => {
@@ -385,7 +523,7 @@ describe('durable checkpoints', () => {
     expect(() =>
       pauseAtCheckpoint(store, store.run, 'plan', { ...data, planDigest: 'e'.repeat(64) }, AT)
     ).toThrow(new CheckpointError('checkpoint_stale'));
-    store.persistRun(transitionRun(store.run, R.PlanApproved, AT));
+    store.persistRun(transitionRun(store.run, R.UserCancelled, AT));
     expect(() => pauseAtCheckpoint(store, store.run, 'plan', data, AT)).toThrow(
       new CheckpointError('checkpoint_not_open')
     );

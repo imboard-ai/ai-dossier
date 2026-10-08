@@ -11,8 +11,11 @@ import {
   type CheckpointBindings,
   type CheckpointPoint,
   type CheckpointRecord,
+  checkpointBindings,
   checkpointFail,
   checkpointPhase,
+  checkpointResumeReason,
+  checkpointSnapshot,
   newCheckpoint,
   restoreCheckpoint,
   sameCheckpointBindings,
@@ -34,6 +37,7 @@ export function checkpointDue(
 }
 function current(store: RunStore, run: RunRecord, now: Date | string): string {
   if (!sameRunRecord(run, store.run)) checkpointFail('checkpoint_stale');
+  if (now instanceof Date && !Number.isFinite(now.getTime())) checkpointFail('checkpoint_invalid');
   const at = now instanceof Date ? now.toISOString() : now;
   if (!isTimestamp(at) || Date.parse(at) < Date.parse(run.updatedAt))
     checkpointFail('checkpoint_invalid');
@@ -77,15 +81,17 @@ function openCheckpoint(
   store: RunStore,
   run: RunRecord,
   answer: unknown,
-  now: Date | string
+  now: Date | string,
+  requireFresh = true
 ): { record: CheckpointRecord; at: string } {
   const at = current(store, run, now);
-  const value: unknown = structuredClone(answer);
+  const value = checkpointSnapshot(answer);
   assertSecretFree(value);
   if (
     !isRecord(value) ||
     Object.keys(value).some((key) => !['point', 'digest'].includes(key)) ||
-    typeof value.digest !== 'string'
+    typeof value.digest !== 'string' ||
+    !/^[a-f0-9]{64}$/u.test(value.digest)
   )
     checkpointFail('checkpoint_invalid');
   checkpointPhase(value.point);
@@ -101,8 +107,7 @@ function openCheckpoint(
   const bindings = store.currentCheckpointBindings(record.point);
   if (
     value.digest !== record.digest ||
-    !bindings ||
-    !sameCheckpointBindings(bindings, record.bindings)
+    (requireFresh && (!bindings || !sameCheckpointBindings(bindings, record.bindings)))
   )
     checkpointFail('checkpoint_stale');
   return { record, at };
@@ -114,12 +119,7 @@ export function approveCheckpoint(
   now: Date | string
 ): RunRecord {
   const { record, at } = openCheckpoint(store, run, answer, now);
-  const reason =
-    record.point === 'plan'
-      ? ReasonCode.ResumePlanning
-      : record.point === 'patch'
-        ? ReasonCode.ResumeVerifying
-        : ReasonCode.ResumeShipping;
+  const reason = checkpointResumeReason(record.point);
   store.resolveCheckpoint(
     restoreCheckpoint({ ...record, status: 'approved', resolvedAt: at }),
     transitionRun(run, reason, at)
@@ -133,14 +133,17 @@ export function rejectCheckpoint(
   reason: string,
   now: Date | string
 ): RunRecord {
-  const { record, at } = openCheckpoint(store, run, answer, now);
+  const { record, at } = openCheckpoint(store, run, answer, now, false);
   store.resolveCheckpoint(
     restoreCheckpoint({ ...record, status: 'rejected', resolvedAt: at, rejectionReason: reason }),
     transitionRun(run, ReasonCode.UserCancelled, at)
   );
   return store.run;
 }
-export function checkpointStatus(input: CheckpointRecord): { nextPermittedAction: string } {
+export function checkpointStatus(
+  input: CheckpointRecord,
+  currentBindings?: CheckpointBindings
+): { nextPermittedAction: string } {
   const record = restoreCheckpoint(input);
   const review =
     record.point === 'plan'
@@ -148,9 +151,17 @@ export function checkpointStatus(input: CheckpointRecord): { nextPermittedAction
       : record.point === 'patch'
         ? `candidate ${record.bindings.candidateSha} and diff at artifacts/candidate.diff`
         : `candidate ${record.bindings.candidateSha} and verification summary at artifacts/verification.json`;
+  const stale =
+    currentBindings !== undefined &&
+    !sameCheckpointBindings(
+      checkpointBindings(currentBindings, record.point, record.runId),
+      record.bindings
+    );
   const nextPermittedAction =
     record.status === 'open'
-      ? `Checkpoint ${record.point}: review ${review}; approve exactly with <zt-run> approve --run ${record.runId} --point ${record.point} --digest ${record.digest}.`
+      ? stale
+        ? `Checkpoint ${record.point} is stale; reject with <zt-run> reject --run ${record.runId} --point ${record.point} --digest ${record.digest} --reason <reason>.`
+        : `Checkpoint ${record.point}: review ${review}; approve exactly with <zt-run> approve --run ${record.runId} --point ${record.point} --digest ${record.digest}.`
       : `Checkpoint ${record.point} is ${record.status}; no further approval is permitted.`;
   assertSecretFree(nextPermittedAction);
   return { nextPermittedAction };

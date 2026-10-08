@@ -28,6 +28,7 @@ import {
   type CheckpointRecord,
   checkpointBindings,
   checkpointPhase,
+  checkpointResumeReason,
   restoreCheckpoint,
   sameCheckpointBindings,
 } from './checkpoint-record';
@@ -100,7 +101,8 @@ function validateCheckpoint(
   if (
     record.runId !== run.runId ||
     !config.checkpoints.includes(record.point) ||
-    !sameCheckpointBindings(record.bindings, bindings.get(record.point) ?? record.bindings)
+    (record.status !== 'rejected' &&
+      !sameCheckpointBindings(record.bindings, bindings.get(record.point) ?? record.bindings))
   )
     fail('invalid_store');
   const previous = records.get(record.point);
@@ -136,12 +138,36 @@ function validateCheckpoint(
     const reason =
       record.status === 'rejected'
         ? ReasonCode.UserCancelled
-        : record.point === 'plan'
-          ? ReasonCode.ResumePlanning
-          : record.point === 'patch'
-            ? ReasonCode.ResumeVerifying
-            : ReasonCode.ResumeShipping;
+        : checkpointResumeReason(record.point);
     if (!sameRunRecord(transitionRun(run, reason, record.resolvedAt), next)) fail('run_diverged');
+  }
+}
+/** An open checkpoint owns its boundary even before the pause snapshot lands.
+ * Ordinary persistence may pause or fail/cancel, but may never continue work. */
+function validateCheckpointContinuation(
+  run: RunRecord,
+  next: RunRecord,
+  records: Map<CheckpointPoint, CheckpointRecord>
+): void {
+  const exits = new Set([
+    ReasonCode.PolicyBlocked,
+    ReasonCode.UnsupportedEnvironment,
+    ReasonCode.ExecutionFailed,
+    ReasonCode.UserCancelled,
+    ReasonCode.CleanupFailed,
+  ]);
+  for (const record of records.values()) {
+    if (record.status !== 'open') continue;
+    for (let i = run.history.length; i < next.history.length; i++) {
+      const event = next.history[i];
+      if (
+        i >= record.interruptedHistoryLength &&
+        (event.from === record.interruptedState || event.from === 'paused_user') &&
+        event.reasonCode !== ReasonCode.UserPaused &&
+        !exits.has(event.reasonCode)
+      )
+        fail('invalid_store');
+    }
   }
 }
 function replayControl(
@@ -176,6 +202,8 @@ function replayControl(
         const record = restoreCheckpoint(event.record);
         validateCheckpoint(record, run, config, checkpoints, bindings, next);
         checkpoints.set(record.point, record);
+      } else if (run) {
+        validateCheckpointContinuation(run, next, checkpoints);
       }
       run = next;
     } else if (
@@ -422,6 +450,7 @@ export class RunStore {
     const run = restoreRun(input);
     if (!isRunContinuation(this.current, run)) fail('run_diverged');
     if (sameRunRecord(this.current, run)) return;
+    validateCheckpointContinuation(this.current, run, this.checkpoints);
     this.write(() => {
       this.journal.append({ v: 1, type: 'run', run });
       confirmSnapshot(this.journal, `/proc/self/fd/${this.directoryFd}`, run);

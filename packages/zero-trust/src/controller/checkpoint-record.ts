@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { assertSecretFree } from '../redaction';
-import { isRecord, isTimestamp, type RunRecord } from '../state';
+import { isRecord, isTimestamp, ReasonCode, type RunRecord } from '../state';
 
 export type CheckpointPoint = 'plan' | 'patch' | 'verification';
 export type CheckpointPhase = 'planning' | 'verifying' | 'shipping';
@@ -37,6 +37,22 @@ export class CheckpointError extends Error {
 export function checkpointFail(code: CheckpointErrorCode): never {
   throw new CheckpointError(code);
 }
+/** Native clone failures may echo function source or thrown getter messages. */
+export function checkpointSnapshot(input: unknown): unknown {
+  try {
+    return structuredClone(input);
+  } catch {
+    return checkpointFail('checkpoint_invalid');
+  }
+}
+export function checkpointResumeReason(point: CheckpointPoint): ReasonCode {
+  checkpointPhase(point);
+  return point === 'plan'
+    ? ReasonCode.ResumePlanning
+    : point === 'patch'
+      ? ReasonCode.ResumeVerifying
+      : ReasonCode.ResumeShipping;
+}
 export function checkpointPhase(point: unknown): CheckpointPhase {
   if (point === 'plan') return 'planning';
   if (point === 'patch') return 'verifying';
@@ -53,7 +69,7 @@ export function checkpointBindings(
   runId: string
 ): CheckpointBindings {
   checkpointPhase(point);
-  const value: unknown = structuredClone(input);
+  const value = checkpointSnapshot(input);
   assertSecretFree(value);
   if (
     !isRecord(value) ||
@@ -129,7 +145,7 @@ export function newCheckpoint(
   return restoreCheckpoint({ ...base, digest: recordDigest(base), status: 'open' });
 }
 export function restoreCheckpoint(input: unknown): CheckpointRecord {
-  const value: unknown = structuredClone(input);
+  const value = checkpointSnapshot(input);
   assertSecretFree(value);
   if (
     !isRecord(value) ||
