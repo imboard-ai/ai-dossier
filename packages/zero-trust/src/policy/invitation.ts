@@ -1,4 +1,3 @@
-import { isTrustedAuthorAssociation } from '@ai-dossier/core';
 import {
   type IssueBinding,
   isGitHubLogin,
@@ -64,6 +63,12 @@ const ASSOCIATIONS = new Set([
   'FIRST_TIMER',
   'NONE',
   'MANNEQUIN',
+]);
+/** Permission floor is private immutable data, not core's exported mutable Set. */
+const MAINTAINER_ASSOCIATIONS: readonly string[] = Object.freeze([
+  'OWNER',
+  'MEMBER',
+  'COLLABORATOR',
 ]);
 /** Entire message only: quotes, negation, plans, caveats and mixed prose never invite. */
 export const INVITATION_RULES = Object.freeze({
@@ -178,7 +183,7 @@ export async function checkInvitation(
             association = a;
             const authorized =
               isGitHubLogin(who) &&
-              (isTrustedAuthorAssociation(a) ||
+              (MAINTAINER_ASSOCIATIONS.includes(a) ||
                 (policy.issueAuthorMayInvite && sameLogin(who, issueAuthor)));
             // The engagement itself is never its own answer, even if edited later.
             if (

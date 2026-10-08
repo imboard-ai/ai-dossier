@@ -19,7 +19,10 @@ cited AI ban → `terminate` (`PolicyBlocked`); ineligible → `ineligible`
 AI, or both unclear assignment and direct-PR policy → `hand_off`; AI approval,
 unfulfilled required assignment, or discussion-first → `request_permission`
 (`PermissionRequired`); otherwise → `proceed`. Contributor identity and assignment
-compare case-insensitively. Missing ban evidence hands off. These are suggestions,
+compare case-insensitively. Missing ban evidence hands off. Required snapshot
+fields and reason enums are validated; explicit competing-work reasons or open PR
+facts cannot be erased by an inconsistent `eligible` discriminant. `bug_unlabeled`
+remains advisory. These are suggestions,
 not transitions. No ceremonial engagement is made on proceed; only the controller
 may invoke `HandoffDriver.issueEngagement` after a permission decision. Its existing
 marker reconciliation and journal ensure one request even across repeated resume.
@@ -57,6 +60,9 @@ agree with the bound issue; the repository-wide event URL alone is not issue ide
 Supplied human account `type` must be `User`; App accounts require `Bot` and a
 matching `[bot]` login/App URL. Missing human `type` remains compatible with the
 existing minimal structural fixtures.
+Supplied actor REST `url` must identify the same login (including percent-encoded
+App-bot suffixes). The invitation permission allowlist is private immutable data,
+independent of consumers mutating core's public trusted-association collection.
 Valid GitHub App bot identities are supported
 as data, including issue authors, but bot comments never grant invitation authority.
 

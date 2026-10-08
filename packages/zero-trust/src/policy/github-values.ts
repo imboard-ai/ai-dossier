@@ -29,7 +29,7 @@ export function isGitHubActorLogin(value: unknown): value is string {
 }
 export function githubActor(value: unknown): { readonly login: string; readonly url: string } {
   const user = githubRecord(value);
-  const { login, html_url: url, type } = user;
+  const { login, html_url: url, type, url: apiUrl } = user;
   if (!isGitHubActorLogin(login) || typeof url !== 'string') throw new Error();
   const bot = login.endsWith('[bot]');
   const expected = bot
@@ -38,6 +38,13 @@ export function githubActor(value: unknown): { readonly login: string; readonly 
   if (
     (bot ? type !== 'Bot' : type !== undefined && type !== 'User') ||
     url.toLowerCase() !== expected.toLowerCase()
+  )
+    throw new Error();
+  if (
+    apiUrl !== undefined &&
+    (typeof apiUrl !== 'string' ||
+      apiUrl.toLowerCase() !==
+        `https://api.github.com/users/${encodeURIComponent(login)}`.toLowerCase())
   )
     throw new Error();
   return Object.freeze({ login, url });

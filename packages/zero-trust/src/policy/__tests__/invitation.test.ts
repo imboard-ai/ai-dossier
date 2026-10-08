@@ -1,3 +1,4 @@
+import { TRUSTED_AUTHOR_ASSOCIATIONS } from '@ai-dossier/core';
 import { describe, expect, it, vi } from 'vitest';
 import type { GitHubRead } from '../../github/reconcile';
 import { ReasonCode } from '../../state';
@@ -51,6 +52,61 @@ function rig(comments: unknown[] = [], events: unknown[] = []) {
 }
 
 describe('explicit resume invitation', () => {
+  it('keeps permission independent of a consumer-mutated core authority Set', async () => {
+    const shared = TRUSTED_AUTHOR_ASSOCIATIONS as Set<string>;
+    const prior = new Set(shared);
+    try {
+      shared.add('NONE');
+      shared.add('CONTRIBUTOR');
+      for (const association of ['NONE', 'CONTRIBUTOR']) {
+        const r = rig([comment('Go ahead', association)]);
+        expect((await checkInvitation(r.read, binding, r.options)).kind).toBe('waiting');
+        expect(r.persist).not.toHaveBeenCalled();
+      }
+    } finally {
+      shared.clear();
+      for (const value of prior) shared.add(value);
+    }
+  });
+  it('validates optional actor API identities for comment users, assigners and assignees', async () => {
+    const wrong = { ...user('maintainer'), url: 'https://api.github.com/users/other' };
+    for (const r of [
+      rig([{ ...comment(), user: wrong }]),
+      rig([], [{ ...assignment(), actor: { ...user('triager'), url: 1 } }]),
+      rig(
+        [],
+        [
+          {
+            ...assignment(),
+            assignee: { ...user('alice'), url: 'https://api.github.com/users/other' },
+          },
+        ]
+      ),
+    ]) {
+      expect((await checkInvitation(r.read, binding, r.options)).kind).toBe('unknown');
+      expect(r.persist).not.toHaveBeenCalled();
+    }
+    const r = rig([
+      {
+        ...comment(),
+        user: {
+          ...user('maintainer'),
+          url: 'https://api.github.com/users/maintainer',
+          type: 'User',
+        },
+      },
+      {
+        ...comment('irrelevant', 'NONE', 'other', 13),
+        user: {
+          login: 'automation[bot]',
+          html_url: 'https://github.com/apps/automation',
+          url: 'https://api.github.com/users/automation%5Bbot%5D',
+          type: 'Bot',
+        },
+      },
+    ]);
+    expect((await checkInvitation(r.read, binding, r.options)).kind).toBe('invited');
+  });
   it('refuses contradictory supplied assignment issue identity while accepting REST omissions', async () => {
     for (const patch of [
       { issue_url: 'https://api.github.com/repos/up/proj/issues/9' },

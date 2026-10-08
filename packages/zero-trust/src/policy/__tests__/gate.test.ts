@@ -87,6 +87,67 @@ const rows: { id: string; p: Partial<PolicyAssessment>; e?: Eligibility; kind: s
 ];
 
 describe('gate table', () => {
+  it.each([
+    'competing_assignee',
+    'competing_fix',
+    'own_pr_exists',
+  ] as const)('cannot proceed with inconsistent eligible reason %s', (reason) => {
+    expect(decideGate(policy, { ...eligible(), reasons: [reason] }, 'alice')).toEqual({
+      kind: 'hand_off',
+      reasons: [reason],
+    });
+  });
+  it('keeps bug_unlabeled advisory and rejects malformed/incomplete facts', () => {
+    expect(decideGate(policy, { ...eligible(), reasons: ['bug_unlabeled'] }, 'alice').kind).toBe(
+      'proceed'
+    );
+    const e = eligible();
+    for (const input of [
+      { kind: 'eligible', reasons: [], facts: { contributor: 'alice', issue: { assignees: [] } } },
+      { ...e, reasons: ['unknown'] },
+      { ...e, evidenceDigest: ['d'.repeat(64)] },
+      { ...e, facts: { ...e.facts, public: false } },
+      { ...e, facts: { ...e.facts, pulls: null } },
+      { ...e, facts: { ...e.facts, issue: { ...e.facts.issue, createdAt: 'bad' } } },
+      { ...e, kind: 'hand_off' },
+    ])
+      expect(decideGate(policy, input as Eligibility, 'alice').kind).toBe('hand_off');
+  });
+  it('derives competing PR evidence even if a caller erased the reason', () => {
+    const e = eligible();
+    const pr = {
+      number: 9,
+      url: 'https://github.com/up/proj/pull/9',
+      fullName: 'up/proj',
+      state: 'open' as const,
+      merged: false,
+      author: { login: 'other', url: 'https://github.com/other' },
+    };
+    expect(decideGate(policy, { ...e, facts: { ...e.facts, pulls: [pr] } }, 'alice')).toEqual({
+      kind: 'hand_off',
+      reasons: ['competing_fix'],
+    });
+    expect(
+      decideGate(
+        policy,
+        {
+          ...e,
+          facts: {
+            ...e.facts,
+            pulls: [{ ...pr, author: { login: 'alice', url: 'https://github.com/alice' } }],
+          },
+        },
+        'alice'
+      )
+    ).toEqual({ kind: 'hand_off', reasons: ['own_pr_exists'] });
+    expect(
+      decideGate(
+        policy,
+        { ...e, facts: { ...e.facts, pulls: [{ ...pr, state: 'closed', merged: true }] } },
+        'alice'
+      ).kind
+    ).toBe('proceed');
+  });
   it('freezes every table row so consumers cannot weaken a ban', () => {
     for (const row of GATE_ROWS) {
       expect(Object.isFrozen(row)).toBe(true);

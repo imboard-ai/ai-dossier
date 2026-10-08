@@ -1,8 +1,10 @@
-import { isGitHubLogin, sameLogin } from '../github/handoff';
+import { isPositiveId } from '../github/fork';
+import { isGitHubLogin, isRepoName, isSafeRef, sameLogin } from '../github/handoff';
 import { assertNoSecrets } from '../redaction';
-import { ReasonCode } from '../state';
+import { isTimestamp, ReasonCode } from '../state';
 import type { PolicyAssessment, PolicyCitation } from './classify';
 import type { Eligibility } from './eligibility';
+import { githubRecord, isGitHubActorLogin } from './github-values';
 
 export type GateDecision =
   | {
@@ -22,9 +24,145 @@ export type GateDecision =
 
 interface GateFacts {
   policy: PolicyAssessment;
-  eligibility: Exclude<Eligibility, { kind: 'unknown' }>;
+  eligibility: {
+    readonly kind: 'eligible' | 'ineligible' | 'hand_off';
+    readonly reasons: readonly string[];
+  };
   assigned: boolean;
   ban?: PolicyCitation;
+}
+const ELIGIBILITY_REASONS: readonly string[] = Object.freeze([
+  'private_repository',
+  'archived_repository',
+  'disabled_repository',
+  'closed_issue',
+  'pull_request',
+  'locked_issue',
+  'not_a_bug',
+  'competing_assignee',
+  'competing_fix',
+  'own_pr_exists',
+  'bug_unlabeled',
+]);
+function validActor(value: unknown): string {
+  const { login, url } = githubRecord(value);
+  if (!isGitHubActorLogin(login) || typeof url !== 'string') throw new Error();
+  const expected = login.endsWith('[bot]')
+    ? `https://github.com/apps/${login.slice(0, -5)}`
+    : `https://github.com/${login}`;
+  if (url.toLowerCase() !== expected.toLowerCase()) throw new Error();
+  return login;
+}
+function eligibilityFacts(
+  value: Eligibility,
+  contributor: string
+): { eligibility: GateFacts['eligibility']; assigned: boolean } {
+  const e = githubRecord(value);
+  const kind = e.kind;
+  const reasons = e.reasons;
+  if (
+    (kind !== 'eligible' && kind !== 'ineligible' && kind !== 'hand_off') ||
+    !Array.isArray(reasons) ||
+    reasons.length > ELIGIBILITY_REASONS.length ||
+    reasons.some((r) => typeof r !== 'string' || !ELIGIBILITY_REASONS.includes(r)) ||
+    typeof e.evidenceDigest !== 'string' ||
+    !/^[a-f0-9]{64}$/u.test(e.evidenceDigest)
+  )
+    throw new Error();
+  const detachedReasons: string[] = [...reasons];
+  const facts = githubRecord(e.facts);
+  const {
+    repositoryId,
+    fullName,
+    defaultBranch,
+    public: isPublic,
+    archived,
+    disabled,
+    contributor: boundContributor,
+    pulls,
+    events,
+  } = facts;
+  const repo = typeof fullName === 'string' ? fullName.split('/') : [];
+  if (
+    !isPositiveId(repositoryId) ||
+    repo.length !== 2 ||
+    !isGitHubLogin(repo[0]) ||
+    !isRepoName(repo[1]) ||
+    !isSafeRef(defaultBranch) ||
+    typeof isPublic !== 'boolean' ||
+    typeof archived !== 'boolean' ||
+    typeof disabled !== 'boolean' ||
+    !isGitHubLogin(boundContributor) ||
+    !sameLogin(boundContributor, contributor) ||
+    !Array.isArray(pulls) ||
+    !Array.isArray(events)
+  )
+    throw new Error();
+  const issue = githubRecord(facts.issue);
+  const {
+    number,
+    url,
+    state,
+    locked,
+    isPullRequest,
+    author,
+    authorAssociation,
+    labels,
+    assignees,
+    createdAt,
+  } = issue;
+  if (
+    !isPositiveId(number) ||
+    typeof url !== 'string' ||
+    url.toLowerCase() !==
+      `https://github.com/${fullName}/${isPullRequest ? 'pull' : 'issues'}/${number}`.toLowerCase() ||
+    (state !== 'open' && state !== 'closed') ||
+    typeof locked !== 'boolean' ||
+    typeof isPullRequest !== 'boolean' ||
+    typeof authorAssociation !== 'string' ||
+    !Array.isArray(labels) ||
+    labels.some((l) => typeof l !== 'string') ||
+    !Array.isArray(assignees) ||
+    typeof createdAt !== 'string' ||
+    !isTimestamp(
+      /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/u.test(createdAt)
+        ? `${createdAt.slice(0, -1)}.000Z`
+        : createdAt
+    )
+  )
+    throw new Error();
+  validActor(author);
+  const assigned = assignees.map(validActor);
+  const add = (reason: string) => {
+    if (!detachedReasons.includes(reason)) detachedReasons.push(reason);
+  };
+  if (assigned.some((a) => !sameLogin(a, contributor))) add('competing_assignee');
+  for (const raw of pulls) {
+    const pr = githubRecord(raw);
+    if (
+      !isPositiveId(pr.number) ||
+      typeof pr.url !== 'string' ||
+      typeof pr.fullName !== 'string' ||
+      pr.url.toLowerCase() !==
+        `https://github.com/${pr.fullName}/pull/${pr.number}`.toLowerCase() ||
+      (pr.state !== 'open' && pr.state !== 'closed') ||
+      typeof pr.merged !== 'boolean' ||
+      (pr.merged && pr.state !== 'closed')
+    )
+      throw new Error();
+    const who = validActor(pr.author);
+    if (pr.state === 'open') add(sameLogin(who, contributor) ? 'own_pr_exists' : 'competing_fix');
+  }
+  const blocked =
+    !isPublic || archived || disabled || state === 'closed' || locked || isPullRequest;
+  if (blocked && kind === 'eligible') throw new Error();
+  if (kind !== 'eligible' && !detachedReasons.length) throw new Error();
+  const resolvedKind =
+    kind === 'eligible' && detachedReasons.some((r) => r !== 'bug_unlabeled') ? 'hand_off' : kind;
+  return {
+    eligibility: { kind: resolvedKind, reasons: Object.freeze(detachedReasons) },
+    assigned: assigned.some((a) => sameLogin(a, contributor)),
+  };
 }
 interface GateRow {
   readonly id: string;
@@ -146,21 +284,8 @@ export function decideGate(
       !['eligible', 'ineligible', 'hand_off'].includes(eligibility.kind)
     )
       throw new Error();
-    if (eligibility.kind === 'unknown') throw new Error();
-    if (
-      !Array.isArray(eligibility.reasons) ||
-      eligibility.reasons.some((r) => typeof r !== 'string') ||
-      !sameLogin(eligibility.facts.contributor, login)
-    )
-      throw new Error();
-    const assignees = eligibility.facts.issue.assignees.map((a) => a.login);
-    if (assignees.some((a) => !isGitHubLogin(a))) throw new Error();
-    // Even a contradictory caller-supplied eligible snapshot cannot erase ownership.
-    const competing = assignees.some((a) => !sameLogin(a, login));
-    const e =
-      competing && eligibility.kind === 'eligible'
-        ? { ...eligibility, kind: 'hand_off' as const, reasons: ['competing_assignee' as const] }
-        : eligibility;
+    const snapshot = eligibilityFacts(eligibility, login);
+    const e = snapshot.eligibility;
     const ban = citations.find(
       (c) =>
         (c.ruleId === 'ai-ban-1' || c.ruleId.startsWith('decision:policy-ai@')) &&
@@ -177,7 +302,7 @@ export function decideGate(
     const facts: GateFacts = {
       policy: { ...policy, ai, assignment, directPr, reason, citations },
       eligibility: e,
-      assigned: assignees.some((a) => sameLogin(a, login)),
+      assigned: snapshot.assigned,
       ban,
     };
     for (const row of GATE_ROWS) if (row.matches(facts)) return Object.freeze(row.decide(facts));
