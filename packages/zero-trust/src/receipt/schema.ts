@@ -57,13 +57,18 @@ export class ReceiptError extends Error {
     this.name = 'ReceiptError';
   }
 }
-const text = { type: 'string', minLength: 1, maxLength: 4096 };
-const id = { type: 'string', pattern: '^[A-Za-z0-9_-]{1,128}$' };
-const sha = { type: 'string', pattern: '^[a-f0-9]{40}$' };
-const digest = { type: 'string', pattern: '^[a-f0-9]{64}$' };
+/** Schema building blocks shared by the receipt and the persisted verification record. */
+export const SCHEMA_TYPES = Object.freeze({
+  text: { type: 'string', minLength: 1, maxLength: 4096 },
+  id: { type: 'string', pattern: '^[A-Za-z0-9_-]{1,128}$' },
+  sha: { type: 'string', pattern: '^[a-f0-9]{40}$' },
+  digest: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+  time: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$' },
+});
+const { text, id, sha, digest, time } = SCHEMA_TYPES;
 const positive = { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER };
-const time = { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$' };
-function object(properties: Record<string, unknown>) {
+/** A closed object: every property required, nothing else allowed. */
+export function strictObject(properties: Record<string, unknown>) {
   return {
     type: 'object',
     additionalProperties: false,
@@ -71,6 +76,34 @@ function object(properties: Record<string, unknown>) {
     properties,
   };
 }
+const object = strictObject;
+/** The receipt's `profile` (see `profileReceiptBinding`). */
+export const PROFILE_SCHEMA = object({
+  name: text,
+  runtime: text,
+  imageDigest: { type: 'string', pattern: '^sha256:[a-f0-9]{64}$' },
+  accelerator: { enum: ['kvm', 'tcg'] },
+});
+/** Supervised command evidence, shared with the persisted verification record. */
+export const COMMANDS_SCHEMA = {
+  type: 'array',
+  minItems: 1,
+  maxItems: 128,
+  items: object({
+    id,
+    command: text,
+    required: { type: 'boolean' },
+    status: { enum: ['passed', 'failed', 'inconclusive', 'skipped'] },
+    exitStatus: { anyOf: [{ type: 'integer', minimum: 0, maximum: 255 }, { const: 'unknown' }] },
+    suites: {
+      anyOf: [
+        { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+        { const: 'unknown' },
+      ],
+    },
+    sanitizedLogDigest: digest,
+  }),
+};
 /** The exported schema is also the runtime validator's single source of truth. */
 export const RECEIPT_SCHEMA = object({
   schemaVersion: { const: RECEIPT_VERSION },
@@ -87,31 +120,8 @@ export const RECEIPT_SCHEMA = object({
   candidateSha: sha,
   profileDigest: digest,
   policyDigest: digest,
-  profile: object({
-    name: text,
-    runtime: text,
-    imageDigest: { type: 'string', pattern: '^sha256:[a-f0-9]{64}$' },
-    accelerator: { enum: ['kvm', 'tcg'] },
-  }),
-  commands: {
-    type: 'array',
-    minItems: 1,
-    maxItems: 128,
-    items: object({
-      id,
-      command: text,
-      required: { type: 'boolean' },
-      status: { enum: ['passed', 'failed', 'inconclusive', 'skipped'] },
-      exitStatus: { anyOf: [{ type: 'integer', minimum: 0, maximum: 255 }, { const: 'unknown' }] },
-      suites: {
-        anyOf: [
-          { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
-          { const: 'unknown' },
-        ],
-      },
-      sanitizedLogDigest: digest,
-    }),
-  },
+  profile: PROFILE_SCHEMA,
+  commands: COMMANDS_SCHEMA,
   networkPolicy: object({
     acquisition: text,
     provisioning: text,
@@ -200,7 +210,7 @@ export function canonicalJson(input: unknown, maxBytes = 128 * 1024): string {
 export function snapshotJson<T>(input: T): T {
   return JSON.parse(canonicalJson(input)) as T;
 }
-export function evidenceVerified(commands: CommandEvidence[]): boolean {
+export function evidenceVerified(commands: readonly CommandEvidence[]): boolean {
   // Unknown discovery counts cannot earn a verification claim. This conservative
   // contract deliberately refuses shipping even for an inconclusive optional check.
   return (

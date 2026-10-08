@@ -291,11 +291,19 @@ export function logArtifact(stdout: string, stderr: string, outputTruncated: boo
   });
 }
 
-/** Write-once: the name carries everything the content depends on beyond the log bytes. */
+/** The persisted log artifact's file name: the name carries everything the content
+ * depends on beyond the log bytes. */
+export function logArtifactName(digest: string, outputTruncated: boolean): string {
+  return `${digest}.${outputTruncated ? 'truncated' : 'complete'}.log.json`;
+}
+
+/** Write-once. */
 function persistLog(directory: string, artifact: LogArtifact): void {
   privateDir(directory);
-  const name = `${artifact.digest}.${artifact.outputTruncated ? 'truncated' : 'complete'}.log.json`;
-  publishPrivate(path.join(directory, name), Buffer.from(`${JSON.stringify(artifact)}\n`, 'utf8'));
+  publishPrivate(
+    path.join(directory, logArtifactName(artifact.digest, artifact.outputTruncated)),
+    Buffer.from(`${JSON.stringify(artifact)}\n`, 'utf8')
+  );
 }
 
 function outcomeOf(result: ExecResult, summary: JunitSummary | null): CommandOutcome {
@@ -418,7 +426,7 @@ export async function releaseWorkspace(
 }
 
 interface Progress {
-  stage: 'upload' | 'provisioning' | 'phase_switch' | 'verification';
+  stage: 'upload' | 'provisioning' | 'phase_switch' | 'verification' | 'before_release';
   commandId?: string;
 }
 
@@ -552,37 +560,84 @@ export function workspaceStatus(records: readonly CommandRecord[]): CommandStatu
   return overallStatus(records.filter((r) => r.captureReport).map((r) => r.status));
 }
 
-async function workspaceEvidence(
+/** Called after the last verification command while the workspace VM is still live (e.g.
+ * the boundary probe); its result is returned beside the records. */
+export type BeforeRelease<T> = (
+  workspace: ProvisionedWorkspace,
+  records: readonly CommandRecord[]
+) => Promise<T>;
+
+export interface WorkspaceRun<T> {
+  readonly workspace: ProvisionedWorkspace;
+  readonly records: readonly CommandRecord[];
+  readonly beforeRelease: T | undefined;
+}
+
+/** One fresh VM: `provisionWorkspace(manifest)`, the plan's verification commands in
+ * order, then `beforeRelease`, then the bounded teardown. A failure journals where it
+ * happened, releases the VM and rethrows. */
+export async function runWorkspace<T = undefined>(
   options: WorkspaceOptions,
   manifest: SourceManifest,
-  plan: CommandPlan
-): Promise<WorkspaceEvidence> {
+  plan: CommandPlan,
+  beforeRelease?: BeforeRelease<T>
+): Promise<WorkspaceRun<T>> {
   const { adapter, lifecycle } = options;
   const workspace = await provisionWorkspace({ ...options, manifest, plan });
   const records: CommandRecord[] = [];
   const progress: Progress = { stage: 'verification' };
+  let result: T | undefined;
   try {
     for (const command of plan.verification) {
       progress.commandId = command.id;
       records.push(await runPlanned(adapter, workspace, command, options.collector, options));
     }
+    progress.stage = 'before_release';
+    progress.commandId = undefined;
+    result = await beforeRelease?.(workspace, Object.freeze([...records]));
   } catch (error) {
     journalAbort(lifecycle, workspace.vm, progress, error);
     await releaseWorkspace(adapter, workspace, lifecycle, error);
     throw error;
   }
   await releaseWorkspace(adapter, workspace, lifecycle);
+  return Object.freeze({ workspace, records: Object.freeze(records), beforeRelease: result });
+}
+
+async function workspaceEvidence(
+  options: WorkspaceOptions,
+  manifest: SourceManifest,
+  plan: CommandPlan
+): Promise<WorkspaceEvidence> {
+  const { workspace, records } = await runWorkspace(options, manifest, plan);
   return Object.freeze({
     provisioning: workspace.provisioning,
-    records: Object.freeze(records),
+    records,
     status: workspaceStatus(records),
     phaseSwitch: workspace.phaseSwitch,
   });
 }
 
-function assertHasTestCommand(plan: CommandPlan): void {
+/** A plan with no report-classified command can never produce a verdict. */
+export function assertHasTestCommand(plan: CommandPlan): void {
   if (!plan.verification.some((c) => c.captureReport))
     throw new EvidencePlanError('no_test_command');
+}
+
+/** The plan that runs only `regressionTargets` (refused when empty or without a test command). */
+export function regressionPlan(
+  profileRecord: ProfileRecord,
+  endpoints: ProxyEndpoints,
+  regressionTargets: readonly string[],
+  planOptions: Omit<PlanOptions, 'testTargets'> = {}
+): CommandPlan {
+  if (regressionTargets.length === 0) throw new EvidencePlanError('no_regression_targets');
+  const plan = buildCommandPlan(profileRecord.manager, endpoints, {
+    ...planOptions,
+    testTargets: regressionTargets,
+  });
+  assertHasTestCommand(plan);
+  return plan;
 }
 
 /** Baseline (PRD §5.6 step 1): the plan's verification commands on the base, in a fresh VM. */
@@ -620,12 +675,12 @@ export function reproductionManifest(
 export async function regressionEvidence(
   options: RegressionOptions
 ): Promise<RegressionRunEvidence> {
-  if (options.regressionTargets.length === 0) throw new EvidencePlanError('no_regression_targets');
-  const plan = buildCommandPlan(options.profileRecord.manager, options.endpoints, {
-    ...options.planOptions,
-    testTargets: options.regressionTargets,
-  });
-  assertHasTestCommand(plan);
+  const plan = regressionPlan(
+    options.profileRecord,
+    options.endpoints,
+    options.regressionTargets,
+    options.planOptions
+  );
   const reproduction = reproductionManifest(
     options.baseManifest,
     options.candidateManifest,
