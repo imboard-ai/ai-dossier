@@ -70,7 +70,7 @@ function screen(value: string): Screening {
       end = i + (value.startsWith('\r\n', i + 1) ? 3 : 2);
     callGap[i] = end === i ? i : callGap[end];
     gap[i] = value[i] === '(' ? gap[i + 1] : end === i ? i : gap[end];
-    if (value[i] === '\r' || value[i] === '\n') lineEnd = i + 1;
+    if (/[\r\n\u2028\u2029]/u.test(value[i])) lineEnd = i + 1;
   }
   const token = (at: number, name: string): number | null =>
     value.startsWith(name, at) &&
@@ -154,7 +154,9 @@ function text(entry: SourceEntry | undefined): string | null {
 }
 /** Preserve line terminators: changing only the final newline still changes a line. */
 function lines(value: string): string[] {
-  return value.match(/[^\n]*\n|[^\n]+$/gu) ?? [];
+  return (
+    value.match(/[^\r\n\u2028\u2029]*(?:\r\n|[\r\n\u2028\u2029])|[^\r\n\u2028\u2029]+$/gu) ?? []
+  );
 }
 interface LineDiff {
   count: number;

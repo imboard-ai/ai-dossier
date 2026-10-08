@@ -62,7 +62,8 @@ blobs and blobs above 1 MiB hand off, including removed blobs.
 `IntegrityLimits` defaults to `maxFiles: 20`, `maxChangedLines: 1000`; explicit
 limits must be nonnegative safe integers. Ordinary directory entries do not count
 as files; file mode changes do. Lines count additions plus deletions, preserving
-terminators (including terminal-newline changes). A bounded LCS diff removes equal
+terminators (LF, CRLF, bare CR, and JavaScript Unicode line/paragraph separators,
+including terminal-newline changes). A bounded LCS diff removes equal
 prefix/suffix and examines up to 1,000,000 cells across the whole review; comparisons
 exceeding the remaining work budget use
 a conservative delete/add diff of the remaining lines. It can over-count, never

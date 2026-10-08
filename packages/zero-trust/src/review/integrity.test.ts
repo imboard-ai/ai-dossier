@@ -396,6 +396,50 @@ describe('deterministic candidate scope/test integrity', () => {
       'test_disabled'
     );
   });
+  it.each([
+    '\u2028',
+    '\u2029',
+  ])('JavaScript Unicode newline %j terminates lexical line comments', (newline) => {
+    const path = 'a.test.js';
+    expect(codes(input({}, { [path]: `it// comment${newline}.skip("case");\n` }))).toContain(
+      'test_disabled'
+    );
+    expect(
+      codes(input({ [path]: `expect// comment${newline}(true);\n` }, { [path]: 'pass\n' }))
+    ).toContain('assertions_reduced');
+    const marker = `it// comment${newline}.skip("case");\n`;
+    expect(codes(input({ [path]: `${marker}old\n` }, { [path]: `${marker}new\n` }))).not.toContain(
+      'test_disabled'
+    );
+  });
+  it.each([
+    '\r',
+    '\r\n',
+    '\n',
+    '\u2028',
+    '\u2029',
+  ])('line budget counts source newline %j for added, removed and changed files', (newline) => {
+    const small = `assert True${newline}`.repeat(1000);
+    const large = `assert True${newline}`.repeat(1001);
+    expect(codes(input({}, { 'src/main.py': small }))).not.toContain('patch_too_large');
+    expect(codes(input({}, { 'src/main.py': large }))).toContain('patch_too_large');
+    expect(codes(input({ 'src/main.py': large }, {}))).toContain('patch_too_large');
+    expect(
+      codes(
+        input({ 'src/main.py': small }, { 'src/main.py': `assert False${newline}`.repeat(1000) })
+      )
+    ).toContain('patch_too_large');
+  });
+  it('mixed source newline styles preserve terminators and changed-line counts', () => {
+    const before = 'a\rb\nc\r\nd\u2028e\u2029';
+    const after = 'x\rb\nc\r\nd\u2028y\u2029';
+    expect(
+      codes({ ...input({ 'a.ts': before }, { 'a.ts': after }), limits: { maxChangedLines: 3 } })
+    ).toContain('patch_too_large');
+    expect(
+      codes({ ...input({ 'a.ts': before }, { 'a.ts': after }), limits: { maxChangedLines: 4 } })
+    ).toEqual([]);
+  });
   it('ordinary source assertions/skip text are not treated as test integrity', () => {
     expect(codes(input({ 'src/a.ts': 'expect(1);\n' }, { 'src/a.ts': 'it.skip(\n' }))).toEqual([]);
   });
