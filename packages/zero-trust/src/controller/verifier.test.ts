@@ -14,22 +14,23 @@ import {
   RUN_ID,
   removeTemps,
   TIME,
+  tempDir,
   VerifierFakeVm,
   verifyingRun,
 } from '../__tests__/verifier-fixture';
 import { createManifest, type SourceManifest } from '../canonical/export';
 import { assertRepairAllowed, RepairCapExceededError } from '../ecosystem/classify';
+import { Journal } from '../journal';
 import { ReasonCode as R, transitionRun } from '../state';
 import { VmCleanupError } from '../vm/adapter';
 import { EvidencePlanError, ProvisioningFailedError } from './evidence-runner';
-import { loadVerification } from './verification-record';
 import {
+  beginVerification,
+  loadVerification,
   REGRESSION_COMMAND_SUFFIX,
-  type VerificationOutcome,
-  VerifierInputError,
-  verificationPlan,
-  verifyCandidate,
-} from './verifier';
+  VERIFICATION_DIRECTORY,
+} from './verification-record';
+import { type VerificationOutcome, verificationPlan, verifyCandidate } from './verifier';
 
 beforeEach(() => {
   // Boundary listeners use real local sockets but never the host's LAN identity.
@@ -297,7 +298,7 @@ describe('verifyCandidate: boundary evidence', () => {
     );
     const input = candidateInput();
     const outcome = await verifyCandidate(h.deps(), input);
-    expect(outcome.kind).toBe('boundary_unavailable');
+    expect(outcome).toMatchObject({ kind: 'boundary_unavailable', reason: 'finalize_failed' });
     expect(outcome.run.state).toBe('blocked');
     expect(storeFiles(h.artifactsDir)).not.toContain(`verification/${input.candidateSha}.json`);
     expect(h.adapter.liveVms()).toEqual([]);
@@ -335,13 +336,83 @@ describe('verifyCandidate: refusals and failures', () => {
     expect(h.adapter.calls).toEqual([]);
   });
 
-  it('never verifies the same candidate twice', async () => {
+  it('never verifies the same candidate twice: an existing record is replayed, no VM', async () => {
     const h = harness();
     const input = candidateInput();
     const first = verified(await verifyCandidate(h.deps(), input));
-    await expect(verifyCandidate(h.deps(), input)).rejects.toBeInstanceOf(VerifierInputError);
+    expect(first.replayed).toBe(false);
+    await expect(verifyCandidate(h.deps(first.run), input)).rejects.toMatchObject({
+      code: 'run_not_verifying',
+    });
+    // A crash after the record was written left the saved run in `verifying`.
+    const again = verified(await verifyCandidate(h.deps(), input));
+    expect(again).toMatchObject({ replayed: true, verdict: 'passed' });
+    expect(again.record).toEqual(first.record);
+    expect(again.run.state).toBe('shipping');
     expect(h.adapter.calls.filter((c) => c.op === 'create')).toHaveLength(1);
-    expect(first.run.state).toBe('shipping');
+  });
+
+  it('an attempt that left no record is never re-run: the run is blocked', async () => {
+    const h = harness();
+    const input = candidateInput();
+    beginVerification(h.artifactsDir, input.candidateSha);
+    const outcome = await verifyCandidate(h.deps(), input);
+    expect(outcome).toMatchObject({ kind: 'interrupted', reason: 'attempt_without_record' });
+    expect(outcome.run.state).toBe('blocked');
+    expect(h.adapter.calls).toEqual([]);
+  });
+
+  it('a record that no longer loads is never replayed: the run is blocked', async () => {
+    const h = harness();
+    const input = candidateInput();
+    verified(await verifyCandidate(h.deps(), input));
+    const file = path.join(h.artifactsDir, VERIFICATION_DIRECTORY, `${input.candidateSha}.json`);
+    fs.chmodSync(file, 0o644);
+    const outcome = await verifyCandidate(h.deps(), input);
+    expect(outcome).toMatchObject({ kind: 'interrupted', reason: 'record_unusable' });
+    expect(outcome.run.state).toBe('blocked');
+    expect(h.adapter.calls.filter((c) => c.op === 'create')).toHaveLength(1);
+  });
+
+  it('refuses a malformed candidate SHA before any work', async () => {
+    const h = harness();
+    await expect(
+      verifyCandidate(h.deps(), { ...candidateInput(), candidateSha: '../x' })
+    ).rejects.toMatchObject({ code: 'invalid_candidate' });
+    expect(h.adapter.calls).toEqual([]);
+  });
+
+  it('journals identity mismatches, completions and aborts', async () => {
+    const journal = new Journal(tempDir('zt-verifier-journal-'));
+    const h = harness();
+    const withJournal = (deps = h.deps()) => ({
+      ...deps,
+      lifecycle: { ...deps.lifecycle, journal },
+    });
+    const input = candidateInput();
+    await verifyCandidate(withJournal(), {
+      ...input,
+      authority: { ...input.authority, baseSha: 'a'.repeat(40) },
+    });
+    const passing = candidateInput(2);
+    verified(await verifyCandidate(withJournal(), passing));
+    const events = journal.read() as Record<string, unknown>[];
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'verification_identity_mismatch',
+        runId: RUN_ID,
+        candidateSha: input.candidateSha,
+        reason: 'wrong_parent',
+      })
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: 'verification_completed',
+        candidateSha: passing.candidateSha,
+        verdict: 'passed',
+        boundaryHeld: true,
+      })
+    );
   });
 
   it('a provisioning failure makes the run unsupported, after teardown', async () => {
@@ -355,16 +426,21 @@ describe('verifyCandidate: refusals and failures', () => {
     expect(adapter.liveVms()).toEqual([]);
   });
 
-  it('an adapter error during verification tears down and propagates, run unchanged', async () => {
+  it('an adapter error during verification tears down, blocks the run and propagates', async () => {
     const h = harness(
       new VerifierFakeVm((request, vm) => {
         if (request.report) throw new Error('transport lost');
         return fixtureScript(request, vm);
       })
     );
-    await expect(verifyCandidate(h.deps(), candidateInput())).rejects.toThrow('transport lost');
-    expect(h.observed).toEqual([]);
+    const input = candidateInput();
+    await expect(verifyCandidate(h.deps(), input)).rejects.toThrow('transport lost');
+    expect(h.observed.map((r) => r.state)).toEqual(['blocked']);
     expect(h.adapter.liveVms()).toEqual([]);
+    // The interrupted attempt is never re-run.
+    const retry = await verifyCandidate(h.deps(), input);
+    expect(retry).toMatchObject({ kind: 'interrupted', reason: 'attempt_without_record' });
+    expect(h.adapter.calls.filter((c) => c.op === 'create')).toHaveLength(1);
   });
 
   it('a teardown that cannot complete blocks cleanup and never reaches shipping', async () => {

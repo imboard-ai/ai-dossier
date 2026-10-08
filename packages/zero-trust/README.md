@@ -16,79 +16,110 @@ Publication remains gated on S1 feasibility.
 and 17) verifies one exact candidate commit in a **fresh** VM and persists a
 controller-owned `VerificationRecord`. It signs nothing and imports nothing from
 `src/github/`: receipts bind the fork repository ID and expire 15 minutes after
-issuance, so shipping turns the record into a receipt just in time.
+issuance, so shipping turns the record into a receipt just in time (#1105), through
+`assertShippableVerification(record)`.
 
-`deps` holds the `VmAdapter`, `runId`, `limits`, the run's trusted `profileRecord`,
-`proxyTarget`, `endpoints`, optional `planOptions`, the run store's private
-`artifactsDir` (`RunStore.storeDirectory('artifacts')`), the `RunLifecycle` (the run
-must be in `verifying` and carry the same `runId`) and an optional
-`boundaryTimeoutMs`. `input` holds the authorized `candidateSha`, the controller's
-sanitized `manifest`, the persisted `CandidateRecord`, the controller-owned
-`CandidateAuthority`, the base pack, the `regressionTargets` and `regressionBase`, the
-regression targets' status on the base plus only the test files
+`deps` (`VerifierDeps`) holds the `VmAdapter`, `runId`, `limits`, the run's trusted
+`profileRecord`, `proxyTarget`, `endpoints`, optional `planOptions`, the run store's
+private `artifactsDir` (`RunStore.storeDirectory('artifacts')`), the `RunLifecycle` (the
+run must be in `verifying` and carry the same `runId`; events go to its `journal`) and
+an optional `boundaryTimeoutMs`. `input` (`VerifyInput`) holds the authorized
+`candidateSha`, the controller's sanitized `manifest`, the persisted `CandidateRecord`,
+the controller-owned `CandidateAuthority`, the base pack, the `regressionTargets` and
+`regressionBase`, the regression targets' status on the base plus only the test files
 (`regressionEvidence().base.status`, #1095).
 
 Order of work, each step fail-closed:
 
-1. Refused with `VerifierInputError` before anything runs: a run that is not
-   `verifying` (`run_not_verifying`), another run ID (`run_mismatch`), a regression not
-   reproduced on the base (`regression_not_reproduced`; only `failed` proves it) and a
-   candidate that already has a record (`already_verified`; records are write-once).
-   No regression targets or no test command is `EvidencePlanError`.
-2. The manifest is validated once into a frozen copy, and `reconstructCandidate`
+1. Refused before anything runs, in this order: a run that is not `verifying`
+   (`VerifierInputError` `run_not_verifying`), another run ID (`run_mismatch`), a
+   `candidateSha` that is not 40 lowercase hex (`invalid_candidate`), a regression not
+   reproduced on the base (`regression_not_reproduced`; only `failed` proves it), then
+   the plan (`EvidencePlanError` `no_regression_targets` or `no_test_command`).
+2. Records are write-once and a candidate is verified at most once
+   (`verificationState`). A record that already exists for this run is **replayed**: it
+   is loaded with `loadVerification` and its transition re-applied, with no VM
+   (`{ kind: 'verified', replayed: true }`; a crash came after the record and before the
+   run state was saved). A record that no longer loads, or a started attempt that left
+   no record (its `.attempt` marker), gives `{ kind: 'interrupted', reason }` and moves
+   the run to `blocked`: an interrupted verification is never silently re-run.
+3. The manifest is validated once into a frozen copy, and `reconstructCandidate`
    rebuilds the commit from it. A `CanonicalError`, or a rebuilt SHA other than
    `candidateSha`, returns `{ kind: 'identity_mismatch', reason }` and moves the run to
    `blocked` (`policy_blocked`), before `prepareBoundary` and before any VM is created.
-3. `prepareBoundary(artifactsDir)`, then `provisionWorkspace` creates a new VM and
-   uploads exactly the files of that validated, reconstructed manifest. The
-   implementation VM is never reused. `verificationPlan` runs the suite's verification
-   commands, then the regression targets' test command (id suffix `-regression`), all
-   with `network: 'none'`. Then `probeBoundary` (a probe that throws leaves failed
-   evidence in its closed session), `await finishBoundary` with the same output
-   collector, the bounded `releaseWorkspace` teardown, and `session.cleanup()` in
-   `finally`. A provisioning failure (`ProvisioningFailedError`, run `unsupported`), a
-   blocked teardown (`VmCleanupError`, run `blocked_cleanup`) and adapter errors
-   propagate after teardown, with the run never in `shipping`.
-4. If `finishBoundary` throws (secret-shaped guest output, collector truncation, an
-   unpublishable artifact), nothing authoritative exists: no record, the run goes to
-   `blocked` and the outcome is `boundary_unavailable`.
-5. The verdict (`verificationVerdict`) is `passed` only when every verification command
-   passed (`workspaceStatus`), the regression proof (`classifyRegression(regressionBase,
-   …)`) is `reproduced_and_fixed` and the evidence is receipt-grade
-   (`evidenceVerified`). A failing command is `failed`; a timeout, a signal, an
-   unreadable report, zero suites or a failed setup step is `inconclusive`, never a
-   pass. The boundary is held only when `isCleanHeldVerdict(runBoundaryVerdict([input],
-   runId))`.
-6. The record is persisted, then the run moves: a boundary that did not hold goes to
-   `blocked` whatever the verdict (no receipt may ever be issued for it, and
-   `authorizeShipping` refuses it again); otherwise `applyVerification` gives
-   `shipping` on a pass, `implementing` while fewer than two repairs were used and
-   `failed` after that (`assertRepairAllowed` then refuses another repair). The outcome
-   is `{ kind: 'verified', verdict, record, run }`.
+4. `beginVerification` claims the candidate (an exclusive marker; a concurrent claim is
+   `already_verified`). `prepareBoundary(artifactsDir)`, then `runWorkspace` (#1095)
+   creates a new VM and uploads exactly the files of that validated, reconstructed
+   manifest. The implementation VM is never reused. `verificationPlan(profileRecord,
+   endpoints, regressionTargets, planOptions?)` runs the suite's verification commands,
+   then the regression targets' test command (id suffix `REGRESSION_COMMAND_SUFFIX`,
+   `-regression`), all with `network: 'none'`. While the VM is still live,
+   `probeBoundary` (a probe that throws leaves failed evidence in its closed session)
+   and `await finishBoundary` with the same output collector; then the bounded teardown
+   and `session.cleanup()`. From the claim on, any failure that has not already moved
+   the run (`ProvisioningFailedError` to `unsupported`, `VmCleanupError` to
+   `blocked_cleanup`) blocks it before the error propagates, and is journaled
+   (`verification_aborted`, error class only).
+5. If `finishBoundary` throws (secret-shaped guest output, collector truncation, an
+   unpublishable artifact), its artifact cannot be read back, or the canaries cannot be
+   removed, nothing authoritative exists: no record, the run goes to `blocked` and the
+   outcome is `{ kind: 'boundary_unavailable', reason }` (`finalize_failed`,
+   `artifact_unreadable`, `cleanup_failed`). The boundary artifact is read once; its
+   digest and its verdict come from the same bytes.
+6. `verificationVerdict(records, regression, commands)` is `passed` only when every
+   verification command passed (`workspaceStatus`) and `receiptGrade(regression,
+   commands)` holds: the regression proof (`classifyRegression(regressionBase, …)`) is
+   `reproduced_and_fixed`, a passed regression command and a required suite command show
+   it, and the evidence is receipt-grade (`evidenceVerified`). A failing command is
+   `failed`; a timeout, a signal, an unreadable report, zero suites or a failed setup
+   step is `inconclusive`, never a pass. The boundary is held only when
+   `isCleanHeldVerdict(runBoundaryVerdict([input], runId))`.
+7. The record is persisted (`verification_completed` is journaled), then the run moves:
+   a boundary that did not hold goes to `blocked` whatever the verdict (no receipt may
+   ever be issued for it; `assertShippableVerification` and `authorizeShipping` refuse
+   it); otherwise `applyVerification` gives `shipping` on a pass, `implementing` while
+   fewer than two repairs were used and `failed` after that (`assertRepairAllowed` then
+   refuses another repair). The outcome is `{ kind: 'verified', verdict, record, run,
+   replayed: false }`.
 
 `VerificationRecord` (`src/controller/verification-record.ts`,
-`VERIFICATION_RECORD_SCHEMA`, version `ztfc-verification-v1`) is written once, mode
-0600, as canonical JSON at `artifacts/verification/<candidateSha>.json`:
+`VERIFICATION_RECORD_SCHEMA`, version `VERIFICATION_RECORD_VERSION`,
+`ztfc-verification-v1`) is written once, mode 0600, as canonical JSON plus a final
+newline at `artifacts/<VERIFICATION_DIRECTORY>/<candidateSha>.json` (`verification`):
 `runId`, `candidateSha`, `baseSha`, `parentSha` (equal), `profileDigest` and `profile`
 (`profileReceiptBinding(record, vm.accelerator)`), `networkPolicy` (`provisioning:
 package_proxy`, `verification: none`), `commands` (receipt `CommandEvidence` for each
-report-classified command), `regression`, `verdict`, `boundaryHeld`,
-`boundaryInputRef` (`{ artifact, digest }`: the boundary artifact's basename in the same
-directory and the SHA-256 of its bytes), `logsDigests` (every command log in the VM,
-provisioning included), `verifiedAt` and `recordDigest` (SHA-256 of the canonical JSON
-of every other field). `publishVerification` refuses an inconsistent record and never
-replaces one.
+report-classified command, validated by the receipt's shared `COMMANDS_SCHEMA`),
+`regression`, `verdict`, `boundaryHeld`, `boundaryInputRef` (`{ artifact, digest }`: the
+boundary artifact's basename in the same directory and the SHA-256 of its bytes),
+`logsDigests` (every command log in the VM, provisioning included), `verifiedAt` and
+`recordDigest` (SHA-256 of the canonical JSON of every other field).
+`publishVerification(artifactsDir, input)` returns the frozen record and throws
+`invalid_record` for a record the schema or consistency rules refuse, `record_exists`
+when one is already there (it is created by hard link, so not even a concurrent writer
+replaces it; `createPrivateOnce` in `durable-fs`) and `unavailable` on a storage
+failure.
 
 `loadVerification(artifactsDir, candidateSha, { runId, expectedDigest? })` reads with
-no-follow, single-link, private-mode checks and strict UTF-8, and requires the exact
-canonical bytes (whitespace edits and duplicate keys fail), the strict schema (unknown
-or missing fields fail), its own digest, the requested candidate and run, the
-controller-held `expectedDigest` when given, a `passed` verdict only with a proven
-regression and receipt-grade evidence, every command's log digest among
-`logsDigests`, the boundary artifact byte-identical to its reference with a recomputed
-held verdict equal to `boundaryHeld`, and a persisted log artifact for every log
-digest. Any deviation throws `VerificationRecordError` with a fixed code
-(`unavailable`, `invalid_record`, `evidence_mismatch`, `record_exists`).
+no-follow, single-link, private-mode checks under real (non-symlink) directories and
+strict UTF-8, at most 1 MiB, and requires the exact canonical bytes (whitespace edits
+and duplicate keys fail), the strict schema (unknown or missing fields fail), its own
+digest, `parentSha` equal to `baseSha`, unique command ids, every command's log digest
+among `logsDigests`, a `reproduced_and_fixed` claim backed by a passed regression
+command, a `passed` verdict only with `receiptGrade`, the requested candidate and run,
+the controller-held `expectedDigest` when given, the boundary artifact byte-identical to
+its reference with a recomputed held verdict equal to `boundaryHeld`, and a persisted log
+artifact (`logArtifactName(digest, truncated)`) for every log digest whose own digest and
+truncation flag agree. Any deviation throws `VerificationRecordError` with a fixed code:
+`unavailable` (the record cannot be read), `invalid_record` (bytes, schema or
+consistency) or `evidence_mismatch` (candidate, run, digest, boundary or log artifacts).
+`assertShippableVerification(record)` throws `not_shippable` unless the verdict is
+`passed` and the boundary held.
+
+`runWorkspace(options, manifest, plan, beforeRelease?)`, `regressionPlan`,
+`assertHasTestCommand` and `logArtifactName` are the evidence runner's (#1095) shared
+pieces the verifier reuses; `SCHEMA_TYPES`, `strictObject`, `PROFILE_SCHEMA` and
+`COMMANDS_SCHEMA` are the receipt schema's.
 
 ## Admitted planning and implementation loop (#1101)
 

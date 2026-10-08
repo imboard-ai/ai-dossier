@@ -6,12 +6,14 @@ import { candidateInput, harness, RUN_ID, removeTemps } from '../__tests__/verif
 import { sha256 } from '../canonical/export';
 import { canonicalJson } from '../receipt/schema';
 import {
+  assertShippableVerification,
+  beginVerification,
   loadVerification,
   publishVerification,
   VERIFICATION_DIRECTORY,
   type VerificationRecord,
   VerificationRecordError,
-  verificationExists,
+  verificationState,
 } from './verification-record';
 import { verifyCandidate } from './verifier';
 
@@ -73,7 +75,7 @@ describe('loadVerification: strict, fail-closed reads (AC5)', () => {
     });
     expect(loaded).toEqual(record);
     expect(Object.isFrozen(loaded.commands[0])).toBe(true);
-    expect(verificationExists(dir, sha)).toBe(true);
+    expect(verificationState(dir, sha)).toBe('recorded');
   });
 
   it('refuses an unknown field even with a recomputed digest', async () => {
@@ -162,7 +164,7 @@ describe('loadVerification: strict, fail-closed reads (AC5)', () => {
     fs.rmSync(`${file}.link`);
     fs.rmSync(file);
     refused(() => loadVerification(dir, sha, { runId: RUN_ID }), 'unavailable');
-    expect(verificationExists(dir, sha)).toBe(false);
+    expect(verificationState(dir, sha)).toBe('attempted');
   });
 
   it('refuses when the boundary artifact changed, vanished or contradicts the record', async () => {
@@ -215,9 +217,65 @@ describe('loadVerification: strict, fail-closed reads (AC5)', () => {
     refused(() => loadVerification(dir, sha, { runId: RUN_ID }), 'evidence_mismatch');
     fs.rmSync(log);
     refused(() => loadVerification(dir, sha, { runId: RUN_ID }), 'evidence_mismatch');
-    // A truncated log artifact is evidence too.
-    rewrite(path.join(dir, `${digest}.truncated.log.json`), original);
+    // A truncated log artifact is evidence too, when its content says so.
+    const truncated = path.join(dir, `${digest}.truncated.log.json`);
+    rewrite(truncated, original);
+    refused(() => loadVerification(dir, sha, { runId: RUN_ID }), 'evidence_mismatch');
+    rewrite(
+      truncated,
+      JSON.stringify({ ...JSON.parse(original.toString()), outputTruncated: true })
+    );
     expect(loadVerification(dir, sha, { runId: RUN_ID }).recordDigest).toBe(record.recordDigest);
+  });
+  it('refuses a record read through a symlinked directory', async () => {
+    const { dir, sha, record } = await persisted();
+    const link = `${dir}-link`;
+    fs.symlinkSync(dir, link);
+    try {
+      refused(() => loadVerification(link, sha, { runId: RUN_ID }), 'unavailable');
+    } finally {
+      fs.rmSync(link);
+    }
+    expect(loadVerification(dir, sha, { runId: RUN_ID })).toEqual(record);
+  });
+
+  it('refuses a regression claim no passed regression command backs', async () => {
+    const { dir, sha, record, file } = await persisted();
+    const commands = record.commands.map((c) =>
+      c.id.endsWith('-regression') ? { ...c, id: 'renamed' } : c
+    );
+    rewrite(file, canonical(redigested(record, { verdict: 'failed', commands })));
+    refused(() => loadVerification(dir, sha, { runId: RUN_ID }), 'invalid_record');
+  });
+});
+
+describe('beginVerification and assertShippableVerification', () => {
+  it('claims a candidate exactly once', async () => {
+    const dir = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'zt-claim-')), 'artifacts');
+    try {
+      const sha = 'e'.repeat(40);
+      expect(verificationState(dir, sha)).toBe('none');
+      beginVerification(dir, sha);
+      expect(verificationState(dir, sha)).toBe('attempted');
+      refused(() => beginVerification(dir, sha), 'record_exists');
+      refused(() => beginVerification(dir, 'not-a-sha'), 'invalid_record');
+    } finally {
+      fs.rmSync(path.dirname(dir), { recursive: true, force: true });
+    }
+  });
+
+  it('ships only a passed record whose boundary held', async () => {
+    const { record } = await persisted();
+    expect(() => assertShippableVerification(record)).not.toThrow();
+    refused(() => assertShippableVerification({ ...record, boundaryHeld: false }), 'not_shippable');
+    refused(
+      () => assertShippableVerification({ ...record, verdict: 'inconclusive' }),
+      'not_shippable'
+    );
+    refused(
+      () => assertShippableVerification({ ...record, regression: 'inconclusive' }),
+      'not_shippable'
+    );
   });
 });
 
@@ -263,10 +321,7 @@ describe('publishVerification', () => {
       const blocked = path.join(dir, 'artifacts');
       fs.writeFileSync(blocked, 'not a directory');
       refused(() => publishVerification(blocked, input), 'unavailable');
-      refused(
-        () => verificationExists(path.join(blocked, 'x'), record.candidateSha),
-        'unavailable'
-      );
+      refused(() => verificationState(path.join(blocked, 'x'), record.candidateSha), 'unavailable');
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

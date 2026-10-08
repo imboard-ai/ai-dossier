@@ -9,26 +9,47 @@ import fs from 'node:fs';
 import path from 'node:path';
 import Ajv from 'ajv';
 import { sha256 } from '../canonical/export';
-import { assertDirectoryAncestors, privateDir, publishPrivate, readPrivate } from '../durable-fs';
+import {
+  assertDirectoryAncestors,
+  createPrivateOnce,
+  privateDir,
+  readPrivate,
+} from '../durable-fs';
 import type { RegressionProof } from '../ecosystem/classify';
 import {
   COMMANDS_SCHEMA,
   type CommandEvidence,
   canonicalJson,
   evidenceVerified,
+  PROFILE_SCHEMA,
+  SCHEMA_TYPES,
+  strictObject,
 } from '../receipt/schema';
 import { runBoundaryVerdict } from '../vm/boundary-probe';
-import { type BoundaryInput, isCleanHeldVerdict } from '../vm/evidence';
+import { isCleanHeldVerdict } from '../vm/evidence';
+import { logArtifactName } from './evidence-runner';
 
 export const VERIFICATION_RECORD_VERSION = 'ztfc-verification-v1' as const;
 /** Subdirectory of the run store's `artifacts` directory. */
 export const VERIFICATION_DIRECTORY = 'verification';
+/** Suffix that keeps a regression-target command's id distinct from the suite's. */
+export const REGRESSION_COMMAND_SUFFIX = '-regression';
+export const VERIFICATION_VERDICTS = Object.freeze(['passed', 'failed', 'inconclusive'] as const);
+export type VerificationVerdict = (typeof VERIFICATION_VERDICTS)[number];
+const REGRESSION_PROOFS = Object.freeze([
+  'reproduced_and_fixed',
+  'not_reproduced',
+  'still_failing',
+  'inconclusive',
+] as const satisfies readonly RegressionProof[]);
 const MAX_RECORD_BYTES = 1024 * 1024;
-/** `prepareBoundary` names its artifact `boundary-<32 hex>.json` in the same directory. */
+/** `prepareBoundary` names its artifact `boundary-<32 hex>.json` in the same directory;
+ * a load fails closed if that ever changes. */
 const BOUNDARY_ARTIFACT = /^boundary-[a-f0-9]{32}\.json$/u;
-const SHA = /^[a-f0-9]{40}$/u;
-
-export type VerificationVerdict = 'passed' | 'failed' | 'inconclusive';
+const SHA = new RegExp(SCHEMA_TYPES.sha.pattern, 'u');
+/** Marks a verification that started; a crash leaves it behind, so the same candidate is
+ * never silently verified again. */
+const ATTEMPT_SUFFIX = '.attempt';
 
 /** The boundary evidence the verdict was computed from: an artifact beside the record
  * (basename only) and the SHA-256 of its exact bytes. */
@@ -72,7 +93,8 @@ export type VerificationRecordErrorCode =
   | 'record_exists'
   | 'unavailable'
   | 'invalid_record'
-  | 'evidence_mismatch';
+  | 'evidence_mismatch'
+  | 'not_shippable';
 
 /** Fixed, non-echoing reason: nothing read from disk is quoted. */
 export class VerificationRecordError extends Error {
@@ -82,41 +104,24 @@ export class VerificationRecordError extends Error {
   }
 }
 
-const id = { type: 'string', pattern: '^[A-Za-z0-9_-]{1,128}$' };
-const text = { type: 'string', minLength: 1, maxLength: 4096 };
-const sha = { type: 'string', pattern: '^[a-f0-9]{40}$' };
-const digest = { type: 'string', pattern: '^[a-f0-9]{64}$' };
-const time = { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$' };
-function object(properties: Record<string, unknown>) {
-  return {
-    type: 'object',
-    additionalProperties: false,
-    required: Object.keys(properties),
-    properties,
-  };
-}
-export const VERIFICATION_RECORD_SCHEMA = object({
+const { id, sha, digest, time } = SCHEMA_TYPES;
+export const VERIFICATION_RECORD_SCHEMA = strictObject({
   schemaVersion: { const: VERIFICATION_RECORD_VERSION },
   runId: id,
   candidateSha: sha,
   baseSha: sha,
   parentSha: sha,
   profileDigest: digest,
-  profile: object({
-    name: text,
-    runtime: text,
-    imageDigest: { type: 'string', pattern: '^sha256:[a-f0-9]{64}$' },
-    accelerator: { enum: ['kvm', 'tcg'] },
-  }),
-  networkPolicy: object({
+  profile: PROFILE_SCHEMA,
+  networkPolicy: strictObject({
     provisioning: { const: 'package_proxy' },
     verification: { const: 'none' },
   }),
   commands: COMMANDS_SCHEMA,
-  regression: { enum: ['reproduced_and_fixed', 'not_reproduced', 'still_failing', 'inconclusive'] },
-  verdict: { enum: ['passed', 'failed', 'inconclusive'] },
+  regression: { enum: REGRESSION_PROOFS },
+  verdict: { enum: VERIFICATION_VERDICTS },
   boundaryHeld: { type: 'boolean' },
-  boundaryInputRef: object({
+  boundaryInputRef: strictObject({
     artifact: { type: 'string', pattern: BOUNDARY_ARTIFACT.source },
     digest,
   }),
@@ -126,13 +131,32 @@ export const VERIFICATION_RECORD_SCHEMA = object({
 });
 const validate = new Ajv({ strict: true }).compile<VerificationRecord>(VERIFICATION_RECORD_SCHEMA);
 
+const isRegressionCommand = (command: CommandEvidence) =>
+  command.id.endsWith(REGRESSION_COMMAND_SUFFIX);
+
+/** The one rule for a `passed` verdict: the regression was reproduced on the base and
+ * fixed here, a passed regression command and a required suite command show it, and the
+ * evidence is receipt-grade. */
+export function receiptGrade(
+  regression: RegressionProof,
+  commands: readonly CommandEvidence[]
+): boolean {
+  return (
+    regression === 'reproduced_and_fixed' &&
+    commands.some((c) => isRegressionCommand(c) && c.status === 'passed') &&
+    commands.some((c) => !isRegressionCommand(c) && c.required) &&
+    evidenceVerified(commands)
+  );
+}
+
 function digestOf(record: Omit<VerificationRecord, 'recordDigest'>): string {
   return sha256(canonicalJson(record, MAX_RECORD_BYTES));
 }
 
-/** Facts the schema cannot express. A `passed` verdict needs the regression proved
- * and receipt-grade evidence; every command log must be one of the record's logs. */
-function consistent(record: VerificationRecord): boolean {
+/** Facts the schema cannot express: its own digest, base equals parent, unique command
+ * ids, every command log among the record's logs, a regression claim backed by a passed
+ * regression command, and a `passed` verdict only when `receiptGrade`. */
+function isConsistent(record: VerificationRecord): boolean {
   const { recordDigest, ...body } = record;
   const ids = record.commands.map((c) => c.id);
   return (
@@ -140,24 +164,65 @@ function consistent(record: VerificationRecord): boolean {
     record.baseSha === record.parentSha &&
     new Set(ids).size === ids.length &&
     record.commands.every((c) => record.logsDigests.includes(c.sanitizedLogDigest)) &&
-    (record.verdict !== 'passed' ||
-      (record.regression === 'reproduced_and_fixed' && evidenceVerified([...record.commands])))
+    (record.regression !== 'reproduced_and_fixed' ||
+      record.commands.some((c) => isRegressionCommand(c) && c.status === 'passed')) &&
+    (record.verdict !== 'passed' || receiptGrade(record.regression, record.commands))
   );
 }
 
-function recordPath(artifactsDir: string, candidateSha: string): string {
-  if (typeof candidateSha !== 'string' || !SHA.test(candidateSha))
-    throw new VerificationRecordError('invalid_record');
-  return path.join(artifactsDir, VERIFICATION_DIRECTORY, `${candidateSha}.json`);
+function verificationDir(artifactsDir: string): string {
+  return path.join(artifactsDir, VERIFICATION_DIRECTORY);
 }
 
-/** Whether a record already exists for this candidate (any entry counts, even a broken one). */
-export function verificationExists(artifactsDir: string, candidateSha: string): boolean {
+function recordPath(artifactsDir: string, candidateSha: string, suffix = '.json'): string {
+  if (typeof candidateSha !== 'string' || !SHA.test(candidateSha))
+    throw new VerificationRecordError('invalid_record');
+  return path.join(verificationDir(artifactsDir), `${candidateSha}${suffix}`);
+}
+
+function exists(file: string): boolean {
   try {
-    fs.lstatSync(recordPath(artifactsDir, candidateSha));
+    fs.lstatSync(file);
     return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw new VerificationRecordError('unavailable');
+  }
+}
+
+/** `recorded` when a record entry exists (even a broken one), `attempted` when only a
+ * started verification left its marker (an interrupted attempt), else `none`. */
+export function verificationState(
+  artifactsDir: string,
+  candidateSha: string
+): 'none' | 'attempted' | 'recorded' {
+  const record = recordPath(artifactsDir, candidateSha);
+  try {
+    assertDirectoryAncestors(verificationDir(artifactsDir));
+  } catch {
+    throw new VerificationRecordError('unavailable');
+  }
+  if (exists(record)) return 'recorded';
+  return exists(recordPath(artifactsDir, candidateSha, ATTEMPT_SUFFIX)) ? 'attempted' : 'none';
+}
+
+/** Claims the candidate before any VM work: exactly one caller can, even concurrently
+ * (`record_exists` for every other). */
+export function beginVerification(artifactsDir: string, candidateSha: string): void {
+  const marker = recordPath(artifactsDir, candidateSha, ATTEMPT_SUFFIX);
+  if (verificationState(artifactsDir, candidateSha) !== 'none')
+    throw new VerificationRecordError('record_exists');
+  writeOnce(marker, Buffer.from(`${candidateSha}\n`, 'utf8'));
+}
+
+function writeOnce(file: string, bytes: Buffer): void {
+  try {
+    assertDirectoryAncestors(path.dirname(file));
+    privateDir(path.dirname(file));
+    createPrivateOnce(file, bytes);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'EEXIST')
+      throw new VerificationRecordError('record_exists');
     throw new VerificationRecordError('unavailable');
   }
 }
@@ -170,14 +235,16 @@ function freeze<T>(value: T): T {
   return value;
 }
 
-/** Writes the record once, with mode 0600, as canonical JSON. A record that already
- * exists for this candidate is never replaced. Returns the record and its digest. */
+/** Writes the record once, mode 0600, as canonical JSON plus a final newline, and returns
+ * it frozen (its digest is `recordDigest`). Throws `invalid_record` for a record the
+ * schema or the consistency rules refuse, `record_exists` when one is already there
+ * (never replaced, even by a concurrent writer) and `unavailable` on a storage failure. */
 export function publishVerification(
   artifactsDir: string,
   input: VerificationRecordInput
 ): VerificationRecord {
   const body = { schemaVersion: VERIFICATION_RECORD_VERSION, ...input };
-  let record: VerificationRecord;
+  let record: unknown;
   let bytes: Buffer;
   try {
     record = JSON.parse(canonicalJson({ ...body, recordDigest: digestOf(body) }, MAX_RECORD_BYTES));
@@ -185,16 +252,9 @@ export function publishVerification(
   } catch {
     throw new VerificationRecordError('invalid_record');
   }
-  if (!validate(record) || !consistent(record)) throw new VerificationRecordError('invalid_record');
-  if (verificationExists(artifactsDir, record.candidateSha))
-    throw new VerificationRecordError('record_exists');
-  try {
-    assertDirectoryAncestors(artifactsDir);
-    privateDir(path.join(artifactsDir, VERIFICATION_DIRECTORY));
-    publishPrivate(recordPath(artifactsDir, record.candidateSha), bytes);
-  } catch {
-    throw new VerificationRecordError('unavailable');
-  }
+  if (!validate(record) || !isConsistent(record))
+    throw new VerificationRecordError('invalid_record');
+  writeOnce(recordPath(artifactsDir, record.candidateSha), bytes);
   return freeze(record);
 }
 
@@ -218,32 +278,34 @@ function assertBoundaryEvidence(artifactsDir: string, record: VerificationRecord
     throw new VerificationRecordError('evidence_mismatch');
   let held: boolean;
   try {
-    const input = JSON.parse(decode(bytes)) as BoundaryInput;
-    held = isCleanHeldVerdict(runBoundaryVerdict([input], record.runId));
+    // Unvalidated shape: `runBoundaryVerdict` fails any malformed input, and a throw is caught.
+    const input: unknown = JSON.parse(decode(bytes));
+    held = isCleanHeldVerdict(runBoundaryVerdict([input as never], record.runId));
   } catch {
     throw new VerificationRecordError('evidence_mismatch');
   }
   if (held !== record.boundaryHeld) throw new VerificationRecordError('evidence_mismatch');
 }
 
-/** Each log digest names a persisted log artifact (`<digest>.<complete|truncated>.log.json`)
- * whose own digest field agrees. */
+/** Each log digest names a persisted log artifact (`logArtifactName`) whose own digest
+ * and truncation flag agree with its name. */
 function assertLogEvidence(artifactsDir: string, record: VerificationRecord): void {
   for (const logDigest of record.logsDigests) {
-    const found = ['complete', 'truncated'].filter((kind) => {
-      const file = path.join(artifactsDir, `${logDigest}.${kind}.log.json`);
+    let found = false;
+    for (const truncated of [false, true]) {
+      const file = path.join(artifactsDir, logArtifactName(logDigest, truncated));
+      if (!exists(file)) continue;
+      let artifact: { digest?: unknown; outputTruncated?: unknown };
       try {
-        fs.lstatSync(file);
-      } catch {
-        return false;
-      }
-      try {
-        return JSON.parse(decode(readEvidence(file))).digest === logDigest;
+        artifact = JSON.parse(decode(readEvidence(file)));
       } catch {
         throw new VerificationRecordError('evidence_mismatch');
       }
-    });
-    if (found.length === 0) throw new VerificationRecordError('evidence_mismatch');
+      if (artifact?.digest !== logDigest || artifact.outputTruncated !== truncated)
+        throw new VerificationRecordError('evidence_mismatch');
+      found = true;
+    }
+    if (!found) throw new VerificationRecordError('evidence_mismatch');
   }
 }
 
@@ -254,8 +316,9 @@ export interface LoadVerificationOptions {
   readonly expectedDigest?: string;
 }
 
-/** Reads and validates a record: strict UTF-8, the exact canonical bytes it was written
- * as, the strict schema (unknown or missing fields fail), its own digest, the expected
+/** Reads and validates a record: no-follow, single-link, private-mode reads under real
+ * directories, strict UTF-8, at most 1 MiB, the exact canonical bytes it was written as,
+ * the strict schema (unknown or missing fields fail), the consistency rules, the expected
  * candidate, run and digest, and the boundary and log artifacts it references. Any
  * deviation throws `VerificationRecordError`; nothing is repaired or defaulted. */
 export function loadVerification(
@@ -266,6 +329,7 @@ export function loadVerification(
   const file = recordPath(artifactsDir, candidateSha);
   let bytes: Buffer;
   try {
+    assertDirectoryAncestors(path.dirname(file));
     bytes = readPrivate(file);
   } catch {
     throw new VerificationRecordError('unavailable');
@@ -280,7 +344,8 @@ export function loadVerification(
   } catch {
     throw new VerificationRecordError('invalid_record');
   }
-  if (!validate(record) || !consistent(record)) throw new VerificationRecordError('invalid_record');
+  if (!validate(record) || !isConsistent(record))
+    throw new VerificationRecordError('invalid_record');
   if (
     record.candidateSha !== candidateSha ||
     record.runId !== options.runId ||
@@ -290,4 +355,11 @@ export function loadVerification(
   assertBoundaryEvidence(artifactsDir, record);
   assertLogEvidence(artifactsDir, record);
   return freeze(record);
+}
+
+/** The only route from a record to a receipt (#1105): a `passed` verdict (which the
+ * consistency rules already tie to `receiptGrade`) on a boundary that held. */
+export function assertShippableVerification(record: VerificationRecord): void {
+  if (record.verdict !== 'passed' || record.boundaryHeld !== true || !isConsistent(record))
+    throw new VerificationRecordError('not_shippable');
 }
