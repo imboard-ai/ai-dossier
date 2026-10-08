@@ -87,6 +87,60 @@ const rows: { id: string; p: Partial<PolicyAssessment>; e?: Eligibility; kind: s
 ];
 
 describe('gate table', () => {
+  it('refuses truncated collections and malformed event evidence', () => {
+    const e = eligible();
+    for (const key of ['pulls', 'events'])
+      expect(
+        decideGate(
+          policy,
+          { ...e, facts: { ...e.facts, [key]: Object.assign([], { truncated: true }) } },
+          'alice'
+        ).kind
+      ).toBe('hand_off');
+    for (const key of ['assignees', 'labels'])
+      expect(
+        decideGate(
+          policy,
+          {
+            ...e,
+            facts: {
+              ...e.facts,
+              issue: { ...e.facts.issue, [key]: Object.assign([], { truncated: true }) },
+            },
+          },
+          'alice'
+        ).kind
+      ).toBe('hand_off');
+    for (const events of [[null], [{ event: 'assigned', id: 1, createdAt: 'bad', actor: null }]])
+      expect(
+        decideGate(policy, { ...e, facts: { ...e.facts, events } } as Eligibility, 'alice').kind
+      ).toBe('hand_off');
+    expect(
+      decideGate({ ...policy, citations: Object.assign([], { truncated: true }) }, e, 'alice').kind
+    ).toBe('hand_off');
+    const event = {
+      event: 'assigned' as const,
+      id: 1,
+      createdAt: '2026-10-06T00:00:00Z',
+      actor: { login: 'triager', url: 'https://github.com/triager' },
+      assignee: { login: 'alice', url: 'https://github.com/alice' },
+    };
+    expect(decideGate(policy, { ...e, facts: { ...e.facts, events: [event] } }, 'alice').kind).toBe(
+      'proceed'
+    );
+    const cross = {
+      event: 'cross-referenced' as const,
+      id: null,
+      createdAt: event.createdAt,
+      updatedAt: event.createdAt,
+      actor: null,
+      pullUrl: 'https://github.com/up/proj/pull/9',
+      identityFields: { number: 9, html_url: 'https://github.com/up/proj/pull/9' },
+    };
+    expect(decideGate(policy, { ...e, facts: { ...e.facts, events: [cross] } }, 'alice').kind).toBe(
+      'proceed'
+    );
+  });
   it.each([
     'competing_assignee',
     'competing_fix',

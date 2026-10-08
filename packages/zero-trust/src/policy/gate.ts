@@ -4,7 +4,7 @@ import { assertNoSecrets } from '../redaction';
 import { isTimestamp, ReasonCode } from '../state';
 import type { PolicyAssessment, PolicyCitation } from './classify';
 import type { Eligibility } from './eligibility';
-import { githubRecord, isGitHubActorLogin } from './github-values';
+import { githubArray, githubRecord, isGitHubActorLogin } from './github-values';
 
 export type GateDecision =
   | {
@@ -44,6 +44,40 @@ const ELIGIBILITY_REASONS: readonly string[] = Object.freeze([
   'own_pr_exists',
   'bug_unlabeled',
 ]);
+function timestamp(value: unknown): void {
+  if (
+    typeof value !== 'string' ||
+    !isTimestamp(
+      /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/u.test(value) ? `${value.slice(0, -1)}.000Z` : value
+    )
+  )
+    throw new Error();
+}
+function validateEvent(value: unknown): void {
+  const event = githubRecord(value);
+  if (
+    !['cross-referenced', 'connected', 'assigned', 'unassigned'].includes(event.event as string) ||
+    (event.id === null ? event.event !== 'cross-referenced' : !isPositiveId(event.id))
+  )
+    throw new Error();
+  timestamp(event.createdAt);
+  if (event.updatedAt !== undefined) timestamp(event.updatedAt);
+  if (event.actor !== null) validActor(event.actor);
+  if (event.event === 'assigned' || event.event === 'unassigned') validActor(event.assignee);
+  if (
+    event.pullUrl !== undefined &&
+    (typeof event.pullUrl !== 'string' ||
+      !/^https:\/\/github\.com\/[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}\/pull\/[1-9]\d*$/u.test(
+        event.pullUrl
+      ))
+  )
+    throw new Error();
+  if (event.identityFields !== undefined) {
+    const fields = githubRecord(event.identityFields);
+    for (const item of Object.values(fields))
+      if (typeof item !== 'string' && !isPositiveId(item)) throw new Error();
+  }
+}
 function validActor(value: unknown): string {
   const { login, url } = githubRecord(value);
   if (!isGitHubActorLogin(login) || typeof url !== 'string') throw new Error();
@@ -59,12 +93,12 @@ function eligibilityFacts(
 ): { eligibility: GateFacts['eligibility']; assigned: boolean } {
   const e = githubRecord(value);
   const kind = e.kind;
-  const reasons = e.reasons;
+  const reasons = githubArray(e.reasons, ELIGIBILITY_REASONS.length).map((r) => {
+    if (typeof r !== 'string' || !ELIGIBILITY_REASONS.includes(r)) throw new Error();
+    return r;
+  });
   if (
     (kind !== 'eligible' && kind !== 'ineligible' && kind !== 'hand_off') ||
-    !Array.isArray(reasons) ||
-    reasons.length > ELIGIBILITY_REASONS.length ||
-    reasons.some((r) => typeof r !== 'string' || !ELIGIBILITY_REASONS.includes(r)) ||
     typeof e.evidenceDigest !== 'string' ||
     !/^[a-f0-9]{64}$/u.test(e.evidenceDigest)
   )
@@ -98,6 +132,8 @@ function eligibilityFacts(
     !Array.isArray(events)
   )
     throw new Error();
+  const pullSnapshot = githubArray(pulls, 1000);
+  for (const event of githubArray(events, 1000)) validateEvent(event);
   const issue = githubRecord(facts.issue);
   const {
     number,
@@ -132,12 +168,13 @@ function eligibilityFacts(
   )
     throw new Error();
   validActor(author);
-  const assigned = assignees.map(validActor);
+  githubArray(labels, 100);
+  const assigned = githubArray(assignees, 100).map(validActor);
   const add = (reason: string) => {
     if (!detachedReasons.includes(reason)) detachedReasons.push(reason);
   };
   if (assigned.some((a) => !sameLogin(a, contributor))) add('competing_assignee');
-  for (const raw of pulls) {
+  for (const raw of pullSnapshot) {
     const pr = githubRecord(raw);
     if (
       !isPositiveId(pr.number) ||
@@ -276,24 +313,24 @@ export function decideGate(
       policy.citations.length > 128
     )
       throw new Error();
-    const citations = policy.citations.map((c) =>
-      Object.freeze({ path: c.path, line: c.line, ruleId: c.ruleId, excerpt: c.excerpt })
-    );
-    for (const c of citations) {
+    const citations = githubArray(policy.citations, 128).map((raw) => {
+      const { path, line, ruleId, excerpt } = githubRecord(raw);
       if (
-        typeof c.path !== 'string' ||
-        !c.path ||
-        typeof c.ruleId !== 'string' ||
-        !c.ruleId ||
-        typeof c.excerpt !== 'string' ||
-        !Number.isSafeInteger(c.line) ||
-        c.line < 1
+        typeof path !== 'string' ||
+        !path ||
+        typeof ruleId !== 'string' ||
+        !ruleId ||
+        typeof excerpt !== 'string' ||
+        typeof line !== 'number' ||
+        !Number.isSafeInteger(line) ||
+        line < 1
       )
         throw new Error();
-      assertNoSecrets(c.path);
-      assertNoSecrets(c.ruleId);
-      assertNoSecrets(c.excerpt);
-    }
+      assertNoSecrets(path);
+      assertNoSecrets(ruleId);
+      assertNoSecrets(excerpt);
+      return Object.freeze({ path, line, ruleId, excerpt });
+    });
     if (
       !isGitHubLogin(login) ||
       ![
