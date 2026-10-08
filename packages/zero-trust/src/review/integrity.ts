@@ -94,9 +94,7 @@ function screen(value: string): Screening {
     at !== null && value[callGap[at]] === '(' ? callGap[at] + 1 : null;
   const markers: [number, number, boolean][] = [];
   let assertions = 0;
-  for (const match of value.matchAll(
-    /\b(?:it|describe|test|xit|xdescribe|pytest|unittest|expect|self|assert)\b|@|\./gu
-  )) {
+  for (const match of value.matchAll(/[\p{ID_Start}_$][\p{ID_Continue}$]*|@|\./gu)) {
     const name = match[0];
     const at = match.index + name.length;
     let end: number | null = null;
@@ -115,7 +113,7 @@ function screen(value: string): Screening {
       end ??= chain(at, ['unittest', '.', 'skipUnless']);
       for (const marker of ['skip', 'skipif', 'xfail'])
         end ??= chain(at, ['pytest', '.', 'mark', '.', marker]);
-    }
+    } else end = call(chain(at, ['.', 'only'])) ?? call(chain(at, ['?.', 'only']));
     if (end !== null) {
       const grouped = /[()]/u.test(value.slice(gapStart[match.index], match.index));
       const start = name === '.' || grouped ? gapStart[match.index] : match.index;

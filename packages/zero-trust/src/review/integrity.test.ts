@@ -440,6 +440,19 @@ describe('deterministic candidate scope/test integrity', () => {
       codes({ ...input({ 'a.ts': before }, { 'a.ts': after }), limits: { maxChangedLines: 4 } })
     ).toEqual([]);
   });
+  it.each([
+    'custom.only',
+    'café.only',
+    'custom?.only',
+  ])('grouped generic focus %s spans arbitrary receiver and selector', (marker) => {
+    const path = 'focus.test.ts';
+    const before = `(\nactive ||\n${marker}\n)("case", () => expect(true));\n`;
+    const after = `(\n${marker}\n)("case", () => expect(true));\n`;
+    expect(codes(input({ [path]: before }, { [path]: after }))).toContain('test_disabled');
+    expect(codes(input({ [path]: `${after}old\n` }, { [path]: `${after}new\n` }))).not.toContain(
+      'test_disabled'
+    );
+  });
   it('ordinary source assertions/skip text are not treated as test integrity', () => {
     expect(codes(input({ 'src/a.ts': 'expect(1);\n' }, { 'src/a.ts': 'it.skip(\n' }))).toEqual([]);
   });
