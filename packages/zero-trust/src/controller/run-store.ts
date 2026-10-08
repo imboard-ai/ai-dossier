@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { types } from 'node:util';
 import {
   assertDirectoryAncestors,
   privateDir,
@@ -8,9 +9,9 @@ import {
   replacePrivate,
   syncDirectory,
 } from '../durable-fs';
-import { Journal } from '../journal';
+import { Journal, parseJournalEvents } from '../journal';
 import { lockDescriptor, StoreLockedError } from '../lock';
-import { isTailRecovery } from '../recovery';
+import { isRecoveryEvent, isTailRecovery } from '../recovery';
 import { assertSecretFree } from '../redaction';
 import {
   createRun,
@@ -22,6 +23,7 @@ import {
   sameRunRecord,
   transitionRun,
 } from '../state';
+import { parseStrictUtf8Json, strictUtf8 } from '../strict-utf8';
 import {
   type CheckpointBindings,
   type CheckpointPoint,
@@ -32,7 +34,13 @@ import {
   restoreCheckpoint,
   sameCheckpointBindings,
 } from './checkpoint-record';
-import { type RunConfig, RunConfigError, runConfigInput, validateRunConfig } from './config';
+import {
+  type RunConfig,
+  RunConfigError,
+  runConfigInput,
+  validateRunConfig,
+  validateStoredRunConfig,
+} from './config';
 import { contributionIdOf } from './ids';
 
 export const RUN_STORE_DIRECTORIES = Object.freeze([
@@ -56,6 +64,15 @@ export type RunStoreErrorCode =
   | 'resume_identity_mismatch'
   | 'persistence_uncertain'
   | 'store_closed';
+export class RunEvidenceError extends Error {
+  constructor(
+    readonly source: 'run' | 'config',
+    readonly code: 'missing' | 'corrupt' | 'incomplete' | 'recovered'
+  ) {
+    super('Unknown durable run evidence');
+    this.name = 'RunEvidenceError';
+  }
+}
 export class RunStoreError extends Error {
   constructor(readonly code: RunStoreErrorCode) {
     super(`Run store refused (${code})`);
@@ -67,6 +84,20 @@ function fail(code: RunStoreErrorCode): never {
 }
 function hash(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
+}
+function readStoredConfig(pinned: string): RunConfig {
+  const bytes = readPrivate(path.join(pinned, 'config.json'));
+  if (hash(bytes) !== strictUtf8(readPrivate(path.join(pinned, 'config.sha256'))))
+    fail('invalid_store');
+  return validateStoredRunConfig(parseStrictUtf8Json(bytes));
+}
+function refuseEvidence(source: 'run' | 'config', error: unknown): never {
+  if (error instanceof RunEvidenceError) throw error;
+  const code = (error as NodeJS.ErrnoException)?.code;
+  throw new RunEvidenceError(
+    source,
+    code === 'ENOENT' ? 'missing' : code === 'run_diverged' ? 'incomplete' : 'corrupt'
+  );
 }
 
 /** Pin every ancestor before descending: later writes cannot follow a replacement. */
@@ -171,7 +202,7 @@ function validateCheckpointContinuation(
   }
 }
 function replayControl(
-  journal: Journal,
+  events: unknown[],
   config: RunConfig
 ): {
   run: RunRecord;
@@ -185,7 +216,7 @@ function replayControl(
   let upstreamId: number | undefined;
   const checkpoints = new Map<CheckpointPoint, CheckpointRecord>();
   const bindings = new Map<CheckpointPoint, CheckpointBindings>();
-  for (const event of journal.read()) {
+  for (const event of events) {
     assertSecretFree(event);
     if (isTailRecovery(event)) continue;
     if (!isRecord(event) || event.v !== 1) fail('invalid_store');
@@ -300,6 +331,59 @@ export class RunStore {
     this.check();
     return this.current;
   }
+  /** Read current durable evidence under the lifetime fence, without repair or writes.
+   * Cached state is an equality constraint, never independent reporting evidence. */
+  validateEvidence(): RunRecord {
+    try {
+      return this.validateOutcomeEvidence().run;
+    } catch {
+      fail('invalid_store');
+    }
+  }
+  /** One fresh config/run read for local outcomes, preserving fixed source/reason diagnostics. */
+  validateOutcomeEvidence(): { config: RunConfig; run: RunRecord } {
+    const config = this.validateConfigEvidence();
+    return { config, run: this.readRunEvidence(config) };
+  }
+  private readRunEvidence(config: RunConfig): RunRecord {
+    this.check();
+    try {
+      const pinned = `/proc/self/fd/${this.directoryFd}`;
+      const events = this.withStoreDirectory('control', (dir) =>
+        parseJournalEvents(readPrivate(path.join(dir, 'events.jsonl')))
+      );
+      if (events.some(isRecoveryEvent)) throw new RunEvidenceError('run', 'recovered');
+      const evidence = replayControl(events, config);
+      const raw = parseStrictUtf8Json(readPrivate(path.join(pinned, 'run.json')));
+      assertSecretFree(raw);
+      const snapshot = restoreRun(raw);
+      if (
+        !evidence.confirmed ||
+        !sameRunRecord(evidence.confirmed, evidence.run) ||
+        !sameRunRecord(evidence.run, snapshot) ||
+        !sameRunRecord(snapshot, this.current) ||
+        evidence.upstreamId !== this.upstreamId ||
+        JSON.stringify([...evidence.checkpoints]) !== JSON.stringify([...this.checkpoints]) ||
+        JSON.stringify([...evidence.bindings]) !== JSON.stringify([...this.bindings])
+      )
+        fail('run_diverged');
+      return snapshot;
+    } catch (error) {
+      refuseEvidence('run', error);
+    }
+  }
+  /** Fresh, strict config/digest evidence through the held directory descriptor. */
+  validateConfigEvidence(): RunConfig {
+    this.check();
+    try {
+      const pinned = `/proc/self/fd/${this.directoryFd}`;
+      const config = readStoredConfig(pinned);
+      if (JSON.stringify(config) !== JSON.stringify(this.storedConfig)) fail('run_diverged');
+      return config;
+    } catch (error) {
+      refuseEvidence('config', error);
+    }
+  }
   get config(): RunConfig {
     this.check();
     return structuredClone(this.storedConfig);
@@ -317,6 +401,47 @@ export class RunStore {
     this.check();
     if (!Number.isSafeInteger(n) || n <= 0) fail('invalid_store');
     return `${this.runId}-s${n}`;
+  }
+  /** Synchronous local operation under this store's held fence and a pinned child directory.
+   * The callback must not retain the descriptor path beyond its lifetime. */
+  withStoreDirectory<T>(
+    name: (typeof RUN_STORE_DIRECTORIES)[number],
+    work: (directory: string) => T & (T extends PromiseLike<unknown> ? never : unknown)
+  ): T {
+    this.check();
+    if (!RUN_STORE_DIRECTORIES.includes(name)) fail('invalid_store');
+    if (types.isAsyncFunction(work)) fail('invalid_store');
+    const fd = fs.openSync(
+      `/proc/self/fd/${this.directoryFd}/${name}`,
+      fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW
+    );
+    try {
+      const stat = fs.fstatSync(fd);
+      if (stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o700) fail('invalid_store');
+      const value = work(`/proc/self/fd/${fd}`);
+      if (
+        value !== null &&
+        (typeof value === 'object' || typeof value === 'function') &&
+        'then' in value &&
+        typeof value.then === 'function'
+      ) {
+        // Consume a rejected returned promise before refusing its escaped lifetime.
+        void Promise.resolve(value).catch(() => {});
+        fail('invalid_store');
+      }
+      return value;
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
+  /** Atomic private artifact publication with the store's persistence-uncertainty latch.
+   * A failed publication retains the lifetime fence; reporting and further writes refuse it. */
+  replaceArtifact(name: string, bytes: Buffer): void {
+    this.check();
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/.test(name)) fail('invalid_store');
+    this.withStoreDirectory('artifacts', (dir) =>
+      this.write(() => replacePrivate(path.join(dir, name), bytes))
+    );
   }
   static create(root: string, input: RunConfig, now: Date | string): RunStore {
     const config = validateRunConfig(runConfigInput(input));
@@ -387,11 +512,9 @@ export class RunStore {
       directoryFd = pinDirectory(directory);
       const pinned = `/proc/self/fd/${directoryFd}`;
       guard = acquire(pinned);
-      const bytes = readPrivate(path.join(pinned, 'config.json'));
-      if (hash(bytes) !== readPrivate(path.join(pinned, 'config.sha256')).toString('utf8'))
-        fail('invalid_store');
-      const config = validateRunConfig(JSON.parse(bytes.toString('utf8')));
-      const raw: unknown = JSON.parse(readPrivate(path.join(pinned, 'run.json')).toString('utf8'));
+      const config = readStoredConfig(pinned);
+      validateRunConfig(runConfigInput(config));
+      const raw = parseStrictUtf8Json(readPrivate(path.join(pinned, 'run.json')));
       assertSecretFree(raw);
       const run = restoreRun(raw);
       if (
@@ -402,7 +525,7 @@ export class RunStore {
         fail('invalid_store');
       readPrivate(path.join(directory, 'control', 'events.jsonl'));
       journal = new Journal(path.join(directory, 'control'));
-      const evidence = replayControl(journal, config);
+      const evidence = replayControl(journal.read(), config);
       if (!sameRunRecord(evidence.run, run)) {
         if (
           !evidence.confirmed ||

@@ -1117,6 +1117,21 @@ describe('LocalQemuAdapter.destroy', () => {
     expect(host.calls.kill).toEqual([]);
   });
 
+  it('strictly decodes VM record bytes without discarding valid Unicode', async () => {
+    const { a, handle, vmDir } = await created();
+    const file = path.join(vmDir, 'vm.json');
+    const record = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const bytes = Buffer.from(JSON.stringify({ ...record, note: 'Unicode café' }));
+    fs.writeFileSync(file, bytes);
+    expect(await a.listByRun('run-1')).toHaveLength(1);
+    bytes[bytes.indexOf(Buffer.from('café'))] = 0xff;
+    fs.writeFileSync(file, bytes);
+    expect(await a.listByRun('run-1')).toEqual([]);
+    await expect(a.exec(handle, { profile: 'node', argv: ['x'] })).rejects.toThrow(/unknown_vm/);
+    expect(host.calls.kill).toEqual([]);
+    expect(fs.existsSync(vmDir)).toBe(true);
+  });
+
   it('accepts a record whose pid is null', async () => {
     const { a, handle, vmDir } = await created();
     const recordFile = path.join(vmDir, 'vm.json');

@@ -6,6 +6,7 @@
  * edits, withdrawal and reopening are contributor actions the run confirms by reading the
  * PR again; it never writes upstream and never claims what it has not observed. */
 import path from 'node:path';
+import { isTrackerContinuation } from '../controller/tracker-continuation';
 import { writePrivateFile } from '../durable-fs';
 import { type IntentInput, isAdmitted, WriteBlockedError } from '../intents';
 import type { Journal } from '../journal';
@@ -570,7 +571,7 @@ type Event =
   | { v: 1; type: 'run_update'; run: RunRecord }
   | { v: 1; type: 'review_awaited'; run: RunRecord }
   | { v: 1; type: 'outcome'; outcome: 'merged' | 'declined'; headSha: string; run: RunRecord }
-  | { v: 1; type: 'blocked'; reason: TrackBlockReason; run: RunRecord }
+  | { v: 1; type: 'blocked'; reason: TrackBlockReason; run: RunRecord; observedMergeSha?: string }
   | { v: 1; type: 'rebound'; number: number; url: string }
   | { v: 1; type: 'revision_started'; feedback: FeedbackRef[]; run: RunRecord }
   | { v: 1; type: 'revision_pushing'; candidateSha: string }
@@ -588,32 +589,11 @@ function sameText(a: string | null, b: string): boolean {
   return (a ?? '').replace(/\r\n?/gu, '\n').trimEnd() === b.replace(/\r\n?/gu, '\n').trimEnd();
 }
 
-/** Lifecycle steps recorded elsewhere (isolated revision, verification, pause, failures).
- * PR outcomes, review and revision edges are the tracker's own: only its reads record them. */
-const EXTERNAL_REASONS: readonly ReasonCode[] = Object.freeze([
-  ReasonCode.CandidateReady,
-  ReasonCode.VerificationPassed,
-  ReasonCode.RepairRequired,
-  ReasonCode.UserPaused,
-  ReasonCode.ResumeRevising,
-  ReasonCode.ResumeVerifying,
-  ReasonCode.ResumeShipping,
-  ReasonCode.PolicyBlocked,
-  ReasonCode.UnsupportedEnvironment,
-  ReasonCode.ExecutionFailed,
-  ReasonCode.UserCancelled,
-  ReasonCode.CleanupFailed,
-  ReasonCode.CleanupCompleted,
-]);
-
 /** The same controller run or an exact forward continuation, advanced only by external
  * steps. */
 function continuation(previous: RunRecord, value: unknown): RunRecord {
   const run = restoreRun(value);
-  if (!isRunContinuation(previous, run)) throw new TrackError('run_diverged');
-  const added = run.history.slice(previous.history.length);
-  const owned = added.find((entry) => !EXTERNAL_REASONS.includes(entry.reasonCode));
-  if (owned) throw new TrackError('run_diverged', `tracker-owned:${owned.reasonCode}`);
+  if (!isTrackerContinuation(previous, run)) throw new TrackError('run_diverged');
   return run;
 }
 
@@ -775,10 +755,20 @@ function reduce(state: TrackState | undefined, raw: unknown, directory: string |
     }
     case 'blocked':
       if (!TRACK_BLOCK_REASONS.includes(raw.reason as TrackBlockReason)) fail('blocked');
+      if (
+        raw.observedMergeSha !== undefined &&
+        (raw.reason !== 'merged_during_revision' ||
+          !state.revision ||
+          !isCommitSha(raw.observedMergeSha))
+      )
+        fail('blocked');
       return {
         ...state,
         run: stepped(state, raw, ReasonCode.PolicyBlocked),
         blockedReason: raw.reason as TrackBlockReason,
+        ...(raw.observedMergeSha === undefined
+          ? {}
+          : { outcomeSha: raw.observedMergeSha as string }),
       };
     case 'rebound':
       if (raw.number === state.pr.number || state.action || state.revision) fail('rebound');
@@ -1042,13 +1032,14 @@ export class PrTracker {
     });
   }
 
-  private block(reason: TrackBlockReason): TrackOutcome {
+  private block(reason: TrackBlockReason, observedMergeSha?: string): TrackOutcome {
     const state = this.state.run.state;
     if (!this.state.blockedReason && permittedTransitions(state)[ReasonCode.PolicyBlocked])
       this.persist({
         v: 1,
         type: 'blocked',
         reason,
+        ...(observedMergeSha === undefined ? {} : { observedMergeSha }),
         run: this.transition(ReasonCode.PolicyBlocked),
       });
     return { kind: 'blocked', reason, status: this.status() };
@@ -1163,7 +1154,7 @@ export class PrTracker {
   /** A read while a revision is in progress: a merge ends it, a close pauses it behind a
    * reopen hand-off, a moved head blocks, and in `shipping` the PR head confirms it. */
   private duringRevision(track: Observed, revision: Revision): TrackOutcome {
-    if (track.merged) return this.block('merged_during_revision');
+    if (track.merged) return this.block('merged_during_revision', track.headSha);
     if (track.state === 'closed') return this.closedDuringRevision();
     if (this.unexpectedHead(track)) return this.block('unexpected_head_sha');
     if (this.state.run.state !== 'shipping' || !revision.candidateSha)
@@ -1268,7 +1259,7 @@ export class PrTracker {
       if (stale) return this.block(stale);
       const track = this.settle(await this.observe());
       if (track.kind !== 'observed') return track;
-      if (track.merged) return this.block('merged_during_revision');
+      if (track.merged) return this.block('merged_during_revision', track.headSha);
       if (track.state === 'closed') return this.closedDuringRevision();
       // Only the last verified SHA, or this candidate after a lost push response (scenario 18).
       if (this.unexpectedHead(track, candidateSha)) return this.block('unexpected_head_sha');

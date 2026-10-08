@@ -3,7 +3,7 @@ import type { BudgetState } from '../budget-types';
 import type { HandoffRecord } from '../github/handoff-driver';
 import { SecretRedactionError } from '../redaction';
 import { createRun, ReasonCode, transitionRun } from '../state';
-import { renderHuman, renderJson } from '../status';
+import { InvalidStatusError, renderHuman, renderJson } from '../status';
 import { assembleStatus } from './status';
 
 const id = 'ztc-0123456789abcdef';
@@ -50,6 +50,19 @@ const parts = () => ({
   sessionId: `${id}-run-1-s1`,
 });
 describe('assembleStatus', () => {
+  it('preserves the typed status error on active-time overflow', () => {
+    const run = createRun(
+      {
+        runId: `${id}-run-1`,
+        upstreamIssue: parts().run.upstreamIssue,
+        contributor: 'contributor',
+      },
+      new Date(-8_000_000_000_000_000).toISOString()
+    );
+    expect(() =>
+      assembleStatus({ ...parts(), run, now: new Date(8_000_000_000_000_000).toISOString() })
+    ).toThrow(InvalidStatusError);
+  });
   it('produces every status fact from history and conservative budget totals', () => {
     let run = initial();
     const events: [ReasonCode, number][] = [

@@ -37,7 +37,8 @@ export function privateDir(dir: string): string {
   return dir;
 }
 
-export function readPrivate(file: string): Buffer {
+/** Optional additional checks run on the same descriptor that supplies the bytes. */
+export function readPrivate(file: string, validate?: (stat: fs.Stats) => void): Buffer {
   const fd = fs.openSync(
     file,
     fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK
@@ -46,6 +47,7 @@ export function readPrivate(file: string): Buffer {
     const stat = fs.fstatSync(fd);
     if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0)
       throw new Error('Controller storage unavailable');
+    validate?.(stat);
     return fs.readFileSync(fd);
   } finally {
     fs.closeSync(fd);

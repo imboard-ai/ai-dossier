@@ -12,6 +12,7 @@ import {
   type LockOwner,
   type LockRecovery,
 } from './recovery';
+import { parseStrictUtf8Json } from './strict-utf8';
 
 export class StoreLockedError extends Error {
   constructor() {
@@ -68,6 +69,32 @@ export function processStartToken(pid: number): string | null {
 function privateFile(fd: number): void {
   const stat = fs.fstatSync(fd);
   if (!stat.isFile() || stat.nlink !== 1 || (stat.mode & 0o077) !== 0) throw new StoreLockedError();
+}
+
+/** Reporting acquires only an existing guard, never publishes/reclaims an owner.
+ * An unresolved owner (live or dead) denies facts until mutation recovery completes. */
+export function withReadOnlyStoreLock<T>(file: string, work: () => T): T {
+  const guard = fs.openSync(
+    `${file}.guard`,
+    fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK
+  );
+  try {
+    privateFile(guard);
+    if (fs.fstatSync(guard).uid !== process.getuid?.()) throw new StoreLockedError();
+    lockDescriptor(guard, 0);
+    const opened = fs.fstatSync(guard);
+    const named = fs.lstatSync(`${file}.guard`);
+    if (opened.ino !== named.ino || opened.dev !== named.dev) throw new StoreLockedError();
+    try {
+      fs.lstatSync(file);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return work();
+      throw error;
+    }
+    throw new StorePersistenceError();
+  } finally {
+    fs.closeSync(guard);
+  }
 }
 
 /** Called only with the store's permanent guard held. */
@@ -176,7 +203,7 @@ export function withStoreLock<T>(
       );
       privateFile(ownerFd);
       if (fs.fstatSync(ownerFd).size > 4096) throw new StoreLockedError();
-      const owner: unknown = JSON.parse(fs.readFileSync(ownerFd, 'utf8'));
+      const owner = parseStrictUtf8Json(fs.readFileSync(ownerFd));
       if (!isLockOwner(owner)) throw new StoreLockedError();
       if (owner.pidNamespace !== pidNamespace()) throw new StoreLockedError();
       const token = processStartToken(owner.pid);

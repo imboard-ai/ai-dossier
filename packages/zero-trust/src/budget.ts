@@ -12,15 +12,25 @@ import {
   type EstimateRequest,
   type Money,
 } from './budget-types';
-import { replacePrivate } from './durable-fs';
+import { readPrivate, replacePrivate } from './durable-fs';
 import {
   lockRecoveries,
   recordLockReclaim,
   StoreLockedError,
   StorePersistenceError,
+  withReadOnlyStoreLock,
   withStoreLock,
 } from './lock';
+import { parseStrictUtf8Json } from './strict-utf8';
 
+function ledgerLockFile(file: string): string {
+  const legacy = `${path.basename(file)}.lock`;
+  const name =
+    Buffer.byteLength(`${legacy}.guard`) <= 255
+      ? legacy
+      : `.zt-budget-lock-${createHash('sha256').update(path.basename(file)).digest('hex')}.lock`;
+  return path.join(path.dirname(file), name);
+}
 function integer(n: number, label: string, positive = false): void {
   if (!Number.isSafeInteger(n) || n < (positive ? 1 : 0)) {
     throw new BudgetError(
@@ -337,6 +347,41 @@ export function isBudgetSessionExhausted(state: BudgetState, sessionId: string):
 
 /** Controller-owned LOCAL filesystem ledger. Opening is read-only and never resets history. */
 export class BudgetLedger {
+  /** Non-mutating snapshot through a caller-pinned path. Never canonicalize it:
+   * resolving /proc/self/fd back to a name discards descriptor authority. */
+  static readOnlySnapshot(file: string, contributionId: string): BudgetState {
+    try {
+      return withReadOnlyStoreLock(ledgerLockFile(file), () =>
+        BudgetLedger.readSnapshot(file, contributionId)
+      );
+    } catch (error) {
+      if (error instanceof BudgetError) throw error;
+      throw new BudgetError(
+        'persistence_uncertain',
+        'Budget evidence requires transaction reconciliation'
+      );
+    }
+  }
+  // biome-ignore lint/correctness/noUnusedPrivateClassMembers: Called through BudgetLedger by both snapshot paths.
+  private static readSnapshot(file: string, contributionId: string): BudgetState {
+    let bytes: Buffer;
+    try {
+      bytes = readPrivate(file, (stat) => {
+        if (stat.uid !== process.getuid?.())
+          throw new BudgetError('corrupt_ledger', 'Ledger must be a private regular file');
+      });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT')
+        throw new BudgetError('missing_ledger', 'Budget ledger missing; never reset on resume');
+      throw new BudgetError('corrupt_ledger', 'Unreadable budget ledger; reconciliation required');
+    }
+    try {
+      return validate(parseStrictUtf8Json(bytes), contributionId);
+    } catch (error) {
+      if (error instanceof BudgetError) throw error;
+      throw new BudgetError('corrupt_ledger', 'Unreadable budget ledger; reconciliation required');
+    }
+  }
   readonly file: string;
   private writeUncertain = false;
   private readonly resumePending = new Set<string>();
@@ -376,12 +421,7 @@ export class BudgetLedger {
         ? legacy
         : `.zt-budget-recovery-${createHash('sha256').update(path.basename(this.file)).digest('hex')}`;
     this.recoveryDirectory = path.join(path.dirname(this.file), name);
-    const legacyLock = `${path.basename(this.file)}.lock`;
-    const lockName =
-      Buffer.byteLength(`${legacyLock}.guard`) <= 255
-        ? legacyLock
-        : `.zt-budget-lock-${createHash('sha256').update(path.basename(this.file)).digest('hex')}.lock`;
-    this.lockFile = path.join(path.dirname(this.file), lockName);
+    this.lockFile = ledgerLockFile(this.file);
     // Opening an existing ledger is a resume boundary, independent of whether
     // the dead controller held its short mutation lock when it crashed. Capture
     // ALL old unknown outcomes; a null observation never reconciles them.
@@ -408,30 +448,7 @@ export class BudgetLedger {
   }
 
   snapshot(): BudgetState {
-    let raw: string;
-    try {
-      const fd = fs.openSync(
-        this.file,
-        fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK
-      );
-      try {
-        if (!fs.fstatSync(fd).isFile())
-          throw new BudgetError('corrupt_ledger', 'Ledger must be a regular file');
-        raw = fs.readFileSync(fd, 'utf8');
-      } finally {
-        fs.closeSync(fd);
-      }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT')
-        throw new BudgetError('missing_ledger', 'Budget ledger missing; never reset on resume');
-      throw error;
-    }
-    try {
-      return validate(JSON.parse(raw), this.contributionId);
-    } catch (error) {
-      if (error instanceof BudgetError) throw error;
-      throw new BudgetError('corrupt_ledger', 'Unreadable budget ledger; reconciliation required');
-    }
+    return BudgetLedger.readSnapshot(this.file, this.contributionId);
   }
 
   startSession(input: BudgetSession): void {

@@ -8,6 +8,7 @@ import { setImmediate as yieldEventLoop } from 'node:timers/promises';
 import { OutputCollector } from '../controller/output-collector';
 import { assertDirectoryAncestors, privateDir, publishPrivate } from '../durable-fs';
 import { assertSecretFree } from '../redaction';
+import { parseStrictUtf8Json } from '../strict-utf8';
 import { BrokerError, type ContainerProfile, type VmAdapter, type VmHandle } from './adapter';
 import { MAX_FILE_BYTES, validateRequest } from './broker';
 import { type BoundaryInput, evaluateBoundary, parseReport, parseReports } from './evidence';
@@ -464,7 +465,7 @@ export async function probeBoundary(
       const bytes = await adapter.getFile(vm, `${fixture}/results/${phase}.json`);
       state.output.append(bytes);
       try {
-        const report = parseReport(JSON.parse(bytes.toString('utf8')));
+        const report = parseReport(parseStrictUtf8Json(bytes));
         if (report.probe !== probe || report.phase !== phase.slice(probe.length + 1))
           throw new Error('Wrong boundary report');
         state.reports.push(report);
@@ -590,7 +591,7 @@ export async function finishBoundary(
     // No clean authoritative artifact exists until all host resources are removed.
     session.cleanup();
     publishPrivate(session.artifactPath, bytes);
-    return JSON.parse(bytes.toString('utf8')) as BoundaryInput;
+    return parseStrictUtf8Json(bytes) as BoundaryInput;
   } finally {
     session.cleanup();
   }

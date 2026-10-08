@@ -8,6 +8,7 @@ import semver from 'semver';
 import { sha256 } from '../canonical/export';
 import { readPrivate, syncDirectory } from '../durable-fs';
 import { canonicalJson, snapshotJson } from '../receipt/schema';
+import { parseStrictUtf8Json } from '../strict-utf8';
 import type { Accelerator } from '../vm/adapter';
 import {
   type Ecosystem,
@@ -428,7 +429,7 @@ export function loadProfileRecord(
   if (bytes === undefined) throw new ProfileError('record_missing');
   let record: unknown;
   try {
-    record = JSON.parse(bytes.toString('utf8'));
+    record = parseStrictUtf8Json(bytes);
   } catch {
     throw new ProfileError('invalid_record');
   }

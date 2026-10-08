@@ -1,4 +1,5 @@
 import Ajv from 'ajv';
+import { dataDescriptors } from '../data-descriptors';
 import { assertNoSecrets } from '../redaction';
 
 export const RECEIPT_VERSION = 'ztfc-receipt-v2' as const;
@@ -174,25 +175,18 @@ export function canonicalJson(input: unknown, maxBytes = 128 * 1024): string {
       return atom(JSON.stringify(value));
     }
     if (typeof value !== 'object' || value === null) throw new ReceiptError('invalid_json');
-    const array = Array.isArray(value);
-    if (Object.getPrototypeOf(value) !== (array ? Array.prototype : Object.prototype))
+    let container: ReturnType<typeof dataDescriptors>;
+    try {
+      container = dataDescriptors(value);
+    } catch {
       throw new ReceiptError('invalid_json');
-    const keys = Reflect.ownKeys(value);
-    if (keys.length > 20000 || keys.some((k) => typeof k !== 'string'))
-      throw new ReceiptError('invalid_json');
-    const descriptors = Object.getOwnPropertyDescriptors(value);
-    for (const key of keys as string[]) {
-      const d = descriptors[key];
-      if (!('value' in d) || (key !== 'length' && !d.enumerable))
-        throw new ReceiptError('invalid_json');
     }
+    const { array, keys, descriptors } = container;
     if (array) {
       const length = descriptors.length.value as number;
-      if (length > 20000 || keys.length !== length + 1) throw new ReceiptError('invalid_json');
       reserve(length + 1);
       const items: string[] = [];
       for (let i = 0; i < length; i++) {
-        if (!descriptors[String(i)]) throw new ReceiptError('invalid_json');
         items.push(encode(descriptors[String(i)].value, depth + 1));
       }
       return `[${items.join(',')}]`;

@@ -10,6 +10,104 @@ plus ecosystem detection, runtime profiles, command plans and package-proxy poli
 (see the gate 2 section below).
 Publication remains gated on S1 feasibility.
 
+## Local outcome metrics (#1103)
+
+`contributionOutcome(store, now?)` reads the locked `RunStore` history, the existing
+`budget/ledger.json` through `BudgetLedger.readOnlySnapshot()` / `budgetTotals`, and the
+hand-off/tracker journals through their existing replay APIs. The controller's
+local replay adapter never constructs a network driver or model adapter. Metrics
+imports neither `src/github/` nor `src/model/`; no reporting call contacts a service
+or initializes/repairs a missing or truncated journal. Missing, corrupt, recovered
+or wrong-identity hand-off/tracker evidence yields field-specific `unknown` values,
+never zero or an inferred success. Reporting does not repair control evidence.
+`unknownEvidence` retains only fixed source
+and reason codes, never raw errors or journal contents. A tracker prefix may lag
+external execution but cannot omit a tracker-owned transition in durable history.
+Submission comes from the durable publication transition, not acceptance. Only a
+tracker-observed outcome with its recorded SHA counts as merged/declined. This includes
+a structurally recorded `observedMergeSha` when upstream merges during revision:
+the tracker remains execution-blocked, while metrics count the observed merge. Legacy
+revision blocks without that SHA remain unknown, never inferred from reason text. Revisions
+count tracker-recorded revision requests, including the currently active revision.
+Gate passage is eligible; a pre-passage policy block is ineligible; a gating
+permission/contributor wait is hand-off; an undecided gate is unknown.
+
+The result includes contribution/contributor/upstream/issue identity, gate,
+submission/PR URL/outcome/revisions, `activeMs`, four `waitMs` families (maintainer,
+contributor, review, paused), per-currency cost and an optional voluntary adoption
+note. `identity: 'known' | 'unknown'` distinguishes availability from the identity
+text (the login `unknown` remains a valid known contributor). Active states are
+gating/planning/implementing/verifying/shipping/revising; status and metrics share
+one lifecycle interval calculator.
+Submitted, awaiting-review and accepted intervals are review wait. Terminal time
+is neither active nor wait. `now` defaults to the last durable transition; pass a
+canonical UTC timestamp or Date to include the current interval.
+
+Cost is in accounting-currency minor units after recorded ledger FX; currencies
+are never combined. Estimated amounts include non-released reservations;
+provider observations stay separate, and unobserved spend is unknown. Model/VM
+components each expose estimated and observed amounts. Token/model-resource rates
+identify model rows; `vm_increment` identifies VM rows. Mixed or unattributable
+reservations yield unknown components rather than an invented allocation.
+
+`aggregate(outcomes)` accepts one result per distinct contribution (duplicates
+are refused). It returns eligible→submitted, accepted (including merged), merged,
+declined and rework-per-submitted rates with numerator, denominator, unknown count
+and value; empty/uncertain denominators give unknown values. Eligible→submitted is
+submitted eligible contributions / eligible contributions. Accepted/merged/declined
+use submitted contributions as denominator; accepted includes merged. Rework is
+total revision requests / submitted contributions, and can exceed one.
+It also returns median
+active time, per-currency average cost per submitted/accepted contribution and
+case-insensitive contributions-per-contributor (`repeatUsage`). Unknown evidence
+is retained rather than silently dropped from statistical results. A known absent
+currency contributes zero to that currency's average across the selected cohort.
+
+`recordAdoption(store, note, now)` records only explicitly supplied voluntary text
+in private `artifacts/adoption.json` (atomic replacement). `ADOPTION_MAX_LENGTH`
+is 2,000 UTF-16 code units; empty, malformed or secret-shaped notes are refused.
+A missing note is omitted; a corrupt note is unknown. Reporting never infers
+adoption. `renderMetricsHuman` / `renderMetricsJson` contain identical facts;
+human values are JSON-quoted to prevent line spoofing. Both renderers and aggregation
+validate public facts, refuse extra keys and invalid numeric values, and preserve
+the same facts in both formats. Per-contribution reports retain fixed source/reason
+diagnostics; aggregates retain uncertainty counts and unknown statistics, not source
+diagnostics. Only `contributionOutcome(store, now?)` rereads durable evidence; regenerate
+outcomes before aggregation or rendering when fresh facts are needed. Aggregation and
+renderers validate the supplied snapshots, not storage. Derivation validates the current
+strict config and its digest as well as the complete durable control journal and snapshot
+against the cached run under the held fence using `RunStore.validateEvidence()`;
+missing, corrupt, recovered or mismatched evidence cannot yield cached success.
+Evidence JSON is decoded with fatal UTF-8 validation. Budget reporting uses
+`BudgetLedger.readOnlySnapshot(file, contributionId)` through the pinned directory
+without resolving it back to a mutable pathname. RunStore's synchronous `withStoreDirectory(name,
+callback)` pins a private child directory under its held descriptor/fence and closes
+it after the callback; Promise-like returns are refused by types and thenables
+are refused at runtime. Descriptor paths must never escape that callback. Adoption
+reads/writes refuse symlink directory replacement. `RunStore.replaceArtifact(name, bytes)`
+publishes a basename atomically under the held descriptor and retains the lifetime fence
+on uncertain persistence; reporting and subsequent writes then refuse until process-death
+reconciliation. Native async callbacks are rejected before invocation; returned thenables
+are refused and their rejections consumed. Snapshot validation refuses accessor properties
+and non-plain containers before copying; snapshot failures expose only fixed errors.
+`RunStore.validateConfigEvidence()` checks fresh strict config/digest against the cached
+configuration without writes or reopening the signing key. `RunStore.validateOutcomeEvidence()`
+returns one freshly validated `{ config, run }` pair with fixed source/reason errors;
+`validateEvidence()` retains its fixed RunStore error boundary. Execution admission still
+requires the signing key. `validateStoredRunConfig(raw)` performs only schema/semantic
+validation; `validateRunConfig(raw)` also checks execution signing readiness. The combined
+evidence API throws `RunEvidenceError` with `source: 'run' | 'config'` and one fixed
+`code: 'missing' | 'corrupt' | 'incomplete' | 'recovered'`, never raw evidence or causes.
+Closed/poisoned handle checks in `validateConfigEvidence()` and `validateOutcomeEvidence()`
+retain `RunStoreError('store_closed' | 'persistence_uncertain')`; `validateEvidence()`
+translates all refusals to `RunStoreError('invalid_store')`.
+Budget reporting acquires the existing transaction guard read-only
+and refuses an unresolved owner, never initializing or reclaiming it; uncertain publication
+yields unknown costs until ledger reconciliation. `parseJournalEvents(bytes)` is
+the shared pure complete-JSONL decoder, including strict UTF-8 validation; it never
+opens or repairs storage. These APIs do not add CLI
+commands or external telemetry.
+
 ## Independent verifier (#1102)
 
 `verifyCandidate(deps, input)` (PRD §5.6 steps 6 to 8, §5.7, §5.9; scenarios 6, 7, 10
@@ -800,9 +898,9 @@ Contents can dereference an in-repository symlink and return a normal file respo
 this API assesses that returned pinned content at its logical policy path, not Git
 tree modes. No additional tree reads or repository-controlled URLs are followed.
 
-Owner and repository names use the shared GitHub binding validators (1–39 ASCII
-alphanumeric login characters with optional single hyphens between them, up to
-77 total characters without trailing/consecutive hyphens; repository at most 100 ASCII
+Owner and repository names use the shared GitHub binding validators (1–39 total ASCII
+login characters, alphanumeric with optional single hyphens between them, without
+trailing/consecutive hyphens; repository at most 100 ASCII
 letters/digits/underscore/dot/hyphen, excluding `.` and `..`). `POLICY_TEMPLATE_DIRECTORY`
 and `POLICY_TEMPLATE_LIMIT` export the directory and 20-file cap. Template names
 are 1–120 ASCII letters/digits/underscore/dot/space/hyphen, excluding `.` and `..`.

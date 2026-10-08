@@ -6,15 +6,7 @@ import { assertSecretFree } from '../redaction';
 import { type RunRecord, type RunState, restoreRun, sameRunRecord } from '../state';
 import { InvalidStatusError, renderJson, type StatusRecord } from '../status';
 import { contributionIdOf } from './ids';
-
-const ACTIVE: readonly RunState[] = [
-  'gating',
-  'planning',
-  'implementing',
-  'verifying',
-  'shipping',
-  'revising',
-];
+import { lifecycleTimes } from './lifecycle-times';
 export const DEFAULT_STATE_ACTIONS: Readonly<Record<RunState, string>> = Object.freeze({
   gating: 'Inspect eligibility and contribution policies.',
   awaiting_maintainer: 'Resume explicitly to check the maintainer invitation.',
@@ -65,16 +57,12 @@ export function assembleStatus(parts: StatusParts): StatusRecord {
   const run = restoreRun(parts.run);
   const now = Date.parse(parts.now instanceof Date ? parts.now.toISOString() : parts.now);
   if (!Number.isFinite(now) || now < Date.parse(run.updatedAt)) throw new InvalidStatusError();
-  let state: RunState = 'gating';
-  let start = Date.parse(run.createdAt);
-  let activeTimeMs = 0;
-  for (const entry of run.history) {
-    const end = Date.parse(entry.timestamp);
-    if (ACTIVE.includes(state)) activeTimeMs += end - start;
-    state = entry.to;
-    start = end;
+  let activeTimeMs: number;
+  try {
+    activeTimeMs = lifecycleTimes(run, now).activeMs;
+  } catch {
+    throw new InvalidStatusError();
   }
-  if (ACTIVE.includes(state)) activeTimeMs += now - start;
   const session = parts.budget.sessions.find((s) => s.id === parts.sessionId);
   if (!session || parts.budget.contributionId !== contributionIdOf(run.runId))
     throw new InvalidStatusError();
