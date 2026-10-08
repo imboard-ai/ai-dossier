@@ -20,7 +20,9 @@ the exact live `vm: VmHandle` returned by `provisionWorkspace`, `model: ModelAda
 body }`, `baseManifest: SourceManifest`, `collector: OutputCollector`, `now: () =>
 Date`, and an awaited controller-owned `persist(entry: string)` transcript sink.
 `maxTurns?` is a trusted caller override. Optional `activeTime: ActiveTimeBudget`
-provides explicit run-wide active accounting. The loop calls `meteredComplete` internally:
+provides explicit run-wide active accounting. `cleanupTimeoutMs?` bounds supervisory
+deadline teardown (default `DEFAULT_LOOP_CLEANUP_TIMEOUT_MS = 5000`); timeout does
+not claim guest quiescence. The loop calls `meteredComplete` internally:
 pass the selected model adapter, with no worker-held model credentials or gateway.
 
 Planning returns `AgentPlan` (`{ kind: 'plan', text, digest }`, SHA-256 of exact UTF-8
@@ -94,7 +96,14 @@ is retained for boundary checks. Broker truncation or collector overflow hands
 off as `output_truncated` rather than allowing partial evidence to pass.
 
 Transcript events include start data, detached model responses, admitted actions,
-rejections and action replies. Every entry is scanned with `assertNoSecrets`
+rejections, action replies and terminal stop events with controller-defined stage,
+turn and stop outcome. Stop persistence has a separate
+`TERMINAL_TRANSCRIPT_TIMEOUT_MS = 1000` durability allowance after active expiry;
+a failed sink is not recursively asked to report itself.
+Terminal persistence failure preserves an already-stopped outcome, but cannot
+turn a candidate/plan into success. Diagnostic codes are controller-defined
+(`broker_failure`, `provider_failure`, `controller_failure`), never exception text.
+Every entry is scanned with `assertNoSecrets`
 (including nested primitive strings); a secret-shaped entry is stored as literal
 `[redacted]`. Secret proposals are rejected and omitted from subsequent requests.
 Secret-bearing initial issue/repair data is recorded redacted and refuses the loop
@@ -122,7 +131,12 @@ limits are rejected before changing the overlay.
 
 Each admitted loop write updates this overlay and mirrors those exact bytes with
 `putFile` so later commands can see them. The loop never calls `getFile` to build
-a candidate. `overlay.materialize(directory)` requires an absent directory under
+a candidate. Direct overlay/authority writes permit at most 1 MiB
+of content, but the OpenAI-compatible model transport caps the **entire serialized
+tool argument at 64 KiB**, including JSON envelope and escaping. Complete-file
+rewrites exceeding that smaller transport bound give `model_invalid_response`;
+they cannot be delivered through that transport. The larger overlay limit does
+not widen transport admission. `overlay.materialize(directory)` requires an absent directory under
 a controller-owned parent, creates it privately (0700), writes only base plus
 overlay files (0600, or 0700 for executables), then returns `exportSource`'s
 candidate manifest and checks its digest against the held source. Existing trees

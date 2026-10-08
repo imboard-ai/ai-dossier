@@ -38,7 +38,14 @@ export function agentTools(phase: AgentPhase): readonly ModelTool[] {
             ...(phase === 'planning'
               ? [action('submit_plan', { text: string(MAX_PLAN_BYTES) })]
               : [
-                  action('worker_write_file', { path: string(512), content: string(1024 * 1024) }),
+                  action('worker_write_file', {
+                    path: string(512),
+                    content: {
+                      ...string(1024 * 1024),
+                      description:
+                        'Complete UTF-8 contents. The OpenAI-compatible transport caps the entire serialized argument at 64 KiB, including JSON overhead/escaping; larger rewrites are unsupported through that transport.',
+                    },
+                  }),
                   action('candidate_ready', {
                     title: string(256),
                     cause: {

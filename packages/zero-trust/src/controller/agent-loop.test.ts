@@ -27,7 +27,7 @@ import {
   runImplementation,
   runPlanning,
 } from './agent-loop';
-import { provisionWorkspace, releaseWorkspace } from './evidence-runner';
+import { provisionWorkspace, releaseWorkspace, runPlanned } from './evidence-runner';
 import { OutputCollector } from './output-collector';
 
 const TIME = '2026-10-08T00:00:00.000Z';
@@ -725,5 +725,115 @@ describe('provider-neutral admitted controller loop', () => {
     expect(model.requests).toHaveLength(1);
     expect(adapter.calls.map((c) => c.op)).toEqual(['destroy']);
     expect(await runPlanning(ctx)).toEqual({ kind: 'hand_off', reason: 'loop_failed' });
+  });
+  it('bounded cleanup returns without claiming quiescence when destruction stalls', async () => {
+    const { ctx, adapter, model, transcript } = await setup([
+      call({ kind: 'worker_write_file', path: 'a', content: 'x' }),
+      call(META),
+    ]);
+    vi.spyOn(adapter, 'putFile').mockImplementation(async () => new Promise<void>(() => {}));
+    vi.spyOn(adapter, 'destroy').mockImplementation(async () => new Promise<void>(() => {}));
+    expect(
+      await runImplementation(
+        {
+          ...ctx,
+          now: () => new Date(),
+          limits: { ...ctx.limits, activeMinutes: 0.002 },
+          cleanupTimeoutMs: 30,
+        },
+        { plan: PLAN }
+      )
+    ).toEqual({ kind: 'hand_off', reason: 'cleanup_failed' });
+    expect(model.requests).toHaveLength(1);
+    expect(adapter.liveVms()).toHaveLength(1);
+    expect(await runPlanning(ctx)).toEqual({ kind: 'hand_off', reason: 'loop_failed' });
+    expect(
+      transcript
+        .map((s) => JSON.parse(s))
+        .some(
+          (e) =>
+            e.event === 'stop' &&
+            e.stage === 'deadline_cleanup' &&
+            e.data.reason === 'cleanup_failed'
+        )
+    ).toBe(true);
+  });
+  it('evidence and loops share exclusive ownership in both acquisition orders', async () => {
+    const { ctx, adapter, workspace, model } = await setup([call(META)]);
+    const command = {
+      id: 'verify',
+      phase: 'verification' as const,
+      network: 'none' as const,
+      argv: ['true'],
+      env: {},
+      timeoutMs: 1000,
+      required: true,
+      captureReport: false,
+    };
+    const original = adapter.exec.bind(adapter);
+    let resume: (() => void) | undefined;
+    const wait = new Promise<void>((r) => {
+      resume = r;
+    });
+    vi.spyOn(adapter, 'exec').mockImplementation(async (...args) => {
+      await wait;
+      return original(...args);
+    });
+    const evidence = runPlanned(adapter, workspace, command, ctx.collector);
+    await Promise.resolve();
+    expect(await runImplementation(ctx, { plan: PLAN })).toEqual({
+      kind: 'hand_off',
+      reason: 'loop_failed',
+    });
+    await expect(runPlanned(adapter, workspace, command, ctx.collector)).rejects.toThrow(
+      'workspace_unproven'
+    );
+    expect(model.requests).toEqual([]);
+    resume?.();
+    await evidence;
+    // Failure releases evidence ownership too.
+    vi.mocked(adapter.exec).mockRejectedValueOnce(new Error('worker unavailable'));
+    await expect(runPlanned(adapter, workspace, command, ctx.collector)).rejects.toThrow();
+    expect((await runImplementation(ctx, { plan: PLAN })).kind).toBe('candidate');
+    let release: (() => void) | undefined;
+    const hold = new Promise<void>((r) => {
+      release = r;
+    });
+    const nextModel = new ScriptedModel(model.id, [call(META)]);
+    const implementation = runImplementation(
+      { ...ctx, model: nextModel, persist: async () => hold },
+      { plan: PLAN }
+    );
+    await Promise.resolve();
+    await expect(runPlanned(adapter, workspace, command, ctx.collector)).rejects.toThrow(
+      'workspace_unproven'
+    );
+    release?.();
+    await implementation;
+  });
+  it('publication with a null candidate is always unexpected_action and has no worker effects', async () => {
+    const { ctx, model, adapter } = await setup([
+      call({ kind: 'request_publication', operation: 'pr_create', title: 'Fix', body: 'Fix' }),
+      call({ kind: 'submit_plan', text: PLAN.text }),
+    ]);
+    expect(await runPlanning({ ...ctx, binding: { ...ctx.binding, candidateSha: null } })).toEqual(
+      PLAN
+    );
+    expect(model.requests[1].messages.at(-1)?.content).toContain('unexpected_action');
+    expect(adapter.calls).toEqual([]);
+    expect(model.requests).toHaveLength(2);
+  });
+  it('secret-bearing worker failures have a durable bounded stop outcome', async () => {
+    const { ctx, adapter, transcript } = await setup([call(exec)]);
+    vi.spyOn(adapter, 'exec').mockRejectedValue(new Error(SECRET));
+    expect(await runPlanning(ctx)).toEqual({ kind: 'hand_off', reason: 'loop_failed' });
+    expect(JSON.parse(transcript.at(-1) ?? '{}')).toMatchObject({
+      event: 'stop',
+      phase: 'planning',
+      turn: 1,
+      stage: 'worker_exec',
+      data: { kind: 'hand_off', reason: 'loop_failed' },
+    });
+    expect(transcript.join('')).not.toContain(SECRET);
   });
 });

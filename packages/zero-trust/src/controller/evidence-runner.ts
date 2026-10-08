@@ -355,10 +355,22 @@ export async function runPlanned(
   options: RunPlannedOptions = {}
 ): Promise<CommandRecord> {
   if (!PROVEN.has(workspace)) throw new EvidencePlanError('workspace_unproven');
-  assertProvisionedVm(adapter, workspace.vm);
-  if (LEASED_VMS.has(workspace.vm)) throw new EvidencePlanError('workspace_unproven');
   assertCommandPhase(command, 'verification');
-  return execute(adapter, workspace.vm, workspace.profile, command, collector, options);
+  const release = leaseProvisionedVm(adapter, workspace.vm);
+  try {
+    const record = await execute(
+      adapter,
+      workspace.vm,
+      workspace.profile,
+      command,
+      collector,
+      options
+    );
+    assertProvisionedVm(adapter, workspace.vm);
+    return record;
+  } finally {
+    release();
+  }
 }
 
 /** One bounded teardown; a blocked one throws `VmCleanupError` with `cause` set to the

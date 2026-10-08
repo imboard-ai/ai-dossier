@@ -10,7 +10,7 @@ import { CanonicalError, type SourceManifest, sha256 } from '../canonical/export
 import { type ModelAdapter, ModelError, type ModelMessage } from '../model/adapter';
 import { BudgetExhaustedError, meteredComplete } from '../model/metered';
 import { assertNoSecrets, assertSecretFree, REDACTED, redactedExcerpt } from '../redaction';
-import type { VmAdapter, VmHandle } from '../vm/adapter';
+import { BrokerError, type VmAdapter, type VmHandle } from '../vm/adapter';
 import { abortProvisionedVm, assertProvisionedVm, leaseProvisionedVm } from './evidence-runner';
 import type { OutputCollector } from './output-collector';
 import { AGENT_SYSTEM, type AgentPhase, agentTools, untrustedFrame } from './prompts';
@@ -19,6 +19,8 @@ import { WorkspaceOverlay } from './workspace-overlay';
 export const DEFAULT_PLANNING_TURNS = 15;
 export const DEFAULT_IMPLEMENTATION_TURNS = 60;
 export const MAX_WORKER_REPLY_BYTES = 16 * 1024;
+export const DEFAULT_LOOP_CLEANUP_TIMEOUT_MS = 5000;
+export const TERMINAL_TRANSCRIPT_TIMEOUT_MS = 1000;
 const MODEL_TIMEOUT_MS = 60_000;
 const MODEL_OUTPUT_TOKENS = 16384;
 
@@ -107,6 +109,8 @@ export interface AgentLoopContext {
   /** Optional explicit run-owned account, retained and persisted by the caller.
    * Default is shared by ledger identity/session in this process. */
   readonly activeTime?: ActiveTimeBudget;
+  /** Separate bounded cleanup allowance after a worker deadline. */
+  readonly cleanupTimeoutMs?: number;
 }
 
 export type AgentStop =
@@ -152,10 +156,18 @@ function outputTail(text: string): string {
   return bytes.subarray(start).toString('utf8');
 }
 
+interface LoopTracking {
+  turn: number;
+  stage: string;
+  code?: string;
+  finish?: () => void;
+}
+
 async function loop(
   ctx: AgentLoopContext,
   phase: AgentPhase,
-  input?: ImplementationInput
+  input: ImplementationInput | undefined,
+  tracking: LoopTracking
 ): Promise<PlanningResult | ImplementationResult> {
   const maxTurns =
     ctx.maxTurns ?? (phase === 'planning' ? DEFAULT_PLANNING_TURNS : DEFAULT_IMPLEMENTATION_TURNS);
@@ -175,13 +187,27 @@ async function loop(
     ceiling > 2_147_483_647 ||
     !Number.isSafeInteger(ctx.limits.commandTimeoutMs) ||
     ctx.limits.commandTimeoutMs < 1000 ||
-    ctx.limits.commandTimeoutMs > 6 * 3600 * 1000
+    ctx.limits.commandTimeoutMs > 6 * 3600 * 1000 ||
+    !Number.isSafeInteger(ctx.cleanupTimeoutMs ?? DEFAULT_LOOP_CLEANUP_TIMEOUT_MS) ||
+    (ctx.cleanupTimeoutMs ?? DEFAULT_LOOP_CLEANUP_TIMEOUT_MS) < 1 ||
+    (ctx.cleanupTimeoutMs ?? DEFAULT_LOOP_CLEANUP_TIMEOUT_MS) > 2_147_483_647
   )
     return { kind: 'hand_off', reason: 'invalid_context' };
   let lastNow = started;
   const account = activeTime(ctx);
   if (!account.enter()) return { kind: 'hand_off', reason: 'session_busy' };
   let release: (() => void) | undefined;
+  tracking.finish = () => {
+    release?.();
+    let end = lastNow;
+    try {
+      const at = ctx.now().getTime();
+      if (Number.isFinite(at) && at >= end) end = at;
+    } catch {
+      /* Last validated clock still contributes active time. */
+    }
+    account.leave(Math.max(0, end - started));
+  };
   let activeModelDeadline = false;
   const remaining = (): number => {
     const at = ctx.now().getTime();
@@ -223,6 +249,8 @@ async function loop(
     assertSecretFree(messages);
     let rejected = 0;
     for (let turn = 1; turn <= maxTurns; turn++) {
+      tracking.turn = turn;
+      tracking.stage = 'model';
       const time = remaining();
       if (time <= 0) return { kind: 'budget_exhausted', reason: 'active_time' };
       assertProvisionedVm(ctx.adapter, ctx.vm);
@@ -264,6 +292,7 @@ async function loop(
         )
           throw new AuthorityError('unexpected_action');
         await record(turn, 'admitted', admitted);
+        tracking.stage = admitted.kind;
         assertProvisionedVm(ctx.adapter, ctx.vm);
         if (remaining() <= 0) return { kind: 'budget_exhausted', reason: 'active_time' };
         switch (admitted.kind) {
@@ -343,7 +372,9 @@ async function loop(
       } catch (error) {
         if (!(error instanceof AuthorityError)) throw error;
         rejected++;
-        reply = { kind: 'rejected', code: error.code };
+        // Publication is unavailable regardless of whether a candidate is bound yet.
+        const code = error.code === 'no_candidate' ? 'unexpected_action' : error.code;
+        reply = { kind: 'rejected', code };
         await record(turn, 'rejected', reply);
         if (rejected >= 5) return { kind: 'hand_off', reason: 'model_noncompliant' };
       }
@@ -373,11 +404,17 @@ async function loop(
     }
     return { kind: 'turns_exhausted' };
   } catch (error) {
+    tracking.code = error instanceof BrokerError ? 'broker_failure' : 'controller_failure';
     if (error instanceof ActiveTimeExpired)
       return { kind: 'budget_exhausted', reason: 'active_time' };
     if (error instanceof WorkerDeadline) {
+      tracking.stage = 'deadline_cleanup';
       try {
-        await abortProvisionedVm(ctx.adapter, ctx.vm);
+        await bounded(
+          () => abortProvisionedVm(ctx.adapter, ctx.vm),
+          ctx.cleanupTimeoutMs ?? DEFAULT_LOOP_CLEANUP_TIMEOUT_MS,
+          new Error('cleanup_timeout')
+        );
       } catch {
         return { kind: 'hand_off', reason: 'cleanup_failed' };
       }
@@ -389,31 +426,68 @@ async function loop(
       return { kind: 'budget_exhausted', reason: 'budget' };
     if (persistenceFailed) return { kind: 'hand_off', reason: 'persistence_failed' };
     if (error instanceof ModelError) {
+      tracking.code = 'provider_failure';
       if (error.code === 'model_timeout' && activeModelDeadline)
         return { kind: 'budget_exhausted', reason: 'active_time' };
       return { kind: 'hand_off', reason: error.code };
     }
     return { kind: 'hand_off', reason: 'loop_failed' };
-  } finally {
-    release?.();
-    let end = lastNow;
+  }
+}
+
+async function runLoop(
+  ctx: AgentLoopContext,
+  phase: AgentPhase,
+  input?: ImplementationInput
+): Promise<PlanningResult | ImplementationResult> {
+  const tracking: LoopTracking = { turn: 0, stage: 'startup' };
+  try {
+    const result = await loop(ctx, phase, input, tracking);
+    // A failed sink is never recursively asked to report its own failure. Stopping
+    // events get a separate small durability allowance even after active expiry.
+    if (result.kind === 'hand_off' && result.reason === 'persistence_failed') return result;
+    const data = result.kind === 'candidate' ? { kind: result.kind, meta: result.meta } : result;
     try {
-      const at = ctx.now().getTime();
-      if (Number.isFinite(at) && at >= end) end = at;
+      await bounded(
+        async () =>
+          ctx.persist(
+            safeRecord({
+              phase,
+              turn: tracking.turn,
+              stage: tracking.stage,
+              code: tracking.code,
+              event: 'stop',
+              data,
+            })
+          ),
+        TERMINAL_TRANSCRIPT_TIMEOUT_MS,
+        new Error('terminal_persistence_timeout')
+      );
     } catch {
-      /* Last validated clock still contributes active time. */
+      return result.kind === 'candidate' || result.kind === 'plan'
+        ? { kind: 'hand_off', reason: 'persistence_failed' }
+        : result;
     }
-    account.leave(Math.max(0, end - started));
+    if (result.kind === 'candidate' || result.kind === 'plan') {
+      try {
+        assertProvisionedVm(ctx.adapter, ctx.vm);
+      } catch {
+        return { kind: 'hand_off', reason: 'loop_failed' };
+      }
+    }
+    return result;
+  } finally {
+    tracking.finish?.();
   }
 }
 
 export async function runPlanning(ctx: AgentLoopContext): Promise<PlanningResult> {
-  return (await loop(ctx, 'planning')) as PlanningResult;
+  return (await runLoop(ctx, 'planning')) as PlanningResult;
 }
 
 export async function runImplementation(
   ctx: AgentLoopContext,
   input: ImplementationInput
 ): Promise<ImplementationResult> {
-  return (await loop(ctx, 'implementing', input)) as ImplementationResult;
+  return (await runLoop(ctx, 'implementing', input)) as ImplementationResult;
 }
