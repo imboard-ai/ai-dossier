@@ -6,6 +6,15 @@ import {
 } from './output-collector';
 
 describe('OutputCollector', () => {
+  it('explicit capture incompleteness remains sticky even below the collection cap', () => {
+    const collector = new OutputCollector(100);
+    collector.append('partial');
+    collector.markIncomplete();
+    collector.append('later complete output');
+    expect(collector.bytes).toBeLessThan(100);
+    expect(collector.truncated).toBe(true);
+    expect(() => collector.outputs()).toThrow(OutputTruncatedError);
+  });
   it('keeps strings and buffers in arrival order and skips empty output', () => {
     const collector = new OutputCollector();
     collector.append('stdout');

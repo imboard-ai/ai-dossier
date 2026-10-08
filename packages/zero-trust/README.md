@@ -101,6 +101,12 @@ untrusted frame with observed exit/timeout facts. Entire outputs are scanned bef
 excerpting, and secret-shaped output becomes `[redacted]`; raw collected evidence
 is retained for boundary checks. Broker truncation or collector overflow hands
 off as `output_truncated` rather than allowing partial evidence to pass.
+`OutputCollector.markIncomplete()` permanently records broker-side capture loss
+even below the collector's own cap, so boundary consumption refuses partial scans.
+Truncation, malformed results and uncertain exec failures fence workspace reuse;
+uncertain exec failures use bounded quiescence before returning, with
+`cleanup_failed` when it cannot be established. A refused concurrent contender
+does not acquire transcript or lifecycle authority and cannot invalidate its owner.
 
 Transcript events include start data, detached model responses, admitted actions,
 rejections, action replies and terminal stop events with controller-defined stage,

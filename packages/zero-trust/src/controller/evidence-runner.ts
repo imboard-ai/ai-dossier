@@ -322,6 +322,7 @@ async function execute(
   });
   collector.append(result.stdout);
   collector.append(result.stderr);
+  if (result.truncated) collector.markIncomplete();
   if (command.captureReport) collector.append(result.report);
   const summary = command.captureReport ? parseJunitReport(result.report) : null;
   const outcome = outcomeOf(result, summary);

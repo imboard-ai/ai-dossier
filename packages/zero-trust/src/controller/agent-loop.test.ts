@@ -1037,4 +1037,56 @@ describe('provider-neutral admitted controller loop', () => {
     expect(await runPlanning(ctx)).toEqual({ kind: 'hand_off', reason: 'loop_failed' });
     expect(model.requests).toEqual([]);
   });
+  it('broker truncation below collector capacity remains incomplete boundary evidence and fences reuse', async () => {
+    const { ctx, adapter, model } = await setup([call(exec), call(META)]);
+    adapter.on(['npm', 'test'], { stdout: 'partial', truncated: true });
+    expect(await runImplementation(ctx, { plan: PLAN })).toEqual({
+      kind: 'hand_off',
+      reason: 'output_truncated',
+    });
+    expect(ctx.collector.bytes).toBeLessThan(ctx.collector.capBytes);
+    expect(ctx.collector.truncated).toBe(true);
+    expect(() => ctx.collector.outputs()).toThrow();
+    expect(await runImplementation(ctx, { plan: PLAN })).toEqual({
+      kind: 'hand_off',
+      reason: 'loop_failed',
+    });
+    expect(model.requests).toHaveLength(1);
+  });
+  it('uncertain exec/protocol failure quiesces and permanently fences candidate-only re-entry', async () => {
+    const { ctx, adapter, model } = await setup([call(exec), call(META)]);
+    vi.spyOn(adapter, 'exec').mockRejectedValue(new Error('post-dispatch transport loss'));
+    expect(await runImplementation(ctx, { plan: PLAN })).toEqual({
+      kind: 'hand_off',
+      reason: 'loop_failed',
+    });
+    expect(adapter.calls.map((c) => c.op)).toEqual(['destroy']);
+    expect(adapter.liveVms()).toEqual([]);
+    expect(ctx.collector.truncated).toBe(true);
+    expect(await runImplementation(ctx, { plan: PLAN })).toEqual({
+      kind: 'hand_off',
+      reason: 'loop_failed',
+    });
+    expect(model.requests).toHaveLength(1);
+  });
+  it('a rejected busy contender cannot run a failing sink or invalidate the owner', async () => {
+    const { ctx, model } = await setup([call(META)]);
+    let release: (() => void) | undefined;
+    const wait = new Promise<void>((r) => {
+      release = r;
+    });
+    const owner = runImplementation({ ...ctx, persist: async () => wait }, { plan: PLAN });
+    await Promise.resolve();
+    const sink = vi.fn(() => {
+      throw new Error('contender sink failed');
+    });
+    expect(await runImplementation({ ...ctx, persist: sink }, { plan: PLAN })).toEqual({
+      kind: 'hand_off',
+      reason: 'session_busy',
+    });
+    expect(sink).not.toHaveBeenCalled();
+    release?.();
+    expect((await owner).kind).toBe('candidate');
+    expect(model.requests).toHaveLength(1);
+  });
 });

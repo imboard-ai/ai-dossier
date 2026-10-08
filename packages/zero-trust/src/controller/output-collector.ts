@@ -9,7 +9,9 @@ export const DEFAULT_OUTPUT_CAP_BYTES = 64 * 1024 * 1024;
  * returned; boundary evidence built from it must fail closed. */
 export class OutputTruncatedError extends Error {
   constructor(readonly capBytes: number) {
-    super(`Guest output exceeded the ${capBytes}-byte collection cap; the scan would be partial`);
+    super(
+      `Guest output is incomplete (capture truncation or ${capBytes}-byte cap); the scan would be partial`
+    );
     this.name = 'OutputTruncatedError';
   }
 }
@@ -48,6 +50,11 @@ export class OutputCollector {
 
   get bytes(): number {
     return this.kept;
+  }
+
+  /** Broker/report capture already dropped bytes, even if this collector has room. */
+  markIncomplete(): void {
+    this.dropped = true;
   }
 
   /** True once anything was dropped at the cap; `outputs()` then refuses. */

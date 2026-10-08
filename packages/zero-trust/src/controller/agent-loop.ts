@@ -180,6 +180,7 @@ interface LoopTracking {
   stage: string;
   code?: string;
   finish?: () => void;
+  ownsWorkspace?: boolean;
 }
 
 async function loop(
@@ -255,6 +256,7 @@ async function loop(
   try {
     if (remaining() <= 0) return { kind: 'budget_exhausted', reason: 'active_time' };
     release = leaseProvisionedVm(ctx.adapter, ctx.vm);
+    tracking.ownsWorkspace = true;
     const overlay = workspaceOverlay(ctx);
     const messages: ModelMessage[] = [
       { role: 'user', content: untrustedFrame('issue', ctx.issue) },
@@ -382,8 +384,11 @@ async function loop(
               invalidateProvisionedVm(ctx.adapter, ctx.vm);
               return { kind: 'hand_off', reason: 'worker_inconclusive' };
             }
-            if (truncated || ctx.collector.truncated)
+            if (truncated || ctx.collector.truncated) {
+              ctx.collector.markIncomplete();
+              invalidateProvisionedVm(ctx.adapter, ctx.vm);
               return { kind: 'hand_off', reason: 'output_truncated' };
+            }
             const { excerpt } = redactedExcerpt(`${stdout}\n--- stderr ---\n${stderr}`, outputTail);
             reply = {
               kind: 'exec_result',
@@ -432,7 +437,10 @@ async function loop(
     }
     return { kind: 'turns_exhausted' };
   } catch (error) {
-    if (tracking.stage === 'worker_write_file') invalidateProvisionedVm(ctx.adapter, ctx.vm);
+    if (tracking.stage === 'worker_write_file' || tracking.stage === 'worker_exec')
+      invalidateProvisionedVm(ctx.adapter, ctx.vm);
+    if (tracking.stage === 'worker_exec' && !(error instanceof WorkerDeadline))
+      ctx.collector.markIncomplete();
     tracking.code = error instanceof BrokerError ? 'broker_failure' : 'controller_failure';
     if (error instanceof ActiveTimeExpired)
       return { kind: 'budget_exhausted', reason: 'active_time' };
@@ -453,6 +461,17 @@ async function loop(
     }
     if (error instanceof BudgetExhaustedError)
       return { kind: 'budget_exhausted', reason: 'budget' };
+    if (tracking.stage === 'worker_exec') {
+      try {
+        await bounded(
+          () => abortProvisionedVm(ctx.adapter, ctx.vm),
+          ctx.cleanupTimeoutMs ?? DEFAULT_LOOP_CLEANUP_TIMEOUT_MS,
+          new Error('cleanup_timeout')
+        );
+      } catch {
+        return { kind: 'hand_off', reason: 'cleanup_failed' };
+      }
+    }
     if (persistenceFailed) return { kind: 'hand_off', reason: 'persistence_failed' };
     if (error instanceof ModelError) {
       tracking.code = 'provider_failure';
@@ -472,6 +491,8 @@ async function runLoop(
   const tracking: LoopTracking = { turn: 0, stage: 'startup' };
   try {
     let result = await loop(ctx, phase, input, tracking);
+    // A refused contender never owned lifecycle/transcript authority for this VM.
+    if (!tracking.ownsWorkspace) return result;
     // A failed sink is never recursively asked to report its own failure. Stopping
     // events get a separate small durability allowance even after active expiry.
     if (result.kind === 'hand_off' && result.reason === 'persistence_failed') return result;
