@@ -380,6 +380,22 @@ describe('deterministic candidate scope/test integrity', () => {
       'test_disabled'
     );
   });
+  it.each([
+    'it.skip',
+    'test.skip',
+    'describe.skip',
+    'xit',
+    'xdescribe',
+    'pytest.skip',
+  ])('grouped selector deletion activating %s preserves grouping context', (marker) => {
+    const path = 'a.test.js';
+    const before = `(\nit ||\n${marker}\n)("case", () => expect(true));\n`;
+    const after = `(\n${marker}\n)("case", () => expect(true));\n`;
+    expect(codes(input({ [path]: before }, { [path]: after }))).toContain('test_disabled');
+    expect(codes(input({ [path]: `${after}old\n` }, { [path]: `${after}new\n` }))).not.toContain(
+      'test_disabled'
+    );
+  });
   it('ordinary source assertions/skip text are not treated as test integrity', () => {
     expect(codes(input({ 'src/a.ts': 'expect(1);\n' }, { 'src/a.ts': 'it.skip(\n' }))).toEqual([]);
   });

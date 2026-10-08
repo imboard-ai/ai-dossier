@@ -116,8 +116,11 @@ function screen(value: string): Screening {
       for (const marker of ['skip', 'skipif', 'xfail'])
         end ??= chain(at, ['pytest', '.', 'mark', '.', marker]);
     }
-    if (end !== null)
-      markers.push([name === '.' ? gapStart[match.index] : match.index, end, name === '.']);
+    if (end !== null) {
+      const grouped = /[()]/u.test(value.slice(gapStart[match.index], match.index));
+      const start = name === '.' || grouped ? gapStart[match.index] : match.index;
+      markers.push([start, end, name === '.' || start < match.index]);
+    }
     if (name === 'assert' || (name === 'expect' && call(at) !== null)) assertions++;
     if (name === 'self') {
       const dot = chain(at, ['.']);
