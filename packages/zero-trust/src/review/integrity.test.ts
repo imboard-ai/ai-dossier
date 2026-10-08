@@ -218,6 +218,23 @@ describe('deterministic candidate scope/test integrity', () => {
     ).not.toContain('test_disabled');
   });
   it.each([
+    'it',
+    'test',
+    'describe',
+    'customRunner',
+  ])('deletion/rearrangement activating %s.only retains receiver evidence', (receiver) => {
+    const path = 'focus.test.js';
+    const before = `${receiver}\n|| (() => {})\n.only("case", () => expect(true));\n`;
+    const after = `${receiver}\n.only("case", () => expect(true));\n`;
+    expect(codes(input({ [path]: before }, { [path]: after }))).toContain('test_disabled');
+    expect(codes(input({ [path]: before }, { [path]: `${after}|| (() => {})\n` }))).toContain(
+      'test_disabled'
+    );
+    expect(codes(input({ [path]: `${after}old\n` }, { [path]: `${after}new\n` }))).not.toContain(
+      'test_disabled'
+    );
+  });
+  it.each([
     ' ',
     '\t',
     '\\\n',

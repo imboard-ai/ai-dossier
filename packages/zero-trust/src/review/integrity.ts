@@ -50,7 +50,7 @@ const MAX_TEXT_BYTES = 1024 * 1024;
 const MAX_DIFF_CELLS = 1_000_000;
 
 interface Screening {
-  markers: [number, number][];
+  markers: [number, number, boolean][];
   assertions: number;
 }
 /** Cached lexical-gap jumps avoid rescanning long comments at each token. */
@@ -87,7 +87,7 @@ function screen(value: string): Screening {
   };
   const call = (at: number | null): number | null =>
     at !== null && value[callGap[at]] === '(' ? callGap[at] + 1 : null;
-  const markers: [number, number][] = [];
+  const markers: [number, number, boolean][] = [];
   let assertions = 0;
   for (const match of value.matchAll(
     /\b(?:it|describe|test|xit|xdescribe|pytest|unittest|expect|self|assert)\b|@|\./gu
@@ -97,6 +97,7 @@ function screen(value: string): Screening {
     let end: number | null = null;
     if (name === 'it' || name === 'describe' || name === 'test') {
       end = call(chain(at, ['.', 'skip']));
+      end ??= call(chain(at, ['.', 'only']));
       if (end === null && name === 'it') end = call(chain(at, ['.', 'todo']));
     } else if (name === 'xit' || name === 'xdescribe') end = call(at);
     else if (name === '.') end = call(chain(at, ['only']));
@@ -108,7 +109,7 @@ function screen(value: string): Screening {
       for (const marker of ['skip', 'skipif', 'xfail'])
         end ??= chain(at, ['pytest', '.', 'mark', '.', marker]);
     }
-    if (end !== null) markers.push([match.index, end]);
+    if (end !== null) markers.push([match.index, end, name === '.']);
     if (name === 'assert' || (name === 'expect' && call(at) !== null)) assertions++;
     if (name === 'self') {
       const dot = chain(at, ['.']);
@@ -212,10 +213,17 @@ function diff(before: string, after: string, remainingCells: number): LineDiff {
 function addedDisableMarker(markers: Screening['markers'], changes: LineDiff): boolean {
   let range = 0;
   let junction = 0;
-  for (const [start, end] of markers) {
+  for (const [start, end, receiverOutsideSpan] of markers) {
     while (range < changes.ranges.length && changes.ranges[range][1] <= start) range++;
     if (range < changes.ranges.length && changes.ranges[range][0] < end) return true;
-    while (junction < changes.junctions.length && changes.junctions[junction] <= start) junction++;
+    // Generic .only spans exclude the receiver; their start junction can
+    // activate a focused call, so retain that boundary as ambiguous evidence.
+    while (
+      junction < changes.junctions.length &&
+      (changes.junctions[junction] < start ||
+        (changes.junctions[junction] === start && !receiverOutsideSpan))
+    )
+      junction++;
     if (junction < changes.junctions.length && changes.junctions[junction] < end) return true;
   }
   return false;
