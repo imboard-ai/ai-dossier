@@ -297,6 +297,41 @@ describe('deterministic candidate scope/test integrity', () => {
       codes(input({ 'a_test.py': assertion }, { 'a_test.py': `${assertion}text\n` }))
     ).not.toContain('assertions_reduced');
   });
+  it.each(['  ', '\t', '/* leading gap */ '])('generic focus keeps lexical prefix %j', (prefix) => {
+    const path = 'focus.test.js';
+    const before = `customRunner\n|| (() => {})\n${prefix}.only("case", () => expect(true));\n`;
+    const after = `customRunner\n${prefix}.only("case", () => expect(true));\n`;
+    expect(codes(input({ [path]: before }, { [path]: after }))).toContain('test_disabled');
+    expect(codes(input({ [path]: `${after}old\n` }, { [path]: `${after}new\n` }))).not.toContain(
+      'test_disabled'
+    );
+  });
+  it.each([
+    'skipIf(True, "reason")',
+    'skipUnless(False, "reason")',
+  ])('continued unittest decorator activation %s spans its @', (marker) => {
+    const path = 'test_activation.py';
+    const before = `@\\\nenabled or \\\nunittest.${marker}\ndef test_case(): assert True\n`;
+    const after = `@\\\nunittest.${marker}\ndef test_case(): assert True\n`;
+    expect(codes(input({ [path]: before }, { [path]: after }))).toContain('test_disabled');
+    expect(codes(input({ [path]: `${after}old\n` }, { [path]: `${after}new\n` }))).not.toContain(
+      'test_disabled'
+    );
+  });
+  it('exhausted diff budget retains conservative deletion boundaries', () => {
+    const baseSource = `old\n${'common\n'.repeat(997)}old-end\n`;
+    const nextSource = `new\n${'common\n'.repeat(997)}new-end\n`;
+    const before = 'customRunner\n|| (() => {})\n  .only("focused", () => {});\n';
+    const after = 'customRunner\n  .only("focused", () => {});\n';
+    expect(
+      codes(
+        input(
+          { 'a.js': baseSource, 'b.test.js': before },
+          { 'a.js': nextSource, 'b.test.js': after }
+        )
+      )
+    ).toContain('test_disabled');
+  });
   it('ordinary source assertions/skip text are not treated as test integrity', () => {
     expect(codes(input({ 'src/a.ts': 'expect(1);\n' }, { 'src/a.ts': 'it.skip(\n' }))).toEqual([]);
   });

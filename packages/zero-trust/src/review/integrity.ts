@@ -77,6 +77,11 @@ function screen(value: string): Screening {
     (!/\w/u.test(name[name.length - 1]) || !/\w/u.test(value[at + name.length] ?? ''))
       ? at + name.length
       : null;
+  // Earliest raw gap leading to each token; generic .only has no named receiver.
+  const gapStart = new Uint32Array(value.length + 1);
+  for (let i = 0; i <= value.length; i++) gapStart[i] = i;
+  for (let i = 0; i < value.length; i++)
+    if (gap[i] > i) gapStart[gap[i]] = Math.min(gapStart[gap[i]], i);
   const chain = (at: number, names: readonly string[]): number | null => {
     for (const name of names) {
       const end = token(gap[at], name);
@@ -106,10 +111,13 @@ function screen(value: string): Screening {
       end = chain(at, ['.', 'skipIf']) ?? chain(at, ['.', 'skipUnless']);
     else if (name === '@') {
       end = chain(at, ['unittest', '.', 'skip']);
+      end ??= chain(at, ['unittest', '.', 'skipIf']);
+      end ??= chain(at, ['unittest', '.', 'skipUnless']);
       for (const marker of ['skip', 'skipif', 'xfail'])
         end ??= chain(at, ['pytest', '.', 'mark', '.', marker]);
     }
-    if (end !== null) markers.push([match.index, end, name === '.']);
+    if (end !== null)
+      markers.push([name === '.' ? gapStart[match.index] : match.index, end, name === '.']);
     if (name === 'assert' || (name === 'expect' && call(at) !== null)) assertions++;
     if (name === 'self') {
       const dot = chain(at, ['.']);
@@ -171,7 +179,7 @@ function diff(before: string, after: string, remainingCells: number): LineDiff {
       count: old.length + next.length,
       added: next.join(''),
       ranges: [[offsets[start], offsets[endB]]],
-      junctions: [],
+      junctions: old.length ? [offsets[start], offsets[endB]] : [],
       cells: 0,
     };
   const width = next.length + 1;
