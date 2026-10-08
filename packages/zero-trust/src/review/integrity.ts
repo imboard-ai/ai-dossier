@@ -224,8 +224,8 @@ function diff(before: string, after: string, remainingCells: number): LineDiff {
 /** Scan full candidate context, including markers split across unchanged/added lines. */
 function addedDisableMarker(markers: Screening['markers'], changes: LineDiff): boolean {
   // Textual screening cannot prove a retained marker stayed inert when a patch
-  // removes comment/string delimiters. Refuse this ambiguous context change.
-  if (markers.length && /\/\*|\*\/|['"`]/u.test(changes.removed)) return true;
+  // changes comment/string delimiters. Refuse this ambiguous context change.
+  if (markers.length && /\/\*|\*\/|['"`]/u.test(changes.added + changes.removed)) return true;
   let range = 0;
   let junction = 0;
   for (const [start, end, receiverOutsideSpan] of markers) {

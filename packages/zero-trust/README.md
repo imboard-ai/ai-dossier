@@ -46,7 +46,7 @@ comments, literals and moved lines can produce findings. Marker matches use full
 candidate context and must overlap an added line or cross a deletion-created
 junction, including multiline markers assembled entirely from retained lines.
 It is not semantic proof.
-If deleted lines contain comment/string delimiters and candidate disabling
+If added or deleted lines contain comment/string delimiters and candidate disabling
 markers remain, screening conservatively refuses the ambiguous lexical-context
 change: a retained marker may have become active without any added token.
 Non-test added lines containing `ai-dossier` or `imboard` are `promotional`.

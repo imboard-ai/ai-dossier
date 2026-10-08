@@ -348,6 +348,23 @@ describe('deterministic candidate scope/test integrity', () => {
       'test_disabled'
     );
   });
+  it.each([
+    [
+      'a.test.js',
+      '/*\nit.skip("hidden", () => {});\n*/\nit("active", () => {});\n',
+      '/*\n*/\nit.skip("hidden", () => {});\n/*\n*/\nit("active", () => {});\n',
+    ],
+    [
+      'test_case.py',
+      '"""\n@unittest.skip("reason")\ndef test_skipped(): pass\n"""\nassert True\n',
+      '"""\n"""\n@unittest.skip("reason")\ndef test_skipped(): pass\n"""\n"""\nassert True\n',
+    ],
+  ])('delimiter insertions in %s refuse retained-marker activation', (path, before, after) => {
+    expect(codes(input({ [path]: before }, { [path]: after }))).toContain('test_disabled');
+    expect(codes(input({ [path]: `${before}old\n` }, { [path]: `${before}new\n` }))).not.toContain(
+      'test_disabled'
+    );
+  });
   it('ordinary source assertions/skip text are not treated as test integrity', () => {
     expect(codes(input({ 'src/a.ts': 'expect(1);\n' }, { 'src/a.ts': 'it.skip(\n' }))).toEqual([]);
   });
