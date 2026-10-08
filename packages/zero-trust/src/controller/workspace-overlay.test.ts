@@ -84,7 +84,10 @@ describe('WorkspaceOverlay controller-held source', () => {
   it('refuses credential and oversized contents', () => {
     const overlay = new WorkspaceOverlay(createManifest([]));
     expect(() => overlay.write('a', ['gh', 'p_', 'fixture'].join(''))).toThrow();
-    expect(() => overlay.write('a', 'é'.repeat(MAX_FILE_BYTES / 2 + 1))).toThrow('limit_exceeded');
+    expect(() => overlay.write('a', 'é'.repeat(MAX_FILE_BYTES / 2 + 1))).toThrow('invalid_field');
+    expect(() => overlay.write(['gh', 'p_', 'fixture'].join(''), 'safe')).toThrow(
+      'credential_material'
+    );
   });
   it('rejects file/directory and case collisions atomically', () => {
     const overlay = new WorkspaceOverlay(

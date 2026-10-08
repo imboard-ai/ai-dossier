@@ -19,6 +19,7 @@ import { assertNoSecrets } from '../redaction';
 import { createRun } from '../state';
 import { DEFAULT_LIMITS } from '../vm/adapter';
 import {
+  ActiveTimeBudget,
   type AgentLoopContext,
   DEFAULT_IMPLEMENTATION_TURNS,
   DEFAULT_PLANNING_TURNS,
@@ -544,5 +545,185 @@ describe('provider-neutral admitted controller loop', () => {
       reason: 'loop_failed',
     });
     expect(model.requests).toEqual([]);
+  });
+  it('shares active time across phases and repair attempts, excluding idle time', async () => {
+    let at = Date.parse(TIME);
+    const fixture = await setup([
+      call(exec),
+      call({ kind: 'submit_plan', text: PLAN.text }),
+      call(exec),
+      call(META),
+    ]);
+    const original = fixture.adapter.exec.bind(fixture.adapter);
+    vi.spyOn(fixture.adapter, 'exec').mockImplementation(async (...args) => {
+      const result = await original(...args);
+      at += 50_000;
+      return result;
+    });
+    const ctx = {
+      ...fixture.ctx,
+      now: () => new Date(at),
+      limits: { ...fixture.ctx.limits, activeMinutes: 1 },
+    };
+    expect(await runPlanning(ctx)).toEqual(PLAN);
+    at += 30 * 60_000;
+    expect(await runImplementation({ ...ctx }, { plan: PLAN })).toEqual({
+      kind: 'budget_exhausted',
+      reason: 'active_time',
+    });
+    expect(fixture.model.requests).toHaveLength(3);
+    expect(fixture.adapter.execs()[1].request.wallTimeoutMs).toBe(10_000);
+    expect(await runImplementation(ctx, { plan: PLAN, repairOf: 'failure' })).toEqual({
+      kind: 'budget_exhausted',
+      reason: 'active_time',
+    });
+    expect(fixture.model.requests).toHaveLength(3);
+    const resumed = await setup([call(META)]);
+    expect(
+      await runImplementation(
+        {
+          ...resumed.ctx,
+          activeTime: new ActiveTimeBudget(60_000),
+          limits: { ...resumed.ctx.limits, activeMinutes: 1 },
+        },
+        { plan: PLAN }
+      )
+    ).toEqual({ kind: 'budget_exhausted', reason: 'active_time' });
+    expect(resumed.model.requests).toEqual([]);
+    expect(() => new ActiveTimeBudget(-1)).toThrow();
+  });
+  it('excludes concurrent loops on the same session or workspace before model effects', async () => {
+    let resume: (() => void) | undefined;
+    const wait = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    const { ctx, model, adapter } = await setup([call(META)]);
+    const pending = runImplementation({ ...ctx, persist: async () => wait }, { plan: PLAN });
+    await Promise.resolve();
+    expect(await runImplementation(ctx, { plan: PLAN })).toEqual({
+      kind: 'hand_off',
+      reason: 'session_busy',
+    });
+    expect(
+      await runImplementation({ ...ctx, activeTime: new ActiveTimeBudget() }, { plan: PLAN })
+    ).toEqual({ kind: 'hand_off', reason: 'loop_failed' });
+    expect(model.requests).toEqual([]);
+    expect(adapter.calls).toEqual([]);
+    resume?.();
+    expect((await pending).kind).toBe('candidate');
+    const another = new ScriptedModel(model.id, [call(META)]);
+    expect((await runImplementation({ ...ctx, model: another }, { plan: PLAN })).kind).toBe(
+      'candidate'
+    );
+  });
+  it('release during persistence or model response prevents subsequent effects and candidates', async () => {
+    for (const where of ['persist', 'model']) {
+      const { ctx, model, adapter, workspace, lifecycle } = await setup([call(META)]);
+      const release = async () => releaseWorkspace(adapter, workspace, lifecycle);
+      if (where === 'model') {
+        const original = model.complete.bind(model);
+        vi.spyOn(model, 'complete').mockImplementation(async (request) => {
+          const result = await original(request);
+          await release();
+          return result;
+        });
+      }
+      expect(
+        await runImplementation(
+          { ...ctx, persist: where === 'persist' ? release : ctx.persist },
+          { plan: PLAN }
+        )
+      ).toEqual({ kind: 'hand_off', reason: 'loop_failed' });
+      expect(model.requests).toHaveLength(where === 'model' ? 1 : 0);
+      expect(adapter.calls.every((c) => c.op === 'destroy')).toBe(true);
+    }
+  });
+  it('a stalled transcript sink expires, and late completion never resumes the loop', async () => {
+    const { ctx, model, adapter } = await setup([call(exec)]);
+    let resolve: (() => void) | undefined;
+    const wait = new Promise<void>((r) => {
+      resolve = r;
+    });
+    expect(
+      await runPlanning({
+        ...ctx,
+        now: () => new Date(),
+        limits: { ...ctx.limits, activeMinutes: 0.001 },
+        persist: async () => wait,
+      })
+    ).toEqual({ kind: 'budget_exhausted', reason: 'active_time' });
+    resolve?.();
+    await Promise.resolve();
+    expect(model.requests).toEqual([]);
+    expect(adapter.calls).toEqual([]);
+  });
+  it('model deadline exhaustion distinguishes active budget from provider timeout', async () => {
+    const limited = await setup([new ModelError('model_timeout')]);
+    expect(
+      await runPlanning({ ...limited.ctx, limits: { ...limited.ctx.limits, activeMinutes: 0.001 } })
+    ).toEqual({ kind: 'budget_exhausted', reason: 'active_time' });
+    const provider = await setup([new ModelError('model_timeout')]);
+    expect(await runPlanning(provider.ctx)).toEqual({ kind: 'hand_off', reason: 'model_timeout' });
+  });
+  it('a real stalled provider hits the active deadline with an unknown charge held', async () => {
+    const { ctx, model, ledger, adapter } = await setup([call(exec)]);
+    vi.spyOn(model, 'complete').mockImplementation(async () => new Promise<never>(() => {}));
+    expect(
+      await runPlanning({
+        ...ctx,
+        now: () => new Date(),
+        limits: { ...ctx.limits, activeMinutes: 0.002 },
+      })
+    ).toEqual({ kind: 'budget_exhausted', reason: 'active_time' });
+    expect(ledger.snapshot().reservations[0].status).toBe('reserved');
+    expect(adapter.calls).toEqual([]);
+  });
+  it('command deadline destruction quiesces a stalled exec and never declares a candidate', async () => {
+    const { ctx, model, adapter } = await setup([call(exec), call(META)]);
+    vi.spyOn(adapter, 'exec').mockImplementation(async () => new Promise<never>(() => {}));
+    expect(
+      await runImplementation(
+        { ...ctx, now: () => new Date(), limits: { ...ctx.limits, commandTimeoutMs: 1000 } },
+        { plan: PLAN }
+      )
+    ).toEqual({ kind: 'hand_off', reason: 'command_timeout' });
+    expect(adapter.calls.map((c) => c.op)).toEqual(['destroy']);
+    expect(adapter.liveVms()).toEqual([]);
+    expect(model.requests).toHaveLength(1);
+  });
+  it('supervises stalled worker RPCs through active expiry and quiesces the VM', async () => {
+    const { ctx, model, adapter } = await setup([
+      call({ kind: 'worker_write_file', path: 'a', content: 'x' }),
+      call(META),
+    ]);
+    vi.spyOn(adapter, 'putFile').mockImplementation(async () => new Promise<void>(() => {}));
+    expect(
+      await runImplementation(
+        { ...ctx, now: () => new Date(), limits: { ...ctx.limits, activeMinutes: 0.002 } },
+        { plan: PLAN }
+      )
+    ).toEqual({ kind: 'budget_exhausted', reason: 'active_time' });
+    expect(adapter.calls.map((c) => c.op)).toEqual(['destroy']);
+    expect(adapter.liveVms()).toEqual([]);
+    expect(model.requests).toHaveLength(1);
+    expect(await runPlanning(ctx)).toEqual({ kind: 'hand_off', reason: 'loop_failed' });
+  });
+  it('supervises the full exec wait and reports failed cleanup without another call', async () => {
+    const { ctx, model, adapter } = await setup([call(exec), call(META)]);
+    vi.spyOn(adapter, 'exec').mockImplementation(async () => new Promise<never>(() => {}));
+    adapter.failDestroy = 1;
+    expect(
+      await runImplementation(
+        {
+          ...ctx,
+          now: () => new Date(),
+          limits: { ...ctx.limits, commandTimeoutMs: 1000, activeMinutes: 1 },
+        },
+        { plan: PLAN }
+      )
+    ).toEqual({ kind: 'hand_off', reason: 'cleanup_failed' });
+    expect(model.requests).toHaveLength(1);
+    expect(adapter.calls.map((c) => c.op)).toEqual(['destroy']);
+    expect(await runPlanning(ctx)).toEqual({ kind: 'hand_off', reason: 'loop_failed' });
   });
 });

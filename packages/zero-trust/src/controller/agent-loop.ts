@@ -11,7 +11,7 @@ import { type ModelAdapter, ModelError, type ModelMessage } from '../model/adapt
 import { BudgetExhaustedError, meteredComplete } from '../model/metered';
 import { assertNoSecrets, assertSecretFree, REDACTED, redactedExcerpt } from '../redaction';
 import type { VmAdapter, VmHandle } from '../vm/adapter';
-import { assertProvisionedVm } from './evidence-runner';
+import { abortProvisionedVm, assertProvisionedVm, leaseProvisionedVm } from './evidence-runner';
 import type { OutputCollector } from './output-collector';
 import { AGENT_SYSTEM, type AgentPhase, agentTools, untrustedFrame } from './prompts';
 import { WorkspaceOverlay } from './workspace-overlay';
@@ -19,6 +19,71 @@ import { WorkspaceOverlay } from './workspace-overlay';
 export const DEFAULT_PLANNING_TURNS = 15;
 export const DEFAULT_IMPLEMENTATION_TURNS = 60;
 export const MAX_WORKER_REPLY_BYTES = 16 * 1024;
+const MODEL_TIMEOUT_MS = 60_000;
+const MODEL_OUTPUT_TOKENS = 16384;
+
+/** Shared active execution accounting across phases, fresh VMs and repairs. Seed
+ * elapsedMs from persisted controller state on resume; time between loops is idle. */
+export class ActiveTimeBudget {
+  private elapsed: number;
+  private held = false;
+  constructor(elapsedMs = 0) {
+    if (!Number.isFinite(elapsedMs) || elapsedMs < 0) throw new RangeError('Invalid active time');
+    this.elapsed = elapsedMs;
+  }
+  get elapsedMs(): number {
+    return this.elapsed;
+  }
+  enter(): boolean {
+    if (this.held) return false;
+    this.held = true;
+    return true;
+  }
+  leave(elapsedMs: number): void {
+    this.elapsed += elapsedMs;
+    this.held = false;
+  }
+}
+const ACTIVE_TIME = new WeakMap<BudgetLedger, Map<string, ActiveTimeBudget>>();
+function activeTime(ctx: AgentLoopContext): ActiveTimeBudget {
+  if (ctx.activeTime) return ctx.activeTime;
+  let sessions = ACTIVE_TIME.get(ctx.ledger);
+  if (!sessions) {
+    sessions = new Map();
+    ACTIVE_TIME.set(ctx.ledger, sessions);
+  }
+  let budget = sessions.get(ctx.sessionId);
+  if (!budget) {
+    budget = new ActiveTimeBudget();
+    sessions.set(ctx.sessionId, budget);
+  }
+  return budget;
+}
+class ActiveTimeExpired extends Error {}
+class WorkerDeadline extends Error {
+  constructor(readonly active: boolean) {
+    super('Worker deadline');
+  }
+}
+
+async function bounded<T>(
+  operation: () => Promise<T>,
+  timeoutMs: number,
+  error: Error
+): Promise<T> {
+  if (timeoutMs <= 0) throw error;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation(),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(error), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 export interface AgentLoopContext {
   readonly adapter: VmAdapter;
@@ -39,6 +104,9 @@ export interface AgentLoopContext {
   readonly persist: (entry: string) => void | Promise<void>;
   /** Trusted override; never supplied by a proposal. */
   readonly maxTurns?: number;
+  /** Optional explicit run-owned account, retained and persisted by the caller.
+   * Default is shared by ledger identity/session in this process. */
+  readonly activeTime?: ActiveTimeBudget;
 }
 
 export type AgentStop =
@@ -91,7 +159,12 @@ async function loop(
 ): Promise<PlanningResult | ImplementationResult> {
   const maxTurns =
     ctx.maxTurns ?? (phase === 'planning' ? DEFAULT_PLANNING_TURNS : DEFAULT_IMPLEMENTATION_TURNS);
-  const started = ctx.now().getTime();
+  let started: number;
+  try {
+    started = ctx.now().getTime();
+  } catch {
+    return { kind: 'hand_off', reason: 'invalid_context' };
+  }
   const ceiling = ctx.limits.activeMinutes * 60_000;
   if (
     !Number.isSafeInteger(maxTurns) ||
@@ -99,29 +172,40 @@ async function loop(
     !Number.isFinite(started) ||
     !Number.isFinite(ceiling) ||
     ceiling <= 0 ||
+    ceiling > 2_147_483_647 ||
     !Number.isSafeInteger(ctx.limits.commandTimeoutMs) ||
     ctx.limits.commandTimeoutMs < 1000 ||
     ctx.limits.commandTimeoutMs > 6 * 3600 * 1000
   )
     return { kind: 'hand_off', reason: 'invalid_context' };
   let lastNow = started;
+  const account = activeTime(ctx);
+  if (!account.enter()) return { kind: 'hand_off', reason: 'session_busy' };
+  let release: (() => void) | undefined;
+  let activeModelDeadline = false;
   const remaining = (): number => {
     const at = ctx.now().getTime();
     if (!Number.isFinite(at) || at < lastNow) throw new Error('invalid_clock');
     lastNow = at;
-    return Math.floor(ceiling - (at - started));
+    return Math.floor(ceiling - account.elapsedMs - (at - started));
   };
   let persistenceFailed = false;
   const record = async (turn: number, event: string, data: unknown): Promise<void> => {
     try {
-      await ctx.persist(safeRecord({ phase, turn, event, data }));
-    } catch {
+      await bounded(
+        async () => ctx.persist(safeRecord({ phase, turn, event, data })),
+        remaining(),
+        new ActiveTimeExpired()
+      );
+    } catch (error) {
+      if (error instanceof ActiveTimeExpired) throw error;
+      if (remaining() <= 0) throw new ActiveTimeExpired();
       persistenceFailed = true;
       throw new Error('persistence_failed');
     }
   };
   try {
-    assertProvisionedVm(ctx.adapter, ctx.vm);
+    release = leaseProvisionedVm(ctx.adapter, ctx.vm);
     const overlay = new WorkspaceOverlay(ctx.baseManifest);
     const messages: ModelMessage[] = [
       { role: 'user', content: untrustedFrame('issue', ctx.issue) },
@@ -141,16 +225,19 @@ async function loop(
     for (let turn = 1; turn <= maxTurns; turn++) {
       const time = remaining();
       if (time <= 0) return { kind: 'budget_exhausted', reason: 'active_time' };
+      assertProvisionedVm(ctx.adapter, ctx.vm);
+      activeModelDeadline = time <= MODEL_TIMEOUT_MS;
       const produced = await meteredComplete(ctx.model, ctx.ledger, ctx.sessionId, ctx.rates, {
         system: AGENT_SYSTEM,
         messages,
         tools: agentTools(phase),
-        maxOutputTokens: 16384,
-        timeoutMs: Math.min(60_000, time),
+        maxOutputTokens: MODEL_OUTPUT_TOKENS,
+        timeoutMs: Math.min(MODEL_TIMEOUT_MS, time),
       });
       // Snapshot the adapter-owned result before the asynchronous transcript sink.
       const result = JSON.parse(JSON.stringify(produced)) as typeof produced;
       await record(turn, 'model', result);
+      assertProvisionedVm(ctx.adapter, ctx.vm);
       if (remaining() <= 0) return { kind: 'budget_exhausted', reason: 'active_time' };
       if (result.kind !== 'tool_calls' || result.calls.length !== 1)
         return { kind: 'hand_off', reason: 'model_invalid_response' };
@@ -177,6 +264,7 @@ async function loop(
         )
           throw new AuthorityError('unexpected_action');
         await record(turn, 'admitted', admitted);
+        assertProvisionedVm(ctx.adapter, ctx.vm);
         if (remaining() <= 0) return { kind: 'budget_exhausted', reason: 'active_time' };
         switch (admitted.kind) {
           case 'hand_off':
@@ -194,28 +282,39 @@ async function loop(
               if (error instanceof CanonicalError) throw new AuthorityError('invalid_field');
               throw error;
             }
-            await ctx.adapter.putFile(
-              ctx.vm,
-              admitted.path,
-              Buffer.from(admitted.content, 'utf8'),
-              overlay.executable(admitted.path)
+            await bounded(
+              () =>
+                ctx.adapter.putFile(
+                  ctx.vm,
+                  admitted.path,
+                  Buffer.from(admitted.content, 'utf8'),
+                  overlay.executable(admitted.path)
+                ),
+              remaining(),
+              new WorkerDeadline(true)
             );
+            assertProvisionedVm(ctx.adapter, ctx.vm);
             reply = { kind: 'written', path: admitted.path };
             break;
           }
           case 'worker_exec': {
-            const timeoutMs = Math.min(ctx.limits.commandTimeoutMs, remaining());
+            const activeRemaining = remaining();
+            const timeoutMs = Math.min(ctx.limits.commandTimeoutMs, activeRemaining);
             if (timeoutMs < 1000) return { kind: 'budget_exhausted', reason: 'active_time' };
-            const { stdout, stderr, exitCode, timedOut, truncated } = await ctx.adapter.exec(
-              ctx.vm,
-              {
-                profile: admitted.profile,
-                argv: admitted.argv,
-                network: 'none',
-                timeoutMs,
-                env: {},
-              }
+            const { stdout, stderr, exitCode, timedOut, truncated } = await bounded(
+              () =>
+                ctx.adapter.exec(ctx.vm, {
+                  profile: admitted.profile,
+                  argv: admitted.argv,
+                  network: 'none',
+                  timeoutMs,
+                  wallTimeoutMs: timeoutMs,
+                  env: {},
+                }),
+              timeoutMs,
+              new WorkerDeadline(activeRemaining <= ctx.limits.commandTimeoutMs)
             );
+            assertProvisionedVm(ctx.adapter, ctx.vm);
             if (
               typeof stdout !== 'string' ||
               typeof stderr !== 'string' ||
@@ -274,11 +373,37 @@ async function loop(
     }
     return { kind: 'turns_exhausted' };
   } catch (error) {
+    if (error instanceof ActiveTimeExpired)
+      return { kind: 'budget_exhausted', reason: 'active_time' };
+    if (error instanceof WorkerDeadline) {
+      try {
+        await abortProvisionedVm(ctx.adapter, ctx.vm);
+      } catch {
+        return { kind: 'hand_off', reason: 'cleanup_failed' };
+      }
+      return error.active
+        ? { kind: 'budget_exhausted', reason: 'active_time' }
+        : { kind: 'hand_off', reason: 'command_timeout' };
+    }
     if (error instanceof BudgetExhaustedError)
       return { kind: 'budget_exhausted', reason: 'budget' };
     if (persistenceFailed) return { kind: 'hand_off', reason: 'persistence_failed' };
-    if (error instanceof ModelError) return { kind: 'hand_off', reason: error.code };
+    if (error instanceof ModelError) {
+      if (error.code === 'model_timeout' && activeModelDeadline)
+        return { kind: 'budget_exhausted', reason: 'active_time' };
+      return { kind: 'hand_off', reason: error.code };
+    }
     return { kind: 'hand_off', reason: 'loop_failed' };
+  } finally {
+    release?.();
+    let end = lastNow;
+    try {
+      const at = ctx.now().getTime();
+      if (Number.isFinite(at) && at >= end) end = at;
+    } catch {
+      /* Last validated clock still contributes active time. */
+    }
+    account.leave(Math.max(0, end - started));
   }
 }
 

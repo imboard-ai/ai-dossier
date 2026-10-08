@@ -244,6 +244,22 @@ describe('admitModelAction — hostile proposals from a compliant model (AC2 / s
 });
 
 describe('admitModelAction — admitted actions are controller-bound', () => {
+  it.each([
+    'cause',
+    'scope',
+  ])('enforces the exact UTF-8 byte boundary for candidate %s', (field) => {
+    const meta = {
+      kind: 'candidate_ready',
+      title: 'Fix',
+      cause: 'Cause',
+      scope: 'Scope',
+      limitations: [],
+    };
+    const atLimit = { ...meta, [field]: 'é'.repeat(2048) };
+    expect(admitModelAction(atLimit, BINDING)).toEqual(atLimit);
+    expect(admitCode({ ...meta, [field]: 'é'.repeat(2049) })).toBe('invalid_field');
+    expect(admitCode({ ...meta, [field]: '界'.repeat(4096) })).toBe('invalid_field');
+  });
   const meta = {
     kind: 'candidate_ready',
     title: 'Fix',

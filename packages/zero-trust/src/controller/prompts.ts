@@ -1,4 +1,4 @@
-import { MAX_CANDIDATE_TEXT_CHARS, MAX_PLAN_BYTES } from '../authority';
+import { MAX_CANDIDATE_TEXT_BYTES, MAX_PLAN_BYTES } from '../authority';
 import type { ModelTool } from '../model/adapter';
 
 export type AgentPhase = 'planning' | 'implementing';
@@ -41,8 +41,14 @@ export function agentTools(phase: AgentPhase): readonly ModelTool[] {
                   action('worker_write_file', { path: string(512), content: string(1024 * 1024) }),
                   action('candidate_ready', {
                     title: string(256),
-                    cause: string(MAX_CANDIDATE_TEXT_CHARS),
-                    scope: string(MAX_CANDIDATE_TEXT_CHARS),
+                    cause: {
+                      ...string(MAX_CANDIDATE_TEXT_BYTES),
+                      description: 'At most 4096 UTF-8 bytes; enforced by controller admission.',
+                    },
+                    scope: {
+                      ...string(MAX_CANDIDATE_TEXT_BYTES),
+                      description: 'At most 4096 UTF-8 bytes; enforced by controller admission.',
+                    },
                     limitations: { type: 'array', maxItems: 10, items: string(500) },
                   }),
                 ]),

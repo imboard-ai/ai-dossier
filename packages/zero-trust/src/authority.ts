@@ -50,7 +50,7 @@ const MAX_TITLE_CHARS = 256;
 const MAX_BODY_CHARS = 65536;
 const MAX_REASON_CHARS = 2000;
 export const MAX_PLAN_BYTES = 8 * 1024;
-export const MAX_CANDIDATE_TEXT_CHARS = 4 * 1024;
+export const MAX_CANDIDATE_TEXT_BYTES = 4 * 1024;
 
 const FIELDS: Readonly<Record<AdmittedAction['kind'], readonly string[]>> = Object.freeze({
   worker_exec: ['kind', 'profile', 'argv'],
@@ -75,6 +75,34 @@ function text(value: unknown, max: number): string {
   return value;
 }
 
+function byteText(value: unknown, max: number): string {
+  const result = text(value, max);
+  if (Buffer.byteLength(result, 'utf8') > max) throw new AuthorityError('invalid_field');
+  return result;
+}
+
+/** Shared controller write policy for authority admission and direct overlay consumers. */
+export function admitWorkspaceWrite(
+  file: unknown,
+  value: unknown
+): { path: string; content: string } {
+  let path: string;
+  try {
+    path = assertWorkspacePath(file);
+  } catch {
+    throw new AuthorityError('invalid_field');
+  }
+  if (typeof value !== 'string' || Buffer.byteLength(value) > MAX_FILE_BYTES)
+    throw new AuthorityError('invalid_field');
+  try {
+    assertNoSecrets(path);
+    assertNoSecrets(value);
+  } catch {
+    throw new AuthorityError('credential_material');
+  }
+  return { path, content: value };
+}
+
 export function admitModelAction(proposal: unknown, binding: AuthorityBinding): AdmittedAction {
   if (typeof proposal !== 'object' || proposal === null || Array.isArray(proposal))
     throw new AuthorityError('not_an_action');
@@ -97,23 +125,7 @@ export function admitModelAction(proposal: unknown, binding: AuthorityBinding): 
       }
     }
     case 'worker_write_file': {
-      let path: string;
-      try {
-        path = assertWorkspacePath(raw.path);
-      } catch {
-        throw new AuthorityError('invalid_field');
-      }
-      const content = raw.content;
-      if (typeof content !== 'string' || Buffer.byteLength(content) > MAX_FILE_BYTES)
-        throw new AuthorityError('invalid_field');
-      // Written files can end up in the published candidate commit.
-      try {
-        assertNoSecrets(path);
-        assertNoSecrets(content);
-      } catch {
-        throw new AuthorityError('credential_material');
-      }
-      return { kind, path, content };
+      return { kind, ...admitWorkspaceWrite(raw.path, raw.content) };
     }
     case 'request_publication': {
       const operation = raw.operation;
@@ -134,9 +146,7 @@ export function admitModelAction(proposal: unknown, binding: AuthorityBinding): 
       };
     }
     case 'submit_plan': {
-      const plan = text(raw.text, MAX_PLAN_BYTES);
-      if (Buffer.byteLength(plan) > MAX_PLAN_BYTES) throw new AuthorityError('invalid_field');
-      return { kind, text: plan };
+      return { kind, text: byteText(raw.text, MAX_PLAN_BYTES) };
     }
     case 'candidate_ready': {
       const limitations = raw.limitations;
@@ -145,8 +155,8 @@ export function admitModelAction(proposal: unknown, binding: AuthorityBinding): 
       return {
         kind,
         title: text(raw.title, MAX_TITLE_CHARS),
-        cause: text(raw.cause, MAX_CANDIDATE_TEXT_CHARS),
-        scope: text(raw.scope, MAX_CANDIDATE_TEXT_CHARS),
+        cause: byteText(raw.cause, MAX_CANDIDATE_TEXT_BYTES),
+        scope: byteText(raw.scope, MAX_CANDIDATE_TEXT_BYTES),
         limitations: limitations.map((item) => text(item, 500)),
       };
     }

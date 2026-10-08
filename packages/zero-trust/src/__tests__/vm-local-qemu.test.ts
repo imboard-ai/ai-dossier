@@ -957,6 +957,23 @@ describe('LocalQemuAdapter provisioning phase', () => {
 });
 
 describe('LocalQemuAdapter broker operations', () => {
+  it('caps accelerator-scaled command time at the controller wall deadline', async () => {
+    const a = adapter({ tools: tools('tcg') });
+    const handle = await a.create(spec());
+    await a.exec(handle, {
+      profile: 'node',
+      argv: ['true'],
+      timeoutMs: 60_000,
+      wallTimeoutMs: 60_000,
+    });
+    expect(host.seen.find((f) => f.op === 'exec')).toMatchObject({ timeoutMs: 60_000 });
+    const before = host.seen.length;
+    for (const wallTimeoutMs of [0, 999, NaN, 6 * 3600 * 1000 + 1])
+      await expect(
+        a.exec(handle, { profile: 'node', argv: ['true'], wallTimeoutMs })
+      ).rejects.toThrow('invalid_timeout');
+    expect(host.seen).toHaveLength(before);
+  });
   it('scales exec timeouts by TIMEOUT_SCALE under TCG', async () => {
     const a = adapter({ tools: tools('tcg') });
     const handle = await a.create(spec());

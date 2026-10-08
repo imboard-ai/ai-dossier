@@ -19,7 +19,8 @@ the exact live `vm: VmHandle` returned by `provisionWorkspace`, `model: ModelAda
 `commandTimeoutMs` and `activeMinutes`, `binding: AuthorityBinding`, `issue: { title,
 body }`, `baseManifest: SourceManifest`, `collector: OutputCollector`, `now: () =>
 Date`, and an awaited controller-owned `persist(entry: string)` transcript sink.
-`maxTurns?` is a trusted caller override. The loop calls `meteredComplete` internally:
+`maxTurns?` is a trusted caller override. Optional `activeTime: ActiveTimeBudget`
+provides explicit run-wide active accounting. The loop calls `meteredComplete` internally:
 pass the selected model adapter, with no worker-held model credentials or gateway.
 
 Planning returns `AgentPlan` (`{ kind: 'plan', text, digest }`, SHA-256 of exact UTF-8
@@ -34,7 +35,7 @@ text-only, malformed, empty or multiple-call answers hand off as
 
 `admitModelAction` adds `submit_plan { text }` (UTF-8 `MAX_PLAN_BYTES = 8192`) and
 `candidate_ready { title, cause, scope, limitations }` (title ≤256 UTF-16 code units,
-cause/scope ≤`MAX_CANDIDATE_TEXT_CHARS = 4096` each, ≤10 limitations of ≤500 units).
+cause/scope ≤`MAX_CANDIDATE_TEXT_BYTES = 4096` UTF-8 bytes each, ≤10 limitations of ≤500 units).
 Both reject extra fields, malformed values and credential patterns. Candidate
 metadata is untrusted prose, not verification evidence; `buildPrContent` bounds it
 again with independently verified receipt facts. Publication is controller-driven:
@@ -46,19 +47,36 @@ resets the streak. An operational failure never silently retries.
 
 Each model call reserves through the real ledger before invoking the provider.
 A denial gives `budget_exhausted/budget` without another call. The active wall-clock
-ceiling is measured from loop entry and checked before every turn and before
-worker operations; the caller retains the run/session ledger across planning,
-implementation and repairs. Non-finite or backward clocks refuse progress. Model
+ceiling is shared across planning, implementation and repairs. By default a
+process-local account is keyed by ledger object and session ID. An explicit
+`new ActiveTimeBudget(elapsedMs = 0)` account can be retained across fresh ledger/VM
+instances and seeded from persisted run state on resume; persist its `elapsedMs`
+after each phase. Only time inside loops is charged; idle hand-off time is excluded.
+Accounts reject concurrent entry (`session_busy`), and the loop holds an exclusive
+workspace lease. The caller retains the ledger and active account across repairs.
+The ceiling is checked before every turn/worker operation and bounds asynchronous
+transcript writes too. Non-finite or backward clocks refuse progress. Model
 calls are capped at 60 seconds or the remaining active time, whichever is smaller;
 worker commands use `network: 'none'`, the admitted profile, an empty environment,
-and at most `limits.commandTimeoutMs` or the remaining active time. Insufficient
+and at most `limits.commandTimeoutMs` or the remaining active time. Controller-only
+`ExecRequest.wallTimeoutMs` caps the guest timeout after TCG scaling; the loop also
+supervises the entire exec/put RPC, including queue and broker grace. Expiry
+invalidates provisioning proof and awaits VM destruction to quiesce work. Active
+expiry is `budget_exhausted/active_time`; a shorter command ceiling is
+`hand_off/command_timeout`. Failed deadline teardown is `hand_off/cleanup_failed`,
+and caller-owned cleanup must retry/persist the blocked lifecycle. Insufficient
 time for the broker's one-second minimum stops with `active_time`. Model-profile
 values and process environment variables are never forwarded into exec.
 
 `assertProvisionedVm(adapter, vm)` refuses handles not produced by that adapter's
 completed provisioning or released with `releaseWorkspace`; the loop calls it
-before any model or worker operation and never creates a VM. The caller owns
-teardown at every stop/checkpoint. Provisioned-handle proof is process-local;
+before every model or worker operation, after awaited boundaries and before
+successful terminal returns; it never creates a VM. `leaseProvisionedVm` acquires
+exclusive loop ownership and returns its release function; evidence execution
+refuses a leased handle. `releaseWorkspace` invalidates proof immediately so a
+pending loop cannot continue after teardown. `abortProvisionedVm` invalidates
+proof and awaits destruction on a supervisory worker deadline. The caller owns
+teardown/retries at every stop/checkpoint. Provisioned-handle proof is process-local;
 resume provisions a fresh workspace. `repairOf` is appended only as untrusted
 failure-summary data. The caller must first enforce `assertRepairAllowed` and
 provide the failed candidate as `baseManifest` in a freshly provisioned workspace.
@@ -81,14 +99,18 @@ rejections and action replies. Every entry is scanned with `assertNoSecrets`
 `[redacted]`. Secret proposals are rejected and omitted from subsequent requests.
 Secret-bearing initial issue/repair data is recorded redacted and refuses the loop
 before a provider call. A throwing/rejecting transcript sink gives
-`hand_off/persistence_failed`, without further effects. Non-model unexpected
+`hand_off/persistence_failed`, without further effects; a stalled sink is bounded
+by remaining active time and late completion cannot resume the loop. Active-limited
+model timeouts give `budget_exhausted/active_time`, while provider timeouts with
+active allowance remaining retain `hand_off/model_timeout`. Non-model unexpected
 failures return fixed `loop_failed`; provider failures retain only their bounded
 `ModelError.code`. Provider/worker exception text never enters the result or sink.
 
 ### Controller-held source overlay
 
 `new WorkspaceOverlay(baseManifest)` revalidates and freezes the exact baseline.
-`write(path, content)` admits bounded secret-free UTF-8 contents after
+`write(path, content)` uses the shared `admitWorkspaceWrite(path, content)` authority
+validator, including filename/content secret scans, bounded UTF-8 contents after
 `assertWorkspacePath` and canonical combined-manifest validation. Rewrites replace
 only that path; existing executable modes are preserved and new files are
 non-executable. `executable(path)` reports the held mode for VM mirroring.

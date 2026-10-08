@@ -225,10 +225,27 @@ export interface RegressionRunEvidence {
 /** Workspaces that passed the phase-switch check and are not yet released. */
 const PROVEN = new WeakSet<ProvisionedWorkspace>();
 const PROVEN_VMS = new WeakMap<VmHandle, VmAdapter>();
+const LEASED_VMS = new WeakSet<VmHandle>();
 
 /** The model loop may use only a live handle from this adapter's completed provisioning. */
 export function assertProvisionedVm(adapter: VmAdapter, vm: VmHandle): void {
   if (PROVEN_VMS.get(vm) !== adapter) throw new EvidencePlanError('workspace_unproven');
+}
+
+/** Exclusive model-loop ownership; release/teardown invalidates proof immediately,
+ * even while the owner awaits a provider or persistence callback. */
+export function leaseProvisionedVm(adapter: VmAdapter, vm: VmHandle): () => void {
+  assertProvisionedVm(adapter, vm);
+  if (LEASED_VMS.has(vm)) throw new EvidencePlanError('workspace_unproven');
+  LEASED_VMS.add(vm);
+  return () => LEASED_VMS.delete(vm);
+}
+
+/** A supervisory worker deadline must quiesce the guest, never merely abandon its promise.
+ * Caller still owns bounded cleanup retries and lifecycle persistence on destroy failure. */
+export async function abortProvisionedVm(adapter: VmAdapter, vm: VmHandle): Promise<void> {
+  PROVEN_VMS.delete(vm);
+  await adapter.destroy(vm);
 }
 
 /** Refuses any command whose phase or network is not its phase's one network:
@@ -338,6 +355,8 @@ export async function runPlanned(
   options: RunPlannedOptions = {}
 ): Promise<CommandRecord> {
   if (!PROVEN.has(workspace)) throw new EvidencePlanError('workspace_unproven');
+  assertProvisionedVm(adapter, workspace.vm);
+  if (LEASED_VMS.has(workspace.vm)) throw new EvidencePlanError('workspace_unproven');
   assertCommandPhase(command, 'verification');
   return execute(adapter, workspace.vm, workspace.profile, command, collector, options);
 }

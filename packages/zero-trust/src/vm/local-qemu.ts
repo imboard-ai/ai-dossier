@@ -712,12 +712,18 @@ export class LocalQemuAdapter implements VmAdapter {
     if (network === 'package_proxy' && phaseOf(record) !== 'provisioning')
       throw new BrokerError('network_not_allowed');
     const base = request.timeoutMs ?? record.limits.commandTimeoutMs;
+    const wall = request.wallTimeoutMs;
+    if (
+      wall !== undefined &&
+      (!Number.isSafeInteger(wall) || wall < 1000 || wall > 6 * 3600 * 1000)
+    )
+      throw new BrokerError('invalid_timeout');
     return this.client(handle).exec(
       {
         profile: request.profile,
         argv: request.argv,
         cwd: request.cwd,
-        timeoutMs: this.scaled(base, handle),
+        timeoutMs: Math.min(this.scaled(base, handle), wall ?? Infinity),
         network,
         env: request.env,
         report: request.report,

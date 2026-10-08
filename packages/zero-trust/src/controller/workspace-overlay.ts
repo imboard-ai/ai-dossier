@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { admitWorkspaceWrite } from '../authority';
 import {
   CanonicalError,
   comparePaths,
@@ -11,9 +12,8 @@ import {
   sha256,
   validateManifest,
 } from '../canonical/export';
-import { assertNoSecrets } from '../redaction';
 import { isTestPath } from '../review/integrity';
-import { assertWorkspacePath, MAX_FILE_BYTES } from '../vm/broker';
+import { assertWorkspacePath } from '../vm/broker';
 
 /** Exact controller-held baseline plus admitted writes. VM reads never enter this map.
  * No deletion or mode-changing action exists in the MVP. */
@@ -29,11 +29,9 @@ export class WorkspaceOverlay {
 
   /** Validates the combined candidate before publishing the write to controller state. */
   write(file: string, content: string): void {
-    const name = assertWorkspacePath(file);
-    if (typeof content !== 'string' || Buffer.byteLength(content) > MAX_FILE_BYTES)
-      throw new CanonicalError('limit_exceeded');
-    assertNoSecrets(content);
-    const bytes = Buffer.from(content, 'utf8');
+    const admitted = admitWorkspaceWrite(file, content);
+    const name = admitted.path;
+    const bytes = Buffer.from(admitted.content, 'utf8');
     const next = new Map(this.entries);
     const old = next.get(name);
     if (old?.mode === '040000') throw new CanonicalError('path_collision');
