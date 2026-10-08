@@ -42,13 +42,21 @@ export interface ReviewCandidateInput {
 }
 
 const TEST =
-  /(?:^|\/)(?:test|tests|__tests__)\/|\.(?:test|spec)\.[^/]+$|(?:^|\/)test_[^/]+\.py$|_test\.py$/u;
+  /(?:^|\/)(?:test|tests|__tests__)\/|\.(?:test|spec)\.[^/]*$|(?:^|\/)test_[^/]*\.py$|_test\.py$/u;
 const CONFIG =
-  /(?:^|\/)(?:package\.json|package-lock\.json|pyproject\.toml|uv\.lock|requirements[^/]*\.txt|setup\.py|setup\.cfg|tox\.ini|pytest\.ini|conftest\.py|jest\.config\.[^/]+|vitest\.config\.[^/]+|\.mocharc[^/]*|Makefile|Dockerfile|\.gitattributes)$|(?:^|\/)(?:\.github|\.devcontainer)(?:\/|$)/u;
+  /(?:^|\/)(?:package\.json|package-lock\.json|pyproject\.toml|uv\.lock|requirements[^/]*\.txt|setup\.py|setup\.cfg|tox\.ini|pytest\.ini|conftest\.py|jest\.config\.[^/]*|vitest\.config\.[^/]*|\.mocharc[^/]*|Makefile|Dockerfile|\.gitattributes)$|(?:^|\/)(?:\.github|\.devcontainer)(?:\/|$)/u;
 const GENERATED = /(?:^|\/)(?:dist|build)(?:\/|$)|\.min\.js$|\.map$/u;
-const DISABLED =
-  /\b(?:it|describe|test)\s*\.\s*skip\s*\(|\b(?:xit|xdescribe)\s*\(|\.\s*only\s*\(|\bit\s*\.\s*todo\s*\(|@pytest\s*\.\s*mark\s*\.\s*(?:skip(?:if)?|xfail)\b|\bpytest\s*\.\s*skip\s*\(|@unittest\s*\.\s*skip\b|\bunittest\s*\.\s*(?:skipIf|skipUnless)\b/u;
-const ASSERTION = /\bexpect\s*\(|\bself\s*\.\s*assert\w*\b|\bassert\b/gu;
+// Python explicit line continuations are lexical gaps too. Match raw source so
+// coordinates still correspond to the line diff rather than a normalized copy.
+const GAP = String.raw`(?:\s|\\\r?\n)*`;
+const DISABLED = new RegExp(
+  String.raw`\b(?:it|describe|test)${GAP}\.${GAP}skip${GAP}\(|\b(?:xit|xdescribe)${GAP}\(|\.${GAP}only${GAP}\(|\bit${GAP}\.${GAP}todo${GAP}\(|@${GAP}pytest${GAP}\.${GAP}mark${GAP}\.${GAP}(?:skip(?:if)?|xfail)\b|\bpytest${GAP}\.${GAP}skip${GAP}\(|@${GAP}unittest${GAP}\.${GAP}skip\b|\bunittest${GAP}\.${GAP}(?:skipIf|skipUnless)\b`,
+  'u'
+);
+const ASSERTION = new RegExp(
+  String.raw`\bexpect${GAP}\(|\bself${GAP}\.${GAP}assert\w*\b|\bassert\b`,
+  'gu'
+);
 const MAX_TEXT_BYTES = 1024 * 1024;
 const MAX_DIFF_CELLS = 1_000_000;
 
@@ -79,6 +87,7 @@ interface LineDiff {
   count: number;
   added: string;
   ranges: readonly (readonly [number, number])[];
+  junctions: readonly number[];
 }
 function diff(before: string, after: string): LineDiff {
   const a = lines(before);
@@ -101,6 +110,7 @@ function diff(before: string, after: string): LineDiff {
       count: old.length + next.length,
       added: next.join(''),
       ranges: [[offsets[start], offsets[endB]]],
+      junctions: [],
     };
   const width = next.length + 1;
   const table = new Uint32Array((old.length + 1) * width);
@@ -112,26 +122,44 @@ function diff(before: string, after: string): LineDiff {
           : Math.max(table[(i + 1) * width + j], table[i * width + j + 1]);
   const added: string[] = [];
   const ranges: [number, number][] = [];
+  const junctions: number[] = [];
   let i = 0;
   let j = 0;
   while (j < next.length) {
     if (i < old.length && old[i] === next[j]) {
       i++;
       j++;
-    } else if (i < old.length && table[(i + 1) * width + j] >= table[i * width + j + 1]) i++;
-    else {
+    } else if (i < old.length && table[(i + 1) * width + j] >= table[i * width + j + 1]) {
+      junctions.push(offsets[start + j]);
+      i++;
+    } else {
       ranges.push([offsets[start + j], offsets[start + j + 1]]);
       added.push(next[j++]);
     }
   }
-  return { count: old.length + next.length - 2 * table[0], added: added.join(''), ranges };
+  // Trimmed equal suffixes can begin the second half of a newly joined marker.
+  if (i < old.length) junctions.push(offsets[endB]);
+  return {
+    count: old.length + next.length - 2 * table[0],
+    added: added.join(''),
+    ranges,
+    junctions,
+  };
 }
 /** Scan full candidate context, including markers split across unchanged/added lines. */
 function addedDisableMarker(after: string, changes: LineDiff): boolean {
   let range = 0;
+  let junction = 0;
   for (const match of after.matchAll(new RegExp(DISABLED.source, 'gu'))) {
     while (range < changes.ranges.length && changes.ranges[range][1] <= match.index) range++;
     if (range < changes.ranges.length && changes.ranges[range][0] < match.index + match[0].length)
+      return true;
+    while (junction < changes.junctions.length && changes.junctions[junction] <= match.index)
+      junction++;
+    if (
+      junction < changes.junctions.length &&
+      changes.junctions[junction] < match.index + match[0].length
+    )
       return true;
   }
   return false;

@@ -36,10 +36,12 @@ Test paths include any `test/`, `tests/`, `__tests__/` component, `*.test.*`,
 `it.skip`, `describe.skip`, `test.skip`, `xit`, `xdescribe`, `.only`, `it.todo`,
 pytest skip/skipif/xfail decorators and skip calls, and unittest skip/skipIf/skipUnless.
 Modified tests compare textual `expect(`, `assert` and `self.assert*` counts.
-The scanner permits whitespace between marker tokens and is conservative:
+The scanner permits whitespace (including Python explicit line continuations)
+between marker tokens and after decorator `@`, and is conservative:
 comments, literals and moved lines can produce findings. Marker matches use full
-candidate context and must overlap an added line, including multiline markers
-assembled from unchanged and added lines. It is not semantic proof.
+candidate context and must overlap an added line or cross a deletion-created
+junction, including multiline markers assembled entirely from retained lines.
+It is not semantic proof.
 Non-test added lines containing `ai-dossier` or `imboard` are `promotional`.
 
 Protected config includes `package.json`, `package-lock.json`, `pyproject.toml`,

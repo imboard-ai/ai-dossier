@@ -49,6 +49,10 @@ const testPaths = [
   'a.spec.js',
   'test_a.py',
   'a_test.py',
+  'test_.py',
+  'nested/test_.py',
+  'a.test.',
+  'nested/a.spec.',
 ];
 const markers = [
   'it.skip(',
@@ -79,6 +83,8 @@ const configs = [
   'conftest.py',
   'jest.config.js',
   'vitest.config.ts',
+  'jest.config.',
+  'nested/vitest.config.',
   '.mocharc.yml',
   'Makefile',
   '.github/workflows/test.yml',
@@ -140,6 +146,18 @@ describe('deterministic candidate scope/test integrity', () => {
       'test_disabled'
     );
   });
+  it.each([
+    'test_.py',
+    'nested/test_.py',
+    'a.test.',
+    'nested/a.spec.',
+  ])('empty wildcard test boundary %s covers disabling and assertion reduction', (path) => {
+    expect(codes(input({ [path]: 'expect(1);\n' }, { [path]: 'it.skip("case");\n' }))).toEqual([
+      'test_disabled',
+      'assertions_reduced',
+    ]);
+    expect(codes(input({ [path]: 'expect(1);\n' }, { [path]: 'expect(2);\n' }))).toEqual([]);
+  });
   it('whitespace-separated marker tokens and focused describes are flagged', () => {
     expect(
       codes(
@@ -168,6 +186,79 @@ describe('deterministic candidate scope/test integrity', () => {
     ).toContain('test_disabled');
     expect(codes(input({ 'a.test.ts': 'old\n' }, { 'a.test.ts': 'new\nit.skip(\n' }))).toContain(
       'test_disabled'
+    );
+  });
+  it.each([
+    '.active\n',
+    ';\n',
+    '|| (() => {})\n',
+    '&& it\n',
+  ])('deletion junction %j introducing skip is flagged, even without additions', (removed) => {
+    const before = `it\n${removed}.skip\n("case", () => { expect(true); });\n`;
+    const after = 'it\n.skip\n("case", () => { expect(true); });\n';
+    expect(codes(input({ 'a.test.ts': before }, { 'a.test.ts': after }))).toContain(
+      'test_disabled'
+    );
+    // Removing another marker must not cancel the new one.
+    expect(
+      codes(input({ 'a.test.ts': `it.skip("old");\n${before}` }, { 'a.test.ts': after }))
+    ).toContain('test_disabled');
+    // Moving the intervening line elsewhere also creates new adjacency.
+    expect(codes(input({ 'a.test.ts': before }, { 'a.test.ts': `${after}${removed}` }))).toContain(
+      'test_disabled'
+    );
+  });
+  it('deletions outside an unchanged marker do not report test disabling', () => {
+    const marker = 'it\n.skip\n("case");\n';
+    expect(
+      codes(input({ 'a.test.ts': `old\n${marker}tail\n` }, { 'a.test.ts': marker }))
+    ).not.toContain('test_disabled');
+    expect(
+      codes(input({ 'a.test.ts': `${marker}old\nnext\n` }, { 'a.test.ts': `${marker}next\n` }))
+    ).not.toContain('test_disabled');
+  });
+  it.each([
+    ' ',
+    '\t',
+    '\\\n',
+    ' \\\r\n  ',
+  ])('Python lexical gap %j in disabling markers is detected', (gap) => {
+    for (const marker of [
+      `@${gap}unittest${gap}.${gap}skip("reason")`,
+      `@${gap}pytest${gap}.${gap}mark${gap}.${gap}skip(reason="reason")`,
+      `@${gap}pytest${gap}.${gap}mark${gap}.${gap}skipif(True)`,
+      `@${gap}pytest${gap}.${gap}mark${gap}.${gap}xfail()`,
+      `pytest${gap}.${gap}skip("reason")`,
+      `unittest${gap}.${gap}skipIf(True, "reason")`,
+      `unittest${gap}.${gap}skipUnless(False, "reason")`,
+    ]) {
+      const path = 'test_.py';
+      expect(
+        codes(input({ [path]: 'assert True\n' }, { [path]: `${marker}\nassert True\n` }))
+      ).toContain('test_disabled');
+      expect(
+        codes(
+          input({ [path]: `${marker}\nassert True\n` }, { [path]: `${marker}\nassert False\n` })
+        )
+      ).not.toContain('test_disabled');
+      expect(
+        codes(input({ [path]: `${marker}\nassert True\n` }, { [path]: 'assert True\n' }))
+      ).not.toContain('test_disabled');
+    }
+  });
+  it.each([
+    'self\\\n.assertEqual(1, 1)\n',
+    'self \\\r\n .assertTrue(True)\n',
+  ])('continued Python assertion %j is counted on both sides', (assertion) => {
+    const path = 'test_.py';
+    expect(codes(input({ [path]: assertion }, { [path]: 'pass\n' }))).toContain(
+      'assertions_reduced'
+    );
+    expect(codes(input({ [path]: assertion }, { [path]: `${assertion}pass\n` }))).not.toContain(
+      'assertions_reduced'
+    );
+    expect(codes(input({ [path]: assertion }, { [path]: assertion.repeat(2) }))).not.toContain(
+      'assertions_reduced'
     );
   });
   it.each([
