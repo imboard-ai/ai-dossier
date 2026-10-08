@@ -365,6 +365,21 @@ describe('deterministic candidate scope/test integrity', () => {
       'test_disabled'
     );
   });
+  it.each([
+    'it.skip(0)',
+    'xit(0)',
+    'test.skip(0)',
+    'describe.skip(0)',
+    'it.todo(0)',
+  ])('backward focus span orders correctly around inert comment marker %s', (inert) => {
+    const path = 'focus.test.js';
+    const before = `customRunner\n|| (() => {})\n/* ${inert} */\n.only("focused", () => expect(true));\n`;
+    const after = `customRunner\n/* ${inert} */\n.only("focused", () => expect(true));\n`;
+    expect(codes(input({ [path]: before }, { [path]: after }))).toContain('test_disabled');
+    expect(codes(input({ [path]: `${after}old\n` }, { [path]: `${after}new\n` }))).not.toContain(
+      'test_disabled'
+    );
+  });
   it('ordinary source assertions/skip text are not treated as test integrity', () => {
     expect(codes(input({ 'src/a.ts': 'expect(1);\n' }, { 'src/a.ts': 'it.skip(\n' }))).toEqual([]);
   });

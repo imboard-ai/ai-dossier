@@ -124,6 +124,9 @@ function screen(value: string): Screening {
       if (dot !== null && /^assert\w*\b/u.test(value.slice(gap[dot], gap[dot] + 64))) assertions++;
     }
   }
+  // Generic focus spans can reach backward over comments containing other
+  // markers. The overlap sweep needs source order, with inclusive starts first.
+  markers.sort((a, b) => a[0] - b[0] || Number(b[2]) - Number(a[2]) || a[1] - b[1]);
   return { markers, assertions };
 }
 
