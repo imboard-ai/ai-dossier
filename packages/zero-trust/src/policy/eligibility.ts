@@ -9,6 +9,7 @@ import {
   githubRecord as object,
   githubPositiveId as positive,
 } from './github-values';
+import { isNonBugIssue } from './issue-labels';
 
 export const ELIGIBILITY_PAGE_LIMIT = 10;
 export const ELIGIBILITY_PAGE_SIZE = 100;
@@ -375,15 +376,7 @@ export async function assessIssue(
         reasonCode: ReasonCode.PolicyBlocked,
       };
     const reasons: EligibilityReason[] = [];
-    const names = labels.map((label) => label.toLowerCase());
-    const bug = names.some((label) => ['bug', 'defect', 'regression'].includes(label));
-    if (
-      !bug &&
-      names.some((label) =>
-        ['enhancement', 'feature', 'question', 'discussion', 'documentation'].includes(label)
-      )
-    )
-      reasons.push('not_a_bug');
+    if (isNonBugIssue(labels)) reasons.push('not_a_bug');
     if (assignees.some((user) => user.login.toLowerCase() !== facts.contributor))
       reasons.push('competing_assignee');
     for (const pr of pulls.values()) {

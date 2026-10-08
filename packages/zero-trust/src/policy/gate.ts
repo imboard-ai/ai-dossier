@@ -5,6 +5,7 @@ import { isTimestamp, ReasonCode } from '../state';
 import type { PolicyAssessment, PolicyCitation } from './classify';
 import type { Eligibility } from './eligibility';
 import { githubArray, githubRecord, isGitHubActorLogin } from './github-values';
+import { isNonBugIssue } from './issue-labels';
 
 export type GateDecision =
   | {
@@ -173,6 +174,7 @@ function eligibilityFacts(
   const add = (reason: string) => {
     if (!detachedReasons.includes(reason)) detachedReasons.push(reason);
   };
+  if (isNonBugIssue(labels)) add('not_a_bug');
   if (assigned.some((a) => !sameLogin(a, contributor))) add('competing_assignee');
   for (const raw of pullSnapshot) {
     const pr = githubRecord(raw);
@@ -297,6 +299,7 @@ export function decideGate(
   contributor: string
 ): GateDecision {
   try {
+    githubRecord(policy);
     const login = contributor;
     const ai = policy.ai;
     const assignment = policy.assignment;

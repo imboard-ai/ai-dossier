@@ -87,6 +87,22 @@ const rows: { id: string; p: Partial<PolicyAssessment>; e?: Eligibility; kind: s
 ];
 
 describe('gate table', () => {
+  it('cannot erase non-bug labels or accept an explicitly truncated policy', () => {
+    const e = eligible();
+    expect(
+      decideGate(
+        policy,
+        { ...e, facts: { ...e.facts, issue: { ...e.facts.issue, labels: ['enhancement'] } } },
+        'alice'
+      )
+    ).toEqual({ kind: 'hand_off', reasons: ['not_a_bug'] });
+    expect(decideGate({ ...policy, truncated: true } as PolicyAssessment, e, 'alice').kind).toBe(
+      'hand_off'
+    );
+    expect(decideGate({ ...policy, truncated: false } as PolicyAssessment, e, 'alice').kind).toBe(
+      'proceed'
+    );
+  });
   it('refuses truncated collections and malformed event evidence', () => {
     const e = eligible();
     for (const key of ['pulls', 'events'])
