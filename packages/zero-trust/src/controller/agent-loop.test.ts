@@ -862,7 +862,6 @@ describe('provider-neutral admitted controller loop', () => {
   });
   it.each([
     'checkpoint',
-    'stop',
   ])('release during terminal %s persistence leaves failure as the durable tail', async (event) => {
     const { ctx, adapter, model, workspace, lifecycle } = await setup([call(META)]);
     const entries: string[] = [];
@@ -937,5 +936,105 @@ describe('provider-neutral admitted controller loop', () => {
     expect(await runPlanning({ ...ctx, model })).toEqual(PLAN);
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(adapter.calls).toEqual([]);
+  });
+  it('failed mirroring fences re-entry while preserving admitted bytes privately', async () => {
+    const { ctx, adapter, model, transcript } = await setup([
+      call({ kind: 'worker_write_file', path: 'a', content: 'held' }),
+      call(META),
+    ]);
+    vi.spyOn(adapter, 'putFile').mockRejectedValueOnce(new Error('guest write uncertain'));
+    expect(await runImplementation(ctx, { plan: PLAN })).toEqual({
+      kind: 'hand_off',
+      reason: 'loop_failed',
+    });
+    expect(await runImplementation(ctx, { plan: PLAN })).toEqual({
+      kind: 'hand_off',
+      reason: 'loop_failed',
+    });
+    expect(model.requests).toHaveLength(1);
+    expect(adapter.calls).toEqual([]);
+    expect(
+      transcript
+        .map((entry) => JSON.parse(entry))
+        .some((entry) => entry.event === 'admitted' && entry.data.content === 'held')
+    ).toBe(true);
+  });
+  it('worker-reported timeout or ambiguous exit cannot lead to another model call', async () => {
+    for (const timedOut of [true, false]) {
+      const { ctx, adapter, model } = await setup([call(exec), call(META)]);
+      adapter.on(['npm', 'test'], { timedOut, exitCode: null, stdout: 'inconclusive output' });
+      expect(await runImplementation(ctx, { plan: PLAN })).toEqual({
+        kind: 'hand_off',
+        reason: timedOut ? 'command_timeout' : 'worker_inconclusive',
+      });
+      expect(model.requests).toHaveLength(1);
+      expect(ctx.collector.outputs()).toContain('inconclusive output');
+      expect(await runImplementation(ctx, { plan: PLAN })).toEqual({
+        kind: 'hand_off',
+        reason: 'loop_failed',
+      });
+      expect(model.requests).toHaveLength(1);
+    }
+  });
+  it('late success-checkpoint persistence can never append an authoritative successful stop', async () => {
+    const { ctx, model } = await setup([call(META), call(META)]);
+    let release: (() => void) | undefined;
+    const wait = new Promise<void>((r) => {
+      release = r;
+    });
+    const entries: string[] = [];
+    const persist = async (entry: string) => {
+      if (JSON.parse(entry).event === 'checkpoint') await wait;
+      entries.push(entry);
+    };
+    expect(await runImplementation({ ...ctx, persist }, { plan: PLAN })).toEqual({
+      kind: 'hand_off',
+      reason: 'persistence_failed',
+    });
+    release?.();
+    await Promise.resolve();
+    expect(
+      entries
+        .map((entry) => JSON.parse(entry))
+        .filter(
+          (entry) => entry.event === 'stop' && ['plan', 'candidate'].includes(entry.data.kind)
+        )
+    ).toEqual([]);
+    expect(await runImplementation(ctx, { plan: PLAN })).toEqual({
+      kind: 'hand_off',
+      reason: 'loop_failed',
+    });
+    expect(model.requests).toHaveLength(1);
+  });
+  it('late earlier appends retain logical sequence order and cannot un-fence the workspace', async () => {
+    const { ctx, model } = await setup([call(exec)]);
+    let release: (() => void) | undefined;
+    const wait = new Promise<void>((r) => {
+      release = r;
+    });
+    const entries: string[] = [];
+    const persist = async (entry: string) => {
+      if (JSON.parse(entry).event === 'start') await wait;
+      entries.push(entry);
+    };
+    expect(
+      await runPlanning({
+        ...ctx,
+        now: () => new Date(),
+        limits: { ...ctx.limits, activeMinutes: 0.002 },
+        persist,
+      })
+    ).toEqual({ kind: 'budget_exhausted', reason: 'active_time' });
+    release?.();
+    await Promise.resolve();
+    const logical = entries
+      .map((entry) => JSON.parse(entry))
+      .sort((a, b) => a.sequence - b.sequence);
+    expect(logical.at(-1)).toMatchObject({
+      event: 'stop',
+      data: { kind: 'budget_exhausted', reason: 'active_time' },
+    });
+    expect(await runPlanning(ctx)).toEqual({ kind: 'hand_off', reason: 'loop_failed' });
+    expect(model.requests).toEqual([]);
   });
 });

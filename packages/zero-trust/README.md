@@ -105,10 +105,14 @@ off as `output_truncated` rather than allowing partial evidence to pass.
 Transcript events include start data, detached model responses, admitted actions,
 rejections, action replies and terminal stop events with controller-defined stage,
 turn and stop outcome.
-Success persistence first writes a tentative `checkpoint`, revalidates liveness,
-then writes the actual `stop`. Teardown during either write produces a final
-failure stop, rather than leaving a candidate-success tail that disagrees with
-the returned outcome. The lease/account remain held through terminal persistence.
+Successful plan/candidate persistence writes only a tentative `checkpoint` and
+revalidates liveness before returning. **No transcript entry establishes success
+authority**; the returned proposal and later verification/controller state own
+that decision. Failed outcomes write `stop` events. A timed-out arbitrary sink
+may append late, so entries carry a controller-assigned monotonic `sequence`;
+read them in logical sequence order, never infer a verdict from the physical tail.
+Persistence failure/timeout permanently invalidates workspace reuse, including
+after a delayed append resolves. The lease/account remain held through terminal persistence.
 Stop persistence has a separate
 `TERMINAL_TRANSCRIPT_TIMEOUT_MS = 1000` durability allowance after active expiry;
 a failed sink is not recursively asked to report itself.
@@ -143,7 +147,11 @@ limits are rejected before changing the overlay.
 
 Each admitted loop write updates this overlay and mirrors those exact bytes with
 `putFile` so later commands can see them. The loop never calls `getFile` to build
-a candidate. Direct overlay/authority writes permit at most 1 MiB
+a candidate. Failed/uncertain mirroring invalidates workspace reuse; admitted
+bytes remain privately recorded for controller recovery, requiring fresh provisioning.
+An adapter-reported timeout is also an inconclusive stop with no further model
+call; ambiguous null exits stop as `worker_inconclusive` and fence reuse.
+Direct overlay/authority writes permit at most 1 MiB
 of content, but the OpenAI-compatible model transport caps the **entire serialized
 tool argument at 64 KiB**, including JSON envelope and escaping. Complete-file
 rewrites exceeding that smaller transport bound give `model_invalid_response`;

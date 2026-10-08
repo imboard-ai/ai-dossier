@@ -11,6 +11,7 @@ import { type ModelAdapter, ModelError, type ModelMessage } from '../model/adapt
 import { BudgetExhaustedError, meteredComplete } from '../model/metered';
 import { assertNoSecrets, assertSecretFree, REDACTED, redactedExcerpt } from '../redaction';
 import { BrokerError, type VmAdapter, type VmHandle } from '../vm/adapter';
+import { invalidateProvisionedVm } from '../vm/workspace-lifecycle';
 import { abortProvisionedVm, assertProvisionedVm, leaseProvisionedVm } from './evidence-runner';
 import type { OutputCollector } from './output-collector';
 import { AGENT_SYSTEM, type AgentPhase, agentTools, untrustedFrame } from './prompts';
@@ -48,6 +49,12 @@ export class ActiveTimeBudget {
 }
 const ACTIVE_TIME = new WeakMap<BudgetLedger, Map<string, ActiveTimeBudget>>();
 const OVERLAYS = new WeakMap<VmHandle, WorkspaceOverlay>();
+const TRANSCRIPT_SEQUENCE = new WeakMap<VmHandle, number>();
+function transcriptEntry(ctx: AgentLoopContext, data: Record<string, unknown>): string {
+  const sequence = (TRANSCRIPT_SEQUENCE.get(ctx.vm) ?? 0) + 1;
+  TRANSCRIPT_SEQUENCE.set(ctx.vm, sequence);
+  return safeRecord({ ...data, sequence });
+}
 function workspaceOverlay(ctx: AgentLoopContext): WorkspaceOverlay {
   const base = validateManifest(ctx.baseManifest);
   const held = OVERLAYS.get(ctx.vm);
@@ -231,11 +238,14 @@ async function loop(
   const record = async (turn: number, event: string, data: unknown): Promise<void> => {
     try {
       await bounded(
-        async () => ctx.persist(safeRecord({ phase, turn, event, data })),
+        async () => ctx.persist(transcriptEntry(ctx, { phase, turn, event, data })),
         remaining(),
         new ActiveTimeExpired()
       );
     } catch (error) {
+      // An arbitrary sink may finish a timed-out append later. Fence workspace
+      // reuse; transcript entries are data and never success authorization.
+      invalidateProvisionedVm(ctx.adapter, ctx.vm);
       if (error instanceof ActiveTimeExpired) throw error;
       if (remaining() <= 0) throw new ActiveTimeExpired();
       persistenceFailed = true;
@@ -243,6 +253,7 @@ async function loop(
     }
   };
   try {
+    if (remaining() <= 0) return { kind: 'budget_exhausted', reason: 'active_time' };
     release = leaseProvisionedVm(ctx.adapter, ctx.vm);
     const overlay = workspaceOverlay(ctx);
     const messages: ModelMessage[] = [
@@ -366,6 +377,11 @@ async function loop(
               throw new Error('invalid_worker_output');
             ctx.collector.append(stdout);
             ctx.collector.append(stderr);
+            if (timedOut) throw new WorkerDeadline(activeRemaining <= ctx.limits.commandTimeoutMs);
+            if (exitCode === null) {
+              invalidateProvisionedVm(ctx.adapter, ctx.vm);
+              return { kind: 'hand_off', reason: 'worker_inconclusive' };
+            }
             if (truncated || ctx.collector.truncated)
               return { kind: 'hand_off', reason: 'output_truncated' };
             const { excerpt } = redactedExcerpt(`${stdout}\n--- stderr ---\n${stderr}`, outputTail);
@@ -416,6 +432,7 @@ async function loop(
     }
     return { kind: 'turns_exhausted' };
   } catch (error) {
+    if (tracking.stage === 'worker_write_file') invalidateProvisionedVm(ctx.adapter, ctx.vm);
     tracking.code = error instanceof BrokerError ? 'broker_failure' : 'controller_failure';
     if (error instanceof ActiveTimeExpired)
       return { kind: 'budget_exhausted', reason: 'active_time' };
@@ -464,7 +481,7 @@ async function runLoop(
       return bounded(
         async () =>
           ctx.persist(
-            safeRecord({
+            transcriptEntry(ctx, {
               phase,
               turn: tracking.turn,
               stage: tracking.stage,
@@ -491,13 +508,11 @@ async function runLoop(
         await recordStop('checkpoint');
         validateSuccess();
       }
-      await recordStop('stop');
-      const wasSuccess = success();
-      validateSuccess();
-      // Teardown can land while even the final stop write is awaited. Append the
-      // actual failure as the last outcome; never leave a success as durable tail.
-      if (wasSuccess && !success()) await recordStop('stop');
+      // Success stays a tentative checkpoint: even a late append cannot establish
+      // authoritative success after the persistence deadline has failed closed.
+      if (!success()) await recordStop('stop');
     } catch {
+      invalidateProvisionedVm(ctx.adapter, ctx.vm);
       return success() ? { kind: 'hand_off', reason: 'persistence_failed' } : result;
     }
     return result;
