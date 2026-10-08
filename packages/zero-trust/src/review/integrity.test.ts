@@ -453,6 +453,25 @@ describe('deterministic candidate scope/test integrity', () => {
       'test_disabled'
     );
   });
+  it.each([
+    'it ||\n',
+    'false &&\n',
+    'true ? it :\n',
+    'enabled or\n',
+    'disabled and\n',
+  ])('retained marker selector deletion %j hands off ambiguous activation', (selector) => {
+    const path = 'a.test.js';
+    const marker = 'it.skip("retained", () => expect(true));\n';
+    expect(codes(input({ [path]: selector + marker }, { [path]: marker }))).toContain(
+      'test_disabled'
+    );
+    expect(codes(input({ [path]: selector + marker }, { [path]: marker + selector }))).toContain(
+      'test_disabled'
+    );
+    expect(codes(input({ [path]: `old\n${marker}` }, { [path]: marker }))).not.toContain(
+      'test_disabled'
+    );
+  });
   it('ordinary source assertions/skip text are not treated as test integrity', () => {
     expect(codes(input({ 'src/a.ts': 'expect(1);\n' }, { 'src/a.ts': 'it.skip(\n' }))).toEqual([]);
   });

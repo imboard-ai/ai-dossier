@@ -49,6 +49,8 @@ It is not semantic proof.
 If added or deleted lines contain comment/string delimiters and candidate disabling
 markers remain, screening conservatively refuses the ambiguous lexical-context
 change: a retained marker may have become active without any added token.
+Changes to short-circuit/conditional selector syntax around retained markers
+likewise refuse ambiguous activation instead of interpreting repository code.
 Non-test added lines containing `ai-dossier` or `imboard` are `promotional`.
 
 Protected config includes `package.json`, `package-lock.json`, `pyproject.toml`,
