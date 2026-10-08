@@ -286,6 +286,7 @@ describe('durable checkpoints', () => {
     expect(store.run.state).toBe(interrupted);
     store = reopen(directory, store);
     expect(store.checkpoint(point)?.status).toBe('approved');
+    assertNoSecrets(JSON.stringify(store.checkpoint(point)));
     expect(() => approveCheckpoint(store, store.run, approval, LATER)).toThrow(
       new CheckpointError('checkpoint_closed')
     );
@@ -428,6 +429,7 @@ describe('durable checkpoints', () => {
     store = reopen(directory, store);
     expect(store.run.state).toBe('cancelled');
     expect(store.checkpoint('patch')?.rejectionReason).toBe('Scope needs revision');
+    assertNoSecrets(JSON.stringify(store.checkpoint('patch')));
     expect(() => rejectCheckpoint(store, store.run, approval, 'again', LATER)).toThrow(
       new CheckpointError('checkpoint_closed')
     );
@@ -435,23 +437,46 @@ describe('durable checkpoints', () => {
   });
 
   it('refuses secret-bearing records, status, bindings and rejection reasons before writing', () => {
-    const { store } = rig();
+    let { store, directory } = rig();
     phase(store, 'plan');
     const data = bindings(store, 'plan');
     const secret = 'ghp_012345678901234567890123456789012345';
+    const journal = path.join(store.directory, 'control/events.jsonl');
+    const before = fs.readFileSync(journal);
+    const beforeRun = store.run;
     expect(() =>
       pauseAtCheckpoint(store, store.run, 'plan', { ...data, planDigest: secret }, AT)
     ).toThrow(SecretRedactionError);
     expect(store.checkpoint('plan')).toBeUndefined();
+    expect(fs.readFileSync(journal)).toEqual(before);
+    expect(store.run).toEqual(beforeRun);
+    store = reopen(directory, store);
+    expect(fs.readFileSync(journal)).toEqual(before);
+    expect(store.checkpoint('plan')).toBeUndefined();
     pauseAtCheckpoint(store, store.run, 'plan', data, AT);
     const record = store.checkpoint('plan');
+    const bytes = fs.readFileSync(journal);
+    const paused = store.run;
     expect(() => checkpointStatus({ ...record, rejectionReason: secret } as never)).toThrow(
       SecretRedactionError
     );
+    expect(fs.readFileSync(journal)).toEqual(bytes);
+    expect(store.run).toEqual(paused);
+    expect(store.checkpoint('plan')).toEqual(record);
     expect(() => rejectCheckpoint(store, store.run, answer(store, 'plan'), secret, AT)).toThrow(
       SecretRedactionError
     );
     expect(store.run.state).toBe('paused_user');
+    expect(fs.readFileSync(journal)).toEqual(bytes);
+    expect(store.run).toEqual(paused);
+    expect(store.checkpoint('plan')).toEqual(record);
+    store = reopen(directory, store);
+    expect(fs.readFileSync(journal)).toEqual(bytes);
+    expect(store.run).toEqual(paused);
+    expect(store.checkpoint('plan')).toEqual(record);
+    assertNoSecrets(fs.readFileSync(journal, 'utf8'));
+    assertNoSecrets(JSON.stringify(store.checkpoint('plan')));
+    assertNoSecrets(checkpointStatus(store.checkpoint('plan') as never).nextPermittedAction);
   });
 
   it.each([
