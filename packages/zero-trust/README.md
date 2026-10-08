@@ -995,6 +995,131 @@ Tests alone can pass `options.remoteUrlForTest`, a local `file:` URL accepted on
 when `process.env.VITEST` is set; only then is file transport permitted. Tests use no
 live network, and production must never set that option.
 
+## Artifact retention and portable export (#1104)
+
+These offline controller APIs are exported from the package index. No CLI or
+upstream write is added. The caller must close live controllers before sweeping;
+`RunStore.open` holds the same permanent lifetime flock used for execution.
+`RunStore.open(root, runId, { readOnly: true })` is the maintenance open used by
+sweep: it validates the complete confirmed control journal without running tail
+recovery, repairing snapshots, changing journal permissions or writing lifecycle
+events. Torn tails, pending recovery markers and unconfirmed snapshots require
+explicit controller recovery before maintenance. Mutating controller methods on
+a read-only handle refuse. Pinned maintenance access also rechecks the current
+snapshot, config digest and confirmed control history, so cached live state cannot
+hide corrupt or divergent selected files.
+
+- `planSweep(root, now, retentionDays?)` is **dry-run only**. `root` contains only
+  contribution directories (`ztc-<16 lowercase hex>`), not keys or other files.
+  `now` is an injected Date or ISO timestamp. Omit the third argument to use each
+  contribution's validated `config.retentionDays` (default **30**); a supplied
+  positive safe integer overrides it for this explicit sweep, without editing config.
+  Last activity is the maximum of lifecycle `updatedAt` and file modification
+  times, excluding maintenance files and lock/guard files. The exact cutoff is
+  retained; only strictly older contributions qualify. `blocked_cleanup` never
+  qualifies. `SweepPlan.contributions[].files` lists exclusively regular,
+  single-link files below `artifacts/`, with relative paths, inode identities,
+  sizes, modification times and SHA-256 digests. Directories are kept.
+- `applySweep(plan, fault?)` is the explicit destructive operation. It requires
+  the unchanged original plan object issued in this process (serialized, cloned,
+  forged or edited plans are refused). Replan after a process restart with the
+  same explicit retention override, if the original plan used one. It reopens
+  each store under the lifetime guard, pins directory descriptors, and revalidates
+  contribution identity, activity, configuration, protected bytes, selected
+  evidence and every remaining artifact before deleting. Symlinks, traversal,
+  hard links, stale files, new files and unreadable/corrupt evidence fail closed.
+  Root and ancestor symlinks are refused too.
+- Publication order is durable `summary.json`, then durable `.snapshot-expired`,
+  then deletion. Both maintenance records live beside the immutable `run.json`.
+  `ContributionSummary` (`ztfc-summary-v1`) contains public links, verified and
+  observed outcome SHAs, receipt digests, evidence-derived outcome, conservative
+  per-session costs and the exact sweep manifest. `snapshotExpired: true` is
+  monotonic: even a crash before the separate marker lands prevents resume.
+  Every protected file remains byte-for-byte unchanged: run/config/control and
+  all intents, handoff, track, tokens, push-ledger, nonces, budget, VM, profile
+  and prepared body evidence. No journal is compacted or discarded.
+- Each removable leaf is atomically moved to a deterministic private maintenance
+  name **within its original artifact directory**, identity/digest-checked, then
+  unlinked. The rename and deletion are followed by directory fsync. A crash
+  after isolation is replayable; a swapped leaf is retained and refused. These
+  temporary names are recognized only by the durable manifest. Already missing
+  files are tolerated only after durable expiry evidence exists. Partial and
+  complete applications can be rerun, reusing the identical summary bytes.
+  The optional synchronous test fault hook is called at `summary`, `expired`,
+  `quarantined` and `deleted` durable boundaries; a thrown fault releases the
+  maintenance handle so recovery can reopen it.
+- `readContributionSummary(store)` validates and returns the persisted summary,
+  or null when neither summary nor expiry marker exists. Missing summary with a
+  present marker, corrupt metadata, mismatched identity/digests and invalid
+  manifests are refused. `assertResumable(store)` delegates to
+  `RunStore.assertResumable()`; expired snapshots throw `RunStoreError('snapshot_expired')`.
+  The real `RunStore.assertResumeMatches` path enforces this before resume
+  identity/provider checks. Read-only open/status/export remain possible.
+  Resuming work requires fresh acquisition/reconstruction and independent
+  verification in a **fresh run**, never clearing expiry on the old snapshot.
+- `RunStore.withPinnedDirectory(work)` runs synchronous trusted controller
+  maintenance against the pinned contribution directory while its lifetime guard
+  is held, and refuses a closed, poisoned or replaced store. It is not a worker
+  API; never retain the descriptor path or start asynchronous work in the callback.
+
+### Selected evidence persistence convention
+
+This slice consumes actual producer records, independently of the metrics slice.
+`PrTracker` and `HandoffDriver` already persist `track/events.jsonl` and
+`handoff/events.jsonl`: raw events are scanned, then their existing replay
+validators establish identity, history, public links and outcome facts. A missing
+tracker outcome is **unknown**, never inferred merged from a lifecycle label.
+`BudgetLedger` snapshots live at `budget/ledger.json`. The new
+`validateBudgetSnapshot(raw, contributionId)` validates/detaches a pinned raw
+snapshot using the ledger's existing validation, without reopening a path or
+acquiring/mutating a budget lock. Costs use existing `budgetTotals`, preserving
+reservations and conservative maxima, with currencies kept per session. No
+ledger or no session means null, not zero. Present invalid evidence throws.
+
+Receipt issuance, command verification and policy/PR-content producers currently
+**return** records; the integrating trusted controller may atomically persist the
+following bounded, 0600 JSON records at the contribution root using its existing
+private durable publication primitive. This module never scans arbitrary bulk
+artifacts for authority, invents records, or auto-persists returned evidence:
+
+| Record | Controller-owned payload |
+|---|---|
+| `receipt-evidence.json` | At most 128 complete `SignedReceipt` envelopes returned by `issueReceipt`; receipt schema remains `ztfc-receipt-v2`. Parsed receipt identities, canonical SHA-256 digests and Ed25519 signatures are verified offline. Signature verification is integrity evidence, not trusted-key or current shipping authorization. |
+| `verification-evidence.json` | `{ runId, candidateSha, records }`; `records` are at most 128 actual `CommandRecord` values returned by the evidence runner. Each `evidence` must match the record's id, argv, status, exit code, suite count and log digest. The command evidence schema is validated; only receipt-style metadata is exported, with `verified` calculated by `evidenceVerified`. |
+| `portfolio-evidence.json` | `{ runId, disclosure, policyCitations }`; disclosure is the actual LLM disclosure text supplied with the prepared PR; citations are at most 128 actual policy assessment citations (`path`, positive `line`, `ruleId`, `excerpt`). Missing disclosure/citations are null; they are never reconstructed from arbitrary prose or fabricated defaults. |
+
+Every selected JSON record is bounded to 1 MiB and must be valid UTF-8; every
+selected journal line is subject to that bound and must be newline terminated.
+Raw strings (including discarded fields and verification log excerpts) are
+scanned with `assertNoSecrets` **before** projection. Missing optional sources
+remain unknown/null. Corrupt, truncated, unreadable or secret-bearing selected
+sources stop maintenance; secrets are never silently redacted into a successful
+export. Log content is not exported; command metadata retains sanitized digests.
+
+### Portable export contract
+
+`exportContribution(store, outFile)` returns and writes one detached
+`ContributionExport` with `schemaVersion: EXPORT_VERSION` (`ztfc-export-v1`):
+the actual run/history, offline status (URLs, verified/outcome SHAs, observed
+outcome and costs), sanitized summary, complete receipt envelopes/digests,
+verification metadata, PR/outcome, disclosure and policy citations. The exported
+summary omits the local sweep manifest and file identities. Missing verification
+is null; no absence can earn a verification or successful outcome claim.
+Config, environment, token journals, nonce stores, budget locks, raw logs and
+prepared body file paths are excluded. All output strings are scanned again.
+`EXPORT_SCHEMA` is the versioned public JSON Schema and the runtime validator's
+source of truth. `validateContributionExport(input)` rejects unknown fields,
+non-JSON values/accessors and bundles beyond the 1-MiB strict snapshot bound,
+malformed structures, secret strings, invalid run/history, contradictory status,
+receipt identities/digests and summary identities, returning a detached bundle.
+Validation completes **before** opening the destination. Output ancestors are
+pinned without following symlinks; output uses exclusive creation at mode 0600,
+fsyncs its file and parent directory, and never overwrites any existing leaf.
+An output write/fsync failure is an error, not a successful export; the exclusive
+partial file is left for the caller to inspect rather than overwritten on retry.
+Read-only status after expiry retains the original immutable run and tracking
+evidence, and the export status includes `snapshotExpired` explicitly.
+
 ## Development commands
 
 ```sh
