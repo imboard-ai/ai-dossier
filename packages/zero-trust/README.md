@@ -1889,3 +1889,35 @@ upstream; decision record row 3b), so the run waits for them durably.
 - The authorization code, `state`, access and refresh tokens never appear in an outcome,
   status, error message or the token journal; the object redacts itself in JSON and
   `inspect`. Every refusal carries a fixed next step.
+# Permission freshness
+
+`createFreshnessProbe({ read, upstream: { owner, repo, issue }, contributor, gated:
+{ policyDigest, policy, eligibilityDigest, invitation? }, ownPr?: { number } })`
+supplies credential-free, GET-only just-in-time admission for `HandoffAdmission`
+and `RevisionAdmission`. Pass its `policyFresh` method directly; for receipts,
+set `ReceiptContext.policyPermitsShipping` from `await probe.policyFresh()`.
+The controller must provide the already-admitted policy/eligibility snapshot and,
+when permission was granted through an invitation, its `InvitationEvidence`.
+
+Each `check()` reassesses current issue/repository/timeline facts, resolves the
+current default-branch commit, and discovers policy files pinned to that commit.
+An identical `policyDigest` reuses the gated assessment (including typed decisions);
+changed file identities are classified by the restriction-only deterministic floor,
+without a model call or inferred prose permission. A changed digest that still
+permits is recorded in the returned immutable `FreshnessReport`, alongside `head`,
+the current eligibility digest, assessment, `fresh`, and `reasons`.
+
+Reasons include `policy_changed`, `issue_closed` (also locked),
+`assignment_changed`, `competing_fix`, and `invitation_revoked`. Other structured
+ineligibility (private/archived/disabled repository, PR-as-issue, or non-bug issue)
+is `issue_ineligible`. Contributor-authored PRs do not compete; an `ownPr` numeric
+collision never exempts another author or another repository. A newly required
+approval/discussion without a gated invitation blocks. Later comments are checked
+with `checkInvitation` using the current policy digest and the maintainer
+association authority floor; this API does not infer issue-author authority.
+
+Unknown, malformed, ambiguous, failed or truncated reads throw the sanitized
+`FreshnessUnavailableError` from both methods, even when an earlier read already
+proved staleness. Neither method retries, writes, journals, transitions a run,
+uses credentials, or emits a contributor link. Callers decide what to do with
+the result; stale returns `false`, whereas unavailable remains a refusal.

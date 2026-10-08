@@ -36,6 +36,7 @@ export {
   type EngagementFacts,
   engagementBody as policyEngagementBody,
 } from './policy/engagement';
+export * from './policy/freshness';
 export * from './policy/gate';
 export * from './policy/invitation';
 export * from './policy/rules';

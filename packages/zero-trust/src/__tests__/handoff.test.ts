@@ -32,6 +32,7 @@ import {
 import { assertContentPolicy } from '../github/text';
 import type { IntentInput } from '../intents';
 import { Journal, JournalError } from '../journal';
+import { freshnessRig } from '../policy/__tests__/freshness-rig';
 import { receiptDigest } from '../receipt/issue';
 import { type CommandEvidence, evidenceVerified, RECEIPT_VERSION } from '../receipt/schema';
 import { SecretRedactionError } from '../redaction';
@@ -670,6 +671,22 @@ describe('awaiting_contributor hand-off driver', () => {
     );
   }
   const prRequest = () => ({ binding, content: contentInput() });
+
+  it('scenario 16 (maintainer/S2): closure after implementation refuses publication with no link', async () => {
+    const r = await freshnessRig();
+    const p = r.probe({ contributor: 'alice' });
+    expect(await p.policyFresh()).toBe(true);
+    r.issue.state = 'closed';
+    expect(await p.policyFresh()).toBe(false);
+    const d = driver(github({ pulls: [] }).read, shipping, admission(p));
+    const before = journal.read().length;
+    await expect(d.issuePr(prRequest())).rejects.toThrow('admission_policy');
+    expect(d.status()).toBeNull();
+    expect(d.snapshot().run.state).toBe('shipping');
+    expect(journal.read()).toHaveLength(before);
+    expect(fs.existsSync(path.join(dir, 'bodies'))).toBe(false);
+    expect(r.fake.calls.every((c) => c.method === 'GET' && c.token === undefined)).toBe(true);
+  });
 
   it('issues the prefilled PR link durably and enters awaiting_contributor', async () => {
     const gh = github({ pulls: [] });
