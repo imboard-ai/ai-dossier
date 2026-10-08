@@ -6,6 +6,7 @@ const EXTERNAL_REASONS: readonly ReasonCode[] = Object.freeze([
   ReasonCode.VerificationPassed,
   ReasonCode.RepairRequired,
   ReasonCode.UserPaused,
+  ReasonCode.ResumeImplementing,
   ReasonCode.ResumeRevising,
   ReasonCode.ResumeVerifying,
   ReasonCode.ResumeShipping,

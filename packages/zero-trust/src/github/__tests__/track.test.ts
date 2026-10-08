@@ -693,6 +693,20 @@ describe('revisions (AC2, AC3, AC5)', () => {
     return { r, up, t, j, advance, ready };
   }
 
+  it('observes a legal paused repair and implementing resume during revision', async () => {
+    const { t, advance } = await revisionRig();
+    expect(kind(await t.beginRevision())).toBe('revising');
+    advance(
+      ReasonCode.CandidateReady,
+      ReasonCode.RepairRequired,
+      ReasonCode.UserPaused,
+      ReasonCode.ResumeImplementing
+    );
+    expect(t.snapshot().run.state).toBe('implementing');
+    advance(ReasonCode.CandidateReady, ReasonCode.VerificationPassed);
+    expect(t.snapshot().run.state).toBe('shipping');
+  });
+
   it('round trip: resume, freshness, isolated revision, fresh receipt, CAS from the last verified SHA, PR head confirmed', async () => {
     const admission = admitAll();
     const { r, up, t, j, advance } = await revisionRig(admission);

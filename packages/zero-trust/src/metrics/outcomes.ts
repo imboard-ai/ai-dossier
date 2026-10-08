@@ -343,6 +343,12 @@ function validateCosts(input: unknown, integer: boolean): void {
       const total = row[field];
       const model = (row.model as Record<string, unknown>)[field];
       const vm = (row.vm as Record<string, unknown>)[field];
+      if (typeof total === 'number') {
+        const knownSum =
+          (typeof model === 'number' ? model : 0) + (typeof vm === 'number' ? vm : 0);
+        const tolerance = integer ? 0 : Number.EPSILON * Math.max(1, knownSum, total) * 4;
+        if (knownSum - total > tolerance) throw new MetricsError();
+      }
       if (typeof total === 'number' && typeof model === 'number' && typeof vm === 'number') {
         const sum = model + vm;
         const tolerance = integer ? 0 : Number.EPSILON * Math.max(1, sum, total) * 4;
@@ -417,6 +423,11 @@ function safeOutcome(input: unknown): ContributionOutcome {
     (raw.submitted === 'unknown' && raw.outcome !== 'unknown')
   )
     throw new MetricsError();
+  if (
+    (raw.submitted === true && ['ineligible', 'hand_off'].includes(raw.gated as string)) ||
+    (raw.submitted === false && typeof raw.revisions === 'number' && raw.revisions > 0)
+  )
+    throw new MetricsError();
   count(raw.issue, true);
   count(raw.revisions, true);
   count(raw.activeMs, true);
@@ -480,6 +491,7 @@ function safeAggregate(input: unknown): OutcomeAggregate {
       r.value !== rate(r.numerator as number, r.denominator as number, r.unknown as number).value ||
       (key !== 'reworkPerSubmitted' && (r.numerator as number) > (r.denominator as number)) ||
       (r.denominator as number) > contributions ||
+      (r.denominator === 0 && r.numerator !== 0) ||
       (r.unknown as number) > contributions ||
       (key !== 'eligibleToSubmitted' && r.denominator !== (raw.accepted as Rate).denominator)
     )
@@ -487,6 +499,17 @@ function safeAggregate(input: unknown): OutcomeAggregate {
   }
   validateCosts(raw.costPerSubmitted, false);
   validateCosts(raw.costPerAccepted, false);
+  if (
+    (contributions === 0 && raw.medianActiveMs !== 'unknown') ||
+    ((raw.accepted as Rate).unknown > 0 && raw.costPerAccepted !== 'unknown') ||
+    ((raw.accepted as Rate).denominator === 0 &&
+      raw.costPerSubmitted !== 'unknown' &&
+      Object.keys(raw.costPerSubmitted as object).length > 0) ||
+    ((raw.accepted as Rate).numerator === 0 &&
+      raw.costPerAccepted !== 'unknown' &&
+      Object.keys(raw.costPerAccepted as object).length > 0)
+  )
+    throw new MetricsError();
   if (!plainRecord(raw.repeatUsage)) throw new MetricsError();
   let knownContributors = 0;
   for (const [login, total] of Object.entries(raw.repeatUsage)) {
@@ -505,6 +528,8 @@ function safeAggregate(input: unknown): OutcomeAggregate {
       (raw.accepted as Rate).unknown
     ) > contributions ||
     (raw.eligibleToSubmitted as Rate).numerator > (raw.accepted as Rate).denominator ||
+    add((raw.eligibleToSubmitted as Rate).numerator, (raw.eligibleToSubmitted as Rate).unknown) >
+      contributions ||
     (raw.merged as Rate).unknown !== (raw.accepted as Rate).unknown ||
     (raw.declined as Rate).unknown !== (raw.accepted as Rate).unknown
   )

@@ -354,8 +354,9 @@ export class RunStore {
       );
       if (events.some(isRecoveryEvent)) throw new RunEvidenceError('run', 'recovered');
       const evidence = replayControl(events, config);
-      const snapshot = restoreRun(parseStrictUtf8Json(readPrivate(path.join(pinned, 'run.json'))));
-      assertSecretFree(snapshot);
+      const raw = parseStrictUtf8Json(readPrivate(path.join(pinned, 'run.json')));
+      assertSecretFree(raw);
+      const snapshot = restoreRun(raw);
       if (
         !evidence.confirmed ||
         !sameRunRecord(evidence.confirmed, evidence.run) ||

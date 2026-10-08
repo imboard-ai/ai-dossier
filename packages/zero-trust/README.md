@@ -95,6 +95,9 @@ requires the signing key. `validateStoredRunConfig(raw)` performs only schema/se
 validation; `validateRunConfig(raw)` also checks execution signing readiness. The combined
 evidence API throws `RunEvidenceError` with `source: 'run' | 'config'` and one fixed
 `code: 'missing' | 'corrupt' | 'incomplete' | 'recovered'`, never raw evidence or causes.
+Closed/poisoned handle checks in `validateConfigEvidence()` and `validateOutcomeEvidence()`
+retain `RunStoreError('store_closed' | 'persistence_uncertain')`; `validateEvidence()`
+translates all refusals to `RunStoreError('invalid_store')`.
 Budget reporting acquires the existing transaction guard read-only
 and refuses an unresolved owner, never initializing or reclaiming it; uncertain publication
 yields unknown costs until ledger reconciliation. `parseJournalEvents(bytes)` is

@@ -176,6 +176,88 @@ afterEach(() => {
 });
 
 describe('local contribution outcomes', () => {
+  it('refuses secret-bearing extra snapshot evidence before restoring known fields', () => {
+    const r = rig();
+    r.shipping();
+    r.step(ReasonCode.PublicationObserved);
+    const t = r.track();
+    t.event({
+      type: 'outcome',
+      outcome: 'merged',
+      headSha: t.sha,
+      run: r.step(ReasonCode.ObservedUpstreamMerge),
+    });
+    fs.writeFileSync(
+      path.join(r.store.directory, 'run.json'),
+      JSON.stringify({ ...r.store.run, extra: 'ghp_demo' })
+    );
+    expect(contributionOutcome(r.store).outcome).toBe('unknown');
+    expect(aggregate([contributionOutcome(r.store)]).merged.value).toBe('unknown');
+    expect(() => r.store.validateEvidence()).toThrow();
+  });
+  it('refuses impossible lifecycle, partial-cost and empty/uncertain statistical facts', () => {
+    const r = rig();
+    r.shipping();
+    r.step(ReasonCode.PublicationObserved);
+    r.track();
+    const o = contributionOutcome(r.store);
+    for (const patch of [
+      { gated: 'ineligible' },
+      { gated: 'hand_off' },
+      { submitted: false, outcome: 'none', revisions: 4 },
+      {
+        cost: {
+          byCurrency: {
+            USD: {
+              estimatedMinor: 1,
+              observedMinor: 1,
+              model: { estimatedMinor: 9, observedMinor: 9 },
+              vm: { estimatedMinor: 'unknown', observedMinor: 'unknown' },
+            },
+          },
+        },
+      },
+    ]) {
+      const value = { ...o, ...patch } as never;
+      expect(() => aggregate([value])).toThrow(MetricsError);
+      for (const render of [renderMetricsJson, renderMetricsHuman])
+        expect(() => render(value)).toThrow(MetricsError);
+    }
+    const stats = aggregate([o]);
+    const empty = aggregate([]);
+    const costs = {
+      USD: {
+        estimatedMinor: 1,
+        observedMinor: 1,
+        model: { estimatedMinor: 1, observedMinor: 1 },
+        vm: { estimatedMinor: 0, observedMinor: 0 },
+      },
+    };
+    const uncertain = aggregate([{ ...o, outcome: 'unknown' }]);
+    for (const value of [
+      {
+        ...stats,
+        eligibleToSubmitted: {
+          numerator: 1,
+          denominator: 1,
+          unknown: 1,
+          value: 'unknown' as const,
+        },
+      },
+      {
+        ...empty,
+        reworkPerSubmitted: { numerator: 7, denominator: 0, unknown: 0, value: 'unknown' as const },
+      },
+      { ...empty, medianActiveMs: 10 },
+      { ...empty, costPerSubmitted: costs },
+      { ...empty, costPerAccepted: costs },
+      { ...uncertain, costPerAccepted: costs },
+    ])
+      for (const render of [renderMetricsJson, renderMetricsHuman])
+        expect(() => render(value)).toThrow(MetricsError);
+    for (const value of [empty, stats, uncertain])
+      expect(() => renderMetricsJson(value)).not.toThrow();
+  });
   it('snapshots outer cohorts and renderer discrimination without invoking accessors or echoing traps', () => {
     let invoked = 0;
     const cohort = Object.defineProperty([], '0', {
@@ -928,6 +1010,8 @@ describe('local contribution outcomes', () => {
     });
     r.step(ReasonCode.CandidateReady);
     r.step(ReasonCode.RepairRequired);
+    r.step(ReasonCode.UserPaused);
+    r.step(ReasonCode.ResumeImplementing);
     expect(contributionOutcome(r.store)).toMatchObject({ outcome: 'open', revisions: 1 });
     expect(aggregate([contributionOutcome(r.store)]).accepted.value).toBe(0);
   });
