@@ -7,6 +7,7 @@ export * from './canonical/reconstruct';
 export * from './controller/agent-loop';
 export * from './controller/checkpoints';
 export * from './controller/config';
+export * from './controller/controller';
 export * from './controller/drift';
 export * from './controller/evidence-runner';
 export * from './controller/output-collector';
