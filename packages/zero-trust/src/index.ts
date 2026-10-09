@@ -13,6 +13,7 @@ export * from './controller/evidence-runner';
 export * from './controller/output-collector';
 export * from './controller/prompts';
 export * from './controller/run-store';
+export * from './controller/shipping';
 export * from './controller/status';
 export * from './controller/verification-record';
 export * from './controller/verifier';

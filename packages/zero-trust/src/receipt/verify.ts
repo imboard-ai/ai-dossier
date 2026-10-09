@@ -9,6 +9,7 @@ import {
   type Receipt,
   ReceiptError,
   type ShippingGrant,
+  sameRequiredCommands,
   snapshotJson,
 } from './schema';
 
@@ -111,12 +112,7 @@ export async function verifyReceipt(
     new Set(expected.requiredCommands.map((c) => c.id)).size !== expected.requiredCommands.length
   )
     throw new ReceiptError('unverified');
-  const required = receipt.commands.filter((c) => c.required);
-  if (
-    canonicalJson(
-      required.map(({ id, command }) => ({ id, command })).sort((a, b) => a.id.localeCompare(b.id))
-    ) !== canonicalJson(expected.requiredCommands.sort((a, b) => a.id.localeCompare(b.id)))
-  )
+  if (!sameRequiredCommands(receipt.commands, expected.requiredCommands))
     throw new ReceiptError('required_commands_mismatch');
   return receipt;
 }

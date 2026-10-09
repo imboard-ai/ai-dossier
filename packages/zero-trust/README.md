@@ -10,6 +10,97 @@ plus ecosystem detection, runtime profiles, command plans and package-proxy poli
 (see the gate 2 section below).
 Publication remains gated on S1 feasibility.
 
+## Credential-free shipping context (#1105)
+
+`controller/shipping.ts` exports the trusted composition APIs below. It has no
+credential-module imports; the composition root supplies authenticated adapters.
+
+- `shippingIntent(bindings): IntentInput` builds the exact `push_branch` target
+  with `forkTarget` and candidate SHA. `idempotencyKey(intent)` is the grant's
+  `operationKey`; `IntentDriver` journals attempts before the pusher authorizes.
+- `buildReceiptContext(deps): Promise<ReceiptContext>` revalidates the locked
+  `RunStore`, binds its contribution/run/contributor/upstream identity to the
+  authenticated `ForkReady`, and reads all persisted boundary artifacts under
+  the store fence to recompute this run's `runBoundaryVerdict`. It refuses missing,
+  malformed or breached evidence and states other than `shipping`/`revising`.
+  Required commands come exclusively from the trusted `CommandPlan`'s required
+  report-capturing verification commands, with `argv.join(' ')` display text.
+  The allowlist contains exactly one push target and the supplied push-ledger
+  `expectedRemoteSha` (null initially). Every call probes `policyFresh()`;
+  false, unknown or throwing results refuse. Inputs are detached and rechecked
+  across asynchronous work.
+- `issueShippingReceipt(deps, verification, bindings, now)` reloads the immutable
+  per-SHA verification record with its controller-held digest, checks the supplied
+  record is identical and calls `assertShippableVerification`. It checks profile,
+  run, candidate, base/parent and command-plan bindings before signing a v2 receipt
+  with exactly one push grant, a fresh nonce and the standard 15-minute expiry.
+- `makeAuthorize(deps)` returns the structural `ForkPusher` callback yielding
+  `{ receipt, context, candidate }`. Dependencies include the held manifest,
+  canonical record/authority and baseline pack. It loads immutable verification,
+  calls `reconstructCandidate`, checks the requested intent and authenticated
+  author, then issues a fresh receipt and context for every attempt. Missing or
+  changed evidence, candidate inputs or identity refuse before authorization.
+  Actual nonce/attempt consumption remains in `authorizeShipping` in the pusher.
+  Source snapshots use `validateManifest` and its canonical source limits, rather
+  than the smaller receipt JSON limits; post-await comparisons revalidate the digest.
+- `makeHandoffAdmission(deps): HandoffAdmission` supplies fresh policy, contributor
+  login and exact fork-readiness checks, authenticated `verifyReceipt` plus digest
+  and verification binding checks, and the injected verified remote read-back.
+  `HandoffAdmission.prBindingVerified(binding)` is required before PR issuance
+  (absence also refuses at runtime). Requested PR head/base bindings must match the held upstream, contributor,
+  branch and default branch. The receipt check reserves a digest once per admission
+  instance (concurrent repeats refuse); `HandoffDriver` releases the reservation
+  when issuance fails before a durable link and reconciles successfully issued links.
+  This factory is shipping/PR-only (`shipping`/`revising` states); gating engagement
+  comments require separate contact-permission and authenticated-contributor admission.
+  Factory authority callbacks, store and trusted-key references are captured;
+  held store validation/directory method identities are also checked across awaits.
+  the returned admission is frozen. Changing callback properties after construction
+  cannot replace the held authorization. Signing and probe failures have fixed,
+  non-echoing refusal codes.
+  `HandoffAdmission.commitPr(candidateSha, digest)` is mandatory and rechecks fresh
+   authenticated contributor, fork readiness and verified remote SHA, followed by
+   run/boundary/policy/verification/receipt admission after PR reconciliation and
+   before durable link publication. Reservations commit only after the enclosing
+   authority check and atomic replay check; refused final admission rolls back only
+   its own reservation. The driver binds admission methods once at construction and
+   detaches and recursively freezes the PR request before queueing; admission,
+   rendering and persistence use that same snapshot.
+  `HandoffAdmission.finalizePr(candidateSha, digest)` is the mandatory synchronous
+  publication fence. After asynchronous `commitPr` resolves, it rechecks run,
+  boundary, verification, receipt identity and expiry, then the driver records the
+  link without yielding. A cancellation/pause in the final promise continuations
+  refuses with `admission_commit` and releases the reservation. Missing binding or
+  commit callbacks also refuse with `admission_pr_binding` or `admission_commit`.
+  Supply `ForkPusher.handoffReadBack`, rather than an ordinary remote read, as
+  `remoteBranchSha` so a matching but unverified branch cannot admit a PR.
+- `prContentInput(input): PrContentInput` binds model `candidateReady` title/cause/
+  scope as untrusted prose, automated regression evidence from the verification
+  record, receipt/template policy flags and permitted baseline failures. It
+  preserves the upstream template and adds “Verified on base `<sha>`; upstream is
+  now at `<sha>`; the merge result was not verified” when the current base differs.
+
+`ShippingBindings` carries controller-held contribution/fork/branch/candidate/
+base/parent/session/default-branch/policy/verification-digest facts and the last
+verified remote SHA. `ReceiptContextDeps`, `ShippingReceiptDeps`,
+`ShippingAuthorizeDeps`, `ShippingHandoffDeps`, `ShippingPrContentDeps` and
+`ShippingAuthorization` describe these public dependency and result shapes.
+Verification checkpoints point to `artifacts/verification/<candidateSha>.json`.
+
+The controller threat model trusts its own in-process modules and constructed
+adapters. External responses/timing, VM/model/repository/policy output, run-store
+filesystem contents and concurrent legitimate cancellation/pause/kill-switch
+changes remain untrusted. Hostile in-process method substitution is out-of-scope
+hardening, not an admission guarantee; captured callbacks are cheap bind-once hygiene.
+`loadPinnedVerification(artifactsDescriptorPath, candidateSha, options)` is the
+descriptor-rooted immutable loader for callers inside `RunStore.withStoreDirectory`.
+The descriptor must remain live for the synchronous call; its private verification
+child is pinned independently and the usual canonical-byte/evidence checks apply.
+`sameRequiredCommands(commands, expected)` compares required evidence against the
+trusted plan by ID and command text without mutating either list.
+Offline integration tests use a real local bare-repository push and real durable
+nonce/intents/handoff stores, with fake GitHub adapters and no live network.
+
 ## Injected run controller core (#1106)
 
 `new RunController(deps)` supplies `start(config)`, `resume(runId)`,
@@ -614,7 +705,8 @@ bindings, now)` returns the persisted run. Call it at `plan` in planning after
 writing `artifacts/plan.txt` and before `PlanApproved`; `patch` in verifying after
 `CandidateReady` and before verification, with `artifacts/candidate.diff`; and
 `verification` in shipping after `VerificationPassed` and before any push intent,
-with `artifacts/verification.json`. Paths are relative to the run store. The
+with `artifacts/verification/<candidateSha>.json`; `verificationDigest` binds that
+immutable per-candidate record. Paths are relative to the run store. The
 controller owns these artifact names and writes the content before invoking the
 checkpoint API. Engagement and publication always remain contributor hand-offs.
 

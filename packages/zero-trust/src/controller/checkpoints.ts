@@ -150,7 +150,7 @@ export function checkpointStatus(
       ? 'plan text at artifacts/plan.txt'
       : record.point === 'patch'
         ? `candidate ${record.bindings.candidateSha} and diff at artifacts/candidate.diff`
-        : `candidate ${record.bindings.candidateSha} and verification summary at artifacts/verification.json`;
+        : `candidate ${record.bindings.candidateSha} and verification summary at artifacts/verification/${record.bindings.candidateSha}.json`;
   const stale =
     currentBindings !== undefined &&
     !sameCheckpointBindings(

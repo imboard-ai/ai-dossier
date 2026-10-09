@@ -40,6 +40,14 @@ import { HandoffError } from './text';
 
 /** Admission is identical to a brokered write (PRD §5.9); each check runs fresh. */
 export interface HandoffAdmission {
+  /** Shipping composition additionally binds the exact requested PR head/base. */
+  prBindingVerified(binding: PrBinding): Promise<boolean>;
+  /** Final fresh commit admission after reconciliation, retaining this receipt reservation. */
+  commitPr(candidateSha: string, receiptDigest: string): Promise<boolean>;
+  /** Synchronous authority fence; the driver publishes without yielding after it. */
+  finalizePr(candidateSha: string, receiptDigest: string): boolean;
+  /** Release a receipt reservation when no durable link was issued. */
+  releaseReceipt?(receiptDigest: string): void;
   /** AI policy, issue open state, assignment, competing fixes and permission, rechecked now. */
   policyFresh(): Promise<boolean>;
   /** The authenticated contributor login equals the run's contributor. */
@@ -411,16 +419,49 @@ export function renderHandoffStatus(status: HandoffStatus): string {
 
 const drivenJournals = new WeakSet<Journal>();
 
+/** Freeze the detached request recursively; callers retain no queued provenance alias. */
+function freezeRequest<T>(value: T): T {
+  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const child of Object.values(value)) freezeRequest(child);
+  }
+  return value;
+}
+
 /** Serial controller driver; the journal directory is controller-owned, never worker storage. */
 export class HandoffDriver {
   private state: HandoffState;
   private tail: Promise<unknown> = Promise.resolve();
+  private readonly admission: HandoffAdmission;
 
   constructor(
     private readonly journal: Journal,
     private readonly deps: HandoffDeps,
     initial: { run: RunRecord; contributionId: string }
   ) {
+    const { admission } = deps;
+    this.admission = Object.freeze({
+      prBindingVerified:
+        typeof admission.prBindingVerified === 'function'
+          ? admission.prBindingVerified.bind(admission)
+          : async () => false,
+      commitPr:
+        typeof admission.commitPr === 'function'
+          ? admission.commitPr.bind(admission)
+          : async () => false,
+      finalizePr:
+        typeof admission.finalizePr === 'function'
+          ? admission.finalizePr.bind(admission)
+          : () => false,
+      ...(admission.releaseReceipt
+        ? { releaseReceipt: admission.releaseReceipt.bind(admission) }
+        : {}),
+      policyFresh: admission.policyFresh.bind(admission),
+      contributorVerified: admission.contributorVerified.bind(admission),
+      forkBindingVerified: admission.forkBindingVerified.bind(admission),
+      receiptValid: admission.receiptValid.bind(admission),
+      remoteBranchSha: admission.remoteBranchSha.bind(admission),
+    });
     if (drivenJournals.has(journal)) throw new HandoffError('journal_in_use');
     const events = journal.read().filter((event) => !isRecoveryEvent(event));
     if (!events.length) {
@@ -482,6 +523,11 @@ export class HandoffDriver {
 
   /** Prefilled pull request for the verified, pushed candidate. */
   issuePr(request: { binding: PrBinding; content: PrContentInput }): Promise<HandoffOutcome> {
+    try {
+      request = freezeRequest(structuredClone(request));
+    } catch {
+      return Promise.reject(new HandoffError('invalid_request'));
+    }
     return this.serial(async () => {
       const intent = request.content?.intent;
       const prior = await this.reconcileFirst(intent);
@@ -494,23 +540,36 @@ export class HandoffDriver {
       // The driver renders the content itself: the receipt it checks is the one in the body.
       const content = buildPrContent(request.content);
       const digest = receiptDigest(parseReceipt(request.content.receipt));
-      const { admission } = this.deps;
-      await this.check('policy', () => admission.policyFresh());
-      await this.check('contributor', () => admission.contributorVerified());
-      await this.check('fork_binding', () => admission.forkBindingVerified());
-      await this.check('receipt', () => admission.receiptValid(sha, digest));
-      await this.check('remote_sha', async () => (await admission.remoteBranchSha()) === sha);
-      // Never issue while any PR exists on this head/base, in any state.
-      const existing = await reconcilePr(this.deps.read, binding, {
-        marker: handoffMarker(intent),
-        contributor: this.state.run.contributor,
-        candidateSha: sha,
-      });
-      if (existing.kind === 'unknown') throw new HandoffError('reconciliation_unavailable');
-      if (existing.kind !== 'absent') throw new HandoffError('existing_submission');
-      const { title, body, commands } = content;
-      const link = compareLink(intent, binding, title, body, commands);
-      return this.issue(intent, binding, link);
+      const { admission } = this;
+      let issued = false;
+      let receiptReserved = false;
+      try {
+        const bindingProbe = admission.prBindingVerified;
+        await this.check('pr_binding', () => bindingProbe(binding));
+        await this.check('policy', () => admission.policyFresh());
+        await this.check('contributor', () => admission.contributorVerified());
+        await this.check('fork_binding', () => admission.forkBindingVerified());
+        await this.check('receipt', () => admission.receiptValid(sha, digest));
+        receiptReserved = true;
+        await this.check('remote_sha', async () => (await admission.remoteBranchSha()) === sha);
+        // Never issue while any PR exists on this head/base, in any state.
+        const existing = await reconcilePr(this.deps.read, binding, {
+          marker: handoffMarker(intent),
+          contributor: this.state.run.contributor,
+          candidateSha: sha,
+        });
+        if (existing.kind === 'unknown') throw new HandoffError('reconciliation_unavailable');
+        if (existing.kind !== 'absent') throw new HandoffError('existing_submission');
+        const { title, body, commands } = content;
+        const link = compareLink(intent, binding, title, body, commands);
+        await this.check('commit', () => admission.commitPr(sha, digest));
+        if (admission.finalizePr(sha, digest) !== true) throw new HandoffError('admission_commit');
+        const outcome = this.issue(intent, binding, link);
+        issued = true;
+        return outcome;
+      } finally {
+        if (!issued && receiptReserved) admission.releaseReceipt?.(digest);
+      }
     });
   }
 
@@ -527,7 +586,7 @@ export class HandoffDriver {
       const binding = bindingFor(this.state.run, intent, request.binding) as IssueBinding;
       if (intent.operationKind !== 'engagement_comment') throw new HandoffError('not_a_handoff');
       if (this.state.run.state !== 'gating') throw new HandoffError('admission_state');
-      const { admission } = this.deps;
+      const { admission } = this;
       await this.check('policy', () => admission.policyFresh());
       await this.check('contributor', () => admission.contributorVerified());
       const existing = await reconcileComment(this.deps.read, binding, {

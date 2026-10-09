@@ -5,6 +5,8 @@
  * ID and expire after 15 minutes, so nothing is signed here). Reading it back fails
  * closed: anything unreadable, unknown, inconsistent or detached from its evidence
  * artifacts throws. */
+
+import fs from 'node:fs';
 import path from 'node:path';
 import Ajv from 'ajv';
 import { sha256 } from '../canonical/export';
@@ -332,6 +334,51 @@ export function loadVerification(
   } catch {
     throw new VerificationRecordError('unavailable');
   }
+  return decodeVerification(bytes, artifactsDir, candidateSha, options);
+}
+
+/** Read through the caller's live pinned artifacts descriptor. Never resolve it
+ * back to a mutable pathname; pin the verification child before opening a record. */
+export function loadPinnedVerification(
+  artifactsDir: string,
+  candidateSha: string,
+  options: LoadVerificationOptions
+): VerificationRecord {
+  recordPath(artifactsDir, candidateSha);
+  if (!/^\/proc\/self\/fd\/[0-9]+$/u.test(artifactsDir))
+    throw new VerificationRecordError('unavailable');
+  let fd: number | undefined;
+  let bytes: Buffer;
+  try {
+    const parent = fs.statSync(artifactsDir);
+    if (
+      !parent.isDirectory() ||
+      parent.uid !== process.getuid?.() ||
+      (parent.mode & 0o777) !== 0o700
+    )
+      throw new Error('invalid directory');
+    fd = fs.openSync(
+      path.join(artifactsDir, VERIFICATION_DIRECTORY),
+      fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW
+    );
+    const child = fs.fstatSync(fd);
+    if (child.uid !== process.getuid?.() || (child.mode & 0o777) !== 0o700)
+      throw new Error('invalid directory');
+    bytes = readPrivate(`/proc/self/fd/${fd}/${candidateSha}.json`);
+  } catch {
+    throw new VerificationRecordError('unavailable');
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+  return decodeVerification(bytes, artifactsDir, candidateSha, options);
+}
+
+function decodeVerification(
+  bytes: Buffer,
+  artifactsDir: string,
+  candidateSha: string,
+  options: LoadVerificationOptions
+): VerificationRecord {
   let record: unknown;
   try {
     if (bytes.length > MAX_RECORD_BYTES) throw new Error('oversize');

@@ -279,9 +279,10 @@ describe('durable checkpoints', () => {
         ? 'artifacts/plan.txt'
         : point === 'patch'
           ? 'artifacts/candidate.diff'
-          : 'artifacts/verification.json'
+          : `artifacts/verification/${record.bindings.candidateSha}.json`
     );
     const approval = answer(store, point);
+    expect(status.nextPermittedAction).not.toContain('artifacts/verification.json');
     approveCheckpoint(store, store.run, approval, LATER);
     expect(store.run.state).toBe(interrupted);
     store = reopen(directory, store);
