@@ -44,12 +44,17 @@ credential-module imports; the composition root supplies authenticated adapters.
 - `makeHandoffAdmission(deps): HandoffAdmission` supplies fresh policy, contributor
   login and exact fork-readiness checks, authenticated `verifyReceipt` plus digest
   and verification binding checks, and the injected verified remote read-back.
-  Requested PR head/base bindings must match the held upstream, contributor,
+  `HandoffAdmission.prBindingVerified(binding)` is required before PR issuance
+  (absence also refuses at runtime). Requested PR head/base bindings must match the held upstream, contributor,
   branch and default branch. The receipt check reserves a digest once per admission
   instance (concurrent repeats refuse); `HandoffDriver` releases the reservation
   when issuance fails before a durable link and reconciles successfully issued links.
   This factory is shipping/PR-only (`shipping`/`revising` states); gating engagement
   comments require separate contact-permission and authenticated-contributor admission.
+  Factory authority callbacks, store and trusted-key references are captured;
+  the returned admission is frozen. Changing callback properties after construction
+  cannot replace the held authorization. Signing and probe failures have fixed,
+  non-echoing refusal codes.
   Supply `ForkPusher.handoffReadBack`, rather than an ordinary remote read, as
   `remoteBranchSha` so a matching but unverified branch cannot admit a PR.
 - `prContentInput(input): PrContentInput` binds model `candidateReady` title/cause/

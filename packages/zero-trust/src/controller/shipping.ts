@@ -221,6 +221,7 @@ function unchanged(deps: ReceiptContextDeps, held: ReceiptContext): void {
 }
 
 export async function buildReceiptContext(deps: ReceiptContextDeps): Promise<ReceiptContext> {
+  deps = { ...deps };
   const held = facts(deps);
   let permitted: boolean;
   try {
@@ -283,6 +284,7 @@ export async function issueShippingReceipt(
   bindings: ShippingBindings,
   now: () => number
 ): Promise<SignedReceipt> {
+  deps = { ...deps };
   const b = snapshotJson(bindings);
   const supplied = snapshotJson(verification);
   const signer = deps.signer;
@@ -301,23 +303,28 @@ export async function issueShippingReceipt(
     ...identity
   } = context;
   const intent = shippingIntent(b);
-  const receipt = await issueReceipt(
-    {
-      ...identity,
-      commands: snapshotJson([...record.commands]),
-      permittedShippingOperations: [
-        {
-          kind: 'push_branch',
-          target: intent.target,
-          operationKey: idempotencyKey(intent),
-          nonce: randomUUID(),
-          expectedRemoteSha: b.expectedRemoteSha,
-        },
-      ],
-    },
-    signer,
-    now
-  );
+  let receipt: SignedReceipt;
+  try {
+    receipt = await issueReceipt(
+      {
+        ...identity,
+        commands: snapshotJson([...record.commands]),
+        permittedShippingOperations: [
+          {
+            kind: 'push_branch',
+            target: intent.target,
+            operationKey: idempotencyKey(intent),
+            nonce: randomUUID(),
+            expectedRemoteSha: b.expectedRemoteSha,
+          },
+        ],
+      },
+      signer,
+      now
+    );
+  } catch {
+    return refuse('signing_unavailable');
+  }
   unchanged(deps, held);
   if (canonicalJson(deps.bindings) !== canonicalJson(b) || deps.signer !== signer)
     refuse('shipping_identity_changed');
@@ -342,6 +349,7 @@ export interface ShippingAuthorization {
 export function makeAuthorize(
   deps: ShippingAuthorizeDeps
 ): (intent: IntentInput) => Promise<ShippingAuthorization> {
+  deps = { ...deps };
   return async (input) => {
     const intent = snapshotJson(input);
     const b = snapshotJson(deps.bindings);
@@ -396,15 +404,34 @@ export interface ShippingHandoffDeps extends ReceiptContextDeps {
 
 /** Shipping/PR only; gating engagement uses a separate contact-permission admission. */
 export function makeHandoffAdmission(deps: ShippingHandoffDeps): HandoffAdmission {
+  const caller = deps;
+  deps = { ...deps };
+  const authorityFields = [
+    'store',
+    'trustedControllerKey',
+    'now',
+    'policyFresh',
+    'readLogin',
+    'checkForkReadiness',
+    'remoteBranchSha',
+    'receipt',
+  ] as const;
+  const assertAuthority = () => {
+    if (authorityFields.some((field) => caller[field] !== deps[field]))
+      refuse('shipping_authority_changed');
+  };
   const used = new Set<string>();
   const check = async (probe: () => Promise<boolean>) => {
     try {
-      return (await probe()) === true;
+      assertAuthority();
+      const result = (await probe()) === true;
+      assertAuthority();
+      return result;
     } catch {
       return false;
     }
   };
-  return {
+  return Object.freeze<HandoffAdmission>({
     prBindingVerified: (binding) =>
       check(async () => {
         const requested = snapshotJson(binding);
@@ -477,6 +504,7 @@ export function makeHandoffAdmission(deps: ShippingHandoffDeps): HandoffAdmissio
         return true;
       }),
     remoteBranchSha: async () => {
+      assertAuthority();
       const held = facts(deps);
       let sha: string | null;
       try {
@@ -485,10 +513,11 @@ export function makeHandoffAdmission(deps: ShippingHandoffDeps): HandoffAdmissio
         return refuse('remote_read_unavailable');
       }
       unchanged(deps, held);
+      assertAuthority();
       if (sha !== held.candidateSha) refuse('remote_sha_mismatch');
       return sha;
     },
-  };
+  });
 }
 
 export interface ShippingPrContentDeps {

@@ -41,7 +41,7 @@ import { HandoffError } from './text';
 /** Admission is identical to a brokered write (PRD §5.9); each check runs fresh. */
 export interface HandoffAdmission {
   /** Shipping composition additionally binds the exact requested PR head/base. */
-  prBindingVerified?(binding: PrBinding): Promise<boolean>;
+  prBindingVerified(binding: PrBinding): Promise<boolean>;
   /** Release a receipt reservation when no durable link was issued. */
   releaseReceipt?(receiptDigest: string): void;
   /** AI policy, issue open state, assignment, competing fixes and permission, rechecked now. */
@@ -503,7 +503,7 @@ export class HandoffDriver {
       let receiptReserved = false;
       try {
         const bindingProbe = admission.prBindingVerified;
-        if (bindingProbe) await this.check('pr_binding', () => bindingProbe(binding));
+        await this.check('pr_binding', () => bindingProbe(binding));
         await this.check('policy', () => admission.policyFresh());
         await this.check('contributor', () => admission.contributorVerified());
         await this.check('fork_binding', () => admission.forkBindingVerified());

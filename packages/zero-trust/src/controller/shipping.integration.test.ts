@@ -299,7 +299,7 @@ async function handoff(h: Awaited<ReturnType<typeof rig>>, receipt = h.authoriza
       fork: h.deps.fork,
       run: h.store.run,
     })),
-    remoteBranchSha: h.pusher.handoffReadBack(TARGET),
+    remoteBranchSha: vi.fn(h.pusher.handoffReadBack(TARGET)),
   };
   const admission = makeHandoffAdmission(admissionDeps);
   const rows = journal(temp('zt-shipping-handoffs-'));
@@ -334,6 +334,23 @@ async function handoff(h: Awaited<ReturnType<typeof rig>>, receipt = h.authoriza
 }
 
 describe('persisted verification to real local shipping (#1105)', () => {
+  it('cannot replace read-back or controller key while contributor admission awaits', async () => {
+    const h = await rig();
+    await h.driver.execute(h.input);
+    const p = await handoff(h);
+    p.admissionDeps.remoteBranchSha.mockRejectedValue(new Error('no verified push'));
+    p.admissionDeps.readLogin.mockImplementation(async () => {
+      Object.assign(p.admissionDeps, {
+        remoteBranchSha: async () => h.input.candidateSha,
+        trustedControllerKey: 'replacement-key',
+      });
+      return OWNER;
+    });
+    await expect(p.driver.issuePr(p.request)).rejects.toThrow('admission_contributor');
+    expect(Object.isFrozen(p.admission)).toBe(true);
+    expect(p.rows.read()).toHaveLength(1);
+    expect(fs.readdirSync(p.bodyDirectory)).toEqual([]);
+  });
   it.each([
     'branch',
     'base',
@@ -353,11 +370,7 @@ describe('persisted verification to real local shipping (#1105)', () => {
     const h = await rig();
     await h.driver.execute(h.input);
     const p = await handoff(h);
-    const readBack = p.admissionDeps.remoteBranchSha;
-    p.admissionDeps.remoteBranchSha = vi
-      .fn()
-      .mockRejectedValueOnce(new Error('temporary'))
-      .mockImplementation(readBack);
+    p.admissionDeps.remoteBranchSha.mockRejectedValueOnce(new Error('temporary'));
     await expect(p.driver.issuePr(p.request)).rejects.toThrow('admission_remote_sha');
     const route = [...p.fake.publicResponses.keys()][0];
     if (!route) throw new Error('missing route');

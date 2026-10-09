@@ -370,6 +370,7 @@ describe('gate table', () => {
           policyFresh: async () => true,
           contributorVerified: async () => true,
           forkBindingVerified: async () => true,
+          prBindingVerified: async () => true,
           receiptValid: async () => true,
           remoteBranchSha: async () => null,
         },

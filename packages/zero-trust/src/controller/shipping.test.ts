@@ -285,6 +285,12 @@ describe('credential-free shipping authorization', () => {
     await expect(buildReceiptContext(h.deps)).rejects.toThrow('boundary_evidence_invalid');
     await expect(buildReceiptContext(h.deps)).rejects.not.toThrow(sentinel);
   });
+  it('normalizes signer failures without exposing signer messages', async () => {
+    const h = rig();
+    vi.spyOn(h.deps.signer, 'sign').mockRejectedValue(new Error('private-signing-response'));
+    await expect(h.authorize()).rejects.toThrow('signing_unavailable');
+    await expect(h.authorize()).rejects.not.toThrow('private-signing-response');
+  });
   it('reconstructs the canonical candidate and issues a fresh single grant on each attempt', async () => {
     const h = rig();
     const first = await h.authorize();
