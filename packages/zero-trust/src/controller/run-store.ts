@@ -2,17 +2,18 @@ import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { types } from 'node:util';
-import {
-  assertDirectoryAncestors,
-  privateDir,
-  readPrivate,
-  replacePrivate,
-  syncDirectory,
-} from '../durable-fs';
-import { Journal, parseJournalEvents } from '../journal';
+import { assertDirectoryAncestors, privateDir, replacePrivate, syncDirectory } from '../durable-fs';
+import { Journal } from '../journal';
 import { lockDescriptor, StoreLockedError } from '../lock';
 import { isRecoveryEvent, isTailRecovery } from '../recovery';
-import { assertSecretFree } from '../redaction';
+import { assertSecretFree, SecretRedactionError } from '../redaction';
+import {
+  boundedRead,
+  JOURNAL_BYTES,
+  jsonRecord,
+  SUMMARY_BYTES,
+  strictJsonLines,
+} from '../retention/files';
 import {
   createRun,
   isRecord,
@@ -23,7 +24,7 @@ import {
   sameRunRecord,
   transitionRun,
 } from '../state';
-import { parseStrictUtf8Json, strictUtf8 } from '../strict-utf8';
+import { strictUtf8 } from '../strict-utf8';
 import {
   type CheckpointBindings,
   type CheckpointPoint,
@@ -62,6 +63,7 @@ export type RunStoreErrorCode =
   | 'invalid_run_id'
   | 'run_diverged'
   | 'resume_identity_mismatch'
+  | 'snapshot_expired'
   | 'persistence_uncertain'
   | 'store_closed';
 export class RunEvidenceError extends Error {
@@ -82,22 +84,47 @@ export class RunStoreError extends Error {
 function fail(code: RunStoreErrorCode): never {
   throw new RunStoreError(code);
 }
+function synchronousResult<T>(value: T): T {
+  if (
+    value !== null &&
+    (typeof value === 'object' || typeof value === 'function') &&
+    'then' in value &&
+    typeof value.then === 'function'
+  ) {
+    void Promise.resolve(value).catch(() => {});
+    fail('invalid_store');
+  }
+  return value;
+}
 function hash(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
-function readStoredConfig(pinned: string): RunConfig {
-  const bytes = readPrivate(path.join(pinned, 'config.json'));
-  if (hash(bytes) !== strictUtf8(readPrivate(path.join(pinned, 'config.sha256'))))
+function readStoredConfig(pinned: string, expectedDigest?: string, selected?: Buffer): RunConfig {
+  const bytes = selected ?? boundedRead(path.join(pinned, 'config.json'));
+  const raw = jsonRecord(bytes);
+  if (expectedDigest !== undefined && hash(bytes) !== expectedDigest) fail('run_diverged');
+  if (hash(bytes) !== strictUtf8(boundedRead(path.join(pinned, 'config.sha256'), 64)))
     fail('invalid_store');
-  return validateStoredRunConfig(parseStrictUtf8Json(bytes));
+  return validateStoredRunConfig(raw);
 }
 function refuseEvidence(source: 'run' | 'config', error: unknown): never {
-  if (error instanceof RunEvidenceError) throw error;
+  if (error instanceof RunEvidenceError || error instanceof SecretRedactionError) throw error;
   const code = (error as NodeJS.ErrnoException)?.code;
   throw new RunEvidenceError(
     source,
     code === 'ENOENT' ? 'missing' : code === 'run_diverged' ? 'incomplete' : 'corrupt'
   );
+}
+function parseStored(bytes: Buffer): unknown {
+  let raw: unknown;
+  try {
+    raw = jsonRecord(bytes, SUMMARY_BYTES);
+  } catch (error) {
+    if (error instanceof SecretRedactionError) throw error;
+    return fail('invalid_store');
+  }
+  assertSecretFree(raw);
+  return raw;
 }
 
 /** Pin every ancestor before descending: later writes cannot follow a replacement. */
@@ -269,20 +296,43 @@ function replayControl(
   if (!run) fail('invalid_store');
   return { run, confirmed, upstreamId, checkpoints, bindings };
 }
-function confirmSnapshot(journal: Journal, directory: string, run: RunRecord): void {
+/** Maintenance never invokes journal tail recovery or snapshot repair. */
+function readControl(directory: string): unknown[] {
+  const fd = fs.openSync(
+    path.join(directory, 'control'),
+    fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW
+  );
+  try {
+    const pinned = `/proc/self/fd/${fd}`;
+    try {
+      fs.lstatSync(path.join(pinned, 'events.jsonl.recovery'));
+      fail('invalid_store');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    return strictJsonLines(boundedRead(path.join(pinned, 'events.jsonl'), JOURNAL_BYTES));
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+function confirmSnapshot(
+  journal: Pick<Journal, 'append'>,
+  directory: string,
+  run: RunRecord
+): void {
   const bytes = Buffer.from(JSON.stringify(run));
   replacePrivate(path.join(directory, 'run.json'), bytes);
   journal.append({ v: 1, type: 'snapshot', sha256: hash(bytes) });
 }
 /** Permanent flock inode; Linux kernel releases it on controller death, never age. */
-function acquire(directory: string): number {
+function acquire(directory: string, create = true): number {
   if (process.platform !== 'linux') throw new StoreLockedError();
   const file = path.join(directory, '.controller.guard');
   let fd: number | undefined;
   try {
     fd = fs.openSync(
       file,
-      fs.constants.O_CREAT |
+      (create ? fs.constants.O_CREAT : 0) |
         fs.constants.O_RDWR |
         fs.constants.O_NOFOLLOW |
         fs.constants.O_NONBLOCK,
@@ -320,9 +370,11 @@ export class RunStore {
     readonly contributionId: string,
     private readonly guard: number,
     private readonly directoryFd: number,
-    private readonly journal: Journal,
+    private readonly journal: Pick<Journal, 'read' | 'append' | 'close'>,
     private readonly storedConfig: RunConfig,
-    private current: RunRecord
+    private current: RunRecord,
+    private readonly readOnly = false,
+    private readonly configDigest = hash(Buffer.from(JSON.stringify(runConfigInput(storedConfig))))
   ) {}
   get runId(): string {
     return this.current.runId;
@@ -349,12 +401,10 @@ export class RunStore {
     this.check();
     try {
       const pinned = `/proc/self/fd/${this.directoryFd}`;
-      const events = this.withStoreDirectory('control', (dir) =>
-        parseJournalEvents(readPrivate(path.join(dir, 'events.jsonl')))
-      );
+      const events = readControl(pinned);
       if (events.some(isRecoveryEvent)) throw new RunEvidenceError('run', 'recovered');
       const evidence = replayControl(events, config);
-      const raw = parseStrictUtf8Json(readPrivate(path.join(pinned, 'run.json')));
+      const raw = jsonRecord(boundedRead(path.join(pinned, 'run.json')));
       assertSecretFree(raw);
       const snapshot = restoreRun(raw);
       if (
@@ -377,7 +427,7 @@ export class RunStore {
     this.check();
     try {
       const pinned = `/proc/self/fd/${this.directoryFd}`;
-      const config = readStoredConfig(pinned);
+      const config = readStoredConfig(pinned, this.configDigest);
       if (JSON.stringify(config) !== JSON.stringify(this.storedConfig)) fail('run_diverged');
       return config;
     } catch (error) {
@@ -387,6 +437,45 @@ export class RunStore {
   get config(): RunConfig {
     this.check();
     return structuredClone(this.storedConfig);
+  }
+  /** Synchronous maintenance under the lifetime guard; never expose a worker path. */
+  withPinnedDirectory<T>(
+    work: (directory: string) => T & (T extends PromiseLike<unknown> ? never : unknown)
+  ): T {
+    this.check();
+    if (types.isAsyncFunction(work)) fail('invalid_store');
+    const directory = this.maintenanceDirectory();
+    return synchronousResult(work(directory));
+  }
+  private maintenanceDirectory(): string {
+    try {
+      const named = fs.lstatSync(this.directory);
+      const pinned = fs.fstatSync(this.directoryFd);
+      if (named.isSymbolicLink() || named.dev !== pinned.dev || named.ino !== pinned.ino)
+        fail('invalid_store');
+      const directory = `/proc/self/fd/${this.directoryFd}`;
+      this.validateOutcomeEvidence();
+      return directory;
+    } catch (error) {
+      if (error instanceof RunStoreError || error instanceof SecretRedactionError) throw error;
+      fail('invalid_store');
+    }
+  }
+  assertResumable(): void {
+    this.withPinnedDirectory((directory) => {
+      for (const name of ['summary.json', '.snapshot-expired']) {
+        try {
+          const raw = parseStored(boundedRead(path.join(directory, name), SUMMARY_BYTES));
+          if (!isRecord(raw) || raw.runId !== this.runId || raw.snapshotExpired !== true)
+            fail('invalid_store');
+          fail('snapshot_expired');
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+          if (error instanceof RunStoreError || error instanceof SecretRedactionError) throw error;
+          fail('invalid_store');
+        }
+      }
+    });
   }
   get upstreamRepositoryId(): number | undefined {
     this.check();
@@ -418,18 +507,7 @@ export class RunStore {
     try {
       const stat = fs.fstatSync(fd);
       if (stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o700) fail('invalid_store');
-      const value = work(`/proc/self/fd/${fd}`);
-      if (
-        value !== null &&
-        (typeof value === 'object' || typeof value === 'function') &&
-        'then' in value &&
-        typeof value.then === 'function'
-      ) {
-        // Consume a rejected returned promise before refusing its escaped lifetime.
-        void Promise.resolve(value).catch(() => {});
-        fail('invalid_store');
-      }
-      return value;
+      return synchronousResult(work(`/proc/self/fd/${fd}`));
     } finally {
       fs.closeSync(fd);
     }
@@ -485,19 +563,24 @@ export class RunStore {
       if (
         error instanceof RunStoreError ||
         error instanceof StoreLockedError ||
-        error instanceof RunConfigError
+        error instanceof RunConfigError ||
+        error instanceof SecretRedactionError
       )
         throw error;
       fail('invalid_store');
     }
   }
-  static open(root: string, runId: string): RunStore {
+  static open(
+    root: string,
+    runId: string,
+    options: { readonly readOnly?: boolean } = {}
+  ): RunStore {
     const contributionId = contributionIdOf(runId);
     if (!contributionId) fail('invalid_run_id');
     const directory = path.resolve(root, contributionId);
     let directoryFd: number | undefined;
     let guard: number | undefined;
-    let journal: Journal | undefined;
+    let journal: Pick<Journal, 'read' | 'append' | 'close'> | undefined;
     try {
       assertDirectoryAncestors(directory);
       // Opening never creates a missing store or missing evidence.
@@ -511,10 +594,11 @@ export class RunStore {
       }
       directoryFd = pinDirectory(directory);
       const pinned = `/proc/self/fd/${directoryFd}`;
-      guard = acquire(pinned);
-      const config = readStoredConfig(pinned);
-      validateRunConfig(runConfigInput(config));
-      const raw = parseStrictUtf8Json(readPrivate(path.join(pinned, 'run.json')));
+      guard = acquire(pinned, !options.readOnly);
+      const bytes = boundedRead(path.join(pinned, 'config.json'));
+      const config = readStoredConfig(pinned, undefined, bytes);
+      if (!options.readOnly) validateRunConfig(runConfigInput(config));
+      const raw = jsonRecord(boundedRead(path.join(pinned, 'run.json')));
       assertSecretFree(raw);
       const run = restoreRun(raw);
       if (
@@ -523,8 +607,13 @@ export class RunStore {
         run.upstreamIssue !== config.issueUrl
       )
         fail('invalid_store');
-      readPrivate(path.join(directory, 'control', 'events.jsonl'));
-      journal = new Journal(path.join(directory, 'control'));
+      if (options.readOnly) {
+        const records = readControl(pinned);
+        journal = { read: () => records, append: () => fail('invalid_store'), close: () => {} };
+      } else {
+        boundedRead(path.join(directory, 'control', 'events.jsonl'), JOURNAL_BYTES);
+        journal = new Journal(path.join(directory, 'control'));
+      }
       const evidence = replayControl(journal.read(), config);
       if (!sameRunRecord(evidence.run, run)) {
         if (
@@ -535,7 +624,9 @@ export class RunStore {
           fail('run_diverged');
       }
       if (!evidence.confirmed || !sameRunRecord(evidence.run, evidence.confirmed))
-        confirmSnapshot(journal, pinned, evidence.run);
+        if (options.readOnly) fail('run_diverged');
+        else confirmSnapshot(journal, pinned, evidence.run);
+      if (options.readOnly && !sameRunRecord(run, evidence.run)) fail('run_diverged');
       const store = new RunStore(
         directory,
         contributionId,
@@ -543,7 +634,9 @@ export class RunStore {
         directoryFd,
         journal,
         config,
-        evidence.run
+        evidence.run,
+        options.readOnly === true,
+        hash(bytes)
       );
       store.upstreamId = evidence.upstreamId;
       store.checkpoints = evidence.checkpoints;
@@ -556,7 +649,8 @@ export class RunStore {
       if (
         error instanceof RunStoreError ||
         error instanceof StoreLockedError ||
-        error instanceof RunConfigError
+        error instanceof RunConfigError ||
+        error instanceof SecretRedactionError
       )
         throw error;
       fail('invalid_store');
@@ -566,6 +660,33 @@ export class RunStore {
     if (this.closed) fail('store_closed');
     if (this.poisoned) fail('persistence_uncertain');
   }
+  private requiresSnapshot(prior: RunRecord, run: RunRecord): boolean {
+    const observations = new Set([
+      ReasonCode.PublicationObserved,
+      ReasonCode.EngagementObserved,
+      ReasonCode.ReviewAwaited,
+      ReasonCode.UpstreamAccepted,
+      ReasonCode.ObservedUpstreamMerge,
+      ReasonCode.UpstreamDeclined,
+      ReasonCode.PolicyBlocked,
+      ReasonCode.UnsupportedEnvironment,
+      ReasonCode.ExecutionFailed,
+      ReasonCode.UserCancelled,
+      ReasonCode.CleanupFailed,
+      ReasonCode.CleanupCompleted,
+      ReasonCode.UserPaused,
+    ]);
+    return run.history
+      .slice(prior.history.length)
+      .some((event) => !observations.has(event.reasonCode));
+  }
+  /** Retained evidence may precede only observation/stop transitions after expiry. */
+  assertObservationContinuation(prior: RunRecord): void {
+    this.check();
+    prior = restoreRun(prior);
+    if (!isRunContinuation(prior, this.current) || this.requiresSnapshot(prior, this.current))
+      fail('run_diverged');
+  }
   persistRun(input: RunRecord): void {
     this.check();
     input = structuredClone(input);
@@ -573,6 +694,8 @@ export class RunStore {
     const run = restoreRun(input);
     if (!isRunContinuation(this.current, run)) fail('run_diverged');
     if (sameRunRecord(this.current, run)) return;
+    // Check every edge, including a multi-edge batch ending in cancellation.
+    if (this.requiresSnapshot(this.current, run)) this.assertResumable();
     validateCheckpointContinuation(this.current, run, this.checkpoints);
     this.write(() => {
       this.journal.append({ v: 1, type: 'run', run });
@@ -613,6 +736,7 @@ export class RunStore {
   resolveCheckpoint(input: CheckpointRecord, next: RunRecord): void {
     this.check();
     const record = restoreCheckpoint(input);
+    if (record.status === 'approved') this.assertResumable();
     next = restoreRun(structuredClone(next));
     validateCheckpoint(
       record,
@@ -647,6 +771,7 @@ export class RunStore {
     }
   ): void {
     this.check();
+    this.assertResumable();
     config = structuredClone(config);
     assertSecretFree(config);
     if (
@@ -658,6 +783,7 @@ export class RunStore {
       fail('resume_identity_mismatch');
   }
   private write(work: () => void): void {
+    if (this.readOnly) fail('invalid_store');
     try {
       work();
     } catch {

@@ -1,6 +1,7 @@
 import Ajv from 'ajv';
 import { dataDescriptors } from '../data-descriptors';
 import { assertNoSecrets } from '../redaction';
+import { object } from '../schema-object';
 
 export const RECEIPT_VERSION = 'ztfc-receipt-v2' as const;
 export const RECEIPT_TTL_MS = 15 * 60 * 1000;
@@ -68,16 +69,8 @@ export const SCHEMA_TYPES = Object.freeze({
 });
 const { text, id, sha, digest, time } = SCHEMA_TYPES;
 const positive = { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER };
-/** A closed object: every property required, nothing else allowed. */
-export function strictObject(properties: Record<string, unknown>) {
-  return {
-    type: 'object',
-    additionalProperties: false,
-    required: Object.keys(properties),
-    properties,
-  };
-}
-const object = strictObject;
+
+export { object as strictObject } from '../schema-object';
 /** The receipt's `profile` (see `profileReceiptBinding`). */
 export const PROFILE_SCHEMA = object({
   name: text,
@@ -145,6 +138,9 @@ export const RECEIPT_SCHEMA = object({
   verified: { type: 'boolean' },
 });
 const validate = new Ajv({ strict: true }).compile<Receipt>(RECEIPT_SCHEMA);
+const validateCommands = new Ajv({ strict: true }).compile<CommandEvidence[]>(
+  RECEIPT_SCHEMA.properties.commands
+);
 
 /** Reject accessors, custom prototypes, sparse arrays and lossy/non-JSON values.
  * Copy before any async boundary; nothing can change between validation/signing/use. */
@@ -215,6 +211,14 @@ export function evidenceVerified(commands: readonly CommandEvidence[]): boolean 
     )
   );
 }
+/** Receipt and standalone verification share command shape and unique identity. */
+export function parseCommandEvidence(input: unknown): CommandEvidence[] {
+  const copy = snapshotJson(input);
+  if (!validateCommands(copy)) throw new ReceiptError('invalid_schema');
+  if (new Set(copy.map((command) => command.id)).size !== copy.length)
+    throw new ReceiptError('invalid_evidence');
+  return copy;
+}
 export function parseReceipt(input: unknown): Receipt {
   const copy = snapshotJson(input);
   if (!validate(copy)) throw new ReceiptError('invalid_schema');
@@ -224,8 +228,7 @@ export function parseReceipt(input: unknown): Receipt {
     receipt.verified !== evidenceVerified(receipt.commands)
   )
     throw new ReceiptError('invalid_evidence');
-  if (new Set(receipt.commands.map((c) => c.id)).size !== receipt.commands.length)
-    throw new ReceiptError('invalid_evidence');
+  parseCommandEvidence(receipt.commands);
   const issued = Date.parse(receipt.issuedAt);
   const expires = Date.parse(receipt.expiresAt);
   if (

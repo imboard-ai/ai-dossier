@@ -21,6 +21,7 @@ import {
   withReadOnlyStoreLock,
   withStoreLock,
 } from './lock';
+import { boundedRead } from './retention/files';
 import { parseStrictUtf8Json } from './strict-utf8';
 
 function ledgerLockFile(file: string): string {
@@ -292,6 +293,11 @@ export interface BudgetTotals {
   timeMs: number;
 }
 
+/** Read-only validation for detached, pinned controller evidence. */
+export function validateBudgetSnapshot(raw: unknown, contributionId: string): BudgetState {
+  return structuredClone(validate(raw, contributionId));
+}
+
 function reservationTotals(
   state: BudgetState,
   sessionId: string,
@@ -350,9 +356,16 @@ export class BudgetLedger {
   /** Non-mutating snapshot through a caller-pinned path. Never canonicalize it:
    * resolving /proc/self/fd back to a name discards descriptor authority. */
   static readOnlySnapshot(file: string, contributionId: string): BudgetState {
+    return BudgetLedger.readOnlyEvidence(file, contributionId).state;
+  }
+  /** Exact scanned bytes and parsed state under the same non-reclaiming transaction fence. */
+  static readOnlyEvidence(
+    file: string,
+    contributionId: string
+  ): { state: BudgetState; bytes: Buffer } {
     try {
       return withReadOnlyStoreLock(ledgerLockFile(file), () =>
-        BudgetLedger.readSnapshot(file, contributionId)
+        BudgetLedger.readEvidence(file, contributionId, true)
       );
     } catch (error) {
       if (error instanceof BudgetError) throw error;
@@ -364,19 +377,29 @@ export class BudgetLedger {
   }
   // biome-ignore lint/correctness/noUnusedPrivateClassMembers: Called through BudgetLedger by both snapshot paths.
   private static readSnapshot(file: string, contributionId: string): BudgetState {
+    return BudgetLedger.readEvidence(file, contributionId).state;
+  }
+  // biome-ignore lint/correctness/noUnusedPrivateClassMembers: Called through BudgetLedger by the guarded and transaction snapshot paths.
+  private static readEvidence(
+    file: string,
+    contributionId: string,
+    bounded = false
+  ): { state: BudgetState; bytes: Buffer } {
     let bytes: Buffer;
     try {
-      bytes = readPrivate(file, (stat) => {
-        if (stat.uid !== process.getuid?.())
-          throw new BudgetError('corrupt_ledger', 'Ledger must be a private regular file');
-      });
+      bytes = bounded
+        ? boundedRead(file)
+        : readPrivate(file, (stat) => {
+            if (stat.uid !== process.getuid?.())
+              throw new BudgetError('corrupt_ledger', 'Ledger must be a private regular file');
+          });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT')
         throw new BudgetError('missing_ledger', 'Budget ledger missing; never reset on resume');
       throw new BudgetError('corrupt_ledger', 'Unreadable budget ledger; reconciliation required');
     }
     try {
-      return validate(parseStrictUtf8Json(bytes), contributionId);
+      return { state: validate(parseStrictUtf8Json(bytes), contributionId), bytes };
     } catch (error) {
       if (error instanceof BudgetError) throw error;
       throw new BudgetError('corrupt_ledger', 'Unreadable budget ledger; reconciliation required');
