@@ -4,10 +4,10 @@ description: 'Take a SET of GitHub issues to merged PRs by building a dependency
 metadata:
   dossier.dossier_schema_version: '1.0.0'
   dossier.title: 'Fleet Cycle — Orchestrate Multiple Issues'
-  dossier.version: '1.9.2'
+  dossier.version: '1.10.0'
   dossier.protocol_version: '"1.0"'
   dossier.status: 'Draft'
-  dossier.last_updated: '2026-10-06'
+  dossier.last_updated: '2026-10-09'
   dossier.objective: 'Take a SET of GitHub issues to merged PRs by building a dependency-aware wave plan, dispatching full-cycle-issue runs across background agents (detached where the repo can merge a parked PR, attached otherwise), and supervising every PR through merge — serial, parallel, or mixed'
   dossier.category: '["development"]'
   dossier.tags: '["github","issues","workflow","autonomous","orchestration","batch","parallel","fleet","full-cycle","dependencies"]'
@@ -18,8 +18,8 @@ metadata:
   dossier.inputs: '{"optional":[{"default":3,"description":"Maximum number of full-cycle runs dispatched concurrently within a wave. Bounded by worktree-pool capacity.","name":"max_parallel","type":"number"},{"default":"auto","description":"Override the computed plan. ''auto'' = dependency-aware waves (default). ''serial'' = one issue at a time in number order. ''parallel'' = ignore dependencies, run all at once (unsafe; use only for known-independent issues).","name":"mode","type":"string"},{"default":"imboard-ai/git/warm-worktree","description":"Warm-worktree dossier passed through to each full-cycle-issue run.","name":"warmup_dossier","type":"string"},{"default":"auto","description":"Default target branch for issues that do not declare their own. Passed through to each full-cycle-issue run.","name":"base_branch","type":"string"},{"default":"auto","description":"Model tier for dispatched full-cycle generation phases: cheap | mid | strong | auto. auto = per-issue by risk signals (labels, title, touched areas): docs/chore→cheap, standard→mid, security/payments/migrations/auth/schema→strong.","name":"dispatch_model_tier","type":"string"}],"required":[{"description":"The issue set to process. Explicit list (''1,2,3''), range (''1..9''), or mixed (''1,2,5..8'').","example":"1..9","name":"issues","type":"string"}]}'
   dossier.outputs: '{"files":[{"description":"Gzipped dependency DAG and wave plan, written before dispatch, kept per-project outside the working tree (most recent 20 retained)","format":"markdown+gzip","path":"~/.dossier/logs/fleet-cycle/{project}/FLEET-PLAN-{timestamp}.md.gz"}]}'
   dossier.authors: '[{"name":"Yuval Dimnik"}]'
-  dossier.checksum: '{"algorithm":"sha256","hash":"76863d05303c69d4cd2e9a62a1212529121b5a6403ca5556abd6b414298d76aa"}'
-  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"P71mTDmaiuAvx80ZBqqfD56NjivbFPbX4qv9XpBB8CQa3zNc2O6tEcxc+qiyp41RzbEftAWSv9SO7bZcQFrJBA==","signed_at":"2026-10-07T11:58:48.197Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
+  dossier.checksum: '{"algorithm":"sha256","hash":"89befed7ed4eb0128fafd9e41bdec67a596a75e90ebe9d8df5b00cda154bba4d"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"XHz7ThGg6ONkRpC3xuWrZ9XM0bTaX1bjIsIr4bBkipznUAXA9VMDTOahq4q/ALzA+g6FpgzJF26+kJ6iT6bPDQ==","signed_at":"2026-10-09T15:23:54.094Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Fleet Cycle — Orchestrate Multiple Issues
@@ -54,7 +54,7 @@ Do NOT ask about: wave composition, branch order, concurrency level, or any mech
 
 ## Phase 2: Build the Dependency Graph
 
-For every pair of issues, determine whether one must merge **before** the other, using explicit signals and judgment. **When uncertain, prefer adding a dependency edge (serialize) over assuming independence** — a false parallel is far more expensive than a false serial.
+For every pair of issues, determine whether one must merge **before** the other, using explicit signals and judgment. **Serialize on real semantic overlap, not on shared registries.** A false parallel on *additive* overlap costs one rebase; a false serial costs a full cycle of wall-clock per issue and lets one stopped issue block every later one. When two issues genuinely change the same symbols and you are unsure whether they conflict, add the edge — but every inferred edge must cite its evidence (below).
 
 **Explicit dependency signals (authoritative):**
 - "depends on #X", "blocked by #X", "after #X" in the issue body or comments
@@ -62,11 +62,15 @@ For every pair of issues, determine whether one must merge **before** the other,
 - A declared `base_branch` that points at another issue's branch or epic
 
 **Inferred dependency signals (judgment):**
-- **File-overlap collision** — two issues that will plausibly modify the same files or modules. Per this dossier's policy, **colliding issues are serialized**, not stacked: the later one waits for the earlier to merge and branches from the updated base. Order them by issue number unless the content implies a natural order.
+- **Semantic-overlap collision** — two issues that will change the *same symbols*: the same function, type, schema, migration, config value, or a module both restructure. **Colliding issues are serialized**, not stacked: the later one waits for the earlier to merge and branches from the updated base. Order them by issue number unless the content implies a natural order.
+- **Additive-only shared files are NOT a collision.** Barrel/index export lists, README or docs sections, changelog or `agent-traps` rows, and other append-only registries resolve with a rebase. Two issues that both *append* to such a file stay in the same wave. Sharing a package, directory or module name alone is not evidence of overlap.
+- **Every inferred edge must cite evidence** in the plan file: the concrete file + symbol both issues will change, or the explicit dependency text. An inferred edge with no cited symbol is dropped.
 - **Logical/data ordering** — issue B builds on a capability, schema, or API that issue A introduces.
-- **Shared migration or config surface** — two issues that both touch migrations, lockfiles, or global config will conflict on merge even if "different features"; serialize them.
+- **Shared migration or config surface** — two issues that both *change* migrations, lockfile dependency versions, or the same global config values will conflict on merge even if "different features"; serialize them.
 
 Output an internal DAG: nodes = issues, edges = "must merge before". Detect cycles; if a true cycle exists, surface it and ask.
+
+**Serial-plan sanity check.** If a set of more than 3 issues produces a fully serial plan (one issue per wave), re-examine every edge before dispatch: drop any edge whose only evidence is an additive shared file or a shared package/directory, and record each surviving edge's cited evidence in the plan file. A fully serial plan is legitimate only when every edge survives this check or the user asked for `mode=serial`.
 
 ## Phase 3: Compute the Wave Plan
 
@@ -75,7 +79,7 @@ Topologically partition the DAG into **waves**:
 - Within a wave, issues are mutually independent → safe to run in parallel.
 - Across waves, execution is gated: wave `N+1` does not start until wave `N` has resolved.
 
-Apply `mode`: `auto` (default) = the wave plan as computed; `serial` = one issue per wave, ascending number order; `parallel` = a single wave with all issues (only when the user asserts independence). Respect `max_parallel`: if a wave has more issues than the cap, dispatch in batches within the wave, refilling as runs finish.
+Apply `mode`: `auto` (default — including when invoked as "fleet x,y,z" or "full cycle issues x,y,z" without the word "serial") = the wave plan as computed; `serial` = one issue per wave, ascending number order; `parallel` = a single wave with all issues (only when the user asserts independence). Respect `max_parallel`: if a wave has more issues than the cap, dispatch in batches within the wave, refilling as runs finish.
 
 **Write the wave plan to `~/.dossier/logs/fleet-cycle/{project}/FLEET-PLAN-{timestamp}.md`** capturing: the resolved set, the dependency edges with their justification (explicit vs inferred), the wave breakdown, the concurrency cap, the chosen `ship_mode` with its evidence (Phase 3.25), and the failure policy.
 - `{project}` = repo slug `<owner>-<repo>` from `gh repo view --json owner,name -q '.owner.login + "-" + .name'`; if that fails (no remote / no `gh`), fall back to the basename of `git rev-parse --show-toplevel`.
@@ -159,11 +163,12 @@ Post it to the conversation, with direct PR URLs for every merged and failed iss
 
 | Situation | Decision / why |
 |---|---|
-| Uncertain whether two issues collide, or they merge into the same base and touch the same file | Add a dependency edge (serialize). False serial < false parallel; optimistic independence is the most expensive failure mode — you discover it at merge time after both ran. |
+| Uncertain whether two issues collide | Name the symbol both would change. If you can, and it is a semantic change (not an append), add the edge. If the only overlap is an additive shared file (index exports, README/docs sections, changelog/traps rows) or a shared package, do NOT serialize — a rebase resolves it. |
+| Plan came out fully serial for > 3 issues | Run the serial-plan sanity check (Phase 2): drop evidence-free and additive-only edges, keep only cited semantic overlaps. |
 | Issue declares `merges into <branch>` | That branch is its base; honor epic/sub-issue chains. |
 | Dependency cycle detected | Surface it and ask — cannot be auto-ordered. |
 | Wave wider than `max_parallel` | Batch within the wave; refill as runs complete. |
-| An issue fails mid-wave | Block its transitive dependents; let independents continue. Partial fleet success is normal — the report must make the blocked set and its cause explicit so the user can re-run the remainder. |
+| An issue fails or stops for a decision mid-wave | Block only its transitive dependents *by declared or cited edges*; let every other issue continue. A hand-off on one issue never stops the fleet. Partial fleet success is normal — the report must make the blocked set and its cause explicit so the user can re-run the remainder. |
 | Parked PRs never merge; `autoMergeRequest=null`, no watcher workflow | The repo has no merge mechanism for detached ship (ai-dossier#860). Phase 3.25 should have chosen `ship_mode=attached`; redispatch the issues attached (ship resumes on the existing `pr=`). Never `gh pr merge --auto` a PR whose review round has not completed. |
 | A dispatched agent exits with its PR open | Under detached ship: expected — the run is parked, not done. Poll the PR; dispatch the tail run once it merges (Phase 4 rule 8). An un-tailed merge leaves a worktree behind and no completion report. |
 | A parked PR goes `CONFLICTING` or gets `auto-merge-blocked` | Mark the issue failed and block dependents. Do not self-merge around it. |
