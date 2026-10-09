@@ -65,10 +65,15 @@ export class WorkspaceOverlay {
     );
   }
 
+  /** Validated immutable source snapshot; no filesystem or VM reads. */
+  manifest(): SourceManifest {
+    return createManifest([...this.entries.values()]);
+  }
+
   /** `directory` must be absent under a controller-owned parent. Never merge into an
    * existing tree (including a symlink). Returns the freshly exported candidate. */
   materialize(directory: string): SourceManifest {
-    const manifest = createManifest([...this.entries.values()]);
+    const manifest = this.manifest();
     fs.mkdirSync(directory, { mode: 0o700 });
     for (const entry of manifest.entries) {
       const target = path.join(directory, entry.path);

@@ -7,10 +7,8 @@ import {
 import {
   CanonicalError,
   comparePaths,
-  createManifest,
   parentPaths,
   type SourceManifest,
-  sha256,
   validateManifest,
 } from '../canonical/export';
 import {
@@ -19,6 +17,7 @@ import {
   type CommitInputs,
   createCandidate,
 } from '../canonical/reconstruct';
+import { isCommitSha } from '../github/fork-ref';
 import { assertNoSecrets } from '../redaction';
 import { ReasonCode, type RunRecord, restoreRun, transitionRun } from '../state';
 import { WorkspaceOverlay } from './workspace-overlay';
@@ -27,9 +26,6 @@ export type BaseCheck =
   | { readonly kind: 'unchanged' }
   | { readonly kind: 'advanced'; readonly newSha: string }
   | { readonly kind: 'unknown' };
-function validSha(value: unknown): value is string {
-  return typeof value === 'string' && /^[a-f0-9]{40}$/u.test(value);
-}
 
 /** One credential-free read. Invalid facts and failed reads never admit a push. */
 export async function checkBase(
@@ -38,7 +34,7 @@ export async function checkBase(
   verifiedBaseSha: string
 ): Promise<BaseCheck> {
   try {
-    if (!validSha(verifiedBaseSha)) return Object.freeze({ kind: 'unknown' });
+    if (!isCommitSha(verifiedBaseSha)) return Object.freeze({ kind: 'unknown' });
     const current = await resolveBase(read, upstream);
     return Object.freeze(
       current === verifiedBaseSha ? { kind: 'unchanged' } : { kind: 'advanced', newSha: current }
@@ -92,17 +88,11 @@ export function rebaseCandidate(input: RebaseInput): RebaseResult {
     .map((entry) => entry.path)
     .sort(comparePaths);
   if (conflicts.length) return Object.freeze({ kind: 'conflict', paths: Object.freeze(conflicts) });
-  for (const entry of writes) {
-    for (const parent of parentPaths(entry.path))
-      if (!nextEntries.has(parent))
-        nextEntries.set(parent, { path: parent, mode: '040000', bytes: '', sha256: sha256('') });
-    nextEntries.set(entry.path, entry);
-  }
-  const manifest = createManifest([...nextEntries.values()]);
-  const candidate = createCandidate(manifest, input.approval, pack);
   const overlay = new WorkspaceOverlay(nextBase);
   for (const entry of writes)
     overlay.write(entry.path, Buffer.from(entry.bytes, 'base64').toString('utf8'));
+  const manifest = overlay.manifest();
+  const candidate = createCandidate(manifest, input.approval, pack);
   return Object.freeze({ kind: 'rebased', candidate, manifest, overlay });
 }
 
@@ -148,18 +138,28 @@ export async function checkShippingBase(
   input: ShippingBaseInput
 ): Promise<ShippingBaseResult> {
   const run = restoreRun(input.run);
+  // Detach validated control facts before the first await. Readonly types do not
+  // prevent retained caller aliases from changing the intent fence or approval.
+  const { rebases, pushIntentJournaled } = input;
+  const approval = Object.freeze({
+    ...input.approval,
+    author: Object.freeze({ ...input.approval.author }),
+  });
+  const overlay = new WorkspaceOverlay(input.overlay.base);
+  for (const entry of input.overlay.writtenEntries())
+    overlay.write(entry.path, Buffer.from(entry.bytes, 'base64').toString('utf8'));
   if (
     !['shipping', 'awaiting_contributor'].includes(run.state) ||
-    !Number.isSafeInteger(input.rebases) ||
-    input.rebases < 0 ||
-    input.rebases > MAX_SESSION_REBASES ||
-    typeof input.pushIntentJournaled !== 'boolean' ||
-    !validSha(input.approval.baseSha)
+    !Number.isSafeInteger(rebases) ||
+    rebases < 0 ||
+    rebases > MAX_SESSION_REBASES ||
+    typeof pushIntentJournaled !== 'boolean' ||
+    !isCommitSha(approval.baseSha)
   )
     throw new CanonicalError('invalid_manifest');
-  const verifiedBase = input.approval.baseSha;
+  const verifiedBase = approval.baseSha;
   const check = await checkBase(deps.read, deps.upstream, verifiedBase);
-  if (input.pushIntentJournaled || run.state === 'awaiting_contributor') {
+  if (pushIntentJournaled || run.state === 'awaiting_contributor') {
     const currentBase =
       check.kind === 'advanced' ? check.newSha : check.kind === 'unchanged' ? verifiedBase : null;
     return Object.freeze({
@@ -173,23 +173,24 @@ export async function checkShippingBase(
     });
   }
   if (check.kind === 'unknown') return Object.freeze({ kind: 'hand_off', reason: 'base_unknown' });
-  if (check.kind === 'unchanged')
-    return Object.freeze({ kind: 'unchanged', run, rebases: input.rebases });
-  if (input.rebases >= MAX_SESSION_REBASES)
+  if (check.kind === 'unchanged') return Object.freeze({ kind: 'unchanged', run, rebases });
+  if (rebases >= MAX_SESSION_REBASES)
     return Object.freeze({ kind: 'hand_off', reason: 'base_unstable' });
   try {
     const now = deps.now();
     const timestamp = now.toISOString();
-    if (timestamp <= `${input.approval.committerTimestamp.slice(0, -1)}.000Z`)
+    const committerTimestamp = timestamp.replace(/\.\d{3}Z$/u, 'Z');
+    const previous = Date.parse(approval.committerTimestamp);
+    if (!Number.isFinite(previous) || Date.parse(committerTimestamp) <= previous)
       throw new CanonicalError('altered_identity');
     const rebased = rebaseCandidate({
-      overlay: input.overlay,
-      oldBaseManifest: input.overlay.base,
+      overlay,
+      oldBaseManifest: overlay.base,
       newBase: deps.acquire(check.newSha),
       approval: {
-        ...input.approval,
+        ...approval,
         baseSha: check.newSha,
-        committerTimestamp: timestamp.replace(/\.\d{3}Z$/u, 'Z'),
+        committerTimestamp,
       },
     });
     if (rebased.kind === 'conflict')
@@ -197,7 +198,7 @@ export async function checkShippingBase(
     return Object.freeze({
       ...rebased,
       run: transitionRun(run, ReasonCode.BaseAdvanced, timestamp),
-      rebases: input.rebases + 1,
+      rebases: rebases + 1,
     });
   } catch {
     return Object.freeze({ kind: 'hand_off', reason: 'rebase_unavailable' });

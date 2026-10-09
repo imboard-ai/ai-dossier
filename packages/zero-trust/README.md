@@ -115,7 +115,8 @@ returns `{ kind: 'unchanged' }`, `{ kind: 'advanced', newSha }` or `{ kind: 'unk
 The upstream includes `owner`, `repo`, `defaultBranch`; unreadable/malformed facts
 never admit shipping and errors are not echoed.
 
-`WorkspaceOverlay.writtenEntries()` exposes a frozen, byte-sorted admitted delta,
+`WorkspaceOverlay.manifest()` returns a validated immutable source snapshot without
+filesystem or VM reads. `WorkspaceOverlay.writtenEntries()` exposes a frozen, byte-sorted admitted delta,
 including byte-identical writes. `rebaseCandidate({ overlay, oldBaseManifest,
 newBase: { pack, manifest }, approval })` validates both manifests and binds the
 new manifest to the pack's `approval.baseSha`. `approval` is `CommitInputs` with
@@ -130,7 +131,7 @@ Canonical collisions/invalid input throw fixed `CanonicalError` codes.
 `checkShippingBase(deps, input)` is the orchestration API for both initial shipping
 and before `shipRevision`. Dependencies are `read`, `upstream`, `acquire(baseSha)`
 (production: `acquireSource`), and controller `now(): Date`. Input holds the restored
-`run`, admitted `overlay`, original candidate's `approval`, persisted session-wide
+`run`, admitted `overlay`, current candidate's recorded `CommitInputs` as `approval`, persisted session-wide
 `rebases` count (0–2), and boolean `pushIntentJournaled` for **this candidate**.
 Only a `shipping` run before any push intent can return `unchanged` admission.
 An advance constructs a new candidate, returns the run transitioned through
@@ -143,15 +144,23 @@ Conflicts hand off `rebase_conflict`; unknown reads defer pushing via
 `base_unknown`; failed acquisition/reconstruction/clock validation hands off
 `rebase_unavailable`, without a candidate or weaker fallback.
 
+Only `shipping` and `awaiting_contributor` are accepted; other phases reject.
 After the candidate's push intent is journaled (even if execution failed or is
-uncertain), and throughout `awaiting_contributor`, the result is only `recorded`:
+uncertain), while still in either accepted phase, the result is only `recorded`:
 unchanged `run`, and `observation: { verifiedBase, currentBase, limitation }`.
 `currentBase` is null on unknown reads. The limitation names both known SHAs and
 never claims verification of the current merge result; feed it to PR limitations.
 No observation authorizes a new push or re-verification. The composition root
 owns the run fence and must serialize this check with intent publication, persist
 the new candidate/overlay/run/counter before verification, and persist observations
-before rendering PR context. Counts are session-wide across resumes and checks;
+before rendering PR context. After each rebase use `result.candidate.record` as
+the next check's `approval`, alongside the returned overlay/run/counter; only the
+approved author/message remain unchanged. Inputs are detached before the base-read
+await, so caller mutation cannot erase an already observed intent fence or alter
+the candidate being checked. A new committer timestamp must advance at whole-second
+precision or reconstruction hands off. Later submitted/review-phase observations
+use `checkBase` with caller-owned recording rather than `checkShippingBase`.
+Counts are session-wide across resumes and checks;
 only an explicitly allocated new budget session gets a fresh allowance.
 These APIs do not construct receipts, access credentials, publish, or poll.
 

@@ -6,9 +6,12 @@ import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { acquireSource, type SourceGitHubRead } from '../canonical/acquire';
 import { createManifest, sha256 } from '../canonical/export';
+import * as canonical from '../canonical/reconstruct';
 import { type CommitInputs, createCandidate, reconstructCandidate } from '../canonical/reconstruct';
+import * as lifecycle from '../state';
 import { createRun, ReasonCode as R, type RunRecord, transitionRun } from '../state';
 import { checkBase, checkShippingBase, rebaseCandidate, type ShippingBaseInput } from './drift';
+import * as verification from './verification-record';
 import { WorkspaceOverlay } from './workspace-overlay';
 
 const temps: string[] = [];
@@ -112,12 +115,30 @@ afterEach(() => {
 });
 
 describe('upstream drift admission', () => {
+  it('negative-effect recording controls fail when construction/transition are injected', async () => {
+    const f = rig();
+    const construct = vi.spyOn(canonical, 'createCandidate');
+    const transition = vi.spyOn(lifecycle, 'transitionRun');
+    const read: SourceGitHubRead = async () => {
+      // Deliberately inject forbidden effects into the real check's read callback.
+      canonical.createCandidate(f.overlay.manifest(), f.approval, f.old.pack);
+      lifecycle.transitionRun(f.input.run, R.BaseAdvanced, time);
+      return { status: 200, body: { commit: { sha: f.baseSha } } };
+    };
+    await checkShippingBase({ ...f.deps, read }, { ...f.input, pushIntentJournaled: true });
+    expect(() => expect(construct).not.toHaveBeenCalled()).toThrow();
+    expect(() => expect(transition).not.toHaveBeenCalled()).toThrow();
+    expect(construct).toHaveBeenCalledTimes(1);
+    expect(transition).toHaveBeenCalledTimes(1);
+  });
   it('leaves an unchanged candidate alone, without acquiring or resetting session count', async () => {
     const f = rig();
+    const construct = vi.spyOn(canonical, 'createCandidate');
     expect(await checkBase(f.deps.read, upstream, f.baseSha)).toEqual({ kind: 'unchanged' });
     const result = await checkShippingBase(f.deps, { ...f.input, rebases: 1 });
     expect(result).toEqual({ kind: 'unchanged', run: f.input.run, rebases: 1 });
     expect(f.deps.acquire).not.toHaveBeenCalled();
+    expect(construct).not.toHaveBeenCalled();
   });
   it('rebases onto a real advanced parent, preserving approved identity/message and requiring fresh verification', async () => {
     const f = rig();
@@ -180,12 +201,14 @@ describe('upstream drift admission', () => {
         : { file: kind === 'changed' ? 'upstream change' : 'old', other: 'two' },
       kind === 'mode' ? '100755' : '100644'
     );
+    const construct = vi.spyOn(canonical, 'createCandidate');
     expect(await checkShippingBase(f.deps, f.input)).toEqual({
       kind: 'hand_off',
       reason: 'rebase_conflict',
       paths: ['file'],
     });
     expect(f.input.run.state).toBe('shipping');
+    expect(construct).not.toHaveBeenCalled();
   });
   it('checks even byte-identical writes and freezes byte-sorted conflict paths', async () => {
     const f = rig();
@@ -238,6 +261,8 @@ describe('upstream drift admission', () => {
       phase === 'awaiting_contributor'
         ? transitionRun(f.input.run, R.ContributorHandoff, time)
         : f.input.run;
+    const transition = vi.spyOn(lifecycle, 'transitionRun');
+    const construct = vi.spyOn(canonical, 'createCandidate');
     const result = await checkShippingBase(f.deps, {
       ...f.input,
       run,
@@ -252,6 +277,8 @@ describe('upstream drift admission', () => {
     expect(result.observation.limitation).toContain(f.baseSha);
     expect(result.observation.limitation).toContain(next);
     expect(f.deps.acquire).not.toHaveBeenCalled();
+    expect(transition).not.toHaveBeenCalled();
+    expect(construct).not.toHaveBeenCalled();
   });
   it('uses the same shipping guard after a revision', async () => {
     const f = rig();
@@ -335,12 +362,138 @@ describe('upstream drift admission', () => {
       },
       { ...f.deps, acquire: () => f.old },
       { ...f.deps, now: () => new Date('2026-10-05T00:00:00Z') },
+      { ...f.deps, now: () => new Date('2026-10-05T00:01:00.500Z') },
       { ...f.deps, now: () => new Date(NaN) },
     ])
       expect(await checkShippingBase(deps, f.input)).toEqual({
         kind: 'hand_off',
         reason: 'rebase_unavailable',
       });
+  });
+
+  it('detaches the already-journaled intent fence and counter before awaiting a read', async () => {
+    const f = rig();
+    const input = { ...f.input, rebases: 2, pushIntentJournaled: true };
+    let resolve!: (value: { status: number; body: unknown }) => void;
+    const read: SourceGitHubRead = () =>
+      new Promise((done) => {
+        resolve = done;
+      });
+    const construct = vi.spyOn(canonical, 'createCandidate');
+    const transition = vi.spyOn(lifecycle, 'transitionRun');
+    const pending = checkShippingBase({ ...f.deps, read }, input);
+    input.pushIntentJournaled = false;
+    input.rebases = -1;
+    resolve({ status: 200, body: { commit: { sha: f.baseSha } } });
+    const result = await pending;
+    expect(result.kind).toBe('recorded');
+    expect(construct).not.toHaveBeenCalled();
+    expect(transition).not.toHaveBeenCalled();
+    expect(f.deps.acquire).not.toHaveBeenCalled();
+  });
+
+  it('detaches author, message, counter and admitted writes before a base-read await', async () => {
+    const f = rig();
+    const approval = { ...f.approval, author: { ...f.approval.author } };
+    const input = { ...f.input, approval };
+    const next = f.advance({ file: 'old', other: 'two' });
+    let resolve!: (value: { status: number; body: unknown }) => void;
+    const read: SourceGitHubRead = () =>
+      new Promise((done) => {
+        resolve = done;
+      });
+    const pending = checkShippingBase({ ...f.deps, read }, input);
+    approval.author.name = 'Changed';
+    approval.message = 'changed message\n';
+    approval.baseSha = next;
+    input.rebases = 2;
+    f.overlay.write('file', 'changed after read');
+    resolve({ status: 200, body: { commit: { sha: next } } });
+    const result = await pending;
+    expect(result.kind).toBe('rebased');
+    if (result.kind !== 'rebased') throw new Error('expected rebase');
+    expect(result.rebases).toBe(1);
+    expect(result.candidate.record.author.name).toBe('Alice');
+    expect(result.candidate.record.message).toBe(f.approval.message);
+    expect(result.manifest.entries.find((entry) => entry.path === 'file')?.bytes).toBe(
+      Buffer.from('fixed').toString('base64')
+    );
+  });
+
+  it('cannot load the old VerificationRecord as admission for the rebased candidate', async () => {
+    const fixture = await import('../__tests__/verifier-fixture');
+    const { verifyCandidate } = await import('./verifier');
+    try {
+      const h = fixture.harness();
+      const verified = await verifyCandidate(h.deps(), fixture.candidateInput());
+      if (verified.kind !== 'verified') throw new Error('expected verification');
+      const oldSha = verified.record.candidateSha;
+      const overlay = new WorkspaceOverlay(fixture.BASE);
+      for (const entry of fixture.CANDIDATE.entries) {
+        if (
+          entry.mode !== '040000' &&
+          fixture.BASE.entries.find((base) => base.path === entry.path)?.bytes !== entry.bytes
+        )
+          overlay.write(entry.path, Buffer.from(entry.bytes, 'base64').toString('utf8'));
+      }
+      const advanced = canonical.createCandidate(
+        fixture.BASE,
+        {
+          ...fixture.approved(),
+          message: 'upstream update\n',
+          committerTimestamp: '2026-10-08T00:02:00Z',
+        },
+        fixture.BASE_COMMIT.pack
+      );
+      const result = await checkShippingBase(
+        {
+          read: async () => ({
+            status: 200,
+            body: { commit: { sha: advanced.record.candidateSha } },
+          }),
+          upstream,
+          acquire: () => ({ pack: advanced.pack, manifest: fixture.BASE }),
+          now: () => new Date('2026-10-08T00:03:00Z'),
+        },
+        {
+          run: verified.run,
+          overlay,
+          approval: fixture.approved(),
+          rebases: 0,
+          pushIntentJournaled: false,
+        }
+      );
+      if (result.kind !== 'rebased') throw new Error('expected rebase');
+      expect(result.candidate.record.candidateSha).not.toBe(oldSha);
+      expect(result.run.state).toBe('verifying');
+      const oldPath = join(h.artifactsDir, verification.VERIFICATION_DIRECTORY, `${oldSha}.json`);
+      const newPath = join(
+        h.artifactsDir,
+        verification.VERIFICATION_DIRECTORY,
+        `${result.candidate.record.candidateSha}.json`
+      );
+      // Deliberately misfile the real old record under the new SHA; binding must refuse.
+      fs.copyFileSync(oldPath, newPath);
+      const admit = vi.spyOn(verification, 'assertShippableVerification');
+      const ship = vi.fn();
+      const attempt = () => {
+        const record = verification.loadVerification(
+          h.artifactsDir,
+          result.candidate.record.candidateSha,
+          { runId: fixture.RUN_ID }
+        );
+        verification.assertShippableVerification(record);
+        ship(record);
+      };
+      expect(attempt).toThrow(verification.VerificationRecordError);
+      expect(admit).not.toHaveBeenCalled();
+      expect(ship).not.toHaveBeenCalled();
+      expect(
+        verification.loadVerification(h.artifactsDir, oldSha, { runId: fixture.RUN_ID })
+      ).toEqual(verified.record);
+    } finally {
+      fixture.removeTemps();
+    }
   });
 });
 
