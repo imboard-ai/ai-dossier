@@ -256,6 +256,41 @@ async function handoff(h: Awaited<ReturnType<typeof rig>>, receipt = h.authoriza
 }
 
 describe('persisted verification to real local shipping (#1105)', () => {
+  it.each([
+    ReasonCode.UserCancelled,
+    ReasonCode.UserPaused,
+  ])('refuses lifecycle change after final admission resolves: %s', async (reason) => {
+    const h = await rig();
+    await h.driver.execute(h.input);
+    const p = await handoff(h);
+    const admission = {
+      ...p.admission,
+      commitPr: (sha: string, digest: string) => {
+        const pending = p.admission.commitPr(sha, digest);
+        void pending.then(() => h.store.persistRun(transitionRun(h.store.run, reason, TIME)));
+        return pending;
+      },
+    };
+    const rows = journal(temp('zt-final-fence-'));
+    const bodyDirectory = temp('zt-final-fence-bodies-');
+    const driver = new HandoffDriver(
+      rows,
+      { read: p.fake.read, admission, bodyDirectory, now: () => TIME },
+      { run: h.store.run, contributionId: h.store.contributionId }
+    );
+    await expect(driver.issuePr(p.request)).rejects.toThrow('admission_commit');
+    expect(rows.read()).toHaveLength(1);
+    expect(fs.readdirSync(bodyDirectory)).toEqual([]);
+    if (reason === ReasonCode.UserPaused) {
+      h.store.persistRun(transitionRun(h.store.run, ReasonCode.ResumeShipping, TIME));
+      expect(
+        await p.admission.receiptValid(
+          h.input.candidateSha as string,
+          h.authorization().receipt.digest
+        )
+      ).toBe(true);
+    }
+  });
   it('detaches queued PR provenance before caller mutation and persists the rendered candidate', async () => {
     const h = await rig();
     await h.driver.execute(h.input);

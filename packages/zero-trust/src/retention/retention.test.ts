@@ -426,6 +426,7 @@ describe('sanitized contribution export and evidence', () => {
             forkBindingVerified: async () => true,
             prBindingVerified: async () => true,
             commitPr: async () => true,
+            finalizePr: () => true,
             receiptValid: async () => true,
             remoteBranchSha: async () => SHA,
           },

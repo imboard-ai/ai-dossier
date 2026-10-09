@@ -652,6 +652,7 @@ describe('awaiting_contributor hand-off driver', () => {
       forkBindingVerified: async () => true,
       prBindingVerified: async () => true,
       commitPr: async () => true,
+      finalizePr: () => true,
       receiptValid: async (sha, digest) =>
         sha === CANDIDATE && digest === receiptDigest(receipt() as never),
       remoteBranchSha: async () => CANDIDATE,

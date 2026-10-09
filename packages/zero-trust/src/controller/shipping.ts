@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { Signer } from '@ai-dossier/core';
 import Ajv from 'ajv';
-import type { SourceManifest } from '../canonical/export';
+import { type SourceManifest, validateManifest } from '../canonical/export';
 import {
   type CandidateAuthority,
   type CandidateRecord,
@@ -381,7 +381,7 @@ export function makeAuthorize(
   return async (input) => {
     const intent = snapshotJson(input);
     const b = snapshotJson(deps.bindings);
-    const manifest = snapshotJson(deps.manifest);
+    const manifest = validateManifest(deps.manifest);
     const record = snapshotJson(deps.record);
     const authority = snapshotJson(deps.authority);
     const pack = Buffer.from(deps.basePack);
@@ -408,7 +408,7 @@ export function makeAuthorize(
     unchanged(deps, held);
     if (
       canonicalJson(deps.bindings) !== canonicalJson(b) ||
-      canonicalJson(deps.manifest) !== canonicalJson(manifest) ||
+      validateManifest(deps.manifest).digest !== manifest.digest ||
       canonicalJson(deps.record) !== canonicalJson(record) ||
       canonicalJson(deps.authority) !== canonicalJson(authority) ||
       !pack.equals(deps.basePack)
@@ -450,6 +450,7 @@ export function makeHandoffAdmission(deps: ShippingHandoffDeps): HandoffAdmissio
   };
   // The token identifies exactly the invocation that owns a reservation.
   const used = new Map<string, symbol>();
+  const prepared = new Map<string, { token: symbol; context: ReceiptContext; receipt: string }>();
   const check = async (probe: () => Promise<boolean>) => {
     try {
       assertAuthority();
@@ -512,6 +513,7 @@ export function makeHandoffAdmission(deps: ShippingHandoffDeps): HandoffAdmissio
       }),
     releaseReceipt: (digest) => {
       used.delete(digest);
+      prepared.delete(digest);
     },
     policyFresh: () =>
       check(async () => {
@@ -560,9 +562,50 @@ export function makeHandoffAdmission(deps: ShippingHandoffDeps): HandoffAdmissio
         if ((await admission.remoteBranchSha()) !== candidateSha) return false;
         return validateReceipt(candidateSha, digest, false);
       });
+      try {
+        if (permitted && used.get(digest) === reservation)
+          prepared.set(digest, {
+            token: reservation,
+            context: facts(contextDeps),
+            receipt: canonicalJson(deps.receipt),
+          });
+      } catch {
+        if (used.get(digest) === reservation) used.delete(digest);
+        return false;
+      }
       // A refused final admission must not strand (or release someone else's) hold.
       if (!permitted && used.get(digest) === reservation) used.delete(digest);
       return permitted && used.get(digest) === reservation;
+    },
+    finalizePr: (candidateSha, digest) => {
+      const held = prepared.get(digest);
+      try {
+        if (!held || used.get(digest) !== held.token) return false;
+        assertAuthority();
+        unchanged(contextDeps, held.context);
+        if (
+          candidateSha !== held.context.candidateSha ||
+          canonicalJson(deps.receipt) !== held.receipt
+        )
+          return false;
+        const clock = deps.now();
+        if (
+          !Number.isFinite(clock) ||
+          clock < Date.parse(deps.receipt.receipt.issuedAt) ||
+          clock >= Date.parse(deps.receipt.receipt.expiresAt)
+        )
+          return false;
+        matchVerification(verificationFor(contextDeps, snapshotJson(deps.bindings)), held.context);
+        prepared.delete(digest);
+        return true;
+      } catch {
+        return false;
+      } finally {
+        if (prepared.has(digest) && used.get(digest) === held?.token) {
+          prepared.delete(digest);
+          used.delete(digest);
+        }
+      }
     },
     remoteBranchSha: async () => {
       assertAuthority();

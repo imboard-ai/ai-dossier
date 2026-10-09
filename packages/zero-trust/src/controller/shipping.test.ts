@@ -4,6 +4,7 @@ import path from 'node:path';
 import { Ed25519Signer } from '@ai-dossier/core';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { candidateInput, harness, removeTemps, TIME } from '../__tests__/verifier-fixture';
+import { createManifest, sha256 } from '../canonical/export';
 import { idempotencyKey } from '../intents';
 import { ReceiptNonceStore } from '../receipt/nonces';
 import { canonicalJson } from '../receipt/schema';
@@ -109,6 +110,28 @@ function rig() {
 }
 
 describe('credential-free shipping authorization', () => {
+  it.each([
+    1, 24,
+  ])('accepts source-sized snapshots with %s large entries before checking reconstruction', async (count) => {
+    const h = rig();
+    const bytes = Buffer.alloc(6145, 97);
+    h.deps = {
+      ...h.deps,
+      manifest: createManifest(
+        Array.from({ length: count }, (_, i) => ({
+          path: `source-${i}.js`,
+          mode: '100644' as const,
+          bytes: bytes.toString('base64'),
+          sha256: sha256(bytes),
+        }))
+      ),
+    };
+    // The held record names another tree: source capture must reach the canonical
+    // reconstruction check, not refuse valid source bytes at receipt JSON limits.
+    await expect(makeAuthorize(h.deps)(shippingIntent(h.deps.bindings))).rejects.toMatchObject({
+      reason: 'tree_mismatch',
+    });
+  });
   it('round-trips an attempted intent through single-use nonce authorization', async () => {
     const h = rig();
     const input = shippingIntent(h.deps.bindings);

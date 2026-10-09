@@ -372,6 +372,7 @@ describe('gate table', () => {
           forkBindingVerified: async () => true,
           prBindingVerified: async () => true,
           commitPr: async () => true,
+          finalizePr: () => true,
           receiptValid: async () => true,
           remoteBranchSha: async () => null,
         },

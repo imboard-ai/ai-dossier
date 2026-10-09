@@ -41,6 +41,8 @@ credential-module imports; the composition root supplies authenticated adapters.
   author, then issues a fresh receipt and context for every attempt. Missing or
   changed evidence, candidate inputs or identity refuse before authorization.
   Actual nonce/attempt consumption remains in `authorizeShipping` in the pusher.
+  Source snapshots use `validateManifest` and its canonical source limits, rather
+  than the smaller receipt JSON limits; post-await comparisons revalidate the digest.
 - `makeHandoffAdmission(deps): HandoffAdmission` supplies fresh policy, contributor
   login and exact fork-readiness checks, authenticated `verifyReceipt` plus digest
   and verification binding checks, and the injected verified remote read-back.
@@ -64,6 +66,12 @@ credential-module imports; the composition root supplies authenticated adapters.
    its own reservation. The driver binds admission methods once at construction and
    detaches and recursively freezes the PR request before queueing; admission,
    rendering and persistence use that same snapshot.
+  `HandoffAdmission.finalizePr(candidateSha, digest)` is the mandatory synchronous
+  publication fence. After asynchronous `commitPr` resolves, it rechecks run,
+  boundary, verification, receipt identity and expiry, then the driver records the
+  link without yielding. A cancellation/pause in the final promise continuations
+  refuses with `admission_commit` and releases the reservation. Missing binding or
+  commit callbacks also refuse with `admission_pr_binding` or `admission_commit`.
   Supply `ForkPusher.handoffReadBack`, rather than an ordinary remote read, as
   `remoteBranchSha` so a matching but unverified branch cannot admit a PR.
 - `prContentInput(input): PrContentInput` binds model `candidateReady` title/cause/

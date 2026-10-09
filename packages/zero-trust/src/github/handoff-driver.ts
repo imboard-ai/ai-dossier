@@ -44,6 +44,8 @@ export interface HandoffAdmission {
   prBindingVerified(binding: PrBinding): Promise<boolean>;
   /** Final fresh commit admission after reconciliation, retaining this receipt reservation. */
   commitPr(candidateSha: string, receiptDigest: string): Promise<boolean>;
+  /** Synchronous authority fence; the driver publishes without yielding after it. */
+  finalizePr(candidateSha: string, receiptDigest: string): boolean;
   /** Release a receipt reservation when no durable link was issued. */
   releaseReceipt?(receiptDigest: string): void;
   /** AI policy, issue open state, assignment, competing fixes and permission, rechecked now. */
@@ -439,8 +441,18 @@ export class HandoffDriver {
   ) {
     const { admission } = deps;
     this.admission = Object.freeze({
-      prBindingVerified: admission.prBindingVerified.bind(admission),
-      commitPr: admission.commitPr.bind(admission),
+      prBindingVerified:
+        typeof admission.prBindingVerified === 'function'
+          ? admission.prBindingVerified.bind(admission)
+          : async () => false,
+      commitPr:
+        typeof admission.commitPr === 'function'
+          ? admission.commitPr.bind(admission)
+          : async () => false,
+      finalizePr:
+        typeof admission.finalizePr === 'function'
+          ? admission.finalizePr.bind(admission)
+          : () => false,
       ...(admission.releaseReceipt
         ? { releaseReceipt: admission.releaseReceipt.bind(admission) }
         : {}),
@@ -551,6 +563,7 @@ export class HandoffDriver {
         const { title, body, commands } = content;
         const link = compareLink(intent, binding, title, body, commands);
         await this.check('commit', () => admission.commitPr(sha, digest));
+        if (admission.finalizePr(sha, digest) !== true) throw new HandoffError('admission_commit');
         const outcome = this.issue(intent, binding, link);
         issued = true;
         return outcome;

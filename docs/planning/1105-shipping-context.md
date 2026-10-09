@@ -106,3 +106,15 @@ SHA before final receipt/context checks. Refused commit admission releases only 
 own reservation token. Offline real-driver tests observe unchanged rendered/journal
 provenance, changed external facts after PR reads, zero body/link effects on refusal,
 and same-instance retry after legitimate pause/resume.
+
+Renewed loop 2: independent report-only security/supportability/convention and
+DRY/maintainability/documentation review reproduced a legitimate cancellation
+after the final admission promise resolves, two missing-callback contract failures,
+and valid source manifests refused by receipt JSON limits. These are valid,
+deterministic fixes; duplicate callback/documentation findings collapse into one.
+The driver now uses mandatory synchronous finalizePr immediately before publication;
+the shipping admission rechecks held evidence/expiry and releases refused holds.
+Missing callback capture remains fail-closed with fixed admission codes. Source
+capture reuses validateManifest and compares its revalidated digest across awaits.
+New tests record no body/link on final-promise cancellation/pause and exercise both
+single-file and aggregate source sizes beyond receipt limits. No scope escalation.
