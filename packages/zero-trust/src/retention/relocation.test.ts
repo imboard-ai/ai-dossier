@@ -108,19 +108,34 @@ it('missing and contradictory portable relocation proof refuses invalid-evidence
       b.relocations[0].author = 'other';
     },
     (b: typeof bundle) => {
-      b.relocations[0].to.fork.repositoryId = 9;
+      b.relocations[0].to = {
+        ...b.relocations[0].to,
+        fork: { ...b.relocations[0].to.fork, repositoryId: 9 },
+      };
     },
     (b: typeof bundle) => {
-      b.relocations[0].to.binding.branch = 'other';
+      b.relocations[0].to = {
+        ...b.relocations[0].to,
+        binding: { ...b.relocations[0].to.binding, branch: 'other' },
+      };
     },
     (b: typeof bundle) => {
-      b.relocations[0].to.binding.upstream.repo = 'other';
+      b.relocations[0].to = {
+        ...b.relocations[0].to,
+        binding: {
+          ...b.relocations[0].to.binding,
+          upstream: { ...b.relocations[0].to.binding.upstream, repo: 'other' },
+        },
+      };
     },
     (b: typeof bundle) => {
       if (b.summary) b.summary.pr = 'https://github.com/owner/other/pull/2';
     },
     (b: typeof bundle) => {
-      b.relocations[0].from.url = 'https://github.com/owner/repo/pull/4';
+      b.relocations[0].from = {
+        ...b.relocations[0].from,
+        url: 'https://github.com/owner/repo/pull/4',
+      };
     },
   ];
   for (const mutate of mutations) {

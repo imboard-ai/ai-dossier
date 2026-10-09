@@ -1370,7 +1370,9 @@ be promoted to a merge/decline claim. Offline receipt integrity never changes
 trusted-key or expiry authority in shipping.
 `parseCommandEvidence(input)` is the shared detached receipt/standalone command parser:
 it validates the receipt command schema (1–128 records) and unique command IDs,
-throwing fixed `ReceiptError('invalid_schema'|'invalid_evidence')` refusals.
+throwing fixed `ReceiptError('invalid_json'|'invalid_schema'|'invalid_evidence')`
+refusals for strict JSON snapshots, schema failures and duplicate IDs respectively.
+Credential-bearing strings propagate `SecretRedactionError`.
 Validation completes **before** opening the destination. Output ancestors are
 pinned without following symlinks; output uses exclusive creation at mode 0600,
 fsyncs its file and parent directory, and never overwrites any existing leaf.
