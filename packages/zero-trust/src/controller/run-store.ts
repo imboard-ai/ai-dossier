@@ -93,8 +93,9 @@ function fail(code: RunStoreErrorCode): never {
 function hash(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
-function readStoredConfig(pinned: string): RunConfig {
+function readStoredConfig(pinned: string, expectedDigest?: string): RunConfig {
   const bytes = readPrivate(path.join(pinned, 'config.json'));
+  if (expectedDigest !== undefined && hash(bytes) !== expectedDigest) fail('run_diverged');
   if (hash(bytes) !== strictUtf8(readPrivate(path.join(pinned, 'config.sha256'))))
     fail('invalid_store');
   return validateStoredRunConfig(parseStrictUtf8Json(bytes));
@@ -421,9 +422,7 @@ export class RunStore {
     this.check();
     try {
       const pinned = `/proc/self/fd/${this.directoryFd}`;
-      const config = readStoredConfig(pinned);
-      if (hash(boundedRead(path.join(pinned, 'config.json'))) !== this.configDigest)
-        fail('run_diverged');
+      const config = readStoredConfig(pinned, this.configDigest);
       if (JSON.stringify(config) !== JSON.stringify(this.storedConfig)) fail('run_diverged');
       return config;
     } catch (error) {
