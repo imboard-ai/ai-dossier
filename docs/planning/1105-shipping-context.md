@@ -56,3 +56,36 @@ None.
 
 ## Base Branch
 `main`
+
+## Execution outcome — bounded review handoff
+
+Run `r-1105-1a9a` completed implementation and three progressing repair passes.
+Initial full independent review covered DRY, security, supportability,
+maintainability, documentation, conventions and blind conformance. Subsequent
+fresh blind conformance reports marked all nine criteria met, but independent
+runtime security/supportability probes still reproduced unresolved defects on
+`9790535`:
+
+1. A mutable HandoffAdmission adapter can replace `commitPr` during reconciliation
+   and publish after authoritative cancellation. Capture/bind every admission
+   method and reject replacements before publication.
+2. The captured RunStore validation method still delegates to mutable public
+   `validateOutcomeEvidence`; replacing that method can mask durable cancellation.
+   Fix the authoritative validation chain rather than adding another field guard.
+3. A request's aliased intent can change during final policy admission; the
+   journal then records a different candidate SHA than the verified receipt.
+   Detach the entire request before queueing/asynchronous work.
+4. Receipt reservation insertion still precedes the outer asynchronous wrapper's
+   authority check. A queued microtask can make admission return false while
+   retaining the digest, preventing a same-instance retry. Commit reservations
+   only after the enclosing check or roll back this invocation's reservation.
+5. Final commit admission refreshes receipt/context but omits fresh contributor,
+   fork-readiness and verified remote-head results after PR reconciliation.
+
+No PR was opened and no merge/deploy was authorized. The review repair cap is
+reached; continuation requires an explicitly authorized renewed repair cycle.
+Last full package gate: 4,464 tests passed; 14 opt-in VM tests skipped. Coverage
+96.13% statements, 93.56% branches, 98.34% functions, 97.71% lines. Strict build,
+test-inclusive typecheck, warning-as-error lint and version-bump check passed.
+The checkpoint path regression was independently reproduced red on isolated
+origin/main and green with the corrected source.
