@@ -10,6 +10,7 @@ it('portable projection excludes internal evidence and filesystem identities', (
     facts = contributionEvidence(r.store, r.directory);
   expect(Object.keys(portableFacts(facts)).sort()).toEqual([
     'costTotals',
+    'metrics',
     'outcome',
     'outcomeSha',
     'pr',

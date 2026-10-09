@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { BudgetLedger, budgetTotals, validateBudgetSnapshot } from '../budget';
+import { validateStoredRunConfig } from '../controller/config';
 import type { RunStore } from '../controller/run-store';
 import { isTrackerContinuation } from '../controller/tracker-continuation';
 import { lstatIfPresent } from '../durable-fs';
@@ -8,8 +9,10 @@ import {
   type RelocationEvidence,
   replayTrack,
   type TrackedPr,
+  type TrackState,
   validateRelocationEvidence,
 } from '../github/track';
+import { type ContributionOutcome, outcomeCosts, recordedOutcome } from '../metrics/outcomes';
 import type { SignedReceipt } from '../receipt/issue';
 import type { CommandEvidence } from '../receipt/schema';
 import { isRecoveryEvent } from '../recovery';
@@ -66,12 +69,16 @@ export function contributionEvidence(
     return bytes;
   };
   // Scan raw snapshots before any projection, including discarded fields.
+  let config: ReturnType<typeof validateStoredRunConfig> | undefined;
   for (const name of ['run.json', 'config.json', 'control/events.jsonl']) {
     const bytes = select(name);
     if (!bytes) refuse();
     if (name.endsWith('jsonl')) {
       strictJsonLines(bytes);
-    } else jsonRecord(bytes);
+    } else {
+      const raw = jsonRecord(bytes);
+      if (name === 'config.json') config = validateStoredRunConfig(raw);
+    }
   }
   let pr: string | null = null;
   let verifiedSha: string | null = null;
@@ -97,10 +104,12 @@ export function contributionEvidence(
   const tracking = select('track/events.jsonl');
   const relocations: RelocationEvidence[] = [];
   let originalPr: TrackedPr | null = null;
+  let trackerState: TrackState | undefined;
   if (tracking) {
     const events = strictJsonLines(tracking);
     if (events.some(isRecoveryEvent)) refuse();
     const track = replayTrack(events);
+    trackerState = track;
     if (
       track.contributionId !== store.contributionId ||
       !isTrackerContinuation(track.run, store.run)
@@ -127,9 +136,25 @@ export function contributionEvidence(
     if (!links.includes(pr)) links.push(pr);
   }
   const budget = select('budget/ledger.json');
-  const costTotals = budget
+  const budgetState = budget
+    ? validateBudgetSnapshot(jsonRecord(budget), store.contributionId)
+    : undefined;
+  const metrics: Pick<ContributionOutcome, 'outcome' | 'cost'> = {
+    outcome: recordedOutcome(store.run, trackerState),
+    cost: {
+      byCurrency:
+        budgetState && config
+          ? outcomeCosts(
+              budgetState,
+              Object.values(config.modelProfile.phases).map((phase) => phase?.model)
+            )
+          : 'unknown',
+    },
+  };
+  if (metrics.outcome === 'accepted') outcome = 'accepted';
+  const costTotals = budgetState
     ? (() => {
-        const state = validateBudgetSnapshot(jsonRecord(budget), store.contributionId);
+        const state = budgetState;
         if (!state.sessions.length) return null;
         return state.sessions.map((session) => ({
           sessionId: session.id,
@@ -199,6 +224,9 @@ export function contributionEvidence(
     ];
   }
   if ((verificationRecords?.length ?? 0) > 128) refuse('size-limit', 'evidence');
+  // Optional provenance cannot earn a verification attribution. Observed outcomes
+  // remain independent; contradictory present provenance is refused by preflight.
+  if (verificationRecords === null) verifiedSha = null;
   const result = {
     upstreamIssue: store.run.upstreamIssue,
     links,
@@ -209,6 +237,7 @@ export function contributionEvidence(
     relocations,
     originalPr,
     costTotals,
+    metrics,
     receipts,
     verification: verificationRecords,
     disclosure,
@@ -329,6 +358,7 @@ export function historicalEvidence(store: RunStore, root: string, snapshot: Evid
   return facts;
 }
 export interface ContributionEvidence {
+  metrics: Pick<ContributionOutcome, 'outcome' | 'cost'>;
   originalPr: TrackedPr | null;
   relocations: RelocationEvidence[];
   upstreamIssue: string;

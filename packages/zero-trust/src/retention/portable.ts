@@ -9,13 +9,38 @@ export const sha = { type: 'string', pattern: '^[a-f0-9]{40}$' };
 export const hash = { type: 'string', pattern: '^[a-f0-9]{64}$' };
 export const nullable = (schema: object) => ({ anyOf: [schema, { type: 'null' }] });
 const number = { type: 'integer', minimum: 0, maximum: Number.MAX_SAFE_INTEGER };
-export const outcome = { enum: ['unknown', 'awaiting_review', 'merged', 'declined', 'blocked'] };
+export const outcome = {
+  enum: ['unknown', 'awaiting_review', 'accepted', 'merged', 'declined', 'blocked'],
+};
+const knownNumber = { anyOf: [number, { const: 'unknown' }] };
+const costAmounts = { estimatedMinor: knownNumber, observedMinor: knownNumber };
+export const metricsSchema = object({
+  outcome: { enum: ['unknown', 'none', 'open', 'accepted', 'merged', 'declined'] },
+  cost: object({
+    byCurrency: {
+      anyOf: [
+        { const: 'unknown' },
+        {
+          type: 'object',
+          maxProperties: 128,
+          propertyNames: { pattern: '^[A-Z]{3}$' },
+          additionalProperties: object({
+            ...costAmounts,
+            model: object(costAmounts),
+            vm: object(costAmounts),
+          }),
+        },
+      ],
+    },
+  }),
+});
 export const portableFields = {
   upstreamIssue: text,
   pr: nullable(text),
   verifiedSha: nullable(sha),
   outcomeSha: nullable(sha),
   outcome,
+  metrics: metricsSchema,
   costTotals: nullable({
     type: 'array',
     maxItems: 128,
@@ -38,5 +63,6 @@ export function portableFacts(facts: ContributionEvidence) {
     outcomeSha: facts.outcomeSha,
     outcome: facts.outcome,
     costTotals: facts.costTotals,
+    metrics: facts.metrics,
   };
 }

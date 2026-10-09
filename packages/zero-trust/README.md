@@ -1396,14 +1396,24 @@ hide corrupt or divergent selected files.
 
 ### Selected evidence persistence convention
 
-This slice consumes actual producer records, independently of the metrics slice.
+This slice consumes actual producer records with stricter maintenance preflight,
+sharing the metrics producer's pure `recordedOutcome(run, tracker?)` and
+`outcomeCosts(validatedBudget, modelNames)` projections. These are the exact
+projections used by `contributionOutcome`; maintenance applies them to its bounded,
+secret-checked and anchored snapshots rather than re-reading through the metrics
+API's permissive unknown-on-corruption reader. Portable status and frozen summary
+retain `metrics: { outcome, cost: { byCurrency } }`, including canonical
+`open`/`accepted` outcomes, separate estimated/observed minor units, and model/VM
+subtotals. Missing budget evidence is `byCurrency: 'unknown'`; unreconciled
+observations remain `'unknown'`, never admission maxima claimed as observed costs.
 `PrTracker` and `HandoffDriver` already persist `track/events.jsonl` and
 `handoff/events.jsonl`: raw events are scanned, then their existing replay
 validators establish identity, history, public links and outcome facts. Complete-line
 tracker tail loss is refused using `isTrackerContinuation`; repaired selected
 handoff/tracker journals are refused rather than presented as complete evidence. A missing
 tracker file is **unknown**, never inferred merged from a lifecycle label. A valid
-pending tracker reports `awaiting_review`, or `blocked` when its replay says so.
+pending tracker reports `awaiting_review` (`metrics.outcome: 'open'`), `accepted`
+when confirmed accepted, or `blocked` when its replay says so.
 `BudgetLedger` snapshots live at `budget/ledger.json`. The new
 `BudgetLedger.readOnlyEvidence(file, contributionId)` returns `{ state, bytes }`
 under the existing non-reclaiming transaction guard, preserving exact scanned bytes
@@ -1411,7 +1421,7 @@ and digests. `readOnlySnapshot` delegates to this same read and returns only `st
 An unresolved owner (live or retained after a crash) refuses reporting/sweep until
 controller reconciliation; reporting never creates or steals the lock.
 `validateBudgetSnapshot(raw, contributionId)` remains the shared detached decoder
-for the already-authenticated historical bytes. Costs use existing `budgetTotals`, preserving
+for the already-authenticated historical bytes. Separate admission `costTotals` use existing `budgetTotals`, preserving
 reservations and conservative maxima, with currencies kept per session. No
 ledger or no session means null, not zero. Present invalid evidence throws.
 Expiry retains exact budget bytes with the selected-source digest. Current budget
@@ -1464,7 +1474,8 @@ the actual run/history, offline status (URLs, verified/outcome SHAs, observed
 outcome and costs), sanitized summary, complete receipt envelopes/digests,
 verification metadata, PR/outcome, disclosure and policy citations. The exported
 summary omits the local sweep manifest and file identities. Missing verification
-is null; no absence can earn a verification or successful outcome claim.
+is null, with `verifiedSha: null`; no absence can earn a verification claim. An
+independently observed outcome and its SHA remain available without verification.
 Config, environment, token journals, nonce stores, budget locks, raw logs and
 prepared body file paths are excluded. All output strings are scanned again.
 `EXPORT_SCHEMA` is the versioned public JSON Schema and the runtime validator's
@@ -1544,10 +1555,14 @@ The replacement's observed tuple must equal retained expected identity **before*
 the merged shortcut or any rebound. Each `RelocationEvidence` stores that observed
 `identity` and `identityDigest`; sweep/export cross-bind numeric identity to held
 authority and intact receipts again. Legacy proofs lacking these fields refuse.
-When verification provenance exists, a claimed verified SHA must match one of its
-verified candidates; observed outcome SHA remains independent. A pending
+Every claimed non-null verified SHA must match a retained verified candidate;
+missing provenance projects null and cannot disable portable validation. Observed
+outcome SHA remains independent. A pending
 `handoff/events.jsonl.recovery` or `track/events.jsonl.recovery` (including malformed
 or symlink intents) refuses maintenance before publication or artifact deletion.
+The control-journal recovery check applies equally to already-held stores and fresh
+read-only opens. Safe SecretRedactionError diagnostics survive run/config/control
+preflight, archive opening and the expired-snapshot guard.
 
 ### Maintenance diagnostics and recovery
 

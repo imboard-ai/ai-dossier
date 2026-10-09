@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, expect, it } from 'vitest';
-import { createFixtures, SHA, signedReceipt } from '../../fixtures/retention';
+import { createFixtures, SHA, signedReceipt, verificationSource } from '../../fixtures/retention';
 import { ReasonCode, transitionRun } from '../state';
 import { MaintenanceError } from './errors';
 import { exportContribution, validateContributionExport } from './export';
@@ -40,6 +40,7 @@ it('rejects fabricated merged/declined outcomes and an unknown observed outcome 
 });
 it('keeps historical public observations after cancellation or blocking without claiming an outcome', () => {
   const r = rig();
+  r.write('verification-evidence.json', verificationSource(r.runId));
   for (const reason of [
     ReasonCode.GatePassed,
     ReasonCode.PlanApproved,

@@ -79,6 +79,24 @@ matching available verified provenance; credential refusal retains its safe erro
 Fresh seven-dimension report-only review and strictly filtered blind specification
 intake follow these repairs. No earlier handoff is a current stopping condition.
 
+### Fresh review repair loop 1
+
+Seven independent reviewers on dcf7716 completed and were joined. Their 17
+reachable findings deduplicated to four technical fixes: held control recovery,
+missing-provenance verified-SHA attribution, run/expiry credential diagnostics,
+and metrics-first outcome/accounting retention (accepted and estimated/observed
+costs). None required a product decision. The closed identity producer passed
+all independent mutation/null/ref/name-case checks; literal ACs were 5/5.
+Share contributionOutcome's pure outcome/cost projections against the strict
+bounded historical/current snapshots. Persist canonical metrics separately from
+conservative admission costTotals, preserving unknown observation values and
+immutable expiry costs. Missing provenance projects verifiedSha null; a non-null
+portable claim always requires a matching verified candidate. Reuse the same
+sidecar-aware control reader for held stores and read-only opens. Preserve the
+safe secret diagnostic across run/config/control, opening and resumability.
+New actual-producer regressions cover every fix. Full private-package coverage,
+strict changed-test typecheck and lint pass before fresh blind conformance.
+
 ## Owner-authorized bounded AC2 repair (2026-10-08)
 Decision: https://github.com/imboard-ai/ai-dossier/issues/1104#issuecomment-6069385805.
 Preserve immutable expiry-time URL/SHA and export current URL/SHA separately. A

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { types } from 'node:util';
 import { assertDirectoryAncestors, privateDir, replacePrivate, syncDirectory } from '../durable-fs';
-import { Journal, parseJournalEvents } from '../journal';
+import { Journal } from '../journal';
 import { lockDescriptor, StoreLockedError } from '../lock';
 import { isRecoveryEvent, isTailRecovery } from '../recovery';
 import { assertSecretFree, SecretRedactionError } from '../redaction';
@@ -24,7 +24,7 @@ import {
   sameRunRecord,
   transitionRun,
 } from '../state';
-import { parseStrictUtf8Json, strictUtf8 } from '../strict-utf8';
+import { strictUtf8 } from '../strict-utf8';
 import {
   type CheckpointBindings,
   type CheckpointPoint,
@@ -101,13 +101,14 @@ function hash(bytes: Buffer): string {
 }
 function readStoredConfig(pinned: string, expectedDigest?: string, selected?: Buffer): RunConfig {
   const bytes = selected ?? boundedRead(path.join(pinned, 'config.json'));
+  const raw = jsonRecord(bytes);
   if (expectedDigest !== undefined && hash(bytes) !== expectedDigest) fail('run_diverged');
   if (hash(bytes) !== strictUtf8(boundedRead(path.join(pinned, 'config.sha256'), 64)))
     fail('invalid_store');
-  return validateStoredRunConfig(parseStrictUtf8Json(bytes));
+  return validateStoredRunConfig(raw);
 }
 function refuseEvidence(source: 'run' | 'config', error: unknown): never {
-  if (error instanceof RunEvidenceError) throw error;
+  if (error instanceof RunEvidenceError || error instanceof SecretRedactionError) throw error;
   const code = (error as NodeJS.ErrnoException)?.code;
   throw new RunEvidenceError(
     source,
@@ -400,12 +401,10 @@ export class RunStore {
     this.check();
     try {
       const pinned = `/proc/self/fd/${this.directoryFd}`;
-      const events = this.withStoreDirectory('control', (dir) =>
-        parseJournalEvents(boundedRead(path.join(dir, 'events.jsonl'), JOURNAL_BYTES))
-      );
+      const events = readControl(pinned);
       if (events.some(isRecoveryEvent)) throw new RunEvidenceError('run', 'recovered');
       const evidence = replayControl(events, config);
-      const raw = parseStrictUtf8Json(boundedRead(path.join(pinned, 'run.json')));
+      const raw = jsonRecord(boundedRead(path.join(pinned, 'run.json')));
       assertSecretFree(raw);
       const snapshot = restoreRun(raw);
       if (
@@ -458,7 +457,7 @@ export class RunStore {
       this.validateOutcomeEvidence();
       return directory;
     } catch (error) {
-      if (error instanceof RunStoreError) throw error;
+      if (error instanceof RunStoreError || error instanceof SecretRedactionError) throw error;
       fail('invalid_store');
     }
   }
@@ -472,7 +471,7 @@ export class RunStore {
           fail('snapshot_expired');
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
-          if (error instanceof RunStoreError) throw error;
+          if (error instanceof RunStoreError || error instanceof SecretRedactionError) throw error;
           fail('invalid_store');
         }
       }
@@ -564,7 +563,8 @@ export class RunStore {
       if (
         error instanceof RunStoreError ||
         error instanceof StoreLockedError ||
-        error instanceof RunConfigError
+        error instanceof RunConfigError ||
+        error instanceof SecretRedactionError
       )
         throw error;
       fail('invalid_store');
@@ -598,7 +598,7 @@ export class RunStore {
       const bytes = boundedRead(path.join(pinned, 'config.json'));
       const config = readStoredConfig(pinned, undefined, bytes);
       if (!options.readOnly) validateRunConfig(runConfigInput(config));
-      const raw = parseStrictUtf8Json(boundedRead(path.join(pinned, 'run.json')));
+      const raw = jsonRecord(boundedRead(path.join(pinned, 'run.json')));
       assertSecretFree(raw);
       const run = restoreRun(raw);
       if (
@@ -649,7 +649,8 @@ export class RunStore {
       if (
         error instanceof RunStoreError ||
         error instanceof StoreLockedError ||
-        error instanceof RunConfigError
+        error instanceof RunConfigError ||
+        error instanceof SecretRedactionError
       )
         throw error;
       fail('invalid_store');

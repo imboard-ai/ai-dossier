@@ -1,5 +1,6 @@
 /** Local PRD §6 facts; reporting never grants permission or performs external I/O. */
 import path from 'node:path';
+import type { BudgetState } from '../budget-types';
 import { lifecycleTimes } from '../controller/lifecycle-times';
 import {
   OutcomeEvidenceError,
@@ -13,7 +14,7 @@ import { readPrivate } from '../durable-fs';
 import { isGitHubLogin } from '../github-login';
 import { isPullRequestTarget, isRepositoryTarget } from '../github-target';
 import { assertNoSecrets, assertSecretFree } from '../redaction';
-import { isRecord, isTimestamp, ReasonCode } from '../state';
+import { isRecord, isTimestamp, ReasonCode, type RunRecord } from '../state';
 import { parseStrictUtf8Json } from '../strict-utf8';
 
 export type Known<T> = T | 'unknown';
@@ -112,13 +113,24 @@ function amounts(
 }
 function costs(store: RunStore): Readonly<Record<string, CurrencyCost>> {
   const state = readOutcomeBudget(store);
+  return outcomeCosts(
+    state,
+    Object.values(store.config.modelProfile.phases).map((p) => p?.model)
+  );
+}
+/** Shared pure reporting projection over a validated budget snapshot. Conservative
+ * admission maxima are never substituted for estimated/observed reporting costs. */
+export function outcomeCosts(
+  state: BudgetState,
+  modelNames: readonly (string | undefined)[]
+): Readonly<Record<string, CurrencyCost>> {
   const byCurrency: Record<string, CurrencyCost> = {};
   for (const currency of new Set(state.sessions.map((s) => s.ceiling.currency))) {
     const rows = state.reservations.filter(
       (r) => r.status !== 'released' && r.estimate.money.currency === currency
     );
     // Currency is the ledger's accounting currency after recorded FX, never a sum of source currencies.
-    const models = new Set(Object.values(store.config.modelProfile.phases).map((p) => p?.model));
+    const models = new Set(modelNames);
     const kind = (row: (typeof rows)[number]) => {
       const kinds = new Set(
         row.estimate.rates.map((r) =>
@@ -140,6 +152,29 @@ function costs(store: RunStore): Readonly<Record<string, CurrencyCost>> {
     };
   }
   return byCurrency;
+}
+/** Shared pure outcome mapping: only a confirmed tracker outcome proves merge/decline. */
+export function recordedOutcome(
+  run: RunRecord,
+  tracker?: ReturnType<typeof readOutcomeTrack>
+): ContributionOutcome['outcome'] {
+  if (!run.history.some((e) => e.reasonCode === ReasonCode.PublicationObserved)) return 'none';
+  if (!tracker) return 'unknown';
+  if (tracker.blockedReason === 'merged_during_revision' && tracker.outcomeSha) return 'merged';
+  if (tracker.run.state === 'merged' || tracker.run.state === 'declined')
+    return tracker.outcomeSha ? tracker.run.state : 'unknown';
+  if (run.state === 'accepted') return 'accepted';
+  return [
+    'submitted',
+    'awaiting_review',
+    'revising',
+    'implementing',
+    'verifying',
+    'shipping',
+    'paused_user',
+  ].includes(run.state)
+    ? 'open'
+    : 'unknown';
 }
 export const ADOPTION_MAX_LENGTH = 2000;
 function adoption(raw: unknown): { at: string; note: string } {
@@ -232,29 +267,7 @@ export function contributionOutcome(store: RunStore, now?: Date | string): Contr
       : [...handoffs.handoffs.values()].find(
           (h) => h.input.operationKind === 'pr_create' && h.status === 'observed'
         );
-  const outcome: ContributionOutcome['outcome'] = !submitted
-    ? 'none'
-    : tracker === 'unknown'
-      ? 'unknown'
-      : tracker.blockedReason === 'merged_during_revision' && tracker.outcomeSha
-        ? 'merged'
-        : tracker.run.state === 'merged' || tracker.run.state === 'declined'
-          ? tracker.outcomeSha
-            ? tracker.run.state
-            : 'unknown'
-          : run.state === 'accepted'
-            ? 'accepted'
-            : [
-                  'submitted',
-                  'awaiting_review',
-                  'revising',
-                  'implementing',
-                  'verifying',
-                  'shipping',
-                  'paused_user',
-                ].includes(run.state)
-              ? 'open'
-              : 'unknown';
+  const outcome = recordedOutcome(run, tracker === 'unknown' ? undefined : tracker);
   const adoptionReported = readAdoption(store, unknownEvidence);
   const value: ContributionOutcome = {
     contributionId: store.contributionId,

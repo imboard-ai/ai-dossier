@@ -154,6 +154,7 @@ export interface ContributionExport {
     outcomeSha: string | null;
     outcome: string;
     costTotals: ReturnType<typeof contributionEvidence>['costTotals'];
+    metrics: ReturnType<typeof contributionEvidence>['metrics'];
     snapshotExpired: boolean;
   };
   summary: {
@@ -167,6 +168,7 @@ export interface ContributionExport {
     outcomeSha: string | null;
     outcome: string;
     costTotals: ReturnType<typeof contributionEvidence>['costTotals'];
+    metrics: ReturnType<typeof contributionEvidence>['metrics'];
     receiptDigests: string[];
   } | null;
   receipts: ReturnType<typeof contributionEvidence>['receipts'];
@@ -338,8 +340,19 @@ export function validateContributionExport(input: unknown): ContributionExport {
     const verifiedSha = input.status.verifiedSha;
     if (
       verifiedSha !== null &&
-      input.verification !== null &&
-      !input.verification.some((record) => record.verified && record.candidateSha === verifiedSha)
+      !(input.verification ?? []).some(
+        (record) => record.verified && record.candidateSha === verifiedSha
+      )
+    )
+      refuse();
+    const metricsOutcome = input.status.metrics.outcome;
+    if (
+      (['merged', 'declined', 'accepted'].includes(metricsOutcome) &&
+        metricsOutcome !== input.outcome) ||
+      (input.outcome === 'accepted' && (run.state !== 'accepted' || !input.pr)) ||
+      (input.summary &&
+        ['merged', 'declined'].includes(input.summary.metrics.outcome) &&
+        input.summary.metrics.outcome !== metricsOutcome)
     )
       refuse();
     if (
