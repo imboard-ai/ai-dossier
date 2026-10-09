@@ -1,0 +1,491 @@
+/** Offline producer-to-shipping integration: real persistence, Git and admission gates. */
+import { generateKeyPairSync } from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { Ed25519Signer } from '@ai-dossier/core';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { candidateInput, harness, removeTemps, TIME } from '../__tests__/verifier-fixture';
+import { sha256 } from '../canonical/export';
+import {
+  FORK_ID,
+  GitHubFake,
+  INSTALLATION_ID,
+  OWNER,
+  UPSTREAM_ID,
+} from '../github/__tests__/github-fake';
+import { BRANCH, Fork, journal, TARGET, temp } from '../github/__tests__/push-rig';
+import { GitPushCredential } from '../github/broker';
+import { HandoffDriver } from '../github/handoff-driver';
+import { ForkPusher, type ForkPusherOptions } from '../github/push';
+import { IntentDriver, MutationUncertainError, WriteBlockedError } from '../intents';
+import { Journal } from '../journal';
+import { ReceiptNonceStore } from '../receipt/nonces';
+import { ReasonCode, transitionRun } from '../state';
+import { validateRunConfig } from './config';
+import { RunStore } from './run-store';
+import {
+  makeAuthorize,
+  makeHandoffAdmission,
+  prContentInput,
+  type ShippingAuthorization,
+  type ShippingAuthorizeDeps,
+  shippingIntent,
+} from './shipping';
+import { publishVerification, type VerificationRecord } from './verification-record';
+import { verifyCandidate } from './verifier';
+
+let template: VerificationRecord;
+let sourceArtifacts: string;
+const stores: RunStore[] = [];
+beforeAll(async () => {
+  vi.spyOn(os, 'networkInterfaces').mockReturnValue({
+    fixture: [
+      { address: '127.0.0.1', family: 'IPv4', internal: false, netmask: '', mac: '', cidr: null },
+    ],
+  });
+  const h = harness();
+  const result = await verifyCandidate(h.deps(), candidateInput());
+  if (result.kind !== 'verified') throw new Error('verification fixture failed');
+  template = result.record;
+  sourceArtifacts = h.artifactsDir;
+  vi.restoreAllMocks();
+});
+afterEach(() => {
+  for (const store of stores.splice(0)) store.close();
+});
+afterAll(removeTemps);
+
+class LocalForkPusher extends ForkPusher {
+  constructor(
+    options: ForkPusherOptions,
+    private readonly bare: string
+  ) {
+    super(options);
+  }
+  protected override remote(): { url: string; config: readonly string[] } {
+    return { url: `file://${this.bare}`, config: ['protocol.file.allow=always'] };
+  }
+}
+
+async function rig() {
+  const root = temp('zt-shipping-integration-');
+  const keyFile = path.join(root, 'controller.pem');
+  fs.writeFileSync(
+    keyFile,
+    generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' }),
+    { mode: 0o600 }
+  );
+  const phase = {
+    adapter: 'fake',
+    model: 'fake',
+    endpoint: 'https://model.example',
+    apiKeyEnv: 'MODEL_KEY',
+  };
+  const config = validateRunConfig({
+    issueUrl: 'https://github.com/o/r/issues/1',
+    contributor: OWNER,
+    executionProfile: {
+      provider: 'local-qemu',
+      profileDir: 'profile',
+      stateDir: 'state',
+      accelerator: 'auto',
+      proxyEndpointsFile: 'endpoints.json',
+    },
+    modelProfile: {
+      phases: { planning: phase, implementing: phase },
+      rates: [
+        {
+          resource: 'fake',
+          currency: 'USD',
+          unit: 'token',
+          price: 0,
+          units: 1,
+          source: 'fixture',
+          fx: { currency: 'USD', numerator: 1, denominator: 1, timestamp: TIME },
+        },
+      ],
+    },
+    budget: {
+      currency: 'USD',
+      ceilingMinor: 100,
+      cleanupAllowanceMinor: 10,
+      tokenLimit: 100,
+      activeMinutes: 120,
+    },
+    checkpoints: [],
+    signerKeyFile: keyFile,
+    githubApp: {
+      appId: 1,
+      clientId: 'fixture',
+      slug: 'fixture',
+      privateKeyEnv: 'APP_KEY',
+      clientSecretEnv: 'APP_SECRET',
+    },
+  });
+  const store = RunStore.create(path.join(root, 'runs'), config, TIME);
+  stores.push(store);
+  store.recordUpstreamRepositoryId(UPSTREAM_ID);
+  for (const reason of [
+    ReasonCode.GatePassed,
+    ReasonCode.PlanApproved,
+    ReasonCode.CandidateReady,
+    ReasonCode.VerificationPassed,
+  ])
+    store.persistRun(transitionRun(store.run, reason, TIME));
+  const artifacts = store.storeDirectory('artifacts');
+  fs.cpSync(sourceArtifacts, artifacts, { recursive: true });
+  fs.rmSync(path.join(artifacts, 'verification'), { recursive: true });
+  const boundaryFile = path.join(artifacts, template.boundaryInputRef.artifact);
+  const boundary = { ...JSON.parse(fs.readFileSync(boundaryFile, 'utf8')), runId: store.runId };
+  const bytes = Buffer.from(JSON.stringify(boundary));
+  fs.writeFileSync(boundaryFile, bytes, { mode: 0o600 });
+  const { schemaVersion: _, recordDigest: __, ...body } = template;
+  const verification = publishVerification(artifacts, {
+    ...body,
+    runId: store.runId,
+    boundaryInputRef: { artifact: template.boundaryInputRef.artifact, digest: sha256(bytes) },
+  });
+  const candidate = candidateInput();
+  const report = (id: string, argv: string[]) => ({
+    id,
+    argv,
+    phase: 'verification' as const,
+    network: 'none' as const,
+    env: {},
+    timeoutMs: 1000,
+    required: true,
+    captureReport: true,
+  });
+  const deps: ShippingAuthorizeDeps = {
+    store,
+    fork: {
+      repositoryId: FORK_ID,
+      owner: OWNER,
+      repo: 'fixture',
+      fullName: `${OWNER}/fixture`,
+      installationId: INSTALLATION_ID,
+    },
+    bindings: {
+      contributionId: store.contributionId,
+      forkRepositoryId: FORK_ID,
+      forkOwner: OWNER,
+      forkRepo: 'fixture',
+      branch: BRANCH,
+      candidateSha: candidate.candidateSha,
+      baseSha: verification.baseSha,
+      parentSha: verification.parentSha,
+      sessionId: 'session-1',
+      defaultBranch: 'main',
+      policyDigest: 'a'.repeat(64),
+      verificationDigest: verification.recordDigest,
+      expectedRemoteSha: null,
+    },
+    profile: { digest: verification.profileDigest, binding: structuredClone(verification.profile) },
+    commandPlan: {
+      manager: 'npm',
+      provisioning: [],
+      verification: [
+        report('npm-test', ['npm', 'test']),
+        report('npm-test-regression', ['npm', 'test', '--', 'test/regression.test.js']),
+      ],
+    },
+    manifest: structuredClone(candidate.manifest),
+    record: structuredClone(candidate.record),
+    authority: structuredClone(candidate.authority),
+    basePack: Buffer.from(candidate.basePack),
+    signer: new Ed25519Signer(keyFile),
+    now: () => Date.parse(TIME),
+    policyFresh: vi.fn(async () => true),
+  };
+  const fork = new Fork();
+  const ledger = journal(temp('zt-shipping-ledger-'));
+  const nonceDir = temp('zt-shipping-nonces-');
+  const nonces = new ReceiptNonceStore(nonceDir);
+  nonces.initialize();
+  // Nonce consumption opens its own journal; observers must release the writer fence.
+  const nonceJournal = {
+    read: () => {
+      const rows = new Journal(nonceDir);
+      try {
+        return rows.read();
+      } finally {
+        rows.close();
+      }
+    },
+  };
+  const consume = vi.spyOn(nonces, 'consume');
+  const broker: ForkPusherOptions['broker'] = {
+    withForkPush: async (intent, target, operation) => {
+      expect(intent.status).toBe('attempted');
+      expect(target).toMatchObject({ repositoryId: FORK_ID });
+      return operation(new GitPushCredential('fixture-local-only'), new AbortController().signal);
+    },
+  };
+  const mint = vi.spyOn(broker, 'withForkPush');
+  let authorization: ShippingAuthorization | undefined;
+  const authorize = vi.fn(async (intent: Parameters<ForkPusherOptions['authorize']>[0]) => {
+    authorization = await makeAuthorize(deps)(intent);
+    return authorization;
+  });
+  const pusher = new LocalForkPusher(
+    {
+      broker,
+      read: fork.read,
+      fork: deps.fork,
+      ledger,
+      trustedControllerKey: await deps.signer.getPublicKey(),
+      nonces,
+      authorize,
+      now: deps.now,
+    },
+    fork.dir
+  );
+  const driver = new IntentDriver(
+    journal(temp('zt-shipping-intents-')),
+    pusher,
+    { run: store.run, contributionId: store.contributionId },
+    () => TIME
+  );
+  const input = shippingIntent(deps.bindings);
+  const editBoundary = (change: Record<string, unknown>) =>
+    fs.writeFileSync(boundaryFile, JSON.stringify({ ...boundary, ...change }), { mode: 0o600 });
+  const noPushEffects = () => {
+    expect(consume).not.toHaveBeenCalled();
+    expect(nonceJournal.read()).toHaveLength(1);
+    expect(mint).not.toHaveBeenCalled();
+    expect(ledger.read()).toEqual([]);
+    expect(fork.sha()).toBeNull();
+  };
+  return {
+    deps,
+    store,
+    verification,
+    artifacts,
+    boundaryFile,
+    editBoundary,
+    fork,
+    ledger,
+    nonces,
+    nonceJournal,
+    consume,
+    broker,
+    mint,
+    authorize,
+    pusher,
+    driver,
+    input,
+    noPushEffects,
+    authorization: () => {
+      if (!authorization) throw new Error('no authorization');
+      return authorization;
+    },
+  };
+}
+
+async function handoff(h: Awaited<ReturnType<typeof rig>>, receipt = h.authorization().receipt) {
+  const fake = new GitHubFake(h.deps.now);
+  fake.publicResponses.set(
+    `/repos/o/r/pulls?state=all&head=${encodeURIComponent(`${OWNER}:${BRANCH}`)}&base=main&per_page=100&page=1`,
+    { status: 200, body: [] }
+  );
+  const admissionDeps = {
+    ...h.deps,
+    receipt,
+    trustedControllerKey: await h.deps.signer.getPublicKey(),
+    readLogin: vi.fn(async () => fake.login),
+    checkForkReadiness: vi.fn(async () => ({
+      kind: 'ready' as const,
+      fork: h.deps.fork,
+      run: h.store.run,
+    })),
+    remoteBranchSha: h.pusher.handoffReadBack(TARGET),
+  };
+  const admission = makeHandoffAdmission(admissionDeps);
+  const rows = journal(temp('zt-shipping-handoffs-'));
+  const bodyDirectory = temp('zt-shipping-bodies-');
+  const driver = new HandoffDriver(
+    rows,
+    { read: fake.read, admission, bodyDirectory, now: () => TIME },
+    { run: h.store.run, contributionId: h.store.contributionId }
+  );
+  const content = prContentInput({
+    intent: { ...h.input, operationKind: 'pr_create', target: 'https://github.com/o/r/pulls' },
+    receipt,
+    verification: h.verification,
+    candidateReady: {
+      title: 'Fix duration rounding',
+      cause: 'Duration rounds incorrectly',
+      scope: 'Correct duration calculation',
+    },
+    policy: { receiptBlockAllowed: true, baselineFailuresPermitted: false },
+    currentBaseSha: h.verification.baseSha,
+  });
+  const request = {
+    binding: {
+      upstream: { owner: 'o', repo: 'r' },
+      base: 'main',
+      headOwner: OWNER,
+      branch: BRANCH,
+    },
+    content,
+  };
+  return { fake, admissionDeps, admission, rows, bodyDirectory, driver, request };
+}
+
+describe('persisted verification to real local shipping (#1105)', () => {
+  it('pushes the reconstructed candidate and issues a compare link only after verified read-back', async () => {
+    const h = await rig();
+    const prepared = await makeAuthorize(h.deps)(h.input);
+    const receipt = prepared.receipt;
+    const before = await handoff(h, receipt);
+    await expect(before.driver.issuePr(before.request)).rejects.toThrow('admission_remote_sha');
+    expect(before.rows.read()).toHaveLength(1);
+    expect(fs.readdirSync(before.bodyDirectory)).toEqual([]);
+    h.noPushEffects();
+    // A matching ref alone cannot stand in for the controller's verified push ledger.
+    h.fork.git(['index-pack', '--stdin'], prepared.candidate.pack);
+    h.fork.git(['update-ref', `refs/heads/${BRANCH}`, h.deps.bindings.candidateSha]);
+    const unverified = await handoff(h, receipt);
+    await expect(unverified.driver.issuePr(unverified.request)).rejects.toThrow(
+      'admission_remote_sha'
+    );
+    expect(unverified.rows.read()).toHaveLength(1);
+    expect(fs.readdirSync(unverified.bodyDirectory)).toEqual([]);
+    expect(h.mint).not.toHaveBeenCalled();
+    expect(h.consume).not.toHaveBeenCalled();
+    h.fork.git(['update-ref', '-d', `refs/heads/${BRANCH}`]);
+    await expect(h.driver.execute(h.input)).resolves.toBe(`${TARGET}@${h.input.candidateSha}`);
+    expect(h.fork.sha()).toBe(h.input.candidateSha);
+    expect(await h.pusher.handoffReadBack(TARGET)()).toBe(h.input.candidateSha);
+    expect(h.ledger.read()).toMatchObject([
+      { type: 'push_intended', expectedRemoteSha: null },
+      { type: 'push_verified', remoteSha: h.input.candidateSha },
+    ]);
+    expect(h.consume).toHaveBeenCalledTimes(1);
+    expect(h.nonceJournal.read()).toHaveLength(2);
+    expect(h.mint).toHaveBeenCalledTimes(1);
+    const after = await handoff(h);
+    const result = await after.driver.issuePr(after.request);
+    expect(result.kind).toBe('awaiting_contributor');
+    expect(after.driver.status()?.link).toContain(`/compare/main...${OWNER}:${BRANCH}`);
+    expect(after.rows.read()).toMatchObject([{ type: 'handoff_run' }, { type: 'link_issued' }]);
+    expect(after.fake.calls.every((call) => call.method === 'GET')).toBe(true);
+    expect(h.mint).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    'missing',
+    'breached',
+  ])('scenario 4: %s persisted boundary refuses before nonce/token/ref effects', async (kind) => {
+    const h = await rig();
+    if (kind === 'missing') fs.rmSync(h.boundaryFile);
+    else h.editBoundary({ listenerConnections: 1 });
+    await expect(h.driver.execute(h.input)).rejects.toThrow();
+    expect(h.deps.policyFresh).not.toHaveBeenCalled();
+    h.noPushEffects();
+  });
+
+  it.each([
+    'SHA',
+    'manifest',
+  ])('scenario 10: changed %s after verification refuses without effects', async (kind) => {
+    const h = await rig();
+    if (kind === 'SHA') Object.assign(h.deps.bindings, { candidateSha: 'f'.repeat(40) });
+    else
+      Object.assign(h.deps.manifest.entries[0] as object, {
+        bytes: Buffer.from('changed\n').toString('base64'),
+      });
+    await expect(h.driver.execute(shippingIntent(h.deps.bindings))).rejects.toThrow();
+    h.noPushEffects();
+  });
+
+  it.each([
+    'contributor',
+    'fork',
+  ])('scenario 17: wrong %s refuses without push effects', async (kind) => {
+    const h = await rig();
+    if (kind === 'contributor') Object.assign(h.deps.authority.author, { login: 'other' });
+    else Object.assign(h.deps.fork, { repositoryId: FORK_ID + 1 });
+    await expect(h.driver.execute(h.input)).rejects.toThrow();
+    h.noPushEffects();
+  });
+
+  it.each([
+    'stale',
+    'throwing',
+    'omitted required command',
+  ])('%s refuses before nonce/token/ref effects', async (kind) => {
+    const h = await rig();
+    if (kind === 'stale') Object.assign(h.deps, { policyFresh: async () => false });
+    if (kind === 'throwing')
+      Object.assign(h.deps, {
+        policyFresh: async () => {
+          throw new Error('policy unavailable');
+        },
+      });
+    if (kind === 'omitted required command')
+      (h.deps.commandPlan.verification as unknown[]).push({
+        ...h.deps.commandPlan.verification[0],
+        id: 'required-lint',
+        argv: ['npm', 'run', 'lint'],
+      });
+    await expect(h.driver.execute(h.input)).rejects.toThrow();
+    h.noPushEffects();
+  });
+
+  it('scenario 17: replayed receipt refuses on retry before another broker lease', async () => {
+    const h = await rig();
+    h.mint.mockImplementationOnce(async () => {
+      throw new Error('lost before local push');
+    });
+    await expect(h.driver.execute(h.input)).rejects.toThrow(MutationUncertainError);
+    const spent = h.authorization();
+    expect(h.nonceJournal.read()).toHaveLength(2);
+    expect(h.fork.sha()).toBeNull();
+    await h.driver.resume();
+    h.authorize.mockResolvedValueOnce(spent);
+    const before = h.ledger.read();
+    const error = await h.driver.execute(h.input).catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(WriteBlockedError);
+    expect((error as Error).cause).toMatchObject({ detail: 'replayed_nonce' });
+    expect(h.nonceJournal.read()).toHaveLength(2);
+    expect(h.mint).toHaveBeenCalledTimes(1);
+    expect(h.ledger.read()).toEqual(before);
+    expect(h.fork.sha()).toBeNull();
+  });
+
+  it.each([
+    'contributor',
+    'fork',
+    'receipt replay',
+  ])('handoff refuses %s without publishing a link', async (kind) => {
+    const h = await rig();
+    await h.driver.execute(h.input);
+    const p = await handoff(h);
+    if (kind === 'contributor') p.fake.login = 'other';
+    if (kind === 'fork')
+      p.admissionDeps.checkForkReadiness.mockResolvedValue({
+        kind: 'ready',
+        run: h.store.run,
+        fork: { ...h.deps.fork, repositoryId: FORK_ID + 1 },
+      });
+    if (kind === 'receipt replay')
+      expect(
+        await p.admission.receiptValid(
+          h.input.candidateSha as string,
+          h.authorization().receipt.digest
+        )
+      ).toBe(true);
+    const nonceRows = h.nonceJournal.read();
+    await expect(p.driver.issuePr(p.request)).rejects.toThrow(
+      `admission_${kind === 'contributor' ? 'contributor' : kind === 'fork' ? 'fork_binding' : 'receipt'}`
+    );
+    expect(p.rows.read()).toHaveLength(1);
+    expect(fs.readdirSync(p.bodyDirectory)).toEqual([]);
+    expect(p.fake.calls).toEqual([]);
+    expect(h.nonceJournal.read()).toEqual(nonceRows);
+    expect(h.mint).toHaveBeenCalledTimes(1);
+    expect(h.fork.sha()).toBe(h.input.candidateSha);
+  });
+});

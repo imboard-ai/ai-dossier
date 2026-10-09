@@ -10,6 +10,59 @@ plus ecosystem detection, runtime profiles, command plans and package-proxy poli
 (see the gate 2 section below).
 Publication remains gated on S1 feasibility.
 
+## Credential-free shipping context (#1105)
+
+`controller/shipping.ts` exports the trusted composition APIs below. It has no
+credential-module imports; the composition root supplies authenticated adapters.
+
+- `shippingIntent(bindings): IntentInput` builds the exact `push_branch` target
+  with `forkTarget` and candidate SHA. `idempotencyKey(intent)` is the grant's
+  `operationKey`; `IntentDriver` journals attempts before the pusher authorizes.
+- `buildReceiptContext(deps): Promise<ReceiptContext>` revalidates the locked
+  `RunStore`, binds its contribution/run/contributor/upstream identity to the
+  authenticated `ForkReady`, and reads all persisted boundary artifacts under
+  the store fence to recompute this run's `runBoundaryVerdict`. It refuses missing,
+  malformed or breached evidence and states other than `shipping`/`revising`.
+  Required commands come exclusively from the trusted `CommandPlan`'s required
+  report-capturing verification commands, with `argv.join(' ')` display text.
+  The allowlist contains exactly one push target and the supplied push-ledger
+  `expectedRemoteSha` (null initially). Every call probes `policyFresh()`;
+  false, unknown or throwing results refuse. Inputs are detached and rechecked
+  across asynchronous work.
+- `issueShippingReceipt(deps, verification, bindings, now)` reloads the immutable
+  per-SHA verification record with its controller-held digest, checks the supplied
+  record is identical and calls `assertShippableVerification`. It checks profile,
+  run, candidate, base/parent and command-plan bindings before signing a v2 receipt
+  with exactly one push grant, a fresh nonce and the standard 15-minute expiry.
+- `makeAuthorize(deps)` returns the structural `ForkPusher` callback yielding
+  `{ receipt, context, candidate }`. Dependencies include the held manifest,
+  canonical record/authority and baseline pack. It loads immutable verification,
+  calls `reconstructCandidate`, checks the requested intent and authenticated
+  author, then issues a fresh receipt and context for every attempt. Missing or
+  changed evidence, candidate inputs or identity refuse before authorization.
+  Actual nonce/attempt consumption remains in `authorizeShipping` in the pusher.
+- `makeHandoffAdmission(deps): HandoffAdmission` supplies fresh policy, contributor
+  login and exact fork-readiness checks, authenticated `verifyReceipt` plus digest
+  and verification binding checks, and the injected verified remote read-back.
+  The receipt check admits a digest once per admission instance (concurrent repeats
+  refuse); the durable `HandoffDriver` remains responsible for link reconciliation.
+  Supply `ForkPusher.handoffReadBack`, rather than an ordinary remote read, as
+  `remoteBranchSha` so a matching but unverified branch cannot admit a PR.
+- `prContentInput(input): PrContentInput` binds model `candidateReady` title/cause/
+  scope as untrusted prose, automated regression evidence from the verification
+  record, receipt/template policy flags and permitted baseline failures. It
+  preserves the upstream template and adds “Verified on base `<sha>`; upstream is
+  now at `<sha>`; the merge result was not verified” when the current base differs.
+
+`ShippingBindings` carries controller-held contribution/fork/branch/candidate/
+base/parent/session/default-branch/policy/verification-digest facts and the last
+verified remote SHA. `ReceiptContextDeps`, `ShippingReceiptDeps`,
+`ShippingAuthorizeDeps`, `ShippingHandoffDeps`, `ShippingPrContentDeps` and
+`ShippingAuthorization` describe these public dependency and result shapes.
+Verification checkpoints point to `artifacts/verification/<candidateSha>.json`.
+Offline integration tests use a real local bare-repository push and real durable
+nonce/intents/handoff stores, with fake GitHub adapters and no live network.
+
 ## Injected run controller core (#1106)
 
 `new RunController(deps)` supplies `start(config)`, `resume(runId)`,
