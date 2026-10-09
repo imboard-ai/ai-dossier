@@ -22,9 +22,11 @@ import { parseVerification } from './verification';
 /** Bounded selected sources only; no credential/replay store or environment. */
 export interface EvidenceSnapshot {
   run: string;
+  /** Exact expiry ledger bytes, anchored by sources and validated against reconciliation. */
+  budget?: string;
   sources: Record<string, { length: number; digest: string }>;
 }
-type EvidenceStore = Pick<RunStore, 'run' | 'runId' | 'contributionId'>;
+type EvidenceStore = Pick<RunStore, 'run' | 'runId' | 'contributionId' | 'upstreamRepositoryId'>;
 export function contributionEvidence(
   store: EvidenceStore,
   root: string,
@@ -45,6 +47,7 @@ export function contributionEvidence(
     if (bytes && snapshot) {
       snapshot.sources[name] = { length: bytes.length, digest: digest(bytes) };
       if (name === 'run.json') snapshot.run = bytes.toString('utf8');
+      if (name === 'budget/ledger.json') snapshot.budget = bytes.toString('utf8');
     }
     return bytes;
   };
@@ -127,7 +130,15 @@ export function contributionEvidence(
     const raw = jsonRecord(receiptBytes);
     if (!Array.isArray(raw) || raw.length > 128) refuse();
     for (const envelope of raw) {
-      receipts.push(offlineReceipt(envelope, store.run, store.contributionId));
+      const signed = offlineReceipt(envelope, store.run, store.contributionId);
+      if (
+        (store.upstreamRepositoryId !== undefined &&
+          signed.receipt.upstreamRepositoryId !== store.upstreamRepositoryId) ||
+        (budget !== null &&
+          !(costTotals ?? []).some((row) => row.sessionId === signed.receipt.sessionId))
+      )
+        refuse();
+      receipts.push(signed);
     }
   }
   const portfolioBytes = select('portfolio-evidence.json');
@@ -191,7 +202,12 @@ export function historicalEvidence(store: RunStore, root: string, snapshot: Evid
   store.assertObservationContinuation(run);
   const seen = new Set<string>();
   const facts = contributionEvidence(
-    { run, runId: run.runId, contributionId: store.contributionId },
+    {
+      run,
+      runId: run.runId,
+      contributionId: store.contributionId,
+      upstreamRepositoryId: store.upstreamRepositoryId,
+    },
     root,
     undefined,
     (name) => {
@@ -207,7 +223,46 @@ export function historicalEvidence(store: RunStore, root: string, snapshot: Evid
       const current =
         name === 'run.json'
           ? runBytes
-          : optionalBytes(root, name, name.endsWith('jsonl') ? JOURNAL_BYTES : undefined);
+          : name === 'budget/ledger.json' && snapshot.budget !== undefined
+            ? (() => {
+                const historical = Buffer.from(snapshot.budget);
+                const live = BudgetLedger.readOnlyEvidence(
+                  path.join(root, name),
+                  store.contributionId
+                ).bytes;
+                const previous = validateBudgetSnapshot(
+                  jsonRecord(historical),
+                  store.contributionId
+                );
+                const next = validateBudgetSnapshot(jsonRecord(live), store.contributionId);
+                for (const session of previous.sessions) {
+                  if (
+                    JSON.stringify(next.sessions.find((row) => row.id === session.id)) !==
+                    JSON.stringify(session)
+                  )
+                    refuse('invalid-summary', 'summary');
+                }
+                for (const reservation of previous.reservations) {
+                  const row = next.reservations.find((entry) => entry.id === reservation.id);
+                  if (!row) refuse('invalid-summary', 'summary');
+                  if (reservation.status !== 'reserved') {
+                    if (JSON.stringify(row) !== JSON.stringify(reservation))
+                      refuse('invalid-summary', 'summary');
+                  } else {
+                    const {
+                      status: _status,
+                      observed: _observed,
+                      releaseEvidence: _release,
+                      ...identity
+                    } = row;
+                    const { status: _oldStatus, ...oldIdentity } = reservation;
+                    if (JSON.stringify(identity) !== JSON.stringify(oldIdentity))
+                      refuse('invalid-summary', 'summary');
+                  }
+                }
+                return historical;
+              })()
+            : optionalBytes(root, name, name.endsWith('jsonl') ? JOURNAL_BYTES : undefined);
       if (
         !current ||
         current.length < anchor.length ||

@@ -2,13 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { types } from 'node:util';
-import {
-  assertDirectoryAncestors,
-  privateDir,
-  readPrivate,
-  replacePrivate,
-  syncDirectory,
-} from '../durable-fs';
+import { assertDirectoryAncestors, privateDir, replacePrivate, syncDirectory } from '../durable-fs';
 import { Journal, parseJournalEvents } from '../journal';
 import { lockDescriptor, StoreLockedError } from '../lock';
 import { isRecoveryEvent, isTailRecovery } from '../recovery';
@@ -90,13 +84,25 @@ export class RunStoreError extends Error {
 function fail(code: RunStoreErrorCode): never {
   throw new RunStoreError(code);
 }
+function synchronousResult<T>(value: T): T {
+  if (
+    value !== null &&
+    (typeof value === 'object' || typeof value === 'function') &&
+    'then' in value &&
+    typeof value.then === 'function'
+  ) {
+    void Promise.resolve(value).catch(() => {});
+    fail('invalid_store');
+  }
+  return value;
+}
 function hash(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
-function readStoredConfig(pinned: string, expectedDigest?: string): RunConfig {
-  const bytes = readPrivate(path.join(pinned, 'config.json'));
+function readStoredConfig(pinned: string, expectedDigest?: string, selected?: Buffer): RunConfig {
+  const bytes = selected ?? boundedRead(path.join(pinned, 'config.json'));
   if (expectedDigest !== undefined && hash(bytes) !== expectedDigest) fail('run_diverged');
-  if (hash(bytes) !== strictUtf8(readPrivate(path.join(pinned, 'config.sha256'))))
+  if (hash(bytes) !== strictUtf8(boundedRead(path.join(pinned, 'config.sha256'), 64)))
     fail('invalid_store');
   return validateStoredRunConfig(parseStrictUtf8Json(bytes));
 }
@@ -395,11 +401,11 @@ export class RunStore {
     try {
       const pinned = `/proc/self/fd/${this.directoryFd}`;
       const events = this.withStoreDirectory('control', (dir) =>
-        parseJournalEvents(readPrivate(path.join(dir, 'events.jsonl')))
+        parseJournalEvents(boundedRead(path.join(dir, 'events.jsonl'), JOURNAL_BYTES))
       );
       if (events.some(isRecoveryEvent)) throw new RunEvidenceError('run', 'recovered');
       const evidence = replayControl(events, config);
-      const raw = parseStrictUtf8Json(readPrivate(path.join(pinned, 'run.json')));
+      const raw = parseStrictUtf8Json(boundedRead(path.join(pinned, 'run.json')));
       assertSecretFree(raw);
       const snapshot = restoreRun(raw);
       if (
@@ -434,10 +440,13 @@ export class RunStore {
     return structuredClone(this.storedConfig);
   }
   /** Synchronous maintenance under the lifetime guard; never expose a worker path. */
-  withPinnedDirectory<T>(work: (directory: string) => T): T {
+  withPinnedDirectory<T>(
+    work: (directory: string) => T & (T extends PromiseLike<unknown> ? never : unknown)
+  ): T {
     this.check();
+    if (types.isAsyncFunction(work)) fail('invalid_store');
     const directory = this.maintenanceDirectory();
-    return work(directory);
+    return synchronousResult(work(directory));
   }
   private maintenanceDirectory(): string {
     try {
@@ -499,18 +508,7 @@ export class RunStore {
     try {
       const stat = fs.fstatSync(fd);
       if (stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o700) fail('invalid_store');
-      const value = work(`/proc/self/fd/${fd}`);
-      if (
-        value !== null &&
-        (typeof value === 'object' || typeof value === 'function') &&
-        'then' in value &&
-        typeof value.then === 'function'
-      ) {
-        // Consume a rejected returned promise before refusing its escaped lifetime.
-        void Promise.resolve(value).catch(() => {});
-        fail('invalid_store');
-      }
-      return value;
+      return synchronousResult(work(`/proc/self/fd/${fd}`));
     } finally {
       fs.closeSync(fd);
     }
@@ -598,9 +596,9 @@ export class RunStore {
       const pinned = `/proc/self/fd/${directoryFd}`;
       guard = acquire(pinned, !options.readOnly);
       const bytes = boundedRead(path.join(pinned, 'config.json'));
-      const config = readStoredConfig(pinned);
+      const config = readStoredConfig(pinned, undefined, bytes);
       if (!options.readOnly) validateRunConfig(runConfigInput(config));
-      const raw = parseStrictUtf8Json(readPrivate(path.join(pinned, 'run.json')));
+      const raw = parseStrictUtf8Json(boundedRead(path.join(pinned, 'run.json')));
       assertSecretFree(raw);
       const run = restoreRun(raw);
       if (

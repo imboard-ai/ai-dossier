@@ -10,7 +10,7 @@ import { isTrackerContinuation } from '../controller/tracker-continuation';
 import { writePrivateFile } from '../durable-fs';
 import { type IntentInput, isAdmitted, WriteBlockedError } from '../intents';
 import type { Journal } from '../journal';
-import type { CommandEvidence } from '../receipt/schema';
+import { type CommandEvidence, canonicalJson } from '../receipt/schema';
 import { isRecoveryEvent } from '../recovery';
 import { assertNoSecrets } from '../redaction';
 import {
@@ -267,7 +267,14 @@ export async function observePr(
   const response = await get(read, `${repoPath(b)}/pulls/${pr.number}`);
   if (response?.status === 404 || response?.status === 410)
     return { kind: 'gone', reason: 'pr_deleted' };
-  const body = response?.status === 200 && isRecord(response.body) ? response.body : null;
+  let body = response?.status === 200 && isRecord(response.body) ? response.body : null;
+  if (body && replacementAuthor !== undefined) {
+    try {
+      body = JSON.parse(canonicalJson(body, 1024 * 1024));
+    } catch {
+      return { kind: 'unknown', detail: 'replacement_identity' };
+    }
+  }
   const head = isRecord(body?.head) ? body.head : null;
   const base = isRecord(body?.base) ? body.base : null;
   if (
@@ -304,9 +311,56 @@ export async function observePr(
           !sameLogin(repo.owner.login, pr.fork.owner))) ||
       (repo.full_name !== undefined &&
         (typeof repo.full_name !== 'string' ||
-          repo.full_name.toLowerCase() !== `${pr.fork.owner}/${pr.fork.repo}`.toLowerCase()))
+          repo.full_name.toLowerCase() !== `${pr.fork.owner}/${pr.fork.repo}`.toLowerCase())) ||
+      (head.label !== undefined &&
+        (typeof head.label !== 'string' ||
+          head.label !== `${head.label.split(':')[0]}:${b.branch}` ||
+          !sameLogin(head.label.split(':')[0], b.headOwner))) ||
+      (head.user !== undefined &&
+        (!isRecord(head.user) ||
+          typeof head.user.login !== 'string' ||
+          !sameLogin(head.user.login, b.headOwner))) ||
+      (base.user !== undefined &&
+        (!isRecord(base.user) ||
+          typeof base.user.login !== 'string' ||
+          !sameLogin(base.user.login, b.upstream.owner))) ||
+      (base.label !== undefined &&
+        (typeof base.label !== 'string' ||
+          base.label !== `${base.label.split(':')[0]}:${b.base}` ||
+          !sameLogin(base.label.split(':')[0], b.upstream.owner))) ||
+      (base.repo !== undefined &&
+        (!isRecord(base.repo) ||
+          !Number.isSafeInteger(base.repo.id) ||
+          (base.repo.id as number) < 1 ||
+          (base.repo.name !== undefined &&
+            (typeof base.repo.name !== 'string' ||
+              base.repo.name.toLowerCase() !== b.upstream.repo.toLowerCase())) ||
+          (base.repo.owner !== undefined &&
+            (!isRecord(base.repo.owner) ||
+              typeof base.repo.owner.login !== 'string' ||
+              !sameLogin(base.repo.owner.login, b.upstream.owner))) ||
+          (base.repo.full_name !== undefined &&
+            (typeof base.repo.full_name !== 'string' ||
+              base.repo.full_name.toLowerCase() !==
+                `${b.upstream.owner}/${b.upstream.repo}`.toLowerCase()))))
     )
       return { kind: 'unknown', detail: 'replacement_identity' };
+    if (isRecord(base.repo)) {
+      // Numeric upstream identity is not part of TrackedPr. Resolve it from the
+      // already bound repository endpoint, never copy the replacement's answer.
+      const upstream = await get(read, repoPath(b));
+      if (
+        upstream?.status !== 200 ||
+        !isRecord(upstream.body) ||
+        upstream.body.id !== base.repo.id ||
+        typeof upstream.body.name !== 'string' ||
+        upstream.body.name.toLowerCase() !== b.upstream.repo.toLowerCase() ||
+        !isRecord(upstream.body.owner) ||
+        typeof upstream.body.owner.login !== 'string' ||
+        !sameLogin(upstream.body.owner.login, b.upstream.owner)
+      )
+        return { kind: 'unknown', detail: 'replacement_upstream_identity' };
+    }
   }
   const facts = {
     kind: 'observed' as const,
@@ -639,7 +693,7 @@ function prUrl(pr: Pick<TrackedPr, 'binding' | 'number'>): string {
   return `https://github.com/${enc(owner)}/${enc(repo)}/pull/${pr.number}`;
 }
 
-function trackedPr(value: unknown): TrackedPr {
+export function trackedPr(value: unknown): TrackedPr {
   if (!isRecord(value) || !isRecord(value.fork)) fail('pr');
   const binding = prBinding(value.binding);
   const fork = value.fork as unknown as ForkRef;

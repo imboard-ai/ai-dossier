@@ -10,7 +10,19 @@ import { inventory } from './sweep-files';
 
 const { rig, cleanup } = createFixtures();
 afterEach(cleanup);
-async function relocated(fault?: 'author' | 'fork' | 'missing-author' | 'missing-fork') {
+async function relocated(
+  fault?:
+    | 'author'
+    | 'fork'
+    | 'missing-author'
+    | 'missing-fork'
+    | 'upstream'
+    | 'label'
+    | 'head-user'
+    | 'base-id'
+    | 'case-branch'
+    | 'valid-base'
+) {
   const r = rig();
   await producerEvidence(r, false);
   r.artifact();
@@ -52,6 +64,8 @@ async function relocated(fault?: 'author' | 'fork' | 'missing-author' | 'missing
               status: 200,
               body: { id: 2, name: 'repo', owner: { login: 'contributor' } },
             };
+          if (endpoint === '/repos/owner/repo')
+            return { status: 200, body: { id: 1, name: 'repo', owner: { login: 'owner' } } };
           if (endpoint.includes('/git/ref/'))
             return {
               status: 200,
@@ -63,6 +77,27 @@ async function relocated(fault?: 'author' | 'fork' | 'missing-author' | 'missing
             if (fault === 'fork') body.head.repo.id = 9;
             if (fault === 'missing-author') Reflect.deleteProperty(body, 'user');
             if (fault === 'missing-fork') Reflect.deleteProperty(body.head, 'repo');
+            if (fault === 'label') body.head.label = 'intruder:other';
+            if (fault === 'case-branch') body.head.label = 'contributor:Task';
+            if (fault === 'head-user') Object.assign(body.head, { user: { login: 'intruder' } });
+            if (fault === 'upstream')
+              Object.assign(body.base, {
+                repo: {
+                  id: 9,
+                  name: 'other',
+                  owner: { login: 'intruder' },
+                  full_name: 'intruder/other',
+                },
+              });
+            if (fault === 'base-id' || fault === 'valid-base')
+              Object.assign(body.base, {
+                repo: {
+                  id: fault === 'base-id' ? 9 : 1,
+                  name: 'repo',
+                  owner: { login: 'owner' },
+                  full_name: 'owner/repo',
+                },
+              });
           }
           return { status: 200, body };
         },
@@ -70,7 +105,7 @@ async function relocated(fault?: 'author' | 'fork' | 'missing-author' | 'missing
       { run: store.run, contributionId: store.contributionId, pr, headSha: SHA }
     );
     const result = await tracker.resume();
-    if (fault) {
+    if (fault && fault !== 'valid-base') {
       expect(result.kind).not.toBe('merged');
       expect(journal.read().some((event) => (event as { type: string }).type === 'rebound')).toBe(
         false
@@ -112,6 +147,11 @@ it.each([
   'fork',
   'missing-author',
   'missing-fork',
+  'upstream',
+  'label',
+  'head-user',
+  'base-id',
+  'case-branch',
 ] as const)('AC2 detailed replacement %s contradicts or omits listing identity: no rebound or merge', async (fault) => {
   const { r, store, summary } = await relocated(fault);
   const bundle = exportContribution(store, path.join(r.temp, 'refused-relocation'));
@@ -120,6 +160,10 @@ it.each([
   expect(bundle.outcome).not.toBe('merged');
   expect(() => store.assertResumable()).toThrow('snapshot_expired');
   expect(fs.readFileSync(path.join(r.directory, 'summary.json'))).toEqual(summary);
+});
+it('AC2 supplied upstream detail is checked against the independently bound repository read', async () => {
+  const { r, store } = await relocated('valid-base');
+  expect(exportContribution(store, path.join(r.temp, 'valid-base')).outcome).toBe('merged');
 });
 it('missing and contradictory portable relocation proof refuses invalid-evidence', async () => {
   const { r, store } = await relocated();

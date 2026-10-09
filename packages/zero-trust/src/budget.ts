@@ -21,6 +21,7 @@ import {
   withReadOnlyStoreLock,
   withStoreLock,
 } from './lock';
+import { boundedRead } from './retention/files';
 import { parseStrictUtf8Json } from './strict-utf8';
 
 function ledgerLockFile(file: string): string {
@@ -364,7 +365,7 @@ export class BudgetLedger {
   ): { state: BudgetState; bytes: Buffer } {
     try {
       return withReadOnlyStoreLock(ledgerLockFile(file), () =>
-        BudgetLedger.readEvidence(file, contributionId)
+        BudgetLedger.readEvidence(file, contributionId, true)
       );
     } catch (error) {
       if (error instanceof BudgetError) throw error;
@@ -381,14 +382,17 @@ export class BudgetLedger {
   // biome-ignore lint/correctness/noUnusedPrivateClassMembers: Called through BudgetLedger by the guarded and transaction snapshot paths.
   private static readEvidence(
     file: string,
-    contributionId: string
+    contributionId: string,
+    bounded = false
   ): { state: BudgetState; bytes: Buffer } {
     let bytes: Buffer;
     try {
-      bytes = readPrivate(file, (stat) => {
-        if (stat.uid !== process.getuid?.())
-          throw new BudgetError('corrupt_ledger', 'Ledger must be a private regular file');
-      });
+      bytes = bounded
+        ? boundedRead(file)
+        : readPrivate(file, (stat) => {
+            if (stat.uid !== process.getuid?.())
+              throw new BudgetError('corrupt_ledger', 'Ledger must be a private regular file');
+          });
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT')
         throw new BudgetError('missing_ledger', 'Budget ledger missing; never reset on resume');

@@ -3,6 +3,16 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+/** No-follow presence: dangling symlinks are present; only ENOENT is absence. */
+export function lstatIfPresent(file: string): fs.Stats | null {
+  try {
+    return fs.lstatSync(file);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
 /** Non-mutating preflight; callers still pin descriptors across later operations. */
 export function assertDirectoryAncestors(directory: string): void {
   for (let current = path.resolve(directory); ; current = path.dirname(current)) {

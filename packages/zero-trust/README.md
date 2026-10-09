@@ -1304,7 +1304,9 @@ hide corrupt or divergent selected files.
   contribution's validated `config.retentionDays` (default **30**); a supplied
   positive safe integer overrides it for this explicit sweep, without editing config.
   Last activity is the maximum of lifecycle `updatedAt` and file modification
-  times, excluding maintenance files and lock/guard files. The exact cutoff is
+   times, excluding maintenance files and controller lock/guard metadata outside
+   artifacts. Every artifact counts, including `.lock`/`.guard` names and quarantined
+   leaves under their original artifact identity. The exact cutoff is
   retained; only strictly older contributions qualify. `blocked_cleanup` never
   qualifies. `SweepPlan.contributions[].files` lists exclusively regular,
   single-link files below `artifacts/`, with relative paths, inode identities,
@@ -1312,7 +1314,8 @@ hide corrupt or divergent selected files.
 - `applySweep(plan, fault?)` is the explicit destructive operation. It requires
   the unchanged original plan object issued in this process (serialized, cloned,
   forged or edited plans are refused). Replan after a process restart with the
-  same explicit retention override, if the original plan used one. It reopens
+   original batch policy for unfinished replay; completed historical overrides do
+   not constrain the policy of a new batch. It reopens
   each store under the lifetime guard, pins directory descriptors, and revalidates
   contribution identity, activity, configuration, protected bytes, selected
   evidence and every remaining artifact before deleting. Symlinks, traversal,
@@ -1323,9 +1326,10 @@ hide corrupt or divergent selected files.
   `ContributionSummary` (`ztfc-summary-v1`) contains public links, verified and
   observed outcome SHAs, receipt digests, evidence-derived outcome, conservative
   per-session costs, the exact sweep manifest and frozen selected-source provenance
-  (`evidence`: original run bytes plus each source's byte length and digest).
+   (`evidence`: original run bytes, exact expiry budget bytes when present, plus
+   each source's byte length and digest).
   The reader verifies retained journal prefixes and unchanged non-journal evidence,
-  reconstructs historical facts, and checks the current confirmed run is an allowed
+   reconstructs historical facts, and checks the current confirmed run is an allowed
   observation/stop continuation. Current selected sources are independently validated
   for status/export. `snapshotExpired: true` is
   monotonic: even a crash before the separate marker lands prevents resume.
@@ -1365,7 +1369,10 @@ hide corrupt or divergent selected files.
    and retention eligibility. Later batches publish separate content-addressed
    `.retention-generation-<digest>.json` manifests before deletion. They crash-replay
    independently, including quarantine recovery, without replacing the first summary
-   or expiry marker. These controller-owned maintenance records are retained and
+   or skipping an unfinished first batch when newer artifacts have aged. Pending
+   batches finish before any new generation is admitted. Completed batches do not
+   pin the retention policy for later artifacts. This preserves the first summary
+   and expiry marker. These controller-owned maintenance records are retained and
    excluded from activity timestamps and protected-store inventory digests; all
    pre-existing fail-closed stores remain unchanged.
    Permitted confirmed observations do not invalidate frozen summary facts.
@@ -1380,6 +1387,9 @@ hide corrupt or divergent selected files.
    opening validates stored configuration without requiring the old signing key to
    remain available; execution opening still enforces signing readiness.
    Preflight filesystem failures become fixed `RunStoreError('invalid_store')` diagnostics,
+   and native async callbacks are refused before invocation; Promise-like results
+   are refused just as with `withStoreDirectory`. Run/config/digest/control reads
+   are bounded before allocation, including maintenance opening and revalidation,
   without native paths/messages/causes. `RunStore.assertObservationContinuation(prior)`
   validates a historical run against the current confirmed run, refusing identity/history
   divergence or any new edge that requires an unexpired snapshot (`run_diverged`).
@@ -1404,6 +1414,14 @@ controller reconciliation; reporting never creates or steals the lock.
 for the already-authenticated historical bytes. Costs use existing `budgetTotals`, preserving
 reservations and conservative maxima, with currencies kept per session. No
 ledger or no session means null, not zero. Present invalid evidence throws.
+Expiry retains exact budget bytes with the selected-source digest. Current budget
+reconciliation may settle/release retained reservations or append new rows/sessions,
+but may not rewrite old session identity, reservation identity/estimates or already
+reconciled rows. Historical costs stay immutable; separately validated current costs
+may differ. Unresolved transaction ownership still refuses both reads.
+Offline receipts must use this run's `<runId>-s<positive safe integer>` session;
+available budget evidence must contain that session, and a held authenticated upstream
+repository ID must match the signed receipt. These checks never grant shipping authority.
 
 Receipt issuance, command verification and policy/PR-content producers currently
 **return** records; the integrating trusted controller may atomically persist the

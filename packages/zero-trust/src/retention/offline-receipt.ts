@@ -1,4 +1,5 @@
 import type { SignatureResult } from '@ai-dossier/core';
+import { upstreamIssueBinding } from '../github/handoff';
 import { receiptIntegrity } from '../receipt/integrity';
 import { receiptDigest, type SignedReceipt } from '../receipt/issue';
 import { parseReceipt } from '../receipt/schema';
@@ -66,15 +67,16 @@ export function offlineReceipt(
       digest: input.digest,
       signature,
     });
-    const issue = /^https:\/\/github\.com\/[^/]+\/[^/]+\/issues\/([1-9][0-9]*)$/u.exec(
-      run.upstreamIssue
-    );
+    const issue = upstreamIssueBinding(run.upstreamIssue);
+    const session = receipt.sessionId.slice(`${run.runId}-s`.length);
     if (
-      !issue ||
       receipt.runId !== run.runId ||
       receipt.contributionId !== contributionId ||
       receipt.contributor !== run.contributor ||
-      receipt.issue !== Number(issue[1]) ||
+      receipt.issue !== issue.issue ||
+      !receipt.sessionId.startsWith(`${run.runId}-s`) ||
+      !/^[1-9][0-9]{0,15}$/u.test(session) ||
+      !Number.isSafeInteger(Number(session)) ||
       input.digest !== receiptDigest(receipt)
     )
       refuse();

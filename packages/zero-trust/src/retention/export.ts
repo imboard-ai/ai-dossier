@@ -4,12 +4,15 @@ import Ajv from 'ajv';
 import { contributionIdOf } from '../controller/ids';
 import type { RunStore } from '../controller/run-store';
 import { assertDirectoryAncestors, syncDirectory } from '../durable-fs';
-import { handoffMarker } from '../github/handoff';
+import { handoffMarker, upstreamIssueBinding } from '../github/handoff';
 import {
   type RelocationEvidence,
   type TrackedPr,
+  trackedPr,
   validateRelocationEvidence,
 } from '../github/track';
+import { isGitHubLogin } from '../github-login';
+import { isPullRequestTarget } from '../github-target';
 import {
   canonicalJson,
   evidenceVerified,
@@ -165,6 +168,8 @@ export function validateContributionExport(input: unknown): ContributionExport {
     assertSecretFree(input);
     if (!validate(input)) refuse();
     const run = restoreRun(input.run);
+    const { upstream } = upstreamIssueBinding(run.upstreamIssue);
+    if (!isGitHubLogin(run.contributor)) refuse();
     if (
       input.status.state !== run.state ||
       input.status.upstreamIssue !== run.upstreamIssue ||
@@ -176,9 +181,17 @@ export function validateContributionExport(input: unknown): ContributionExport {
     const contributionId = contributionIdOf(run.runId);
     if (!contributionId) refuse();
     const observedPr = run.history.some((event) => event.to === 'submitted');
-    const prPrefix = run.upstreamIssue.replace(/\/issues\/[1-9][0-9]*$/u, '/pull/');
-    const boundPr = (url: string) =>
-      url.startsWith(prPrefix) && /^[1-9][0-9]*$/u.test(url.slice(prPrefix.length));
+    const boundPr = (url: string) => isPullRequestTarget(url, `${upstream.owner}/${upstream.repo}`);
+    if (input.originalPr) {
+      const original = trackedPr(input.originalPr);
+      if (
+        !boundPr(original.url) ||
+        original.binding.headOwner.toLowerCase() !== run.contributor.toLowerCase() ||
+        !original.marker.startsWith(`<!-- ai-dossier:ztfc contribution=${contributionId} `) ||
+        (!input.relocations.length && original.url !== input.pr)
+      )
+        refuse();
+    }
     let previous: RelocationEvidence | undefined;
     if (input.relocations.length && !input.originalPr) refuse();
     for (const raw of input.relocations) {
@@ -209,10 +222,7 @@ export function validateContributionExport(input: unknown): ContributionExport {
         refuse();
     }
     if (
-      (input.pr !== null &&
-        (!observedPr ||
-          !input.pr.startsWith(prPrefix) ||
-          !/^[1-9][0-9]*$/u.test(input.pr.slice(prPrefix.length)))) ||
+      (input.pr !== null && (!observedPr || !boundPr(input.pr))) ||
       (input.status.verifiedSha !== null && input.pr === null)
     )
       refuse();
@@ -235,31 +245,36 @@ export function validateContributionExport(input: unknown): ContributionExport {
       refuse();
     if (
       (run.state === 'merged' || (run.state === 'declined' && observedPr)) &&
-      input.outcome !== run.state
+      input.outcome !== run.state &&
+      input.outcome !== 'unknown'
     )
       refuse();
     for (const envelope of input.receipts) {
       offlineReceipt(envelope, run, contributionId);
     }
-    for (const proof of input.relocations) {
+    const endpoints = input.originalPr
+      ? [input.originalPr, ...input.relocations.map((proof) => proof.to)]
+      : [];
+    for (const original of endpoints) {
       const target = run.upstreamIssue.replace('https://github.com/', '').replace('/issues/', '#');
       const applicable = input.receipts;
       if (
-        !applicable.some(
-          ({ receipt }) =>
-            proof.from.marker ===
-            handoffMarker({
-              contributionId,
-              target,
-              operationKind: 'pr_create',
-              candidateSha: receipt.candidateSha,
-            })
-        ) ||
+        (applicable.length > 0 &&
+          !applicable.some(
+            ({ receipt }) =>
+              original.marker ===
+              handoffMarker({
+                contributionId,
+                target,
+                operationKind: 'pr_create',
+                candidateSha: receipt.candidateSha,
+              })
+          )) ||
         applicable.some(
           ({ receipt }) =>
-            receipt.forkRepositoryId !== proof.from.fork.repositoryId ||
-            receipt.defaultBranch !== proof.from.binding.base ||
-            receipt.contributor.toLowerCase() !== proof.from.fork.owner.toLowerCase()
+            receipt.forkRepositoryId !== original.fork.repositoryId ||
+            receipt.defaultBranch !== original.binding.base ||
+            receipt.contributor.toLowerCase() !== original.fork.owner.toLowerCase()
         )
       )
         refuse();
@@ -297,7 +312,6 @@ export function validateContributionExport(input: unknown): ContributionExport {
           input.summary.verifiedSha !== input.status.verifiedSha) ||
         (input.summary.outcomeSha !== null &&
           input.summary.outcomeSha !== input.status.outcomeSha) ||
-        JSON.stringify(input.summary.costTotals) !== JSON.stringify(input.status.costTotals) ||
         JSON.stringify(input.summary.receiptDigests) !==
           JSON.stringify(input.receipts.map((r) => r.digest)))
     )

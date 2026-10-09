@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { syncDirectory } from '../durable-fs';
+import { lstatIfPresent, syncDirectory } from '../durable-fs';
 import { digest, directoryEntries, fileDigest, inDirectory, refuse, sameInode } from './files';
 import type { SweepFile } from './retention';
 
@@ -47,7 +47,10 @@ export function inventory(root: string, pending: readonly SweepFile[] = []) {
         bytes += stat.size;
         if (bytes > INVENTORY_LIMITS.bytes) refuse('size-limit', 'inventory');
         const sha256 = fileDigest(file, stat, INVENTORY_LIMITS.fileBytes);
-        if (!name.endsWith('.guard') && !name.endsWith('.lock'))
+        if (
+          relative.startsWith('artifacts/') ||
+          (!name.endsWith('.guard') && !name.endsWith('.lock'))
+        )
           activity = Math.max(activity, stat.mtimeMs);
         if (relative.startsWith('artifacts/')) {
           if (paths.has(relative)) refuse('stale-plan', 'inventory');
@@ -75,13 +78,7 @@ export function inventory(root: string, pending: readonly SweepFile[] = []) {
   };
 }
 function exists(file: string): boolean {
-  try {
-    fs.lstatSync(file);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
-    throw error;
-  }
+  return lstatIfPresent(file) !== null;
 }
 /** Directory is controller-owned, outside artifacts and never mounted in a worker.
  * This is not isolation against an arbitrary same-UID controller adversary. */

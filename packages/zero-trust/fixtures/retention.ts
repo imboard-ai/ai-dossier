@@ -205,7 +205,8 @@ export function createFixtures() {
 /** Actual tracker, budget and receipt producers, shared by module-owned suites. */
 export async function producerEvidence(
   r: ReturnType<ReturnType<typeof createFixtures>['rig']>,
-  merged = true
+  merged = true,
+  prUrl = 'https://github.com/owner/repo/pull/2'
 ) {
   let at = Date.parse(START);
   const now = () => {
@@ -236,7 +237,7 @@ export async function producerEvidence(
           status: 200,
           body: {
             number: 2,
-            html_url: 'https://github.com/owner/repo/pull/2',
+            html_url: prUrl,
             state: 'closed',
             merged,
             head: { sha: SHA, ref: 'task', repo: { id: 2 } },
@@ -259,7 +260,7 @@ export async function producerEvidence(
           },
           fork: { repositoryId: 2, owner: 'contributor', repo: 'repo' },
           number: 2,
-          url: 'https://github.com/owner/repo/pull/2',
+          url: prUrl,
           marker: handoffMarker({
             contributionId: r.store.contributionId,
             target: 'owner/repo#1',

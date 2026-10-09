@@ -203,7 +203,8 @@ export function planSweep(root: string, now: Date | string, retentionDays?: numb
               ? []
               : [...summary.sweep.files];
             const batches: { planned: SweepContribution; prior: ContributionSummary }[] = [];
-            let pending = false;
+            let pending = !isCompleted(directory, summary.sweep);
+            if (pending) contributions.push(summary.sweep);
             for (const name of directoryEntries(directory)) {
               if (!name.startsWith('.retention-generation-')) continue;
               if (!/^\.retention-generation-[a-f0-9]{64}\.json$/u.test(name))
@@ -262,7 +263,7 @@ export function planSweep(root: string, now: Date | string, retentionDays?: numb
               const generation = `.retention-generation-${digest(bytes)}.json`;
               generations.set(generation, bytes);
               contributions.push({ ...sweep, generation });
-            } else if (!pending) contributions.push(summary.sweep);
+            }
             return;
           }
           const scan = inventory(directory);
@@ -369,8 +370,8 @@ function revalidateSweep(
       (scan.protectedDigest !== planned.protectedDigest ||
         facts.evidenceDigest !== planned.evidenceDigest ||
         activity !== planned.activity)) ||
-    (override ?? store.config.retentionDays) !== planned.retentionDays ||
-    planned.activity >= Date.parse(now) - planned.retentionDays * 86400000
+    (!prior && (override ?? store.config.retentionDays) !== planned.retentionDays) ||
+    (!completed && planned.activity >= Date.parse(now) - planned.retentionDays * 86400000)
   )
     refuse('stale-plan', 'revalidate');
   const remaining = new Map(scan.artifacts.map((file) => [file.path, file]));
