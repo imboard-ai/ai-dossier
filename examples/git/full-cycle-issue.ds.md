@@ -4,10 +4,10 @@ description: 'Take a GitHub issue from start to merged PR autonomously — compo
 metadata:
   dossier.dossier_schema_version: '1.0.0'
   dossier.title: 'Full Cycle Issue Workflow'
-  dossier.version: '3.17.3'
+  dossier.version: '3.18.0'
   dossier.protocol_version: '"1.0"'
   dossier.status: 'Draft'
-  dossier.last_updated: '2026-10-06'
+  dossier.last_updated: '2026-10-09'
   dossier.objective: 'Take a GitHub issue from start to merged PR autonomously — composed from shared sub-dossiers: gate, setup, plan, implement, review, ship, and report'
   dossier.category: '["development"]'
   dossier.tags: '["github","issues","workflow","autonomous","full-cycle","pr","merge"]'
@@ -19,8 +19,8 @@ metadata:
   dossier.external_references: '[{"description":"GitHub CLI documentation","required":false,"trust_level":"trusted","type":"documentation","url":"https://cli.github.com/"}]'
   dossier.inputs: '{"optional":[{"default":"imboard-ai/git/warm-worktree","description":"Which warm-worktree dossier to use for worktree warmup. Passed through to setup-issue-workflow. Override for project-specific warmup (e.g., imboard-ai/imboard/warm-worktree-pnpm-ssm for pnpm+SSM).","name":"warmup_dossier","type":"string"},{"default":"auto","description":"Target branch to branch from and merge into. Overrides issue body parsing. Use for epic sub-issues.","name":"base_branch","type":"string"},{"default":"attached","description":"attached (default) = Phase 5 drives the PR to a confirmed merge and deploy, then Phase 6 reports. detached = a REQUEST to park: Phase 5 parks the PR on auto-merge, posts the awaiting-merge milestone, and the run STOPS (a later run resumes at ship-teardown) ONLY when ship-issue Step 3c confirms a merge mechanism (watcher workflow, or a non-null autoMergeRequest read back after requesting native auto-merge) — otherwise the run falls back to attached and merges the PR itself. Fleet-cycle and sched pass the detected mechanism and dispatch detached only where it is confirmed.","name":"ship_mode","type":"string"}]}'
   dossier.authors: '[{"name":"Yuval Dimnik"}]'
-  dossier.checksum: '{"algorithm":"sha256","hash":"d9f1055378a47e3f173cff740b54811a77fb9be4dff3ae906469cc2a028d15b1"}'
-  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"ZTMTx0aMjwph0g5JH+k+uUYq1YgFn9g4YPu5LUcMKV+Z5kgJlVNrEwWHAbtV9iNacts8XuUCCyv2tYxA38jNDQ==","signed_at":"2026-10-07T11:59:00.573Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
+  dossier.checksum: '{"algorithm":"sha256","hash":"065cbf0e5c174147ea6bb20d5e2530ed5d5d2019b559c5384f695b5b2ffb31b9"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"PqMyKLv0Kw4WlAOi55ydOR5dFYWLCBnIeASY1gvFJmTf5Dg+hndmnE3OdF588lsy67eBiIR2uGDBrUQFfAayBA==","signed_at":"2026-10-09T05:59:35.801Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Full Cycle Issue Workflow
@@ -33,7 +33,7 @@ Take a GitHub issue from start to merged PR autonomously. For small-to-medium is
 
 **Do not ask the user interactively, at any phase.** This runs unattended — there may be no one present to answer. If the run cannot complete autonomously, STOP and hand the decision back through the issue itself; never wait on a reply in this conversation.
 
-The following are the ONLY authorized hand-off triggers; any other stop is unauthorized: the issue is too vague to implement · a business/product/design decision is genuinely ambiguous, including anything review escalates (Phase 4) or a CI/merge blocker needing judgment (Phase 5) · tests fail after 2 fix attempts with no clear path · merge conflicts require human judgment.
+The following are the ONLY authorized hand-off triggers; any other stop is unauthorized: the issue is too vague to implement · a business/product/design decision is genuinely ambiguous, including anything review escalates with `escalation_reason` ∈ {spec-ambiguous, no-progress, loop-cap, budget} (Phase 4) or a CI/merge blocker needing judgment (Phase 5) · tests fail after 2 fix attempts with no clear path · merge conflicts require human judgment.
 
 The orchestrator's metered model budget, provider quotas and rate limits, and wall-clock pressure are never hand-off triggers. When an issue specifies spend ceilings, reaching one is a recorded result, not an escalation. If a run is unsure but has not reached an authorized trigger, drop optional work and state that omission in the report rather than asking. Continue all required work that remains safe and possible.
 
@@ -168,7 +168,7 @@ Always runs — it determines `resume_from`.
 1. Run `ai-dossier run imboard-ai/git/review-issue`, passing the issue number and `run_id`.
 2. **This is a tiered review (1–8 report-only agents + serial apply), not a fixed parallel fan-out.** review-issue applies a risk floor then per-dimension relevance (`micro`/`docs`/`small`/`full`) and applies fixes itself; no agent edits files. Expect `tier=` and agent lists covering only that tier in the milestone. **Agent 8 (Visual Conformance) sits outside the tier**: it runs iff the plan milestone this run posted in Phase 2 carries `visual_review=true`, and it drives the app in a real browser. That is the only place on this path where a UI change is checked by rendering it rather than by reading it — a `visual_review=true` issue whose review milestone comes back `live=n/a` means the agent did not run, and the review is incomplete, not clean.
 3. Collect `review_tier`, `review_fixed`, `review_escalated`, `review_clean`, `ac_results` (per-AC checklist — pass through to Ship for the PR body), and `live`, `live_flows`, `live_note`, `live_results` (Agent 8's roll-up, flow count, the reason nothing could be verified when there is one, and the per-flow checklist — all passed through to Ship). `live=n/a` with `live_flows=0` is the correct reading when Phase 2 recorded `visual_review=false`; carry it forward rather than dropping the keys.
-4. **If `review_escalated` is non-empty: apply the Guiding Principle hand-off and STOP — do not proceed to Phase 5.** review-issue restricts escalation to findings that genuinely need a product/business decision, so reaching this step means a real decision is needed, not a fan-out of side issues. List each escalated finding in the comment (file/lines, description, why it needs a human call), grouped by category if more than one.
+4. **If `review_escalated` is non-empty: apply the Guiding Principle hand-off and STOP — do not proceed to Phase 5.** review-issue now repairs actionable, in-scope `not-met` findings itself in a bounded loop (≤ 3, progress required) and files out-of-scope findings as one follow-up issue, so an escalation here always carries `escalation_reason` ∈ {spec-ambiguous, no-progress, loop-cap, budget}; name it in the hand-off comment. **Phase 5 re-entry:** a ship result `reason=verdict-stale-not-met` with `repairable=true` is NOT a hand-off — re-enter Phase 3/4 for a scoped repair under the same loop cap, then review and ship again. review-issue restricts escalation to findings that genuinely need a product/business decision, so reaching this step means a real decision is needed, not a fan-out of side issues. List each escalated finding in the comment (file/lines, description, why it needs a human call), grouped by category if more than one.
 
 ### Phase 5: Ship
 
