@@ -651,6 +651,7 @@ describe('awaiting_contributor hand-off driver', () => {
       contributorVerified: async () => true,
       forkBindingVerified: async () => true,
       prBindingVerified: async () => true,
+      commitPr: async () => true,
       receiptValid: async (sha, digest) =>
         sha === CANDIDATE && digest === receiptDigest(receipt() as never),
       remoteBranchSha: async () => CANDIDATE,
@@ -750,6 +751,8 @@ describe('awaiting_contributor hand-off driver', () => {
   it.each([
     ['pr_binding', { prBindingVerified: undefined }],
     ['pr_binding', { prBindingVerified: async () => false }],
+    ['commit', { commitPr: async () => false }],
+    ['commit', { commitPr: undefined }],
     ['policy', { policyFresh: async () => false }],
     ['contributor', { contributorVerified: async () => false }],
     ['fork_binding', { forkBindingVerified: async () => false }],

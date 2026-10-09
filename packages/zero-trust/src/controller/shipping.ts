@@ -116,6 +116,31 @@ function refuse(code: string): never {
   throw new ReceiptError(code);
 }
 
+/** Retain the actual validation methods, not just a mutable object's identity. */
+function heldStore(store: ReceiptContextDeps['store']): ReceiptContextDeps['store'] {
+  const validate = store.validateEvidence;
+  const directory = store.withStoreDirectory;
+  const unchangedMethods = () => {
+    if (store.validateEvidence !== validate || store.withStoreDirectory !== directory)
+      refuse('shipping_authority_changed');
+  };
+  return Object.freeze({
+    contributionId: store.contributionId,
+    upstreamRepositoryId: store.upstreamRepositoryId,
+    validateEvidence: () => {
+      unchangedMethods();
+      return validate.call(store);
+    },
+    withStoreDirectory: <T>(
+      name: Parameters<typeof directory>[0],
+      work: (directory: string) => T & (T extends PromiseLike<unknown> ? never : unknown)
+    ): T => {
+      unchangedMethods();
+      return directory.call(store, name, work) as T;
+    },
+  });
+}
+
 /** Detached full inputs, including bindings not carried in the receipt projection. */
 const snapshots = new WeakMap<ReceiptContext, string>();
 
@@ -221,7 +246,7 @@ function unchanged(deps: ReceiptContextDeps, held: ReceiptContext): void {
 }
 
 export async function buildReceiptContext(deps: ReceiptContextDeps): Promise<ReceiptContext> {
-  deps = { ...deps };
+  deps = { ...deps, store: heldStore(deps.store) };
   const held = facts(deps);
   let permitted: boolean;
   try {
@@ -284,7 +309,7 @@ export async function issueShippingReceipt(
   bindings: ShippingBindings,
   now: () => number
 ): Promise<SignedReceipt> {
-  deps = { ...deps };
+  deps = { ...deps, store: heldStore(deps.store) };
   const b = snapshotJson(bindings);
   const supplied = snapshotJson(verification);
   const signer = deps.signer;
@@ -349,7 +374,7 @@ export interface ShippingAuthorization {
 export function makeAuthorize(
   deps: ShippingAuthorizeDeps
 ): (intent: IntentInput) => Promise<ShippingAuthorization> {
-  deps = { ...deps };
+  deps = { ...deps, store: heldStore(deps.store) };
   return async (input) => {
     const intent = snapshotJson(input);
     const b = snapshotJson(deps.bindings);
@@ -431,11 +456,47 @@ export function makeHandoffAdmission(deps: ShippingHandoffDeps): HandoffAdmissio
       return false;
     }
   };
+  const originalStore = deps.store;
+  const pinnedStore = heldStore(originalStore);
+  const contextDeps = { ...deps, store: pinnedStore };
+  const validateReceipt = async (candidateSha: string, digest: string, reserve: boolean) => {
+    const envelope = snapshotJson(deps.receipt);
+    const key = deps.trustedControllerKey;
+    const held = facts(contextDeps);
+    if (
+      used.has(digest) === reserve ||
+      envelope.digest !== digest ||
+      candidateSha !== held.candidateSha
+    )
+      return false;
+    const context = await buildReceiptContext(contextDeps);
+    const receipt = await verifyReceipt(envelope, key, context, deps.now);
+    unchanged(contextDeps, held);
+    const verification = verificationFor(contextDeps, snapshotJson(deps.bindings));
+    matchVerification(verification, context);
+    if (
+      canonicalJson(receipt.commands) !== canonicalJson(verification.commands) ||
+      canonicalJson(deps.receipt) !== canonicalJson(envelope) ||
+      receipt.permittedShippingOperations.length !== 1 ||
+      canonicalJson(
+        receipt.permittedShippingOperations.map(({ kind, target, expectedRemoteSha }) => ({
+          kind,
+          target,
+          expectedRemoteSha,
+        }))
+      ) !== canonicalJson(context.allowedShippingOperations) ||
+      used.has(digest) === reserve
+    )
+      return false;
+    assertAuthority();
+    if (reserve) used.add(digest);
+    return true;
+  };
   return Object.freeze<HandoffAdmission>({
     prBindingVerified: (binding) =>
       check(async () => {
         const requested = snapshotJson(binding);
-        const held = facts(deps);
+        const held = facts(contextDeps);
         const upstream = upstreamIssueBinding(deps.store.validateEvidence().upstreamIssue).upstream;
         return (
           requested.upstream.owner.toLowerCase() === upstream.owner.toLowerCase() &&
@@ -450,22 +511,22 @@ export function makeHandoffAdmission(deps: ShippingHandoffDeps): HandoffAdmissio
     },
     policyFresh: () =>
       check(async () => {
-        await buildReceiptContext(deps);
+        await buildReceiptContext(contextDeps);
         return true;
       }),
     contributorVerified: () =>
       check(async () => {
-        const held = facts(deps);
+        const held = facts(contextDeps);
         const login = await deps.readLogin();
-        unchanged(deps, held);
+        unchanged(contextDeps, held);
         return typeof login === 'string' && sameLogin(login, held.contributor);
       }),
     forkBindingVerified: () =>
       check(async () => {
-        const held = facts(deps);
+        const held = facts(contextDeps);
         const fork = snapshotJson(deps.fork);
         const result = await deps.checkForkReadiness();
-        unchanged(deps, held);
+        unchanged(contextDeps, held);
         return (
           result.kind === 'ready' &&
           canonicalJson(result.fork) === canonicalJson(fork) &&
@@ -474,45 +535,18 @@ export function makeHandoffAdmission(deps: ShippingHandoffDeps): HandoffAdmissio
         );
       }),
     receiptValid: (candidateSha, digest) =>
-      check(async () => {
-        const envelope = snapshotJson(deps.receipt);
-        const key = deps.trustedControllerKey;
-        const held = facts(deps);
-        if (used.has(digest) || envelope.digest !== digest || candidateSha !== held.candidateSha)
-          return false;
-        const context = await buildReceiptContext(deps);
-        const receipt = await verifyReceipt(envelope, key, context, deps.now);
-        unchanged(deps, held);
-        const verification = verificationFor(deps, snapshotJson(deps.bindings));
-        matchVerification(verification, context);
-        if (
-          canonicalJson(receipt.commands) !== canonicalJson(verification.commands) ||
-          canonicalJson(deps.receipt) !== canonicalJson(envelope) ||
-          deps.trustedControllerKey !== key ||
-          receipt.permittedShippingOperations.length !== 1 ||
-          canonicalJson(
-            receipt.permittedShippingOperations.map(({ kind, target, expectedRemoteSha }) => ({
-              kind,
-              target,
-              expectedRemoteSha,
-            }))
-          ) !== canonicalJson(context.allowedShippingOperations) ||
-          used.has(digest)
-        )
-          return false;
-        used.add(digest);
-        return true;
-      }),
+      check(() => validateReceipt(candidateSha, digest, true)),
+    commitPr: (candidateSha, digest) => check(() => validateReceipt(candidateSha, digest, false)),
     remoteBranchSha: async () => {
       assertAuthority();
-      const held = facts(deps);
+      const held = facts(contextDeps);
       let sha: string | null;
       try {
         sha = await deps.remoteBranchSha();
       } catch {
         return refuse('remote_read_unavailable');
       }
-      unchanged(deps, held);
+      unchanged(contextDeps, held);
       assertAuthority();
       if (sha !== held.candidateSha) refuse('remote_sha_mismatch');
       return sha;

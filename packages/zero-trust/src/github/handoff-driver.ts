@@ -42,6 +42,8 @@ import { HandoffError } from './text';
 export interface HandoffAdmission {
   /** Shipping composition additionally binds the exact requested PR head/base. */
   prBindingVerified(binding: PrBinding): Promise<boolean>;
+  /** Final fresh commit admission after reconciliation, retaining this receipt reservation. */
+  commitPr(candidateSha: string, receiptDigest: string): Promise<boolean>;
   /** Release a receipt reservation when no durable link was issued. */
   releaseReceipt?(receiptDigest: string): void;
   /** AI policy, issue open state, assignment, competing fixes and permission, rechecked now. */
@@ -520,6 +522,7 @@ export class HandoffDriver {
         if (existing.kind !== 'absent') throw new HandoffError('existing_submission');
         const { title, body, commands } = content;
         const link = compareLink(intent, binding, title, body, commands);
+        await this.check('commit', () => admission.commitPr(sha, digest));
         const outcome = this.issue(intent, binding, link);
         issued = true;
         return outcome;

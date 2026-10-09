@@ -52,9 +52,13 @@ credential-module imports; the composition root supplies authenticated adapters.
   This factory is shipping/PR-only (`shipping`/`revising` states); gating engagement
   comments require separate contact-permission and authenticated-contributor admission.
   Factory authority callbacks, store and trusted-key references are captured;
+  held store validation/directory method identities are also checked across awaits.
   the returned admission is frozen. Changing callback properties after construction
   cannot replace the held authorization. Signing and probe failures have fixed,
   non-echoing refusal codes.
+  `HandoffAdmission.commitPr(candidateSha, digest)` is mandatory and rechecks fresh
+  run/boundary/policy/verification/receipt admission after PR reconciliation and
+  before durable link publication, retaining the current receipt reservation.
   Supply `ForkPusher.handoffReadBack`, rather than an ordinary remote read, as
   `remoteBranchSha` so a matching but unverified branch cannot admit a PR.
 - `prContentInput(input): PrContentInput` binds model `candidateReady` title/cause/

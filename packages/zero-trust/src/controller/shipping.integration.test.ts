@@ -1,12 +1,9 @@
 /** Offline producer-to-shipping integration: real persistence, Git and admission gates. */
-import { generateKeyPairSync } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
-import path from 'node:path';
 import { Ed25519Signer } from '@ai-dossier/core';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { candidateInput, harness, removeTemps, TIME } from '../__tests__/verifier-fixture';
-import { sha256 } from '../canonical/export';
 import {
   FORK_ID,
   GitHubFake,
@@ -22,8 +19,12 @@ import { IntentDriver, MutationUncertainError, WriteBlockedError } from '../inte
 import { Journal } from '../journal';
 import { ReceiptNonceStore } from '../receipt/nonces';
 import { ReasonCode, transitionRun } from '../state';
-import { validateRunConfig } from './config';
-import { RunStore } from './run-store';
+import {
+  shippingCommandPlan,
+  shippingStore,
+  shippingVerification,
+} from './__tests__/shipping-fixture';
+import type { RunStore } from './run-store';
 import {
   makeAuthorize,
   makeHandoffAdmission,
@@ -32,7 +33,7 @@ import {
   type ShippingAuthorizeDeps,
   shippingIntent,
 } from './shipping';
-import { publishVerification, type VerificationRecord } from './verification-record';
+import type { VerificationRecord } from './verification-record';
 import { verifyCandidate } from './verifier';
 
 let template: VerificationRecord;
@@ -70,93 +71,21 @@ class LocalForkPusher extends ForkPusher {
 
 async function rig() {
   const root = temp('zt-shipping-integration-');
-  const keyFile = path.join(root, 'controller.pem');
-  fs.writeFileSync(
-    keyFile,
-    generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' }),
-    { mode: 0o600 }
+  const { store, keyFile } = shippingStore(
+    root,
+    'https://github.com/o/r/issues/1',
+    OWNER,
+    UPSTREAM_ID,
+    TIME
   );
-  const phase = {
-    adapter: 'fake',
-    model: 'fake',
-    endpoint: 'https://model.example',
-    apiKeyEnv: 'MODEL_KEY',
-  };
-  const config = validateRunConfig({
-    issueUrl: 'https://github.com/o/r/issues/1',
-    contributor: OWNER,
-    executionProfile: {
-      provider: 'local-qemu',
-      profileDir: 'profile',
-      stateDir: 'state',
-      accelerator: 'auto',
-      proxyEndpointsFile: 'endpoints.json',
-    },
-    modelProfile: {
-      phases: { planning: phase, implementing: phase },
-      rates: [
-        {
-          resource: 'fake',
-          currency: 'USD',
-          unit: 'token',
-          price: 0,
-          units: 1,
-          source: 'fixture',
-          fx: { currency: 'USD', numerator: 1, denominator: 1, timestamp: TIME },
-        },
-      ],
-    },
-    budget: {
-      currency: 'USD',
-      ceilingMinor: 100,
-      cleanupAllowanceMinor: 10,
-      tokenLimit: 100,
-      activeMinutes: 120,
-    },
-    checkpoints: [],
-    signerKeyFile: keyFile,
-    githubApp: {
-      appId: 1,
-      clientId: 'fixture',
-      slug: 'fixture',
-      privateKeyEnv: 'APP_KEY',
-      clientSecretEnv: 'APP_SECRET',
-    },
-  });
-  const store = RunStore.create(path.join(root, 'runs'), config, TIME);
   stores.push(store);
-  store.recordUpstreamRepositoryId(UPSTREAM_ID);
-  for (const reason of [
-    ReasonCode.GatePassed,
-    ReasonCode.PlanApproved,
-    ReasonCode.CandidateReady,
-    ReasonCode.VerificationPassed,
-  ])
-    store.persistRun(transitionRun(store.run, reason, TIME));
-  const artifacts = store.storeDirectory('artifacts');
-  fs.cpSync(sourceArtifacts, artifacts, { recursive: true });
-  fs.rmSync(path.join(artifacts, 'verification'), { recursive: true });
-  const boundaryFile = path.join(artifacts, template.boundaryInputRef.artifact);
-  const boundary = { ...JSON.parse(fs.readFileSync(boundaryFile, 'utf8')), runId: store.runId };
-  const bytes = Buffer.from(JSON.stringify(boundary));
-  fs.writeFileSync(boundaryFile, bytes, { mode: 0o600 });
-  const { schemaVersion: _, recordDigest: __, ...body } = template;
-  const verification = publishVerification(artifacts, {
-    ...body,
-    runId: store.runId,
-    boundaryInputRef: { artifact: template.boundaryInputRef.artifact, digest: sha256(bytes) },
-  });
+  const {
+    dir: artifacts,
+    boundaryFile,
+    input: boundary,
+    verification,
+  } = shippingVerification(store, sourceArtifacts, template);
   const candidate = candidateInput();
-  const report = (id: string, argv: string[]) => ({
-    id,
-    argv,
-    phase: 'verification' as const,
-    network: 'none' as const,
-    env: {},
-    timeoutMs: 1000,
-    required: true,
-    captureReport: true,
-  });
   const deps: ShippingAuthorizeDeps = {
     store,
     fork: {
@@ -182,14 +111,7 @@ async function rig() {
       expectedRemoteSha: null,
     },
     profile: { digest: verification.profileDigest, binding: structuredClone(verification.profile) },
-    commandPlan: {
-      manager: 'npm',
-      provisioning: [],
-      verification: [
-        report('npm-test', ['npm', 'test']),
-        report('npm-test-regression', ['npm', 'test', '--', 'test/regression.test.js']),
-      ],
-    },
+    commandPlan: shippingCommandPlan(),
     manifest: structuredClone(candidate.manifest),
     record: structuredClone(candidate.record),
     authority: structuredClone(candidate.authority),
@@ -334,6 +256,27 @@ async function handoff(h: Awaited<ReturnType<typeof rig>>, receipt = h.authoriza
 }
 
 describe('persisted verification to real local shipping (#1105)', () => {
+  it.each([
+    'policy',
+    'boundary',
+    'cancelled',
+  ])('refuses %s revoked during final PR reconciliation', async (kind) => {
+    const h = await rig();
+    await h.driver.execute(h.input);
+    const p = await handoff(h);
+    const get = p.fake.publicResponses.get.bind(p.fake.publicResponses);
+    vi.spyOn(p.fake.publicResponses, 'get').mockImplementation((route) => {
+      if (kind === 'policy') vi.mocked(h.deps.policyFresh).mockResolvedValue(false);
+      if (kind === 'boundary') fs.rmSync(h.boundaryFile);
+      if (kind === 'cancelled')
+        h.store.persistRun(transitionRun(h.store.run, ReasonCode.UserCancelled, TIME));
+      return get(route);
+    });
+    await expect(p.driver.issuePr(p.request)).rejects.toThrow('admission_commit');
+    expect(p.rows.read()).toHaveLength(1);
+    expect(fs.readdirSync(p.bodyDirectory)).toEqual([]);
+    expect(h.mint).toHaveBeenCalledTimes(1);
+  });
   it('cannot replace read-back or controller key while contributor admission awaits', async () => {
     const h = await rig();
     await h.driver.execute(h.input);

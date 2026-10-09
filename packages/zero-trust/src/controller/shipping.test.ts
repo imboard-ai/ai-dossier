@@ -1,18 +1,20 @@
-import { generateKeyPairSync } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { Ed25519Signer } from '@ai-dossier/core';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { candidateInput, harness, removeTemps, TIME } from '../__tests__/verifier-fixture';
-import { sha256 } from '../canonical/export';
 import { idempotencyKey } from '../intents';
 import { ReceiptNonceStore } from '../receipt/nonces';
 import { canonicalJson } from '../receipt/schema';
 import { authorizeShipping, verifyReceipt } from '../receipt/verify';
 import { ReasonCode, transitionRun } from '../state';
-import { validateRunConfig } from './config';
-import { RunStore } from './run-store';
+import {
+  shippingCommandPlan,
+  shippingStore,
+  shippingVerification,
+} from './__tests__/shipping-fixture';
+import type { RunStore } from './run-store';
 import {
   buildReceiptContext,
   issueShippingReceipt,
@@ -22,7 +24,7 @@ import {
   type ShippingAuthorizeDeps,
   shippingIntent,
 } from './shipping';
-import { publishVerification, type VerificationRecord } from './verification-record';
+import type { VerificationRecord } from './verification-record';
 import { verifyCandidate } from './verifier';
 
 let template: VerificationRecord;
@@ -52,95 +54,20 @@ afterEach(() => {
 function rig() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zt-shipping-'));
   roots.push(root);
-  const keyFile = path.join(root, 'controller.pem');
-  fs.writeFileSync(
-    keyFile,
-    generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' }),
-    { mode: 0o600 }
+  const { store, keyFile } = shippingStore(
+    root,
+    'https://github.com/owner/repo/issues/1',
+    'contributor',
+    11,
+    TIME
   );
-  const phase = {
-    adapter: 'fake',
-    model: 'fake',
-    endpoint: 'https://model.example',
-    apiKeyEnv: 'MODEL_KEY',
-  };
-  const config = validateRunConfig({
-    issueUrl: 'https://github.com/owner/repo/issues/1',
-    contributor: 'contributor',
-    executionProfile: {
-      provider: 'local-qemu',
-      profileDir: 'profile',
-      stateDir: 'state',
-      accelerator: 'auto',
-      proxyEndpointsFile: 'endpoints.json',
-    },
-    modelProfile: {
-      phases: { planning: phase, implementing: phase },
-      rates: [
-        {
-          resource: 'fake',
-          currency: 'USD',
-          unit: 'token',
-          price: 0,
-          units: 1,
-          source: 'fixture',
-          fx: { currency: 'USD', numerator: 1, denominator: 1, timestamp: TIME },
-        },
-      ],
-    },
-    budget: {
-      currency: 'USD',
-      ceilingMinor: 100,
-      cleanupAllowanceMinor: 10,
-      tokenLimit: 100,
-      activeMinutes: 120,
-    },
-    checkpoints: [],
-    signerKeyFile: keyFile,
-    githubApp: {
-      appId: 1,
-      clientId: 'fixture',
-      slug: 'fixture',
-      privateKeyEnv: 'APP_KEY',
-      clientSecretEnv: 'APP_SECRET',
-    },
-  });
-  const store = RunStore.create(path.join(root, 'stores'), config, TIME);
   stores.push(store);
-  store.recordUpstreamRepositoryId(11);
-  for (const reason of [
-    ReasonCode.GatePassed,
-    ReasonCode.PlanApproved,
-    ReasonCode.CandidateReady,
-    ReasonCode.VerificationPassed,
-  ])
-    store.persistRun(transitionRun(store.run, reason, TIME));
-  const dir = store.storeDirectory('artifacts');
-  fs.cpSync(artifacts, dir, { recursive: true });
-  fs.rmSync(path.join(dir, 'verification'), { recursive: true, force: true });
-  const boundaryFile = path.join(dir, template.boundaryInputRef.artifact);
-  const input = JSON.parse(fs.readFileSync(boundaryFile, 'utf8'));
-  input.runId = store.runId;
-  const bytes = Buffer.from(JSON.stringify(input));
-  fs.writeFileSync(boundaryFile, bytes, { mode: 0o600 });
-  const { schemaVersion: _, recordDigest: __, ...body } = template;
-  const verification = publishVerification(dir, {
-    ...body,
-    runId: store.runId,
-    boundaryInputRef: { artifact: template.boundaryInputRef.artifact, digest: sha256(bytes) },
-  });
+  const { dir, boundaryFile, input, verification } = shippingVerification(
+    store,
+    artifacts,
+    template
+  );
   const candidate = candidateInput();
-  // The trusted command plan is independent of the receipt and verification record.
-  const report = (id: string, argv: string[]) => ({
-    id,
-    argv,
-    phase: 'verification' as const,
-    network: 'none' as const,
-    env: {},
-    timeoutMs: 1000,
-    required: true,
-    captureReport: true,
-  });
   const deps: ShippingAuthorizeDeps = {
     store,
     fork: {
@@ -166,14 +93,7 @@ function rig() {
       expectedRemoteSha: null,
     },
     profile: { digest: verification.profileDigest, binding: structuredClone(verification.profile) },
-    commandPlan: {
-      manager: 'npm',
-      provisioning: [],
-      verification: [
-        report('npm-test', ['npm', 'test']),
-        report('npm-test-regression', ['npm', 'test', '--', 'test/regression.test.js']),
-      ],
-    },
+    commandPlan: shippingCommandPlan(),
     manifest: structuredClone(candidate.manifest),
     record: structuredClone(candidate.record),
     authority: structuredClone(candidate.authority),
@@ -290,6 +210,17 @@ describe('credential-free shipping authorization', () => {
     vi.spyOn(h.deps.signer, 'sign').mockRejectedValue(new Error('private-signing-response'));
     await expect(h.authorize()).rejects.toThrow('signing_unavailable');
     await expect(h.authorize()).rejects.not.toThrow('private-signing-response');
+  });
+  it('refuses cancellation hidden by replacing a held store validation method', async () => {
+    const h = rig();
+    const prior = h.store.validateEvidence();
+    vi.mocked(h.deps.policyFresh).mockImplementation(async () => {
+      h.store.persistRun(transitionRun(h.store.run, ReasonCode.UserCancelled, TIME));
+      Object.assign(h.store, { validateEvidence: () => prior });
+      return true;
+    });
+    await expect(h.authorize()).rejects.toThrow('shipping_authority_changed');
+    expect(h.store.run.state).toBe('cancelled');
   });
   it('reconstructs the canonical candidate and issues a fresh single grant on each attempt', async () => {
     const h = rig();
@@ -521,6 +452,19 @@ async function handoffRig() {
 }
 
 describe('handoff admission', () => {
+  it('does not retain a receipt reservation when its final authority check refuses', async () => {
+    const h = await handoffRig();
+    const login = h.admissionDeps.readLogin;
+    vi.mocked(h.deps.policyFresh).mockImplementationOnce(async () => {
+      Object.assign(h.admissionDeps, { readLogin: async () => 'other' });
+      return true;
+    });
+    const sha = h.deps.bindings.candidateSha;
+    const digest = h.authorization.receipt.digest;
+    expect(await h.admission.receiptValid(sha, digest)).toBe(false);
+    Object.assign(h.admissionDeps, { readLogin: login });
+    expect(await h.admission.receiptValid(sha, digest)).toBe(true);
+  });
   it('requires fresh authenticated facts, accepts the receipt once, and checks verified push read-back', async () => {
     const h = await handoffRig();
     expect(await h.admission.policyFresh()).toBe(true);
