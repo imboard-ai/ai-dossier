@@ -843,7 +843,7 @@ Snapshot reads/writes are anchored to a pinned directory descriptor; replacing
 an ancestor cannot redirect publication. Lock contention/unavailable kernel
 locking raises `StoreLockedError`. Other store refusals have non-echoing
 `RunStoreError.code`: `invalid_store`, `invalid_run_id`, `run_diverged`,
-`resume_identity_mismatch`, `persistence_uncertain`, `store_closed`. Stored
+`resume_identity_mismatch`, `snapshot_expired`, `persistence_uncertain`, `store_closed`. Stored
 configuration failures preserve their typed `RunConfigError`, including an
 unavailable signer key. Failed first creation preserves incomplete private
 evidence rather than deleting it. `RUN_STORE_DIRECTORIES` exports the allowlist.
@@ -1203,6 +1203,215 @@ has the existing immutable `SourceManifest` shape. Both APIs are package exports
 Tests alone can pass `options.remoteUrlForTest`, a local `file:` URL accepted only
 when `process.env.VITEST` is set; only then is file transport permitted. Tests use no
 live network, and production must never set that option.
+
+## Artifact retention and portable export (#1104)
+
+These offline controller APIs are exported from the package index. No CLI or
+upstream write is added. The caller must close live controllers before sweeping;
+`RunStore.open` holds the same permanent lifetime flock used for execution.
+`RunStore.open(root, runId, { readOnly: true })` is the maintenance open used by
+sweep: it validates the complete confirmed control journal without running tail
+recovery, repairing snapshots, changing journal permissions or writing lifecycle
+events. Torn tails, pending recovery markers and unconfirmed snapshots require
+explicit controller recovery before maintenance. Mutating controller methods on
+a read-only handle refuse. Pinned maintenance access also rechecks the current
+snapshot, config digest and confirmed control history, so cached live state cannot
+hide corrupt or divergent selected files.
+
+- `planSweep(root, now, retentionDays?)` is **dry-run only**. `root` contains only
+  contribution directories (`ztc-<16 lowercase hex>`), not keys or other files.
+  `now` is an injected Date or ISO timestamp. Omit the third argument to use each
+  contribution's validated `config.retentionDays` (default **30**); a supplied
+  positive safe integer overrides it for this explicit sweep, without editing config.
+  Last activity is the maximum of lifecycle `updatedAt` and file modification
+  times, excluding maintenance files and lock/guard files. The exact cutoff is
+  retained; only strictly older contributions qualify. `blocked_cleanup` never
+  qualifies. `SweepPlan.contributions[].files` lists exclusively regular,
+  single-link files below `artifacts/`, with relative paths, inode identities,
+  sizes, modification times and SHA-256 digests. Directories are kept.
+- `applySweep(plan, fault?)` is the explicit destructive operation. It requires
+  the unchanged original plan object issued in this process (serialized, cloned,
+  forged or edited plans are refused). Replan after a process restart with the
+  same explicit retention override, if the original plan used one. It reopens
+  each store under the lifetime guard, pins directory descriptors, and revalidates
+  contribution identity, activity, configuration, protected bytes, selected
+  evidence and every remaining artifact before deleting. Symlinks, traversal,
+  hard links, stale files, new files and unreadable/corrupt evidence fail closed.
+  Root and ancestor symlinks are refused too.
+- Publication order is durable `summary.json`, then durable `.snapshot-expired`,
+  then deletion. Both maintenance records live beside the immutable `run.json`.
+  `ContributionSummary` (`ztfc-summary-v1`) contains public links, verified and
+  observed outcome SHAs, receipt digests, evidence-derived outcome, conservative
+  per-session costs, the exact sweep manifest and frozen selected-source provenance
+  (`evidence`: original run bytes plus each source's byte length and digest).
+  The reader verifies retained journal prefixes and unchanged non-journal evidence,
+  reconstructs historical facts, and checks the current confirmed run is an allowed
+  observation/stop continuation. Current selected sources are independently validated
+  for status/export. `snapshotExpired: true` is
+  monotonic: even a crash before the separate marker lands prevents resume.
+  Every protected file remains byte-for-byte unchanged: run/config/control and
+  all intents, handoff, track, tokens, push-ledger, nonces, budget, VM, profile
+  and prepared body evidence. No journal is compacted or discarded.
+- Each removable leaf is atomically moved to a deterministic name in the pinned
+  controller-owned **`.retention-quarantine/` beside `artifacts/`**, owned by the
+  controller and mode 0700. This storage is never available to a worker by architecture.
+  The regular inode is streamed through a no-follow descriptor, identity/digest-checked,
+  and its final named identity is checked again immediately before unlink. POSIX
+  has no unlink-by-descriptor; the private parent and exclusive lifetime guard are
+  essential authority, not isolation against an arbitrary same-UID controller attacker.
+  Mismatched moved bytes are retained in quarantine for recovery, never deleted;
+  unplanned leaves are never consumed. Both rename parents and deletion are fsynced. A crash
+  after isolation is replayable; a swapped leaf is retained and refused. These
+  temporary names are recognized only by the durable manifest. Already missing
+  files are tolerated only after durable expiry evidence exists. Partial and
+  complete applications can be rerun, reusing the identical summary bytes.
+  The optional synchronous test fault hook is called at `summary`, `expired`,
+  `quarantined` and `deleted` durable boundaries; a thrown fault releases the
+  maintenance handle so recovery can reopen it.
+- `readContributionSummary(store)` validates and returns the persisted summary,
+  or null when neither summary nor expiry marker exists. Missing summary with a
+  present marker, corrupt metadata, mismatched identity/digests and invalid
+  manifests are refused. `assertResumable(store)` delegates to
+  `RunStore.assertResumable()`; expired snapshots throw `RunStoreError('snapshot_expired')`.
+  `RunStore.assertResumeMatches`, ordinary `persistRun` active transitions and actual
+  checkpoint approval enforce this before any journal writes. Every added history
+  edge is checked, so batching continuation with a later cancellation cannot bypass
+  expiry. Observed public status, decline, cancellation, failure, pause and cleanup
+  transitions remain permitted. Read-only open/status/export remain possible.
+  Replay checks still require the original artifact identities/digests and reject new
+  artifacts; permitted confirmed observations do not invalidate frozen summary facts.
+  Resuming work requires fresh acquisition/reconstruction and independent
+  verification in a **fresh run**, never clearing expiry on the old snapshot.
+- `RunStore.withPinnedDirectory(work)` runs synchronous trusted controller
+  maintenance against the pinned contribution directory while its lifetime guard
+  is held, and refuses a closed, poisoned or replaced store. It is not a worker
+  API; never retain the descriptor path or start asynchronous work in the callback.
+  Preflight filesystem failures become fixed `RunStoreError('invalid_store')` diagnostics,
+  without native paths/messages/causes. `RunStore.assertObservationContinuation(prior)`
+  validates a historical run against the current confirmed run, refusing identity/history
+  divergence or any new edge that requires an unexpired snapshot (`run_diverged`).
+
+### Selected evidence persistence convention
+
+This slice consumes actual producer records, independently of the metrics slice.
+`PrTracker` and `HandoffDriver` already persist `track/events.jsonl` and
+`handoff/events.jsonl`: raw events are scanned, then their existing replay
+validators establish identity, history, public links and outcome facts. A missing
+tracker file is **unknown**, never inferred merged from a lifecycle label. A valid
+pending tracker reports `awaiting_review`, or `blocked` when its replay says so.
+`BudgetLedger` snapshots live at `budget/ledger.json`. The new
+`validateBudgetSnapshot(raw, contributionId)` validates/detaches a pinned raw
+snapshot using the ledger's existing validation, without reopening a path or
+acquiring/mutating a budget lock. Costs use existing `budgetTotals`, preserving
+reservations and conservative maxima, with currencies kept per session. No
+ledger or no session means null, not zero. Present invalid evidence throws.
+
+Receipt issuance, command verification and policy/PR-content producers currently
+**return** records; the integrating trusted controller may atomically persist the
+following bounded, 0600 JSON records at the contribution root using its existing
+private durable publication primitive. This module never scans arbitrary bulk
+artifacts for authority, invents records, or auto-persists returned evidence:
+
+| Record | Controller-owned payload |
+|---|---|
+| `receipt-evidence.json` | At most 128 complete `SignedReceipt` envelopes returned by `issueReceipt`; receipt schema remains `ztfc-receipt-v2`. Parsed receipt identities, canonical SHA-256 digests and Ed25519 signatures are verified offline. Signature verification is integrity evidence, not trusted-key or current shipping authorization. |
+| `verification-evidence.json` | `{ runId, candidateSha, records }`; `records` are 1–128 actual verification-phase `CommandRecord` values returned by the evidence runner, with unique command IDs. Each `evidence` must match id, argv, status, supervised exit code, suite count and log digest. Status is reclassified using the producer's classifier, with timeout/signal, report counts (including supervised `skipped`) and capture mode checked. Missing skipped counts in legacy records fail closed; they never default to zero. All-skipped reports remain inconclusive. Truncated output cannot establish success. Only receipt-style metadata is exported, with `verified` calculated by `evidenceVerified`. Omit the optional source to represent absent verification; a present empty command array is invalid. |
+| `portfolio-evidence.json` | `{ runId, disclosure, policyCitations }`; a present file requires a disclosure string and citations array, at most 128 actual policy assessment citations (`path`, positive `line`, `ruleId`, `excerpt`). Only a missing file yields null disclosure/citations. Missing fields in a present file fail closed; prose and defaults cannot replace them. |
+
+Every selected JSON record is bounded to 1 MiB before allocation and must be valid
+UTF-8. Metadata and pinned regular no-follow inode checks precede reads; bounded
+reads detect growth and replacement. Journals are capped at 16 MiB, 10,000 records,
+and 1 MiB per newline-terminated line. Blank/torn lines are refused; maintenance
+never uses forgiving journal recovery. The **aggregate verification array** is at
+most 128 entries: one per receipt plus one for a present standalone verification
+source. Thus 128 receipts plus that source is refused
+before sweep publication. The exact serialized summary is preflighted against its
+4-MiB reader cap before summary, expiry or deletion. The complete prospective portable
+bundle is also preflighted before expiry, using the same schema, consistency and size
+checks as export. Export bounds still apply
+to the portable bundle, whose summary excludes the manifest. Inventory streams
+directory entries and bulk hashes, capped per contribution at 20,000 entries,
+64 directory levels, 256 MiB per file and 1 GiB total file bytes; the root allows
+10,000 contributions. Unsupported inventories/manifests fail before destructive effects.
+Raw strings (including discarded fields and verification log excerpts) are
+scanned with `assertNoSecrets` **before** projection. Missing optional sources
+remain unknown/null. Corrupt, truncated, unreadable or secret-bearing selected
+sources stop maintenance; secrets are never silently redacted into a successful
+export. Log content is not exported; command metadata retains sanitized digests.
+
+### Portable export contract
+
+`exportContribution(store, outFile)` returns and writes one detached
+`ContributionExport` with `schemaVersion: EXPORT_VERSION` (`ztfc-export-v1`):
+the actual run/history, offline status (URLs, verified/outcome SHAs, observed
+outcome and costs), sanitized summary, complete receipt envelopes/digests,
+verification metadata, PR/outcome, disclosure and policy citations. The exported
+summary omits the local sweep manifest and file identities. Missing verification
+is null; no absence can earn a verification or successful outcome claim.
+Config, environment, token journals, nonce stores, budget locks, raw logs and
+prepared body file paths are excluded. All output strings are scanned again.
+`EXPORT_SCHEMA` is the versioned public JSON Schema and the runtime validator's
+source of truth. `validateContributionExport(input)` rejects unknown fields,
+non-JSON values/accessors and bundles beyond the 1-MiB strict snapshot bound,
+strings beyond 8,192 UTF-16 code units, more than 20,000 JSON nodes or depth 12,
+and more than 128 cost sessions. Persisted sources below the raw byte limit may
+still exceed these portable bounds; controllers should preflight exportable evidence
+before persisting it. Canonical snapshot limit failures report `invalid-input` at
+`export`; schema and explicit consistency refusals report `invalid-evidence` at
+`evidence`, while lifecycle-decoder failures report `invalid-evidence` at `export`.
+The export validator also rejects
+malformed structures, secret strings, invalid run/history, contradictory status,
+receipt run/contribution/contributor/issue bindings, full signature metadata,
+offline Ed25519 integrity, verification consistency and summary identities, returning
+a detached bundle. Merged/declined outcomes require the matching lifecycle state,
+an observed PR and outcome SHA; unknown has no observed outcome SHA. Historical PR
+and verified SHA observations can survive later cancellation/blocking, but cannot
+be promoted to a merge/decline claim. Offline receipt integrity never changes
+trusted-key or expiry authority in shipping.
+`parseCommandEvidence(input)` is the shared detached receipt/standalone command parser:
+it validates the receipt command schema (1–128 records) and unique command IDs,
+throwing fixed `ReceiptError('invalid_schema'|'invalid_evidence')` refusals.
+Validation completes **before** opening the destination. Output ancestors are
+pinned without following symlinks; output uses exclusive creation at mode 0600,
+fsyncs its file and parent directory, and never overwrites any existing leaf.
+An output write/fsync failure is an error, not a successful export; the exclusive
+partial file is left for the caller to inspect rather than overwritten on retry.
+The exported summary retains expiry-time facts; current status/run and observed
+outcome can advance through permitted confirmed lifecycle observations. Historical
+non-null verified/outcome SHAs must agree with current observations, and terminal
+historical outcomes cannot change. The expiry-time PR URL stays immutable while current
+status may name a replacement PR only with a validated append-only tracker `rebound`
+chain. The bundle's `relocations` records retain each old/new PR binding, the marker
+body and contributor identity: every step must keep the same contributor fork ID,
+fork owner/name, branch, base and bound upstream. Each URL is independently checked
+against that upstream. Missing, contradictory or unmarked relocation proof refuses
+export with `invalid-evidence`; legacy rebound entries without provenance cannot prove
+a relocation for export. Tracker observation now persists that provenance only after
+the replacement PR and fork identity are read successfully. Both historical and current
+URLs and SHAs remain visible; relocation never clears expired-snapshot refusal.
+`validateRelocationEvidence(input)` validates and detaches this credential-free
+tracker provenance, throwing `TrackError('invalid_journal')` on contradiction.
+Export status includes `snapshotExpired` explicitly.
+
+### Maintenance diagnostics and recovery
+
+`MaintenanceError` exposes only fixed `code` and `stage` values; no raw filesystem
+message, path, cause or selected source text is echoed. Known-safe `RunStoreError`
+and `SecretRedactionError` retain their existing semantics. Injected fault-hook
+exceptions propagate intentionally at durable crash boundaries.
+
+| Code | Action |
+|---|---|
+| `invalid-input` | Correct the root, timestamp, retention override or portable input. |
+| `stale-plan` | Close active controllers and obtain a fresh plan; inspect changed or quarantined inodes before recovery. Never delete mismatched held bytes. |
+| `invalid-evidence` | Repair/recover the producing controller's confirmed evidence; missing optional evidence cannot substitute for corrupt present evidence. |
+| `invalid-summary` | Recover the durable summary/marker pair and manifest; never clear expiry to reuse a snapshot. |
+| `size-limit` | Use a supported bounded evidence/inventory format before maintenance; no oversized summary is published. |
+| `io-error` | Check storage availability/permissions or use a fresh export destination; an exclusive partial output is preserved. |
+
+Stages are the fixed names `input`, `read`, `inventory`, `evidence`, `summary`,
+`revalidate`, `delete` and `export`. A valid crash prefix can be replanned/replayed;
+a stale/invalid prefix requires controller recovery rather than blind deletion.
 
 ## Development commands
 

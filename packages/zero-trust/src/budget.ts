@@ -292,6 +292,11 @@ export interface BudgetTotals {
   timeMs: number;
 }
 
+/** Read-only validation for detached, pinned controller evidence. */
+export function validateBudgetSnapshot(raw: unknown, contributionId: string): BudgetState {
+  return structuredClone(validate(raw, contributionId));
+}
+
 function reservationTotals(
   state: BudgetState,
   sessionId: string,

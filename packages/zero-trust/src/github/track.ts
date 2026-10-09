@@ -350,7 +350,8 @@ export async function relocatePr(
   if (!hasOnlyMarker(found.body, pr.marker)) return { kind: 'ambiguous', reason: 'marker_missing' };
   if (found.author !== contributor.toLowerCase())
     return { kind: 'ambiguous', reason: 'foreign_author' };
-  if (found.headRepoGone) return { kind: 'ambiguous', reason: 'fork_unverifiable' };
+  if (found.headRepoGone || found.headRepositoryId !== pr.fork.repositoryId)
+    return { kind: 'ambiguous', reason: 'fork_unverifiable' };
   return { kind: 'found', number: found.number, url: found.url };
 }
 
@@ -572,7 +573,7 @@ type Event =
   | { v: 1; type: 'review_awaited'; run: RunRecord }
   | { v: 1; type: 'outcome'; outcome: 'merged' | 'declined'; headSha: string; run: RunRecord }
   | { v: 1; type: 'blocked'; reason: TrackBlockReason; run: RunRecord; observedMergeSha?: string }
-  | { v: 1; type: 'rebound'; number: number; url: string }
+  | { v: 1; type: 'rebound'; number: number; url: string; evidence?: RelocationEvidence }
   | { v: 1; type: 'revision_started'; feedback: FeedbackRef[]; run: RunRecord }
   | { v: 1; type: 'revision_pushing'; candidateSha: string }
   | { v: 1; type: 'revision_confirmed'; headSha: string; run: RunRecord }
@@ -635,6 +636,33 @@ function trackedPr(value: unknown): TrackedPr {
     url: value.url,
     marker: value.marker,
   });
+}
+
+/** Controller-observed relocation provenance, retained in the append-only tracker journal. */
+export interface RelocationEvidence {
+  from: TrackedPr;
+  to: TrackedPr;
+  author: string;
+  body: string;
+}
+export function validateRelocationEvidence(value: unknown): RelocationEvidence {
+  if (!isRecord(value) || Object.keys(value).sort().join(',') !== 'author,body,from,to')
+    fail('rebound');
+  const from = trackedPr(value.from);
+  const to = trackedPr(value.to);
+  if (
+    from.number === to.number ||
+    JSON.stringify(from.binding) !== JSON.stringify(to.binding) ||
+    JSON.stringify(from.fork) !== JSON.stringify(to.fork) ||
+    from.marker !== to.marker ||
+    typeof value.author !== 'string' ||
+    !sameLogin(value.author, from.binding.headOwner) ||
+    typeof value.body !== 'string' ||
+    !hasOnlyMarker(value.body, from.marker)
+  )
+    fail('rebound');
+  assertNoSecrets(value.body);
+  return { from, to, author: value.author, body: value.body };
 }
 
 function bodyFileName(input: IntentInput, kind: ActionKind): string {
@@ -772,6 +800,15 @@ function reduce(state: TrackState | undefined, raw: unknown, directory: string |
       };
     case 'rebound':
       if (raw.number === state.pr.number || state.action || state.revision) fail('rebound');
+      if (raw.evidence !== undefined) {
+        const evidence = validateRelocationEvidence(raw.evidence);
+        if (
+          JSON.stringify(evidence.from) !== JSON.stringify(state.pr) ||
+          evidence.to.number !== raw.number ||
+          evidence.to.url !== raw.url
+        )
+          fail('rebound');
+      }
       return { ...state, pr: trackedPr({ ...state.pr, number: raw.number, url: raw.url }) };
     case 'revision_started': {
       if (state.revision || state.action || !Array.isArray(raw.feedback) || !raw.feedback.length)
@@ -1074,8 +1111,19 @@ export class PrTracker {
       if (moved.kind === 'unknown') return { kind: 'unknown', detail: 'relocate' };
       if (moved.kind === 'ambiguous') return { kind: 'handoff', reason: moved.reason };
       if (moved.kind === 'found') {
-        this.persist({ v: 1, type: 'rebound', number: moved.number, url: moved.url });
-        track = await observePr(this.deps.read, this.state.pr);
+        const from = this.state.pr;
+        const to = trackedPr({ ...from, number: moved.number, url: moved.url });
+        track = await observePr(this.deps.read, to);
+        if (track.kind !== 'observed') return track;
+        if (!hasOnlyMarker(track.body ?? '', from.marker))
+          return { kind: 'handoff', reason: 'marker_missing' };
+        this.persist({
+          v: 1,
+          type: 'rebound',
+          number: moved.number,
+          url: moved.url,
+          evidence: { from, to, author: this.state.run.contributor, body: track.body ?? '' },
+        });
       }
     }
     // CI and feedback are reported only for a head the run can vouch for.
