@@ -9,6 +9,7 @@ import { BudgetLedger } from '../budget';
 import type { BudgetEstimate, BudgetObservation } from '../budget-types';
 import { sha256 } from '../canonical/export';
 import { isAdmitted } from '../intents';
+import { Journal } from '../journal';
 import { ReasonCode, transitionRun } from '../state';
 import { ScriptedRecovery, ScriptedSteps } from './__tests__/fake-steps';
 import { approveCheckpoint } from './checkpoints';
@@ -1054,5 +1055,70 @@ describe('RunController', () => {
     const stopped = await task;
     expect(stopped.state).toBe('awaiting_maintainer');
     expect(await h.vm.listByRun(stopped.runId)).toHaveLength(0);
+  });
+  it.each([
+    'crash',
+    'contributor',
+  ] as const)('VM-dependent shipping reacquires fresh resources after %s recovery', async (scenario) => {
+    const h = rig();
+    const acquire = async (c: PhaseContext) => {
+      await c.createVm({ scope: 'container' });
+      return { kind: 'acquired' as const };
+    };
+    h.steps.scripts.acquire = [acquire, acquire];
+    const ship = async (c: PhaseContext) => {
+      expect(await h.vm.listByRun(c.run.runId)).toHaveLength(1);
+      return { kind: 'submitted' as const };
+    };
+    if (scenario === 'crash') {
+      h.steps.scripts.drift = [
+        () => {
+          throw new Error('next-step crash');
+        },
+      ];
+      h.steps.scripts.ship = [ship];
+      await expect(h.controller.start(h.config)).rejects.toMatchObject({ code: 'step_failed' });
+    } else {
+      h.steps.scripts.ship = [{ kind: 'fork_missing' }, ship];
+      h.steps.scripts.resumeHandoff = [{ kind: 'resume_shipping' }];
+      expect((await h.controller.start(h.config)).state).toBe('awaiting_contributor');
+    }
+    const id = h.controller.snapshot().runId;
+    expect((await new RunController(h.deps).resume(id)).state).toBe('submitted');
+    expect(h.vm.calls.filter((call) => call.op === 'create')).toHaveLength(2);
+    expect(await h.vm.listByRun(id)).toHaveLength(0);
+  });
+  it('emergency cleanup fencing still fans the persisted snapshot out to every driver', async () => {
+    const h = rig();
+    h.steps.scripts.gate = [
+      async (c) => {
+        await c.createVm({ scope: 'container' });
+        return { kind: 'request_permission' };
+      },
+    ];
+    h.deps.estimateVm = (_spec, purpose) =>
+      purpose === 'teardown'
+        ? { ...h.estimate, money: { currency: 'USD', minor: 1000 } }
+        : h.estimate;
+    const append = Journal.prototype.append;
+    vi.spyOn(Journal.prototype, 'append').mockImplementation(function (event) {
+      if (
+        typeof event === 'object' &&
+        event !== null &&
+        'type' in event &&
+        event.type === 'cleanup'
+      )
+        throw new Error('cleanup journal unavailable');
+      append.call(this, event);
+    });
+    await expect(h.controller.start(h.config)).rejects.toMatchObject({ code: 'admission_closed' });
+    const run = h.controller.snapshot();
+    expect(run.state).toBe('blocked_cleanup');
+    for (const seen of h.seen)
+      expect(seen).toEqual(['gating', 'awaiting_maintainer', 'blocked_cleanup']);
+    expect(await h.vm.listByRun(run.runId)).toHaveLength(0);
+    const store = open(h, run.runId);
+    expect(store.validateEvidence().state).toBe('blocked_cleanup');
+    store.close();
   });
 });

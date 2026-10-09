@@ -65,11 +65,13 @@ further progress. The current snapshot is also delivered at open/start. Successf
 phase results are journaled under `control/controller/events.jsonl` before applying
 their transitions: review/drift completion and checkpoint content survive crashes
 without repeating completed effects. Acquisition metadata survives, but its VM
-does not: recovered planning/implementation/verification/revision invokes `acquire`
+does not: recovered planning/implementation/verification/shipping/revision invokes `acquire`
 again with `context.replayingAcquisition=true` after all recovery barriers. This
 step must reuse durable sanitized source/artifacts and reconcile write-once effects
 while provisioning fresh ephemeral resources needed by that phase. A cached
 `acquired` result never establishes that a VM survived recovery.
+This applies when a contributor/maintainer observation resumes an active phase
+as well as when the stored snapshot was already active.
 A step interrupted before it
 returns must reconcile its own effects through recovery; a phase-result cache
 alone is not a write-once network adapter. Recovered/truncated or invalid

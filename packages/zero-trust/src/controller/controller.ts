@@ -261,6 +261,7 @@ export class RunController {
   private operation = Symbol();
   private phaseLease?: symbol;
   private replayingAcquisition = false;
+  private needsAcquisition = false;
   private cached = new Map<string, Outcome>();
   private last?: RunRecord;
   constructor(private readonly deps: ControllerDependencies) {}
@@ -349,17 +350,7 @@ export class RunController {
           await this.recover(() => this.deps.recovery.resumeTracker(this.context()))
         );
       this.recovering = false;
-      if (
-        !this.incident &&
-        ['planning', 'implementing', 'verifying', 'revising'].includes(this.store.run.state)
-      ) {
-        this.replayingAcquisition = true;
-        try {
-          if (!(await this.apply(await this.step('acquire', true)))) return this.store.run;
-        } finally {
-          this.replayingAcquisition = false;
-        }
-      }
+      this.needsAcquisition = true;
       return this.loop(true);
     });
   }
@@ -369,6 +360,7 @@ export class RunController {
     this.operation = Symbol();
     this.phaseLease = undefined;
     this.replayingAcquisition = false;
+    this.needsAcquisition = false;
     this.incident = false;
     this.incidentKill = undefined;
     this.recovering = false;
@@ -464,9 +456,8 @@ export class RunController {
     let current = previous;
     for (const event of run.history.slice(previous.history.length)) {
       current = transitionRun(current, event.reasonCode, event.timestamp);
-      this.held.persistRun(current);
       try {
-        this.notify(current);
+        this.persistObserved(current);
       } catch (error) {
         if (stopped(current.state)) await this.cleanup();
         throw error;
@@ -476,6 +467,10 @@ export class RunController {
   }
   private async recovered(run: undefined | RunRecord): Promise<void> {
     if (run) await this.persist(restoreRun(run));
+  }
+  private persistObserved(run: RunRecord): void {
+    this.held.persistRun(run);
+    this.notify(run);
   }
   private async recover<T>(work: () => Promise<T>): Promise<T> {
     try {
@@ -715,6 +710,15 @@ export class RunController {
         if (!(await this.apply(await this.step('track')))) return this.held.run;
       }
       while (!stopped(this.held.run.state)) {
+        if (this.needsAcquisition && this.held.run.state !== 'gating') {
+          this.replayingAcquisition = true;
+          try {
+            if (!(await this.apply(await this.step('acquire', true)))) break;
+          } finally {
+            this.replayingAcquisition = false;
+            this.needsAcquisition = false;
+          }
+        }
         if (!(await this.dispatchActive())) break;
       }
       if (this.incident) return await this.cancel();
@@ -862,7 +866,7 @@ export class RunController {
       } catch (error) {
         failures.push(error);
         try {
-          this.held.persistRun(
+          this.persistObserved(
             transitionRun(this.held.run, ReasonCode.CleanupFailed, this.deps.now().toISOString())
           );
         } catch (fenceError) {
@@ -897,8 +901,7 @@ export class RunController {
       !TERMINAL_STATES.includes(current.state)
     ) {
       try {
-        this.held.persistRun(result.run);
-        this.notify(result.run);
+        this.persistObserved(result.run);
       } catch (error) {
         failures.push(error);
       }
