@@ -2,8 +2,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 import { createFixtures, NOW, producerEvidence, SHA } from '../../fixtures/retention';
+import { PR_IDENTITY_PATHS, prIdentityDigest } from '../github/pr-identity';
 import { PrTracker, replayTrack } from '../github/track';
 import { Journal } from '../journal';
+import { retainedPrIdentity } from './evidence';
 import { exportContribution, validateContributionExport } from './export';
 import { applySweep, planSweep, readContributionSummary } from './retention';
 import { inventory } from './sweep-files';
@@ -21,7 +23,9 @@ async function relocated(
     | 'head-user'
     | 'base-id'
     | 'case-branch'
-    | 'valid-base'
+    | 'valid-base',
+  mutate?: (body: Record<string, unknown>) => void,
+  accepted = false
 ) {
   const r = rig();
   await producerEvidence(r, false);
@@ -41,8 +45,13 @@ async function relocated(
     merged: number === 3,
     merged_at: number === 3 ? NOW : null,
     user: { login: 'contributor' },
-    head: { sha: SHA, ref: 'task', label: 'contributor:task', repo: { id: 2 } },
-    base: { ref: 'main' },
+    head: {
+      sha: SHA,
+      ref: 'task',
+      label: 'contributor:task',
+      repo: { id: 2, name: 'repo', owner: { login: 'contributor' } },
+    },
+    base: { ref: 'main', repo: { id: 1, name: 'repo', owner: { login: 'owner' } } },
     title: 'Fix',
     body: pr.marker,
   });
@@ -51,6 +60,7 @@ async function relocated(
       journal,
       {
         bodyDirectory: store.storeDirectory('bodies'),
+        retainedIdentity: retainedPrIdentity(store),
         now: () => NOW,
         admission: {
           policyFresh: async () => true,
@@ -73,6 +83,22 @@ async function relocated(
             };
           const body = pull(endpoint.endsWith('/3') ? 3 : 2);
           if (endpoint.endsWith('/3')) {
+            if (mutate) {
+              Object.assign(body, { url: 'https://api.github.com/repos/owner/repo/pulls/3' });
+              Object.assign(body.base, { label: 'owner:main', user: { login: 'owner' } });
+              Object.assign(body.head, { user: { login: 'contributor' } });
+              Object.assign(body.base.repo, {
+                full_name: 'owner/repo',
+                url: 'https://api.github.com/repos/owner/repo',
+                html_url: 'https://github.com/owner/repo',
+              });
+              Object.assign(body.head.repo, {
+                full_name: 'contributor/repo',
+                url: 'https://api.github.com/repos/contributor/repo',
+                html_url: 'https://github.com/contributor/repo',
+              });
+              mutate(body);
+            }
             if (fault === 'author') body.user.login = 'intruder';
             if (fault === 'fork') body.head.repo.id = 9;
             if (fault === 'missing-author') Reflect.deleteProperty(body, 'user');
@@ -105,7 +131,7 @@ async function relocated(
       { run: store.run, contributionId: store.contributionId, pr, headSha: SHA }
     );
     const result = await tracker.resume();
-    if (fault && fault !== 'valid-base') {
+    if ((fault && fault !== 'valid-base') || (mutate && !accepted)) {
       expect(result.kind).not.toBe('merged');
       expect(journal.read().some((event) => (event as { type: string }).type === 'rebound')).toBe(
         false
@@ -117,6 +143,65 @@ async function relocated(
   }
   return { r, store, summary };
 }
+function changePath(
+  body: Record<string, unknown>,
+  field: string,
+  replace: (value: unknown) => unknown
+) {
+  const keys = field.split('.');
+  let parent = body;
+  for (const key of keys.slice(0, -1)) parent = parent[key] as Record<string, unknown>;
+  const leaf = keys[keys.length - 1];
+  parent[leaf] = replace(parent[leaf]);
+}
+it.each(
+  PR_IDENTITY_PATHS.map(([field]) => field)
+)('closed replacement schema refuses changed and null %s through the real tracker before any publication', async (field) => {
+  for (const nullValue of [false, true]) {
+    const { r, store, summary } = await relocated(undefined, (body) =>
+      changePath(body, field, (value) =>
+        nullValue ? null : typeof value === 'number' ? value + 98 : 'contradictory'
+      )
+    );
+    const bundle = exportContribution(store, path.join(r.temp, 'mutation-export'));
+    expect(bundle.relocations).toEqual([]);
+    expect(bundle.outcome).not.toBe('merged');
+    expect(fs.readFileSync(path.join(r.directory, 'summary.json'))).toEqual(summary);
+    expect(() => store.assertResumable()).toThrow('snapshot_expired');
+  }
+});
+it.each(
+  PR_IDENTITY_PATHS.map(([field]) => field).filter(
+    (field) => !field.endsWith('.id') && field !== 'number'
+  )
+)('replacement schema case-only rule for %s preserves names but not refs', async (field) => {
+  const exact = ['head.ref', 'base.ref', 'head.label', 'base.label'].includes(field);
+  const { r, store } = await relocated(
+    undefined,
+    (body) =>
+      changePath(body, field, (value) =>
+        (value as string).replace(/[a-z]+/gu, (segment) => {
+          // URL structure is exact; only repository/owner components change case.
+          return ['https', 'github', 'com', 'api', 'repos', 'pull', 'pulls'].includes(segment)
+            ? segment
+            : segment.toUpperCase();
+        })
+      ),
+    !exact
+  );
+  const bundle = exportContribution(store, path.join(r.temp, 'case-export'));
+  expect(bundle.relocations).toHaveLength(exact ? 0 : 1);
+  if (!exact)
+    expect(bundle.relocations[0].identityDigest).toBe(
+      prIdentityDigest(bundle.relocations[0].identity)
+    );
+});
+it('a fresh repository lookup cannot replace retained upstream authority', async () => {
+  const { r, store } = await relocated(undefined, (body) => {
+    (body.base as { repo: { id: number } }).repo.id = 99;
+  });
+  expect(exportContribution(store, path.join(r.temp, 'retained-id')).relocations).toEqual([]);
+});
 it('AC2 real sweep → marked relocation → merge → export/replan preserves expiry links, SHAs and protected hashes', async () => {
   const { r, store, summary } = await relocated();
   const before = inventory(r.directory).protectedDigest;

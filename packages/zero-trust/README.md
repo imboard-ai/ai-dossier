@@ -1524,6 +1524,31 @@ retain their existing deleted-fork semantics.
 tracker provenance, throwing `TrackError('invalid_journal')` on contradiction.
 Export status includes `snapshotExpired` explicitly.
 
+Replacement tracking requires `TrackDeps.retainedIdentity`. Obtain it with
+`retainedPrIdentity(store)` while holding the RunStore: it validates retained signed
+receipt evidence and uses the **held upstream numeric ID**, with the signed fork ID.
+Missing authority refuses replacement observation (`unknown`), never a fresh lookup
+substituted as authority. Ordinary tracking, including established merged/deleted
+fork observations, remains available without this replacement-only input.
+
+`PrIdentity` is the closed canonical tuple `{ upstreamId, upstreamOwner,
+upstreamName, baseRef, forkId, forkOwner, forkName, headRef, contributor, number,
+htmlUrl, apiUrl }`. `extractPrIdentity(detail)` checks every supplied identity path
+enumerated in `PR_IDENTITY_PATHS`, including both PR URLs and repository API/HTML
+URLs. Present null/malformed paths or parents contradict the tuple. Optional absent
+paths are skipped, but enough observed fields must exist to determine the full
+identity without copying expected bindings. Owner/repository names canonicalize to
+lower case; refs and URL syntax remain exact. `samePrIdentity`,
+`validatePrIdentity` and `prIdentityDigest` compare/validate/hash that tuple.
+The replacement's observed tuple must equal retained expected identity **before**
+the merged shortcut or any rebound. Each `RelocationEvidence` stores that observed
+`identity` and `identityDigest`; sweep/export cross-bind numeric identity to held
+authority and intact receipts again. Legacy proofs lacking these fields refuse.
+When verification provenance exists, a claimed verified SHA must match one of its
+verified candidates; observed outcome SHA remains independent. A pending
+`handoff/events.jsonl.recovery` or `track/events.jsonl.recovery` (including malformed
+or symlink intents) refuses maintenance before publication or artifact deletion.
+
 ### Maintenance diagnostics and recovery
 
 `MaintenanceError` exposes only fixed `code` and `stage` values; no raw filesystem

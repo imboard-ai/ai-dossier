@@ -19,7 +19,7 @@ import {
   parseCommandEvidence,
   RECEIPT_SCHEMA,
 } from '../receipt/schema';
-import { assertSecretFree } from '../redaction';
+import { assertSecretFree, SecretRedactionError } from '../redaction';
 import { type RunRecord, restoreRun } from '../state';
 import { maintenanceBoundary } from './errors';
 import { contributionEvidence } from './evidence';
@@ -54,6 +54,20 @@ const trackedPrSchema = object({
   number: { type: 'integer', minimum: 1 },
   url: text,
   marker: text,
+});
+const identitySchema = object({
+  upstreamId: { type: 'integer', minimum: 1 },
+  upstreamOwner: text,
+  upstreamName: text,
+  baseRef: text,
+  forkId: { type: 'integer', minimum: 1 },
+  forkOwner: text,
+  forkName: text,
+  headRef: text,
+  contributor: text,
+  number: { type: 'integer', minimum: 1 },
+  htmlUrl: text,
+  apiUrl: text,
 });
 /** Portable public schema, also used by the runtime validator before any output write. */
 export const EXPORT_SCHEMA = object({
@@ -107,7 +121,14 @@ export const EXPORT_SCHEMA = object({
   relocations: {
     type: 'array',
     maxItems: 128,
-    items: object({ from: trackedPrSchema, to: trackedPrSchema, author: text, body: text }),
+    items: object({
+      from: trackedPrSchema,
+      to: trackedPrSchema,
+      author: text,
+      body: text,
+      identity: identitySchema,
+      identityDigest: hash,
+    }),
   },
   outcome,
   disclosure: nullable(text),
@@ -162,7 +183,8 @@ export function validateContributionExport(input: unknown): ContributionExport {
   return maintenanceBoundary('export', () => {
     try {
       input = JSON.parse(canonicalJson(input, 1024 * 1024));
-    } catch {
+    } catch (error) {
+      if (error instanceof SecretRedactionError) throw error;
       refuse('invalid-input', 'export');
     }
     assertSecretFree(input);
@@ -252,6 +274,17 @@ export function validateContributionExport(input: unknown): ContributionExport {
     for (const envelope of input.receipts) {
       offlineReceipt(envelope, run, contributionId);
     }
+    for (const proof of input.relocations) {
+      if (
+        !input.receipts.length ||
+        input.receipts.some(
+          ({ receipt }) =>
+            receipt.upstreamRepositoryId !== proof.identity.upstreamId ||
+            receipt.forkRepositoryId !== proof.identity.forkId
+        )
+      )
+        refuse();
+    }
     const endpoints = input.originalPr
       ? [input.originalPr, ...input.relocations.map((proof) => proof.to)]
       : [];
@@ -302,6 +335,13 @@ export function validateContributionExport(input: unknown): ContributionExport {
           refuse();
       }
     }
+    const verifiedSha = input.status.verifiedSha;
+    if (
+      verifiedSha !== null &&
+      input.verification !== null &&
+      !input.verification.some((record) => record.verified && record.candidateSha === verifiedSha)
+    )
+      refuse();
     if (
       input.summary &&
       (input.summary.runId !== run.runId ||

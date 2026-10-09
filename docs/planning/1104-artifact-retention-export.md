@@ -63,6 +63,22 @@ No existing plan artifact was present. The prior fleet scheduling comment is sup
 ## Open Questions
 None.
 
+## Current authorization and closed identity repair (2026-10-09)
+
+Owner decision 6083840745 supersedes **every earlier cycle limit below**. Resume from
+19f1723 with up to three progressing review repairs under review-issue 1.18.0.
+Canonical PrIdentity validates all enumerated present PR identity fields as one tuple,
+including null/malformed parents, before rebound or merged publication. Numeric
+authority comes only from held RunStore identity and validated retained signed
+receipt via retainedPrIdentity; missing authority refuses relocation. Rebound stores
+observed canonical identity plus its digest, cross-bound again on export/sweep.
+Table-driven real tracker/sweep/export mutations cover every identity path, nulls,
+exact ref casing and legitimate repository/owner case-only differences. Pending
+recovery sidecars refuse under pinned directory reads; claimed verified SHAs require
+matching available verified provenance; credential refusal retains its safe error.
+Fresh seven-dimension report-only review and strictly filtered blind specification
+intake follow these repairs. No earlier handoff is a current stopping condition.
+
 ## Owner-authorized bounded AC2 repair (2026-10-08)
 Decision: https://github.com/imboard-ai/ai-dossier/issues/1104#issuecomment-6069385805.
 Preserve immutable expiry-time URL/SHA and export current URL/SHA separately. A

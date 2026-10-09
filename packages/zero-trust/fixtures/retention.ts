@@ -213,6 +213,7 @@ export async function producerEvidence(
     at += 1000;
     return new Date(at).toISOString();
   };
+  r.store.recordUpstreamRepositoryId(1);
   for (const reason of [
     ReasonCode.GatePassed,
     ReasonCode.PlanApproved,

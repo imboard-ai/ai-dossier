@@ -42,6 +42,13 @@ import {
   upstreamIssueBinding,
 } from './handoff';
 import type { HandoffAdmission, HandoffRecord } from './handoff-driver';
+import {
+  extractPrIdentity,
+  type PrIdentity,
+  prIdentityDigest,
+  samePrIdentity,
+  validatePrIdentity,
+} from './pr-identity';
 import { type AmbiguityReason, type GitHubRead, listAll, listPulls } from './reconcile';
 import { assertContentPolicy, HandoffError, untrustedText } from './text';
 
@@ -94,6 +101,7 @@ export type PrTrack =
       readonly body: string | null;
       /** Actual detail author, required when validating a replacement identity. */
       readonly author?: string;
+      readonly identity?: PrIdentity;
       /** Open PRs only. */
       readonly ci?: CiState;
       /** Open PRs only; null when the remarks could not be read. */
@@ -261,9 +269,11 @@ export async function observeFeedback(
 export async function observePr(
   read: GitHubRead,
   pr: TrackedPr,
-  replacementAuthor?: string
+  replacementAuthor?: string,
+  retainedIdentity?: { upstreamRepositoryId: number; forkRepositoryId: number }
 ): Promise<PrTrack> {
   const b = prBinding(pr.binding);
+  const authority = retainedIdentity ? { ...retainedIdentity } : undefined;
   const response = await get(read, `${repoPath(b)}/pulls/${pr.number}`);
   if (response?.status === 404 || response?.status === 410)
     return { kind: 'gone', reason: 'pr_deleted' };
@@ -294,72 +304,18 @@ export async function observePr(
     return { kind: 'unknown', detail: `pull:${response?.status ?? 'unreachable'}` };
   const merged = body.merged === true || typeof body.merged_at === 'string';
   const author = isRecord(body.user) ? body.user.login : undefined;
+  let identity: PrIdentity | undefined;
   if (replacementAuthor !== undefined) {
     // A listing is not authority for a different detail answer. Check before the
     // merged shortcut: a deleted fork is normal for an established PR, but cannot
     // prove the identity of a replacement we have never observed.
-    const repo = isRecord(head.repo) ? head.repo : null;
-    if (
-      typeof author !== 'string' ||
-      !sameLogin(author, replacementAuthor) ||
-      !repo ||
-      repo.id !== pr.fork.repositoryId ||
-      (repo.name !== undefined && repo.name !== pr.fork.repo) ||
-      (repo.owner !== undefined &&
-        (!isRecord(repo.owner) ||
-          typeof repo.owner.login !== 'string' ||
-          !sameLogin(repo.owner.login, pr.fork.owner))) ||
-      (repo.full_name !== undefined &&
-        (typeof repo.full_name !== 'string' ||
-          repo.full_name.toLowerCase() !== `${pr.fork.owner}/${pr.fork.repo}`.toLowerCase())) ||
-      (head.label !== undefined &&
-        (typeof head.label !== 'string' ||
-          head.label !== `${head.label.split(':')[0]}:${b.branch}` ||
-          !sameLogin(head.label.split(':')[0], b.headOwner))) ||
-      (head.user !== undefined &&
-        (!isRecord(head.user) ||
-          typeof head.user.login !== 'string' ||
-          !sameLogin(head.user.login, b.headOwner))) ||
-      (base.user !== undefined &&
-        (!isRecord(base.user) ||
-          typeof base.user.login !== 'string' ||
-          !sameLogin(base.user.login, b.upstream.owner))) ||
-      (base.label !== undefined &&
-        (typeof base.label !== 'string' ||
-          base.label !== `${base.label.split(':')[0]}:${b.base}` ||
-          !sameLogin(base.label.split(':')[0], b.upstream.owner))) ||
-      (base.repo !== undefined &&
-        (!isRecord(base.repo) ||
-          !Number.isSafeInteger(base.repo.id) ||
-          (base.repo.id as number) < 1 ||
-          (base.repo.name !== undefined &&
-            (typeof base.repo.name !== 'string' ||
-              base.repo.name.toLowerCase() !== b.upstream.repo.toLowerCase())) ||
-          (base.repo.owner !== undefined &&
-            (!isRecord(base.repo.owner) ||
-              typeof base.repo.owner.login !== 'string' ||
-              !sameLogin(base.repo.owner.login, b.upstream.owner))) ||
-          (base.repo.full_name !== undefined &&
-            (typeof base.repo.full_name !== 'string' ||
-              base.repo.full_name.toLowerCase() !==
-                `${b.upstream.owner}/${b.upstream.repo}`.toLowerCase()))))
-    )
+    try {
+      if (!authority) throw new Error('identity');
+      identity = extractPrIdentity(body);
+      const expected = expectedPrIdentity(pr, replacementAuthor, authority);
+      if (!samePrIdentity(identity, expected)) throw new Error('identity');
+    } catch {
       return { kind: 'unknown', detail: 'replacement_identity' };
-    if (isRecord(base.repo)) {
-      // Numeric upstream identity is not part of TrackedPr. Resolve it from the
-      // already bound repository endpoint, never copy the replacement's answer.
-      const upstream = await get(read, repoPath(b));
-      if (
-        upstream?.status !== 200 ||
-        !isRecord(upstream.body) ||
-        upstream.body.id !== base.repo.id ||
-        typeof upstream.body.name !== 'string' ||
-        upstream.body.name.toLowerCase() !== b.upstream.repo.toLowerCase() ||
-        !isRecord(upstream.body.owner) ||
-        typeof upstream.body.owner.login !== 'string' ||
-        !sameLogin(upstream.body.owner.login, b.upstream.owner)
-      )
-        return { kind: 'unknown', detail: 'replacement_upstream_identity' };
     }
   }
   const facts = {
@@ -372,6 +328,7 @@ export async function observePr(
     title: body.title,
     body: body.body as string | null,
     ...(typeof author === 'string' ? { author } : {}),
+    ...(identity ? { identity } : {}),
   };
   if (merged) return Object.freeze({ ...facts, branchSha: null });
   if (head.repo === null) return { kind: 'gone', reason: 'fork_deleted' };
@@ -520,6 +477,13 @@ export type RevisionAdmission = Pick<
 /** What a `PrTracker` reads and writes with; all controller-owned. */
 export interface TrackDeps {
   readonly read: GitHubRead;
+  /** Controller-held numeric authority: upstream from RunStore, fork from a validated
+   * retained signed receipt. Never populate from fresh GitHub responses. Absent means
+   * replacement observation refuses; ordinary tracking remains available. */
+  readonly retainedIdentity?: {
+    readonly upstreamRepositoryId: number;
+    readonly forkRepositoryId: number;
+  };
   readonly admission: RevisionAdmission;
   /** Controller-owned directory for prepared texts the contributor pastes. */
   readonly bodyDirectory: string;
@@ -727,9 +691,35 @@ export interface RelocationEvidence {
   to: TrackedPr;
   author: string;
   body: string;
+  identity: PrIdentity;
+  identityDigest: string;
+}
+function expectedPrIdentity(
+  pr: TrackedPr,
+  contributor: string,
+  retained: { upstreamRepositoryId: number; forkRepositoryId: number }
+): PrIdentity {
+  if (retained.forkRepositoryId !== pr.fork.repositoryId) fail('rebound');
+  return validatePrIdentity({
+    upstreamId: retained.upstreamRepositoryId,
+    upstreamOwner: pr.binding.upstream.owner.toLowerCase(),
+    upstreamName: pr.binding.upstream.repo.toLowerCase(),
+    baseRef: pr.binding.base,
+    forkId: retained.forkRepositoryId,
+    forkOwner: pr.fork.owner.toLowerCase(),
+    forkName: pr.fork.repo.toLowerCase(),
+    headRef: pr.binding.branch,
+    contributor: contributor.toLowerCase(),
+    number: pr.number,
+    htmlUrl: pr.url.toLowerCase(),
+    apiUrl: `https://api.github.com/repos/${pr.binding.upstream.owner.toLowerCase()}/${pr.binding.upstream.repo.toLowerCase()}/pulls/${pr.number}`,
+  });
 }
 export function validateRelocationEvidence(value: unknown): RelocationEvidence {
-  if (!isRecord(value) || Object.keys(value).sort().join(',') !== 'author,body,from,to')
+  if (
+    !isRecord(value) ||
+    Object.keys(value).sort().join(',') !== 'author,body,from,identity,identityDigest,to'
+  )
     fail('rebound');
   const from = trackedPr(value.from);
   const to = trackedPr(value.to);
@@ -745,7 +735,31 @@ export function validateRelocationEvidence(value: unknown): RelocationEvidence {
   )
     fail('rebound');
   assertNoSecrets(value.body);
-  return { from, to, author: value.author, body: value.body };
+  let identity: PrIdentity;
+  try {
+    identity = validatePrIdentity(value.identity);
+  } catch {
+    fail('rebound');
+  }
+  if (
+    value.identityDigest !== prIdentityDigest(identity) ||
+    !samePrIdentity(
+      identity,
+      expectedPrIdentity(to, value.author, {
+        upstreamRepositoryId: identity.upstreamId,
+        forkRepositoryId: from.fork.repositoryId,
+      })
+    )
+  )
+    fail('rebound');
+  return {
+    from,
+    to,
+    author: value.author,
+    body: value.body,
+    identity,
+    identityDigest: value.identityDigest as string,
+  };
 }
 
 function bodyFileName(input: IntentInput, kind: ActionKind): string {
@@ -1009,6 +1023,7 @@ type Read = PrTrack | { kind: 'handoff'; reason: AmbiguityReason };
 /** Serial controller driver over its own journal; the directory is controller-owned. */
 export class PrTracker {
   private state: TrackState;
+  private readonly retainedIdentity: TrackDeps['retainedIdentity'];
   private seen: Seen | undefined;
   private tail: Promise<unknown> = Promise.resolve();
 
@@ -1017,6 +1032,9 @@ export class PrTracker {
     private readonly deps: TrackDeps,
     initial: { run: RunRecord; contributionId: string; pr: TrackedPr; headSha: string }
   ) {
+    this.retainedIdentity = deps.retainedIdentity
+      ? Object.freeze({ ...deps.retainedIdentity })
+      : undefined;
     if (drivenJournals.has(journal)) throw new TrackError('journal_in_use');
     const directory = path.resolve(deps.bodyDirectory);
     const events = journal.read().filter((event) => !isRecoveryEvent(event));
@@ -1196,7 +1214,12 @@ export class PrTracker {
       if (moved.kind === 'found') {
         const from = this.state.pr;
         const to = trackedPr({ ...from, number: moved.number, url: moved.url });
-        track = await observePr(this.deps.read, to, this.state.run.contributor);
+        track = await observePr(
+          this.deps.read,
+          to,
+          this.state.run.contributor,
+          this.retainedIdentity
+        );
         if (track.kind !== 'observed') return track;
         if (!hasOnlyMarker(track.body ?? '', from.marker))
           return { kind: 'handoff', reason: 'marker_missing' };
@@ -1205,7 +1228,14 @@ export class PrTracker {
           type: 'rebound',
           number: moved.number,
           url: moved.url,
-          evidence: { from, to, author: track.author as string, body: track.body ?? '' },
+          evidence: {
+            from,
+            to,
+            author: track.author as string,
+            body: track.body ?? '',
+            identity: track.identity as PrIdentity,
+            identityDigest: prIdentityDigest(track.identity as PrIdentity),
+          },
         });
       }
     }

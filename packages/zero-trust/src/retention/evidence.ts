@@ -2,6 +2,7 @@ import path from 'node:path';
 import { BudgetLedger, budgetTotals, validateBudgetSnapshot } from '../budget';
 import type { RunStore } from '../controller/run-store';
 import { isTrackerContinuation } from '../controller/tracker-continuation';
+import { lstatIfPresent } from '../durable-fs';
 import { replayHandoffs } from '../github/handoff-driver';
 import {
   type RelocationEvidence,
@@ -14,7 +15,15 @@ import type { CommandEvidence } from '../receipt/schema';
 import { isRecoveryEvent } from '../recovery';
 import { assertSecretFree } from '../redaction';
 import { isRunContinuation, restoreRun } from '../state';
-import { digest, JOURNAL_BYTES, jsonRecord, optionalBytes, refuse, strictJsonLines } from './files';
+import {
+  digest,
+  inDirectory,
+  JOURNAL_BYTES,
+  jsonRecord,
+  optionalBytes,
+  refuse,
+  strictJsonLines,
+} from './files';
 import { offlineReceipt } from './offline-receipt';
 import { parsePortfolio } from './portfolio';
 import { parseVerification } from './verification';
@@ -34,6 +43,11 @@ export function contributionEvidence(
   read?: (name: string) => Buffer | null
 ): ContributionEvidence {
   const sources: Record<string, string> = {};
+  for (const directory of ['handoff', 'track']) {
+    inDirectory(root, directory, (pinned) => {
+      if (lstatIfPresent(path.join(pinned, 'events.jsonl.recovery'))) refuse();
+    });
+  }
   const select = (name: string) => {
     const bytes = read
       ? read(name)
@@ -141,6 +155,19 @@ export function contributionEvidence(
       receipts.push(signed);
     }
   }
+  for (const proof of relocations) {
+    if (
+      store.upstreamRepositoryId === undefined ||
+      proof.identity.upstreamId !== store.upstreamRepositoryId ||
+      !receipts.length ||
+      receipts.some(
+        ({ receipt }) =>
+          receipt.upstreamRepositoryId !== proof.identity.upstreamId ||
+          receipt.forkRepositoryId !== proof.identity.forkId
+      )
+    )
+      refuse();
+  }
   const portfolioBytes = select('portfolio-evidence.json');
   let disclosure: string | null = null;
   let policyCitations: { path: string; line: number; ruleId: string; excerpt: string }[] | null =
@@ -191,6 +218,29 @@ export function contributionEvidence(
   };
   assertSecretFree(result);
   return result;
+}
+/** Supply a tracker with retained numeric authority under the store's lifetime guard.
+ * No fresh lookup, credential module or receipt-v2 mutation enters this boundary. */
+export function retainedPrIdentity(store: RunStore): {
+  upstreamRepositoryId: number;
+  forkRepositoryId: number;
+} {
+  return store.withPinnedDirectory((root) => {
+    const facts = contributionEvidence(store, root);
+    const upstreamRepositoryId = store.upstreamRepositoryId;
+    const forkRepositoryId = facts.receipts[0]?.receipt.forkRepositoryId;
+    if (
+      upstreamRepositoryId === undefined ||
+      forkRepositoryId === undefined ||
+      facts.receipts.some(
+        ({ receipt }) =>
+          receipt.upstreamRepositoryId !== upstreamRepositoryId ||
+          receipt.forkRepositoryId !== forkRepositoryId
+      )
+    )
+      refuse();
+    return { upstreamRepositoryId, forkRepositoryId };
+  });
 }
 /** Verify frozen selected sources, with append-only prefixes for confirmed journals.
  * Current sources are validated separately; a new journal cannot rewrite the old facts. */
