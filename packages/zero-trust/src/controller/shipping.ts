@@ -11,7 +11,7 @@ import {
   type CanonicalCandidate,
   reconstructCandidate,
 } from '../canonical/reconstruct';
-import { assertDirectoryAncestors, readPrivate } from '../durable-fs';
+import { readPrivate } from '../durable-fs';
 import type { CommandPlan } from '../ecosystem/commands';
 import type { ForkReady, ReadinessOutcome } from '../github/fork';
 import { forkTarget } from '../github/fork-ref';
@@ -27,6 +27,7 @@ import {
   type Receipt,
   ReceiptError,
   SCHEMA_TYPES,
+  sameRequiredCommands,
   snapshotJson,
   strictObject,
 } from '../receipt/schema';
@@ -36,7 +37,7 @@ import { type BoundaryInput, isCleanHeldVerdict } from '../vm/evidence';
 import type { RunStore } from './run-store';
 import {
   assertShippableVerification,
-  loadVerification,
+  loadPinnedVerification,
   REGRESSION_COMMAND_SUFFIX,
   type VerificationRecord,
 } from './verification-record';
@@ -100,7 +101,7 @@ export function shippingIntent(bindings: ShippingBindings): IntentInput {
 export interface ReceiptContextDeps {
   readonly store: Pick<
     RunStore,
-    'validateEvidence' | 'withPinnedDirectory' | 'contributionId' | 'upstreamRepositoryId'
+    'validateEvidence' | 'withStoreDirectory' | 'contributionId' | 'upstreamRepositoryId'
   >;
   /** Authenticated checkForkReadiness result retained by the controller. */
   readonly fork: ForkReady;
@@ -154,19 +155,23 @@ function facts(deps: ReceiptContextDeps): ReceiptContext {
     new Set(requiredCommands.map((c) => c.id)).size !== requiredCommands.length
   )
     refuse('required_commands_mismatch');
-  const boundaryEvidence = deps.store.withPinnedDirectory((directory) => {
-    const artifacts = path.join(fs.realpathSync(directory), 'artifacts');
-    assertDirectoryAncestors(artifacts);
-    const names = fs.readdirSync(artifacts).filter((name) => name.startsWith('boundary-'));
-    if (!names.length) refuse('boundary_evidence_missing');
-    const inputs = names.sort().map((name) => {
-      if (!/^boundary-[a-f0-9]{32}\.json$/u.test(name)) refuse('boundary_not_held');
-      return JSON.parse(
-        new TextDecoder('utf-8', { fatal: true }).decode(readPrivate(path.join(artifacts, name)))
-      ) as BoundaryInput;
+  let boundaryEvidence: ReturnType<typeof runBoundaryVerdict>;
+  try {
+    boundaryEvidence = deps.store.withStoreDirectory('artifacts', (artifacts) => {
+      const names = fs.readdirSync(artifacts).filter((name) => name.startsWith('boundary-'));
+      if (!names.length) refuse('boundary_evidence_missing');
+      const inputs = names.sort().map((name) => {
+        if (!/^boundary-[a-f0-9]{32}\.json$/u.test(name)) refuse('boundary_not_held');
+        return JSON.parse(
+          new TextDecoder('utf-8', { fatal: true }).decode(readPrivate(path.join(artifacts, name)))
+        ) as BoundaryInput;
+      });
+      return runBoundaryVerdict(inputs, run.runId);
     });
-    return runBoundaryVerdict(inputs, run.runId);
-  });
+  } catch (error) {
+    if (error instanceof ReceiptError) throw error;
+    refuse('boundary_evidence_invalid');
+  }
   if (!isCleanHeldVerdict(boundaryEvidence) || boundaryEvidence.runId !== run.runId)
     refuse('boundary_not_held');
   shippingIntent(b);
@@ -217,7 +222,13 @@ function unchanged(deps: ReceiptContextDeps, held: ReceiptContext): void {
 
 export async function buildReceiptContext(deps: ReceiptContextDeps): Promise<ReceiptContext> {
   const held = facts(deps);
-  if ((await deps.policyFresh()) !== true) refuse('policy_denied');
+  let permitted: boolean;
+  try {
+    permitted = await deps.policyFresh();
+  } catch {
+    return refuse('policy_unavailable');
+  }
+  if (permitted !== true) refuse('policy_denied');
   unchanged(deps, held);
   return snapshotJson({ ...held, policyPermitsShipping: true });
 }
@@ -227,15 +238,21 @@ export interface ShippingReceiptDeps extends ReceiptContextDeps {
 }
 
 function verificationFor(deps: ReceiptContextDeps, b: ShippingBindings): VerificationRecord {
-  return deps.store.withPinnedDirectory((directory) =>
-    loadVerification(path.join(fs.realpathSync(directory), 'artifacts'), b.candidateSha, {
+  return deps.store.withStoreDirectory('artifacts', (directory) =>
+    loadPinnedVerification(directory, b.candidateSha, {
       runId: deps.store.validateEvidence().runId,
       expectedDigest: b.verificationDigest,
     })
   );
 }
 
-function matchVerification(record: VerificationRecord, context: ReceiptContext): void {
+function matchVerificationIdentity(
+  record: VerificationRecord,
+  context: Pick<
+    ReceiptContext,
+    'runId' | 'candidateSha' | 'baseSha' | 'parentSha' | 'profileDigest' | 'profile'
+  >
+): void {
   assertShippableVerification(record);
   for (const field of [
     'runId',
@@ -247,17 +264,16 @@ function matchVerification(record: VerificationRecord, context: ReceiptContext):
   ] as const)
     if (canonicalJson(record[field]) !== canonicalJson(context[field]))
       refuse('verification_binding_mismatch');
+}
+
+function matchVerification(record: VerificationRecord, context: ReceiptContext): void {
+  matchVerificationIdentity(record, context);
   if (
     record.networkPolicy.provisioning !== context.networkPolicy.provisioning ||
     record.networkPolicy.verification !== context.networkPolicy.verification
   )
     refuse('verification_binding_mismatch');
-  const required = record.commands
-    .filter((c) => c.required)
-    .map(({ id, command }) => ({ id, command }));
-  const sorted = (commands: typeof required) =>
-    [...commands].sort((a, b) => a.id.localeCompare(b.id));
-  if (canonicalJson(sorted(required)) !== canonicalJson(sorted(context.requiredCommands)))
+  if (!sameRequiredCommands(record.commands, context.requiredCommands))
     refuse('required_commands_mismatch');
 }
 
@@ -378,6 +394,7 @@ export interface ShippingHandoffDeps extends ReceiptContextDeps {
   readonly remoteBranchSha: () => Promise<string | null>;
 }
 
+/** Shipping/PR only; gating engagement uses a separate contact-permission admission. */
 export function makeHandoffAdmission(deps: ShippingHandoffDeps): HandoffAdmission {
   const used = new Set<string>();
   const check = async (probe: () => Promise<boolean>) => {
@@ -388,6 +405,22 @@ export function makeHandoffAdmission(deps: ShippingHandoffDeps): HandoffAdmissio
     }
   };
   return {
+    prBindingVerified: (binding) =>
+      check(async () => {
+        const requested = snapshotJson(binding);
+        const held = facts(deps);
+        const upstream = upstreamIssueBinding(deps.store.validateEvidence().upstreamIssue).upstream;
+        return (
+          requested.upstream.owner.toLowerCase() === upstream.owner.toLowerCase() &&
+          requested.upstream.repo.toLowerCase() === upstream.repo.toLowerCase() &&
+          sameLogin(requested.headOwner, held.contributor) &&
+          requested.branch === deps.bindings.branch &&
+          requested.base === held.defaultBranch
+        );
+      }),
+    releaseReceipt: (digest) => {
+      used.delete(digest);
+    },
     policyFresh: () =>
       check(async () => {
         await buildReceiptContext(deps);
@@ -445,7 +478,12 @@ export function makeHandoffAdmission(deps: ShippingHandoffDeps): HandoffAdmissio
       }),
     remoteBranchSha: async () => {
       const held = facts(deps);
-      const sha = await deps.remoteBranchSha();
+      let sha: string | null;
+      try {
+        sha = await deps.remoteBranchSha();
+      } catch {
+        return refuse('remote_read_unavailable');
+      }
       unchanged(deps, held);
       if (sha !== held.candidateSha) refuse('remote_sha_mismatch');
       return sha;
@@ -471,25 +509,12 @@ export interface ShippingPrContentDeps {
 export function prContentInput(input: ShippingPrContentDeps): PrContentInput {
   const d = snapshotJson(input);
   receiptIntegrity(d.receipt);
-  assertShippableVerification(d.verification);
-  for (const field of [
-    'runId',
-    'candidateSha',
-    'baseSha',
-    'parentSha',
-    'profileDigest',
-    'profile',
-    'commands',
-  ] as const)
-    if (canonicalJson(d.verification[field]) !== canonicalJson(d.receipt.receipt[field]))
-      refuse('verification_binding_mismatch');
+  matchVerificationIdentity(d.verification, d.receipt.receipt);
   if (
     d.intent.operationKind !== 'pr_create' ||
     d.intent.contributionId !== d.receipt.receipt.contributionId ||
     d.intent.candidateSha !== d.verification.candidateSha ||
-    d.receipt.receipt.candidateSha !== d.verification.candidateSha ||
     canonicalJson(d.receipt.receipt.commands) !== canonicalJson(d.verification.commands) ||
-    d.receipt.receipt.baseSha !== d.verification.baseSha ||
     !/^[a-f0-9]{40}$/u.test(d.currentBaseSha)
   )
     refuse('verification_binding_mismatch');

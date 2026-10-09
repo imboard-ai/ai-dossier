@@ -44,8 +44,12 @@ credential-module imports; the composition root supplies authenticated adapters.
 - `makeHandoffAdmission(deps): HandoffAdmission` supplies fresh policy, contributor
   login and exact fork-readiness checks, authenticated `verifyReceipt` plus digest
   and verification binding checks, and the injected verified remote read-back.
-  The receipt check admits a digest once per admission instance (concurrent repeats
-  refuse); the durable `HandoffDriver` remains responsible for link reconciliation.
+  Requested PR head/base bindings must match the held upstream, contributor,
+  branch and default branch. The receipt check reserves a digest once per admission
+  instance (concurrent repeats refuse); `HandoffDriver` releases the reservation
+  when issuance fails before a durable link and reconciles successfully issued links.
+  This factory is shipping/PR-only (`shipping`/`revising` states); gating engagement
+  comments require separate contact-permission and authenticated-contributor admission.
   Supply `ForkPusher.handoffReadBack`, rather than an ordinary remote read, as
   `remoteBranchSha` so a matching but unverified branch cannot admit a PR.
 - `prContentInput(input): PrContentInput` binds model `candidateReady` title/cause/
@@ -60,6 +64,12 @@ verified remote SHA. `ReceiptContextDeps`, `ShippingReceiptDeps`,
 `ShippingAuthorizeDeps`, `ShippingHandoffDeps`, `ShippingPrContentDeps` and
 `ShippingAuthorization` describe these public dependency and result shapes.
 Verification checkpoints point to `artifacts/verification/<candidateSha>.json`.
+`loadPinnedVerification(artifactsDescriptorPath, candidateSha, options)` is the
+descriptor-rooted immutable loader for callers inside `RunStore.withStoreDirectory`.
+The descriptor must remain live for the synchronous call; its private verification
+child is pinned independently and the usual canonical-byte/evidence checks apply.
+`sameRequiredCommands(commands, expected)` compares required evidence against the
+trusted plan by ID and command text without mutating either list.
 Offline integration tests use a real local bare-repository push and real durable
 nonce/intents/handoff stores, with fake GitHub adapters and no live network.
 
@@ -667,7 +677,8 @@ bindings, now)` returns the persisted run. Call it at `plan` in planning after
 writing `artifacts/plan.txt` and before `PlanApproved`; `patch` in verifying after
 `CandidateReady` and before verification, with `artifacts/candidate.diff`; and
 `verification` in shipping after `VerificationPassed` and before any push intent,
-with `artifacts/verification.json`. Paths are relative to the run store. The
+with `artifacts/verification/<candidateSha>.json`; `verificationDigest` binds that
+immutable per-candidate record. Paths are relative to the run store. The
 controller owns these artifact names and writes the content before invoking the
 checkpoint API. Engagement and publication always remain contributor hand-offs.
 

@@ -255,6 +255,36 @@ describe('credential-free shipping authorization', () => {
         'operation_denied'
       );
   });
+  it('keeps boundary reads pinned when the artifacts pathname is replaced', async () => {
+    const h = rig();
+    const artifacts = h.store.storeDirectory('artifacts');
+    const held = `${artifacts}-held`;
+    const clean = fs.readFileSync(h.boundaryFile);
+    h.editBoundary({ listenerConnections: 1 });
+    const original = h.store.withStoreDirectory.bind(h.store);
+    vi.spyOn(h.store, 'withStoreDirectory').mockImplementation((name, work) =>
+      original(name, (directory) => {
+        fs.renameSync(artifacts, held);
+        fs.mkdirSync(artifacts, { mode: 0o700 });
+        fs.writeFileSync(path.join(artifacts, path.basename(h.boundaryFile)), clean, {
+          mode: 0o600,
+        });
+        return work(directory);
+      })
+    );
+    await expect(buildReceiptContext(h.deps)).rejects.toThrow('boundary_not_held');
+    expect(h.deps.policyFresh).not.toHaveBeenCalled();
+  });
+  it('normalizes policy and malformed boundary diagnostics without echoing supplied text', async () => {
+    const h = rig();
+    const sentinel = 'private-provider-response';
+    vi.mocked(h.deps.policyFresh).mockRejectedValue(new Error(sentinel));
+    await expect(buildReceiptContext(h.deps)).rejects.toThrow('policy_unavailable');
+    await expect(buildReceiptContext(h.deps)).rejects.not.toThrow(sentinel);
+    fs.writeFileSync(h.boundaryFile, `{"${sentinel}":`, { mode: 0o600 });
+    await expect(buildReceiptContext(h.deps)).rejects.toThrow('boundary_evidence_invalid');
+    await expect(buildReceiptContext(h.deps)).rejects.not.toThrow(sentinel);
+  });
   it('reconstructs the canonical candidate and issues a fresh single grant on each attempt', async () => {
     const h = rig();
     const first = await h.authorize();
@@ -583,7 +613,8 @@ describe('handoff admission', () => {
     h.admissionDeps.remoteBranchSha.mockResolvedValue(null);
     await expect(h.admission.remoteBranchSha()).rejects.toThrow();
     h.admissionDeps.remoteBranchSha.mockRejectedValue(new Error('unverified'));
-    await expect(h.admission.remoteBranchSha()).rejects.toThrow('unverified');
+    await expect(h.admission.remoteBranchSha()).rejects.toThrow('remote_read_unavailable');
+    await expect(h.admission.remoteBranchSha()).rejects.not.toThrow('unverified');
   });
 });
 

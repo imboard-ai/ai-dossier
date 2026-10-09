@@ -334,6 +334,45 @@ async function handoff(h: Awaited<ReturnType<typeof rig>>, receipt = h.authoriza
 }
 
 describe('persisted verification to real local shipping (#1105)', () => {
+  it.each([
+    'branch',
+    'base',
+  ])('refuses substituted PR %s before publishing any link', async (field) => {
+    const h = await rig();
+    await h.driver.execute(h.input);
+    const p = await handoff(h);
+    Object.assign(p.request.binding, { [field]: 'unverified-other' });
+    const before = p.rows.read();
+    await expect(p.driver.issuePr(p.request)).rejects.toThrow('admission_pr_binding');
+    expect(p.rows.read()).toEqual(before);
+    expect(fs.readdirSync(p.bodyDirectory)).toEqual([]);
+    expect(p.fake.calls).toEqual([]);
+    expect(h.mint).toHaveBeenCalledTimes(1);
+  });
+  it('retries the same handoff admission after transient read-back and reconciliation failures', async () => {
+    const h = await rig();
+    await h.driver.execute(h.input);
+    const p = await handoff(h);
+    const readBack = p.admissionDeps.remoteBranchSha;
+    p.admissionDeps.remoteBranchSha = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('temporary'))
+      .mockImplementation(readBack);
+    await expect(p.driver.issuePr(p.request)).rejects.toThrow('admission_remote_sha');
+    const route = [...p.fake.publicResponses.keys()][0];
+    if (!route) throw new Error('missing route');
+    p.fake.publicResponses.set(route, { status: 503, body: {} });
+    await expect(p.driver.issuePr(p.request)).rejects.toThrow('reconciliation_unavailable');
+    expect(p.rows.read()).toHaveLength(1);
+    expect(fs.readdirSync(p.bodyDirectory)).toEqual([]);
+    p.fake.publicResponses.set(route, { status: 200, body: [] });
+    await expect(p.driver.issuePr(p.request)).resolves.toMatchObject({
+      kind: 'awaiting_contributor',
+    });
+    expect(
+      p.rows.read().filter((row) => (row as { type: string }).type === 'link_issued')
+    ).toHaveLength(1);
+  });
   it('pushes the reconstructed candidate and issues a compare link only after verified read-back', async () => {
     const h = await rig();
     const prepared = await makeAuthorize(h.deps)(h.input);

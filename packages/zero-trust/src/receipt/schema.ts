@@ -200,6 +200,20 @@ export function canonicalJson(input: unknown, maxBytes = 128 * 1024): string {
 export function snapshotJson<T>(input: T): T {
   return JSON.parse(canonicalJson(input)) as T;
 }
+/** Compare evidence to the trusted plan without mutating either list. */
+export function sameRequiredCommands(
+  commands: readonly CommandEvidence[],
+  expected: readonly { id: string; command: string }[]
+): boolean {
+  const sort = (rows: readonly { id: string; command: string }[]) =>
+    [...rows].sort((a, b) => a.id.localeCompare(b.id));
+  return (
+    canonicalJson(
+      sort(commands.filter((c) => c.required).map(({ id, command }) => ({ id, command })))
+    ) === canonicalJson(sort(expected))
+  );
+}
+
 export function evidenceVerified(commands: readonly CommandEvidence[]): boolean {
   // Unknown discovery counts cannot earn a verification claim. This conservative
   // contract deliberately refuses shipping even for an inconclusive optional check.

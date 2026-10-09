@@ -40,6 +40,10 @@ import { HandoffError } from './text';
 
 /** Admission is identical to a brokered write (PRD §5.9); each check runs fresh. */
 export interface HandoffAdmission {
+  /** Shipping composition additionally binds the exact requested PR head/base. */
+  prBindingVerified?(binding: PrBinding): Promise<boolean>;
+  /** Release a receipt reservation when no durable link was issued. */
+  releaseReceipt?(receiptDigest: string): void;
   /** AI policy, issue open state, assignment, competing fixes and permission, rechecked now. */
   policyFresh(): Promise<boolean>;
   /** The authenticated contributor login equals the run's contributor. */
@@ -495,22 +499,33 @@ export class HandoffDriver {
       const content = buildPrContent(request.content);
       const digest = receiptDigest(parseReceipt(request.content.receipt));
       const { admission } = this.deps;
-      await this.check('policy', () => admission.policyFresh());
-      await this.check('contributor', () => admission.contributorVerified());
-      await this.check('fork_binding', () => admission.forkBindingVerified());
-      await this.check('receipt', () => admission.receiptValid(sha, digest));
-      await this.check('remote_sha', async () => (await admission.remoteBranchSha()) === sha);
-      // Never issue while any PR exists on this head/base, in any state.
-      const existing = await reconcilePr(this.deps.read, binding, {
-        marker: handoffMarker(intent),
-        contributor: this.state.run.contributor,
-        candidateSha: sha,
-      });
-      if (existing.kind === 'unknown') throw new HandoffError('reconciliation_unavailable');
-      if (existing.kind !== 'absent') throw new HandoffError('existing_submission');
-      const { title, body, commands } = content;
-      const link = compareLink(intent, binding, title, body, commands);
-      return this.issue(intent, binding, link);
+      let issued = false;
+      let receiptReserved = false;
+      try {
+        const bindingProbe = admission.prBindingVerified;
+        if (bindingProbe) await this.check('pr_binding', () => bindingProbe(binding));
+        await this.check('policy', () => admission.policyFresh());
+        await this.check('contributor', () => admission.contributorVerified());
+        await this.check('fork_binding', () => admission.forkBindingVerified());
+        await this.check('receipt', () => admission.receiptValid(sha, digest));
+        receiptReserved = true;
+        await this.check('remote_sha', async () => (await admission.remoteBranchSha()) === sha);
+        // Never issue while any PR exists on this head/base, in any state.
+        const existing = await reconcilePr(this.deps.read, binding, {
+          marker: handoffMarker(intent),
+          contributor: this.state.run.contributor,
+          candidateSha: sha,
+        });
+        if (existing.kind === 'unknown') throw new HandoffError('reconciliation_unavailable');
+        if (existing.kind !== 'absent') throw new HandoffError('existing_submission');
+        const { title, body, commands } = content;
+        const link = compareLink(intent, binding, title, body, commands);
+        const outcome = this.issue(intent, binding, link);
+        issued = true;
+        return outcome;
+      } finally {
+        if (!issued && receiptReserved) admission.releaseReceipt?.(digest);
+      }
     });
   }
 
