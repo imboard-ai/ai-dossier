@@ -4,7 +4,7 @@ description: 'Take a SET of GitHub issues to merged PRs by building a dependency
 metadata:
   dossier.dossier_schema_version: '1.0.0'
   dossier.title: 'Fleet Cycle — Orchestrate Multiple Issues'
-  dossier.version: '1.10.0'
+  dossier.version: '1.11.0'
   dossier.protocol_version: '"1.0"'
   dossier.status: 'Draft'
   dossier.last_updated: '2026-10-09'
@@ -18,8 +18,8 @@ metadata:
   dossier.inputs: '{"optional":[{"default":3,"description":"Maximum number of full-cycle runs dispatched concurrently within a wave. Bounded by worktree-pool capacity.","name":"max_parallel","type":"number"},{"default":"auto","description":"Override the computed plan. ''auto'' = dependency-aware waves (default). ''serial'' = one issue at a time in number order. ''parallel'' = ignore dependencies, run all at once (unsafe; use only for known-independent issues).","name":"mode","type":"string"},{"default":"imboard-ai/git/warm-worktree","description":"Warm-worktree dossier passed through to each full-cycle-issue run.","name":"warmup_dossier","type":"string"},{"default":"auto","description":"Default target branch for issues that do not declare their own. Passed through to each full-cycle-issue run.","name":"base_branch","type":"string"},{"default":"auto","description":"Model tier for dispatched full-cycle generation phases: cheap | mid | strong | auto. auto = per-issue by risk signals (labels, title, touched areas): docs/chore→cheap, standard→mid, security/payments/migrations/auth/schema→strong.","name":"dispatch_model_tier","type":"string"}],"required":[{"description":"The issue set to process. Explicit list (''1,2,3''), range (''1..9''), or mixed (''1,2,5..8'').","example":"1..9","name":"issues","type":"string"}]}'
   dossier.outputs: '{"files":[{"description":"Gzipped dependency DAG and wave plan, written before dispatch, kept per-project outside the working tree (most recent 20 retained)","format":"markdown+gzip","path":"~/.dossier/logs/fleet-cycle/{project}/FLEET-PLAN-{timestamp}.md.gz"}]}'
   dossier.authors: '[{"name":"Yuval Dimnik"}]'
-  dossier.checksum: '{"algorithm":"sha256","hash":"89befed7ed4eb0128fafd9e41bdec67a596a75e90ebe9d8df5b00cda154bba4d"}'
-  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"XHz7ThGg6ONkRpC3xuWrZ9XM0bTaX1bjIsIr4bBkipznUAXA9VMDTOahq4q/ALzA+g6FpgzJF26+kJ6iT6bPDQ==","signed_at":"2026-10-09T15:23:54.094Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
+  dossier.checksum: '{"algorithm":"sha256","hash":"889968b080dc9b98679faa1d061a7b7ea4ec4322905f7ca289045ac3eb6fda73"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"32Ixl5tQ0Nop7DK0rm8VhFaG/BDEKIgoy6vixXdfIIvMlx6qTRqjBHXnkHFlmF2zsU55EXA3PYbIqB5sq/XvAg==","signed_at":"2026-10-09T21:37:36.501Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Fleet Cycle — Orchestrate Multiple Issues
@@ -110,6 +110,8 @@ Record the chosen `ship_mode` and the evidence (watcher path, `allow_auto_merge`
 
 > Pool CLI invocation: always `npx -y @ai-dossier/worktree-pool@^0.7.2 <cmd>`. The bare `npx worktree-pool` only resolves where the package is installed locally (it 404s elsewhere), and versions before 0.5.1 have a data-loss bug in `gc`, and `claim` before 0.7.2 hands out a warm entry whose directory was deleted outside the pool, failing as `spawnSync git ENOENT`. Never pin an older version — and bump this range deliberately: a caret range on 0.x never leaves its minor (`^0.5.1` stays on 0.5.x).
 
+**Reclaim leaked slots first.** Before computing `N` for the first wave, run `ai-dossier run imboard-ai/git/worktree-hygiene` once from the orchestrator, in the foreground. It returns slots whose issues are closed and merged, and it is cheap: it skips itself when it succeeded within the last hour, and waits for a concurrent run instead of racing. Exit 1 or 3 is a warning; never block the fleet on it. Use the post-hygiene `status` for capacity.
+
 Before dispatching each wave, from the **orchestrator** — not the agents (replenish is serial by construction, so one orchestrator prewarm is strictly cheaper than N agents cold-starting behind the pool lock):
 
 ```bash
@@ -199,6 +201,7 @@ Post it to the conversation, with direct PR URLs for every merged and failed iss
 - [ ] Dependents branched from updated base after their dependency merged
 - [ ] Failures blocked their transitive dependents; independents continued
 - [ ] Wave N+1 gated on wave N being MERGED (not merely parked)
+- [ ] worktree-hygiene ran (or skipped as fresh) before the first wave, and its result was reported
 - [ ] Pool prewarmed before each wave (or the missing-pool case reported once)
 - [ ] Aggregate report posted with per-issue status, PR links, `model=` per issue, any escalations, and last-runstate-comment links
 

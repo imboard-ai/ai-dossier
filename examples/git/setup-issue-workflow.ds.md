@@ -4,10 +4,10 @@ description: 'Create a workflow for GitHub issues: fetch issue details, create a
 metadata:
   dossier.dossier_schema_version: '1.0.0'
   dossier.title: 'Setup Issue Workflow'
-  dossier.version: '1.14.5'
+  dossier.version: '1.14.6'
   dossier.protocol_version: '"1.0"'
   dossier.status: 'Stable'
-  dossier.last_updated: '2026-10-06'
+  dossier.last_updated: '2026-10-09'
   dossier.objective: 'Create a workflow for GitHub issues: fetch issue details, create appropriately named branches, set up git worktrees with environment warmup (or claim from a pre-warmed pool), and generate planning files; in batch mode (batch_id) it creates the shared batch branch for the batch anchor instead'
   dossier.category: '["development"]'
   dossier.risk_level: 'low'
@@ -17,8 +17,8 @@ metadata:
   dossier.external_references: '[{"description":"GitHub CLI documentation","required":false,"trust_level":"trusted","type":"documentation","url":"https://cli.github.com/"},{"description":"Official git documentation","required":false,"trust_level":"trusted","type":"documentation","url":"https://git-scm.com/docs/git-worktree"},{"description":"GitHub CLI documentation","required":false,"trust_level":"trusted","type":"documentation","url":"https://cli.github.com/manual/"},{"description":"External reference: conventionalcommits.org","required":false,"trust_level":"trusted","type":"documentation","url":"https://www.conventionalcommits.org/"}]'
   dossier.inputs: '{"optional":[{"default":"imboard-ai/git/warm-worktree","description":"Which warm-worktree dossier to run for worktree warmup. Override this to use a project-specific warmup (e.g., imboard-ai/imboard/warm-worktree-pnpm-ssm for pnpm+SSM projects).","name":"warmup_dossier","type":"string"},{"default":"auto","description":"Target branch to branch from and merge into. Overrides issue body parsing (''merges into `<branch>`''). Use for epic sub-issues or when the target is not main.","name":"base_branch","type":"string"},{"description":"Runstate run id minted by gate-issue; pass through unchanged. In batch mode this is the batch''s run id (minted against the anchor issue).","name":"run_id","type":"string"},{"description":"Batch id slug (e.g. b-2026-08-29-01). When set, run in BATCH MODE: one run per batch against the batch ANCHOR issue — creates the shared branch batch/<batch_id>-<date> from base, skips per-issue branch naming and the planning scaffold, and posts phase=batch-setup on the anchor. Unset = ordinary per-issue mode.","name":"batch_id","type":"string"}]}'
   dossier.authors: '[{"name":"Yuval Dimnik"}]'
-  dossier.checksum: '{"algorithm":"sha256","hash":"1c7b87d0877bd1fdb646bb2153b33d2a933e9bee0d915621f79017f377738f84"}'
-  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"XHY3gTVaRNPoTBVJ9zNin8varfqLoeXnSAK2beB5af8PHFMc5vUyBlPjnJ5IrZWxVnBEOmXL1jfpUSQZ7dpLCQ==","signed_at":"2026-10-07T12:01:35.899Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
+  dossier.checksum: '{"algorithm":"sha256","hash":"86193d85713c5351f0dfe0dc7e891587c4f9436e585f960227a5b3350755f296"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"sT3E9JMibDuxyo5bYZlhn1stHfYEGucpmOlQLjZhN7YNJ7QsG2H8nrLvA6nYLtmOe9DXeQMAcho4Ap+Vku+cBg==","signed_at":"2026-10-09T21:37:39.680Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Setup Issue Workflow
@@ -115,7 +115,7 @@ Option 1 → Step 5.1. Options 2, 3, 4 → Step 5b.
 
 > Pool CLI invocation: always `npx -y @ai-dossier/worktree-pool@^0.7.2 <cmd>`. The bare `npx worktree-pool` only resolves where the package is installed locally (it 404s elsewhere), and versions before 0.5.1 have a data-loss bug in `gc`, and `claim` before 0.7.2 hands out a warm entry whose directory was deleted outside the pool, failing as `spawnSync git ENOENT`. Never pin an older version — and bump this range deliberately: a caret range on 0.x never leaves its minor (`^0.5.1` stays on 0.5.x).
 
-> **Never run `worktree-pool gc`, `refresh`, or any command described as removing worktrees.** The pool directory is shared with developer worktrees; in `@ai-dossier/worktree-pool` ≤ 0.5.0 `gc` deleted every worktree it did not create (ai-dossier#438). Agents may only use `status`, `claim`, `return`, `replenish`, `detect`. If the pool looks broken (claim fails, orphaned entry, missing `.git` admin dir), **fall back to cold worktree creation (Step 6)** and mention the broken pool in the setup milestone (`pool_claimed=false pool_note=<reason>`); pool maintenance is a human task.
+> **Never run `worktree-pool gc`, `refresh`, or any command described as removing worktrees.** The pool directory is shared with developer worktrees; in `@ai-dossier/worktree-pool` ≤ 0.5.0 `gc` deleted every worktree it did not create (ai-dossier#438). Agents may only use `status`, `claim`, `return`, `replenish`, `detect` — plus the sanctioned `ai-dossier run imboard-ai/git/worktree-hygiene` dossier (item 3), whose pinned `gc` only touches the pool's own entries and never removes foreign worktrees. If the pool looks broken (claim fails, orphaned entry, missing `.git` admin dir), **fall back to cold worktree creation (Step 6)** and mention the broken pool in the setup milestone (`pool_claimed=false pool_note=<reason>`); pool maintenance is a human task.
 
 Pool worktrees already have `node_modules`, `.env` files and build artifacts — ~2 seconds vs ~3-5 minutes cold.
 
@@ -147,7 +147,7 @@ Pool worktrees already have `node_modules`, `.env` files and build artifacts —
    - **Skip Steps 6, 7, 8 and 8.5 entirely** — go to Step 9 using `CLAIMED_PATH` as the worktree path.
    - Print `⚡ Claimed pre-warmed worktree from pool (instant setup)`; if rebased, also print `Rebased onto $BASE_BRANCH`.
 
-3. **If pool is empty or claim fails**: print `Pool empty or unavailable — creating cold worktree...` and continue with Step 6.
+3. **If pool is empty or claim fails**: run `ai-dossier run imboard-ai/git/worktree-hygiene` once (foreground; it skips itself if it succeeded within the last hour, and exit 1 or 3 is non-fatal), then retry the claim **once**. If that claim also fails, print `Pool empty or unavailable — creating cold worktree...` and continue with Step 6. Record `pool_note=hygiene-<exit>` in the setup milestone.
 
 ### Step 5b: Other Modes (Options 2, 3, 4)
 
