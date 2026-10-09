@@ -9,6 +9,7 @@ export enum ReasonCode {
   PlanApproved = 'plan_approved',
   CandidateReady = 'candidate_ready',
   VerificationPassed = 'verification_passed',
+  BaseAdvanced = 'base_advanced',
   RepairRequired = 'repair_required',
   UserPaused = 'user_paused',
   ResumeGating = 'resume_gating',
@@ -109,6 +110,7 @@ export const TRANSITIONS = Object.freeze({
   } as const),
   shipping: Object.freeze({
     ...failures,
+    [ReasonCode.BaseAdvanced]: 'verifying',
     [ReasonCode.PublicationObserved]: 'submitted',
     [ReasonCode.UserPaused]: 'paused_user',
     [ReasonCode.ContributorHandoff]: 'awaiting_contributor',

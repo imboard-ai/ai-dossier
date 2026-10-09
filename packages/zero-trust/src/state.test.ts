@@ -110,6 +110,7 @@ const expected: Record<RunState, string[]> = {
   ],
   shipping: [
     ...failTargets,
+    'verifying',
     'submitted',
     'paused_user',
     'awaiting_contributor',
@@ -137,6 +138,15 @@ const expected: Record<RunState, string[]> = {
 };
 
 describe('lifecycle contract', () => {
+  it('base_advanced returns only shipping to verification and replays that history', () => {
+    for (const state of RUN_STATES) {
+      if (state === 'shipping') {
+        const next = move(at(state), R.BaseAdvanced);
+        expect(next.state).toBe('verifying');
+        expect(deserializeRun(serializeRun(next))).toEqual(next);
+      } else expect(() => move(at(state), R.BaseAdvanced)).toThrow(IllegalTransitionError);
+    }
+  });
   it('has exactly the required 19 states and immutable table', () => {
     expect(RUN_STATES).toEqual(Object.keys(expected));
     expect(TERMINAL_STATES).toEqual([
