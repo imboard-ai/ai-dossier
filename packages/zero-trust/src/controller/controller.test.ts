@@ -62,7 +62,7 @@ function record(
   const boundaryName = `boundary-${sha256(String(context.run.history.length)).slice(0, 32)}.json`;
   fs.writeFileSync(path.join(dir, boundaryName), bytes, { mode: 0o600 });
   const { schemaVersion: _, recordDigest: __, ...body } = template;
-  const candidateSha = context.store.currentCheckpointBindings('patch')?.candidateSha ?? latestSha;
+  const candidateSha = latestSha;
   return publishVerification(dir, {
     ...body,
     runId: context.run.runId,
@@ -158,7 +158,11 @@ function rig(checkpoints: ('plan' | 'patch' | 'verification')[] = []) {
     },
     implement: async (c) => {
       write(`candidate-${c.run.history.length}`);
-      latestSha = c.run.history.some((e) => e.reasonCode === ReasonCode.RepairRequired)
+      latestSha = c.run.history.some(
+        (e) =>
+          e.reasonCode === ReasonCode.RepairRequired ||
+          e.reasonCode === ReasonCode.RevisionRequested
+      )
         ? sha256(String(c.run.history.length)).slice(0, 40)
         : SHA;
       c.store.replaceArtifact('candidate.diff', Buffer.from('diff'));
@@ -167,8 +171,10 @@ function rig(checkpoints: ('plan' | 'patch' | 'verification')[] = []) {
     review: async () => ({ kind: 'approved' }),
     verify: async (c) => ({ kind: 'verified', record: record(c) }),
     drift: async () => ({ kind: 'unchanged' }),
-    ship: async () => {
-      write('pr');
+    ship: async (c) => {
+      write(
+        `pr-${c.run.history.filter((e) => e.reasonCode === ReasonCode.PublicationObserved).length}`
+      );
       return { kind: 'submitted' };
     },
     resumeHandoff: async () => ({ kind: 'waiting' }),
@@ -512,7 +518,7 @@ describe('RunController', () => {
     const h = rig();
     h.steps.scripts.ship = [
       async () => {
-        h.writes.add('pr');
+        h.writes.add('pr-0');
         throw new Error('lost publication response');
       },
     ];
@@ -688,5 +694,209 @@ describe('RunController', () => {
     });
     await expect(h.controller.resume(run.runId)).rejects.toMatchObject({ code: 'recovery_failed' });
     expect(h.vm.calls.filter((c) => c.op === 'create')).toHaveLength(0);
+  });
+  it.each([
+    'awaiting_maintainer',
+    'paused_user',
+  ] as const)('observer failure at %s cannot skip mandatory teardown', async (state) => {
+    const h = rig(state === 'paused_user' ? ['plan'] : []);
+    h.steps.scripts.gate = [
+      async (c) => {
+        await c.createVm({ scope: 'container' });
+        return { kind: state === 'paused_user' ? 'proceed' : 'request_permission' };
+      },
+    ];
+    h.deps.drivers.push({
+      observeRun: (run) => {
+        if (run.state === state) throw new Error('observer failure');
+      },
+    });
+    await expect(h.controller.start(h.config)).rejects.toMatchObject({ code: 'driver_failed' });
+    expect(await h.vm.listByRun(h.controller.snapshot().runId)).toHaveLength(0);
+    expect(h.steps.calls).not.toContain('implement');
+  });
+  it.each([
+    'metering',
+    'observer',
+  ] as const)('cleanup %s failure still attempts all remaining guests', async (failure) => {
+    const h = rig();
+    h.steps.scripts.gate = [
+      async (c) => {
+        await c.createVm({ scope: 'container' });
+        await c.createVm({ scope: 'container' });
+        return { kind: 'request_permission' };
+      },
+    ];
+    if (failure === 'metering')
+      h.deps.observeVm = async (hold) => {
+        if (hold.purpose === 'teardown') throw new Error('metering failed');
+        return observation(hold.estimate);
+      };
+    else {
+      vi.spyOn(h.vm, 'destroy').mockRejectedValue(new Error('destroy failed'));
+      h.deps.drivers.push({
+        observeRun: (run) => {
+          if (run.state === 'blocked_cleanup') throw new Error('observer failed');
+        },
+      });
+    }
+    await expect(h.controller.start(h.config)).rejects.toMatchObject({
+      code: failure === 'metering' ? 'recovery_failed' : 'driver_failed',
+    });
+    expect(h.vm.calls.filter((call) => call.op === 'destroy')).toHaveLength(
+      failure === 'metering' ? 2 : 0
+    );
+    if (failure === 'metering')
+      expect(await h.vm.listByRun(h.controller.snapshot().runId)).toHaveLength(0);
+    else expect(vi.mocked(h.vm.destroy)).toHaveBeenCalledTimes(6);
+  });
+  it('unfunded cleanup fences every reopen until explicit accounting reconciliation', async () => {
+    const h = rig();
+    h.steps.scripts.gate = [
+      async (c) => {
+        await c.createVm({ scope: 'container' });
+        return { kind: 'request_permission' };
+      },
+    ];
+    h.deps.estimateVm = (_spec, purpose) =>
+      purpose === 'teardown'
+        ? { ...h.estimate, money: { currency: 'USD', minor: 1000 } }
+        : h.estimate;
+    await expect(h.controller.start(h.config)).rejects.toMatchObject({ code: 'admission_closed' });
+    const id = h.controller.snapshot().runId;
+    const calls = h.steps.calls.length;
+    h.steps.scripts.resumeHandoff = [{ kind: 'invited' }];
+    expect((await new RunController(h.deps).resume(id)).state).toBe('awaiting_maintainer');
+    expect(h.steps.calls).toHaveLength(calls);
+    h.deps.recovery.reconcileCleanup = async () => 'adapter proves destruction is not billable';
+    expect((await new RunController(h.deps).resume(id)).state).toBe('submitted');
+  });
+  it('synchronous observing callback cannot reenter start or orphan a store lock', async () => {
+    const h = rig();
+    let refused = false;
+    h.deps.drivers.unshift({
+      observeRun: (run) => {
+        if (run.state === 'gating') {
+          expect(() => h.controller.start(h.config)).toThrow('busy');
+          refused = true;
+        }
+      },
+    });
+    const run = await h.controller.start(h.config);
+    expect(run.state).toBe('submitted');
+    expect(refused).toBe(true);
+    const store = open(h, run.runId);
+    expect(store.run).toEqual(run);
+    store.close();
+  });
+  it.each([
+    'permission',
+    'fork',
+    'tracker',
+  ] as const)('hand-off from durable %s observation preserves the stop', async (scenario) => {
+    const h = rig();
+    if (scenario === 'permission') h.steps.scripts.gate = [{ kind: 'request_permission' }];
+    if (scenario === 'fork') h.steps.scripts.ship = [{ kind: 'fork_missing' }];
+    const run = await h.controller.start(h.config);
+    if (scenario === 'tracker') h.steps.scripts.track = [{ kind: 'hand_off' }];
+    else h.steps.scripts.resumeHandoff = [{ kind: 'hand_off' }];
+    expect((await h.controller.resume(run.runId)).state).toBe(run.state);
+  });
+  it.each([
+    {},
+    { policyDigest: 'bad', budgetSessionId: 'other', planDigest: 'a'.repeat(64) },
+    { policyDigest: 'a'.repeat(64), budgetSessionId: 'other', planDigest: 'a'.repeat(64) },
+  ])('rejects malformed nested bindings even with all checkpoints disabled: %j', async (bindings) => {
+    const h = rig();
+    h.steps.scripts.plan = [{ kind: 'planned', bindings } as never];
+    await expect(h.controller.start(h.config)).rejects.toMatchObject({ code: 'invalid_outcome' });
+    expect(h.steps.calls).not.toContain('implement');
+  });
+  it('missing verification digest cannot weaken returned-record binding', async () => {
+    const h = rig();
+    h.steps.scripts.verify = [
+      async (c) => {
+        const verified = record(c);
+        return { kind: 'verified', record: { candidateSha: verified.candidateSha } } as never;
+      },
+    ];
+    await expect(h.controller.start(h.config)).rejects.toMatchObject({ code: 'invalid_outcome' });
+    expect(h.steps.calls).not.toContain('ship');
+  });
+  it.each([
+    ReasonCode.RepairRequired,
+    ReasonCode.BaseAdvanced,
+    ReasonCode.MaintainerInvited,
+    ReasonCode.ResumeShipping,
+    ReasonCode.RevisionRequested,
+    ReasonCode.ResumePlanning,
+    ReasonCode.ResumeVerifying,
+  ] as const)('crashes after persisted %s, then matches uninterrupted continuation with no duplicate writes', async (reason) => {
+    const h = rig(
+      reason === ReasonCode.ResumePlanning
+        ? ['plan']
+        : reason === ReasonCode.ResumeVerifying
+          ? ['patch']
+          : []
+    );
+    if (reason === ReasonCode.RepairRequired)
+      h.steps.scripts.verify = [async (c) => ({ kind: 'verified', record: record(c, 'failed') })];
+    if (reason === ReasonCode.BaseAdvanced)
+      h.steps.scripts.drift = [
+        async (c) => {
+          latestSha = 'd'.repeat(40);
+          return {
+            kind: 'advanced',
+            bindings: {
+              policyDigest: 'a'.repeat(64),
+              budgetSessionId: c.sessionId,
+              candidateSha: latestSha,
+            },
+          };
+        },
+      ];
+    if (reason === ReasonCode.MaintainerInvited) {
+      h.steps.scripts.gate = [{ kind: 'request_permission' }];
+      h.steps.scripts.resumeHandoff = [{ kind: 'invited' }];
+    }
+    if (reason === ReasonCode.ResumeShipping) {
+      h.steps.scripts.ship = [{ kind: 'fork_missing' }];
+      h.steps.scripts.resumeHandoff = [{ kind: 'resume_shipping' }];
+    }
+    if (reason === ReasonCode.RevisionRequested) h.steps.scripts.track = [{ kind: 'revision' }];
+    let injected = false;
+    h.steps.before = (_phase, c) => {
+      if (!injected && c.run.history.some((event) => event.reasonCode === reason)) {
+        injected = true;
+        throw new Error('next-step crash');
+      }
+    };
+    let run: Awaited<ReturnType<RunController['start']>>;
+    try {
+      run = await h.controller.start(h.config);
+    } catch (error) {
+      expect(error).toMatchObject({ code: 'step_failed' });
+      run = h.controller.snapshot();
+    }
+    if (!injected) {
+      if (run.state === 'paused_user') {
+        const store = open(h, run.runId);
+        const point = reason === ReasonCode.ResumePlanning ? 'plan' : 'patch';
+        const checkpoint = store.checkpoint(point);
+        if (!checkpoint) throw new Error('checkpoint missing');
+        approveCheckpoint(store, store.run, { point, digest: checkpoint.digest }, TIME);
+        store.close();
+      }
+      try {
+        run = await h.controller.resume(run.runId);
+      } catch (error) {
+        expect(error).toMatchObject({ code: 'step_failed' });
+        run = h.controller.snapshot();
+      }
+    }
+    expect(injected).toBe(true);
+    const resumed = await new RunController(h.deps).resume(run.runId);
+    expect(resumed.state).toBe('submitted');
+    expect(h.duplicates()).toBe(0);
   });
 });

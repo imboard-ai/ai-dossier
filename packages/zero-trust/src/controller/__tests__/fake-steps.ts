@@ -21,6 +21,7 @@ import { RunStore } from '../run-store';
 
 type Script<T> = T | ((context: PhaseContext) => T | Promise<T>);
 export class ScriptedSteps implements PhaseSteps {
+  before?: (phase: keyof PhaseSteps, context: PhaseContext) => void;
   readonly calls: (keyof PhaseSteps)[] = [];
   readonly scripts: { [K in keyof PhaseSteps]?: Script<Awaited<ReturnType<PhaseSteps[K]>>>[] } = {};
   constructor(private readonly defaults: PhaseSteps) {}
@@ -29,6 +30,7 @@ export class ScriptedSteps implements PhaseSteps {
     context: PhaseContext
   ): Promise<Awaited<ReturnType<PhaseSteps[K]>>> {
     this.calls.push(phase);
+    this.before?.(phase, context);
     const script = this.scripts[phase]?.shift();
     return (
       script === undefined

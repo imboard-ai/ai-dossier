@@ -1,5 +1,5 @@
-/** Bounded VM teardown (PRD §5.9, scenario 20). Three failed deletions put the
- * run in `blocked_cleanup`, which has no edge back to execution or shipping. */
+/** Bounded VM teardown (PRD §5.9, scenario 20). Three failed deletions return a
+ * blocked-cleanup outcome, normally transitioning through CleanupFailed. */
 import { isAdmitted, type OperationKind } from '../intents';
 import type { Journal } from '../journal';
 import { ReasonCode, type RunRecord, TERMINAL_STATES, transitionRun } from '../state';
@@ -37,7 +37,8 @@ export async function teardownVm(
     now: () => Date;
     retryDelayMs?: number;
     sleep?: (ms: number) => Promise<void>;
-    /** Reconcile an already fenced stop without inventing a new lifecycle edge. */
+    /** An already terminal/cleanup-blocked run retains state/history on failure.
+     * The outcome kind describes cleanup, not necessarily outcome.run.state. */
     reconcileStopped?: boolean;
   }
 ): Promise<TeardownOutcome> {

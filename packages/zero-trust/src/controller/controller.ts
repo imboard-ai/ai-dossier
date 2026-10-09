@@ -5,6 +5,7 @@ import type { BudgetEstimate, BudgetObservation, BudgetReservation } from '../bu
 import { readPrivate } from '../durable-fs';
 import { applyVerification } from '../ecosystem/classify';
 import { Journal } from '../journal';
+import { canonicalJson } from '../receipt/schema';
 import { assertSecretFree } from '../redaction';
 import {
   isRecord,
@@ -18,10 +19,11 @@ import {
   transitionRun,
 } from '../state';
 import type { VmAdapter, VmHandle, VmSpec } from '../vm/adapter';
-import { teardownVm } from '../vm/teardown';
+import { type TeardownOutcome, teardownVm } from '../vm/teardown';
 import {
   type CheckpointBindings,
   type CheckpointPoint,
+  checkpointBindings,
   checkpointDue,
   pauseAtCheckpoint,
 } from './checkpoints';
@@ -42,10 +44,16 @@ export type GateOutcome =
 export type AcquireOutcome = PhaseStop | { readonly kind: 'acquired' };
 export type PlanOutcome =
   | PhaseStop
-  | { readonly kind: 'planned'; readonly bindings: CheckpointBindings };
+  | {
+      readonly kind: 'planned';
+      readonly bindings: CheckpointBindings & { readonly planDigest: string };
+    };
 export type ImplementOutcome =
   | PhaseStop
-  | { readonly kind: 'candidate'; readonly bindings: CheckpointBindings };
+  | {
+      readonly kind: 'candidate';
+      readonly bindings: CheckpointBindings & { readonly candidateSha: string };
+    };
 export type ReviewOutcome = PhaseStop | { readonly kind: 'approved' };
 export type VerifyOutcome =
   | PhaseStop
@@ -53,7 +61,10 @@ export type VerifyOutcome =
 export type DriftOutcome =
   | PhaseStop
   | { readonly kind: 'unchanged' }
-  | { readonly kind: 'advanced'; readonly bindings: CheckpointBindings };
+  | {
+      readonly kind: 'advanced';
+      readonly bindings: CheckpointBindings & { readonly candidateSha: string };
+    };
 export type ShipOutcome =
   | PhaseStop
   | {
@@ -112,10 +123,15 @@ export interface RecoveryHooks {
   openStore(root: string, runId: string): RunStore;
   openBudget(store: RunStore): BudgetLedger;
   reconcileHold(hold: BudgetReservation, context: PhaseContext): Promise<BudgetObservation | null>;
+  /** Explicit accounting/no-charge evidence for previously unfunded destruction.
+   * Wiring reconciles the actual charge in the ledger before returning evidence. */
+  reconcileCleanup?(vmId: string, context: PhaseContext): Promise<string | null>;
   reconcileVms(context: PhaseContext, cleanup: () => Promise<void>): Promise<void>;
   recoverCredentials(context: PhaseContext): Promise<void>;
   resumeIntents(context: PhaseContext): Promise<undefined | RunRecord>;
+  /** Replay/reconcile existing effects only; fresh invitation checks belong to PhaseSteps. */
   resumeHandoff(context: PhaseContext): Promise<undefined | RunRecord>;
+  /** Replay/reconcile existing effects only; fresh tracker observations belong to PhaseSteps. */
   resumeTracker(context: PhaseContext): Promise<undefined | RunRecord>;
   killAll(context: PhaseContext): Promise<void>;
 }
@@ -239,6 +255,7 @@ export class RunController {
   private incidentKill?: Promise<void>;
   private recovering = false;
   private oldHolds = new Set<string>();
+  private unfundedCleanup = new Set<string>();
   private cached = new Map<string, Outcome>();
   private last?: RunRecord;
   constructor(private readonly deps: ControllerDependencies) {}
@@ -279,6 +296,23 @@ export class RunController {
         );
       }
       this.openJournal(true);
+      for (const vmId of this.unfundedCleanup) {
+        const evidence = await this.recover(
+          () => this.deps.recovery.reconcileCleanup?.(vmId, this.context()) ?? Promise.resolve(null)
+        );
+        if (evidence === null) continue;
+        assertSecretFree(evidence);
+        if (typeof evidence !== 'string' || !evidence.trim() || evidence.length > 500)
+          throw new ControllerError('invalid_outcome');
+        this.journal?.append({
+          v: 1,
+          type: 'cleanup_reconciled',
+          runId: this.held.runId,
+          vmId,
+          evidence,
+        });
+        this.unfundedCleanup.delete(vmId);
+      }
       this.notify(this.store.run);
       await this.recover(() =>
         this.deps.recovery.reconcileVms(this.context(), () => this.cleanup())
@@ -309,19 +343,23 @@ export class RunController {
     this.incidentKill = undefined;
     this.recovering = false;
     this.oldHolds.clear();
+    this.unfundedCleanup.clear();
     this.cached.clear();
-    const task = work().finally(() => {
-      try {
-        this.last = this.store?.run ?? this.last;
-      } finally {
-        this.journal?.close();
-        this.store?.close();
-        this.store = undefined;
-        this.ledger = undefined;
-        this.journal = undefined;
-        this.running = undefined;
-      }
-    });
+    // Fence synchronous observer/hook re-entry before invoking any injected code.
+    const task = Promise.resolve()
+      .then(work)
+      .finally(() => {
+        try {
+          this.last = this.store?.run ?? this.last;
+        } finally {
+          this.journal?.close();
+          this.store?.close();
+          this.store = undefined;
+          this.ledger = undefined;
+          this.journal = undefined;
+          this.running = undefined;
+        }
+      });
     this.running = task;
     return task;
   }
@@ -377,7 +415,12 @@ export class RunController {
     for (const event of run.history.slice(previous.history.length)) {
       current = transitionRun(current, event.reasonCode, event.timestamp);
       this.held.persistRun(current);
-      this.notify(current);
+      try {
+        this.notify(current);
+      } catch (error) {
+        if (stopped(current.state)) await this.cleanup();
+        throw error;
+      }
     }
     if (stopped(run.state)) await this.cleanup();
   }
@@ -418,15 +461,26 @@ export class RunController {
         Object.hasOwn(KINDS, event.phase) &&
         Object.keys(event).length === 6
       )
-        this.cached.set(event.key, outcome(event.phase as PhaseName, event.outcome));
+        this.cached.set(event.key, this.validatedOutcome(event.phase as PhaseName, event.outcome));
       else if (
         event.type === 'cleanup' &&
-        ['destroyed', 'blocked_cleanup'].includes(String(event.kind)) &&
+        ['pending', 'destroyed', 'blocked_cleanup'].includes(String(event.kind)) &&
+        (event.kind !== 'pending' || event.funded === false) &&
         typeof event.vmId === 'string' &&
         typeof event.funded === 'boolean' &&
         Object.keys(event).length === 6
+      ) {
+        if (!event.funded) this.unfundedCleanup.add(event.vmId);
+      } else if (
+        event.type === 'cleanup_reconciled' &&
+        typeof event.vmId === 'string' &&
+        this.unfundedCleanup.has(event.vmId) &&
+        typeof event.evidence === 'string' &&
+        event.evidence.trim() &&
+        event.evidence.length <= 500 &&
+        Object.keys(event).length === 5
       )
-        continue;
+        this.unfundedCleanup.delete(event.vmId);
       else throw new ControllerError('invalid_journal');
     }
   }
@@ -443,8 +497,41 @@ export class RunController {
     );
     return `${history.length}:${phase}`;
   }
+  private validatedOutcome(phase: PhaseName, input: unknown): Outcome {
+    try {
+      const result = outcome(phase, input);
+      if (result.kind === 'planned' || result.kind === 'candidate' || result.kind === 'advanced') {
+        const bindings = checkpointBindings(
+          result.bindings,
+          result.kind === 'planned' ? 'plan' : 'patch',
+          this.held.runId
+        );
+        if (bindings.budgetSessionId !== this.sessionId())
+          throw new ControllerError('invalid_outcome');
+      } else if (result.kind === 'verified') {
+        if (
+          typeof result.record.recordDigest !== 'string' ||
+          !/^[a-f0-9]{64}$/u.test(result.record.recordDigest)
+        )
+          throw new ControllerError('invalid_outcome');
+        const record = loadVerification(
+          this.held.storeDirectory('artifacts'),
+          result.record.candidateSha,
+          { runId: this.held.runId, expectedDigest: result.record.recordDigest }
+        );
+        if (canonicalJson(record, 1024 * 1024) !== canonicalJson(result.record, 1024 * 1024))
+          throw new ControllerError('invalid_outcome');
+        return { kind: 'verified', record };
+      }
+      return result;
+    } catch {
+      throw new ControllerError('invalid_outcome');
+    }
+  }
   private async step(phase: PhaseName): Promise<Outcome> {
     if (this.incident || this.abort.signal.aborted) throw new ControllerError('admission_closed');
+    if (this.unfundedCleanup.size)
+      return stopped(this.held.run.state) ? { kind: 'waiting' } : { kind: 'hand_off' };
     const key = this.key(phase);
     const cached = this.cached.get(key);
     if (cached) return cached;
@@ -464,7 +551,7 @@ export class RunController {
       return stopped(this.held.run.state) ? { kind: 'waiting' } : { kind: 'hand_off' };
     let result: Outcome;
     try {
-      result = outcome(phase, await this.deps.steps[phase](this.context()));
+      result = this.validatedOutcome(phase, await this.deps.steps[phase](this.context()));
     } catch (error) {
       if (error instanceof ControllerError) throw error;
       throw new ControllerError('step_failed');
@@ -486,7 +573,11 @@ export class RunController {
   }
   private async apply(result: Outcome): Promise<boolean> {
     if (['hand_off', 'waiting'].includes(result.kind)) {
-      if (result.kind === 'hand_off' && this.held.run.state !== 'gating')
+      if (
+        result.kind === 'hand_off' &&
+        this.held.run.state !== 'gating' &&
+        !stopped(this.held.run.state)
+      )
         await this.persist(
           transitionRun(this.held.run, ReasonCode.UserPaused, this.deps.now().toISOString())
         );
@@ -516,7 +607,14 @@ export class RunController {
     if (!checkpointDue(this.held.config.checkpoints, point)) return true;
     const previous = this.held.run;
     pauseAtCheckpoint(this.held, previous, point, bindings, this.deps.now());
-    if (!sameRunRecord(previous, this.held.run)) this.notify(this.held.run);
+    if (!sameRunRecord(previous, this.held.run)) {
+      try {
+        this.notify(this.held.run);
+      } catch (error) {
+        await this.cleanup();
+        throw error;
+      }
+    }
     if (this.held.run.state === 'paused_user') {
       await this.cleanup();
       return false;
@@ -544,34 +642,7 @@ export class RunController {
         if (!(await this.apply(await this.step('track')))) return this.held.run;
       }
       while (!stopped(this.held.run.state)) {
-        const state = this.held.run.state;
-        if (state === 'gating') {
-          if (!(await this.apply(await this.step('gate')))) break;
-        } else if (state === 'planning') {
-          const acquired = await this.step('acquire');
-          if (!(await this.apply(acquired))) break;
-          const plan = await this.step('plan');
-          if (plan.kind === 'planned' && !(await this.checkpoint('plan', plan.bindings))) break;
-          if (!(await this.apply(plan))) break;
-        } else if (state === 'implementing' || state === 'revising') {
-          if (!(await this.apply(await this.step('implement')))) break;
-        } else if (state === 'verifying') {
-          const candidate = this.latestCandidate();
-          if (!(await this.checkpoint('patch', candidate.bindings))) break;
-          if (!(await this.apply(await this.step('review')))) break;
-          if (!(await this.apply(await this.step('verify')))) break;
-        } else if (state === 'shipping') {
-          const record = this.latestVerification();
-          const bindings = {
-            ...this.latestCandidate().bindings,
-            verificationDigest: record.recordDigest,
-          };
-          if (!(await this.checkpoint('verification', bindings))) break;
-          const drift = await this.step('drift');
-          if (!(await this.apply(drift))) break;
-          if (drift.kind === 'advanced') continue;
-          if (!(await this.apply(await this.step('ship')))) break;
-        } else throw new ControllerError('invalid_outcome');
+        if (!(await this.dispatchActive())) break;
       }
       if (this.incident) return await this.cancel();
       return this.held.run;
@@ -579,6 +650,45 @@ export class RunController {
       if (this.incident) return this.cancel();
       throw error;
     }
+  }
+  private dispatchActive(): Promise<boolean> {
+    switch (this.held.run.state) {
+      case 'gating':
+        return this.step('gate').then((result) => this.apply(result));
+      case 'planning':
+        return this.planning();
+      case 'implementing':
+      case 'revising':
+        return this.step('implement').then((result) => this.apply(result));
+      case 'verifying':
+        return this.verifying();
+      case 'shipping':
+        return this.shipping();
+      default:
+        throw new ControllerError('invalid_outcome');
+    }
+  }
+  private async planning(): Promise<boolean> {
+    if (!(await this.apply(await this.step('acquire')))) return false;
+    const plan = await this.step('plan');
+    if (plan.kind === 'planned' && !(await this.checkpoint('plan', plan.bindings))) return false;
+    return this.apply(plan);
+  }
+  private async verifying(): Promise<boolean> {
+    if (!(await this.checkpoint('patch', this.latestCandidate().bindings))) return false;
+    if (!(await this.apply(await this.step('review')))) return false;
+    return this.apply(await this.step('verify'));
+  }
+  private async shipping(): Promise<boolean> {
+    const record = this.latestVerification();
+    const bindings = {
+      ...this.latestCandidate().bindings,
+      verificationDigest: record.recordDigest,
+    };
+    if (!(await this.checkpoint('verification', bindings))) return false;
+    const drift = await this.step('drift');
+    if (!(await this.apply(drift))) return false;
+    return drift.kind === 'advanced' || this.apply(await this.step('ship'));
   }
   private latestCandidate(): { readonly bindings: CheckpointBindings } {
     const candidate = [...this.cached.values()]
@@ -597,6 +707,7 @@ export class RunController {
     if (
       this.incident ||
       this.recovering ||
+      this.unfundedCleanup.size > 0 ||
       this.abort.signal.aborted ||
       stopped(this.held.run.state)
     )
@@ -616,54 +727,121 @@ export class RunController {
   }
   private async cleanup(): Promise<void> {
     const vms = await this.recover(() => this.deps.vm.listByRun(this.held.runId));
-    let unfunded = false;
+    const failures: unknown[] = [];
+    let cleanupRun = this.held.run;
+    const limits = this.held.config.limits;
     for (const vm of vms) {
-      if (vm.runId !== this.held.runId) throw new ControllerError('invalid_outcome');
-      const spec: VmSpec = {
-        runId: this.held.runId,
-        limits: this.held.config.limits,
-        scope: 'container',
-      };
-      let hold: BudgetReservation | undefined;
-      try {
-        hold = this.budget.reserve(
-          this.sessionId(),
-          this.deps.estimateVm(spec, 'teardown'),
-          'teardown'
-        );
-      } catch {
-        // A financial denial can fence work but must never leave a guest running.
-        // Record the unaccounted cleanup and refuse continuation after quiescence.
-        unfunded = true;
+      if (vm.runId !== cleanupRun.runId) {
+        failures.push(new ControllerError('invalid_outcome'));
+        continue;
       }
-      const current = this.held.run;
-      const result = await teardownVm(this.deps.vm, vm, current, {
+      cleanupRun = await this.cleanupVm(
+        vm,
+        { runId: cleanupRun.runId, limits, scope: 'container' },
+        cleanupRun,
+        failures
+      );
+    }
+    if (failures.length) throw failures[0];
+  }
+  private cleanupReservation(
+    vm: Pick<VmHandle, 'vmId' | 'runId'>,
+    spec: VmSpec,
+    failures: unknown[]
+  ): BudgetReservation | undefined {
+    try {
+      return this.budget.reserve(
+        this.sessionId(),
+        this.deps.estimateVm(spec, 'teardown'),
+        'teardown'
+      );
+    } catch {
+      this.unfundedCleanup.add(vm.vmId);
+      failures.push(new ControllerError('admission_closed'));
+      // Write the obligation BEFORE destruction: a crash during destruction must
+      // not erase the accounting fence merely because the guest later disappears.
+      try {
+        this.journal?.append({
+          v: 1,
+          type: 'cleanup',
+          runId: vm.runId,
+          vmId: vm.vmId,
+          kind: 'pending',
+          funded: false,
+        });
+      } catch (error) {
+        failures.push(error);
+        try {
+          this.held.persistRun(
+            transitionRun(this.held.run, ReasonCode.CleanupFailed, this.deps.now().toISOString())
+          );
+        } catch (fenceError) {
+          failures.push(fenceError);
+        }
+      }
+      return undefined;
+    }
+  }
+  private recordCleanup(
+    vm: Pick<VmHandle, 'vmId' | 'runId'>,
+    result: TeardownOutcome,
+    current: RunRecord,
+    funded: boolean,
+    failures: unknown[]
+  ): void {
+    try {
+      this.journal?.append({
+        v: 1,
+        type: 'cleanup',
+        runId: vm.runId,
+        vmId: vm.vmId,
+        kind: result.kind,
+        funded,
+      });
+    } catch (error) {
+      failures.push(error);
+    }
+    if (
+      result.kind === 'blocked_cleanup' &&
+      current.state !== 'blocked_cleanup' &&
+      !TERMINAL_STATES.includes(current.state)
+    ) {
+      try {
+        this.held.persistRun(result.run);
+        this.notify(result.run);
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+  }
+  private async cleanupVm(
+    vm: Pick<VmHandle, 'vmId' | 'runId'>,
+    spec: VmSpec,
+    current: RunRecord,
+    failures: unknown[]
+  ): Promise<RunRecord> {
+    const hold = this.cleanupReservation(vm, spec, failures);
+    let result: TeardownOutcome;
+    try {
+      result = await teardownVm(this.deps.vm, vm, current, {
         now: this.deps.now,
         reconcileStopped: true,
         retryDelayMs: 0,
         sleep: async () => {},
       });
-      this.journal?.append({
-        v: 1,
-        type: 'cleanup',
-        runId: this.held.runId,
-        vmId: vm.vmId,
-        kind: result.kind,
-        funded: hold !== undefined,
-      });
-      if (
-        result.kind === 'blocked_cleanup' &&
-        current.state !== 'blocked_cleanup' &&
-        !TERMINAL_STATES.includes(current.state)
-      ) {
-        this.held.persistRun(result.run);
-        this.notify(result.run);
-      }
-      if (hold)
-        this.budget.settle(hold.id, await this.recover(() => this.deps.observeVm(hold, vm)));
-      // Continue destroying the other VMs even after one failed; admission stays fenced.
+    } catch (error) {
+      failures.push(error);
+      return current;
     }
-    if (unfunded) throw new ControllerError('admission_closed');
+    this.recordCleanup(vm, result, current, hold !== undefined, failures);
+    if (hold) {
+      try {
+        this.budget.settle(hold.id, await this.recover(() => this.deps.observeVm(hold, vm)));
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    return result.run;
   }
   async incidentStop(reason: string): Promise<RunRecord> {
     if (!this.running || !this.journal) throw new ControllerError('not_running');
