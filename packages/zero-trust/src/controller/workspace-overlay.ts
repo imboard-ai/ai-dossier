@@ -57,6 +57,14 @@ export class WorkspaceOverlay {
     return Object.freeze([...this.written].filter(isTestPath).sort(comparePaths));
   }
 
+  /** Immutable admitted delta, including writes byte-identical to the baseline.
+   * Drift must check every touched path, not just the final diff. */
+  writtenEntries(): readonly SourceEntry[] {
+    return Object.freeze(
+      [...this.written].sort(comparePaths).map((file) => this.entries.get(file) as SourceEntry)
+    );
+  }
+
   /** `directory` must be absent under a controller-owned parent. Never merge into an
    * existing tree (including a symlink). Returns the freshly exported candidate. */
   materialize(directory: string): SourceManifest {

@@ -108,6 +108,53 @@ the shared pure complete-JSONL decoder, including strict UTF-8 validation; it ne
 opens or repairs storage. These APIs do not add CLI
 commands or external telemetry.
 
+## Upstream drift before shipping (#1107)
+
+`checkBase(read, upstream, verifiedBaseSha)` uses credential-free `resolveBase` and
+returns `{ kind: 'unchanged' }`, `{ kind: 'advanced', newSha }` or `{ kind: 'unknown' }`.
+The upstream includes `owner`, `repo`, `defaultBranch`; unreadable/malformed facts
+never admit shipping and errors are not echoed.
+
+`WorkspaceOverlay.writtenEntries()` exposes a frozen, byte-sorted admitted delta,
+including byte-identical writes. `rebaseCandidate({ overlay, oldBaseManifest,
+newBase: { pack, manifest }, approval })` validates both manifests and binds the
+new manifest to the pack's `approval.baseSha`. `approval` is `CommitInputs` with
+the unchanged contributor-approved author/message, new parent and new recorded
+committer timestamp. Every touched path compares old/new blob hashes **and modes**;
+upstream additions, deletions and ancestor file collisions refuse with
+`{ kind: 'conflict', paths }`. No text merging occurs. A success returns
+`{ kind: 'rebased', candidate, manifest, overlay }`, preserving unrelated upstream
+files and admitted writes; the returned overlay is based on the new source.
+Canonical collisions/invalid input throw fixed `CanonicalError` codes.
+
+`checkShippingBase(deps, input)` is the orchestration API for both initial shipping
+and before `shipRevision`. Dependencies are `read`, `upstream`, `acquire(baseSha)`
+(production: `acquireSource`), and controller `now(): Date`. Input holds the restored
+`run`, admitted `overlay`, original candidate's `approval`, persisted session-wide
+`rebases` count (0–2), and boolean `pushIntentJournaled` for **this candidate**.
+Only a `shipping` run before any push intent can return `unchanged` admission.
+An advance constructs a new candidate, returns the run transitioned through
+`BaseAdvanced` (`base_advanced`) to `verifying`, and increments `rebases`.
+The new SHA/record binding invalidates the old VerificationRecord and receipt;
+the caller must independently verify the new candidate, with new evidence and
+authorization, never reusing the old SHA's verification.
+Unchanged reads do not reset the counter; a third advance hands off `base_unstable`.
+Conflicts hand off `rebase_conflict`; unknown reads defer pushing via
+`base_unknown`; failed acquisition/reconstruction/clock validation hands off
+`rebase_unavailable`, without a candidate or weaker fallback.
+
+After the candidate's push intent is journaled (even if execution failed or is
+uncertain), and throughout `awaiting_contributor`, the result is only `recorded`:
+unchanged `run`, and `observation: { verifiedBase, currentBase, limitation }`.
+`currentBase` is null on unknown reads. The limitation names both known SHAs and
+never claims verification of the current merge result; feed it to PR limitations.
+No observation authorizes a new push or re-verification. The composition root
+owns the run fence and must serialize this check with intent publication, persist
+the new candidate/overlay/run/counter before verification, and persist observations
+before rendering PR context. Counts are session-wide across resumes and checks;
+only an explicitly allocated new budget session gets a fresh allowance.
+These APIs do not construct receipts, access credentials, publish, or poll.
+
 ## Independent verifier (#1102)
 
 `verifyCandidate(deps, input)` (PRD §5.6 steps 6 to 8, §5.7, §5.9; scenarios 6, 7, 10
@@ -689,6 +736,10 @@ illegal edges, inconsistent summaries and backwards timestamps fail closed.
 Pure lifecycle callers own atomic storage, concurrency, retention and identity
 validation. The controller can use the durable write journal described below;
 neither JSON encoding nor this local journal is an authenticated receipt.
+
+`BaseAdvanced` has exactly one legal edge: `shipping → verifying`. It cannot
+leave a contributor wait or revision directly; verified revisions reach shipping
+and use the same pre-intent drift guard before publication.
 
 Negative terminal states and `merged` cannot transition. Explicit `createRun`
 starts at `gating`; when given a previous run it rejects reuse of its ID. Only
