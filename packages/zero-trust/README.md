@@ -24,6 +24,10 @@ write adapter. There are no scheduled tasks, timers or polling loops.
 `drift`, `ship`, `resumeHandoff`, and `track`. Each receives a `PhaseContext`:
 the locked store, current immutable run, ledger, session ID, an `AbortSignal`,
 and reserved `createVm(spec)` (run ID and limits come from the held store).
+Allocation capabilities are bound to the current launch, run, abort signal and
+phase lease; retaining a callback cannot retarget it to a later phase or run.
+Already-admitted allocations are joined before phase completion/stop persistence
+and lock release, even if an injected step forgot to await its allocation.
 Production wiring must use this allocation path, honor cancellation, and keep
 effects journaled/idempotent through the existing drivers. Steps return facts;
 they must not persist lifecycle transitions themselves. The controller maps
@@ -59,8 +63,14 @@ contain several transitions are persisted and fanned out individually. One
 observer failure does not prevent the others from seeing the fence, but refuses
 further progress. The current snapshot is also delivered at open/start. Successful
 phase results are journaled under `control/controller/events.jsonl` before applying
-their transitions: acquisition/review/drift completion and checkpoint content
-survive crashes without repeating completed steps. A step interrupted before it
+their transitions: review/drift completion and checkpoint content survive crashes
+without repeating completed effects. Acquisition metadata survives, but its VM
+does not: recovered planning/implementation/verification/revision invokes `acquire`
+again with `context.replayingAcquisition=true` after all recovery barriers. This
+step must reuse durable sanitized source/artifacts and reconcile write-once effects
+while provisioning fresh ephemeral resources needed by that phase. A cached
+`acquired` result never establishes that a VM survived recovery.
+A step interrupted before it
 returns must reconcile its own effects through recovery; a phase-result cache
 alone is not a write-once network adapter. Recovered/truncated or invalid
 controller journals refuse admission. Checkpoint approval reuses the completed
@@ -76,6 +86,11 @@ admit new execution. They must reconcile and return observations, never create
 VMs or introduce new upstream writes. They execute under the run lock. Unknown
 old budget holds use `settle(id, null)`, retain their entire reservation, and fence
 new work. Credentials and write reconciliation still precede phase admission.
+An initial observer refusal cannot suppress VM or credential recovery, or incident
+revocation: these obligations are attempted under the run lock before the error
+is reported, and no phase is admitted. Explicit invalid phase output similarly
+aborts, tears down and persists a policy/cleanup block before releasing the lock;
+a thrown next-step crash remains a recoverable interruption rather than a pass.
 
 Start initializes the ledger and starts `<runId>-s1` with the persisted ceiling,
 protected cleanup allowance, token limit and active-minutes limit. Resume never

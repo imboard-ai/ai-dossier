@@ -100,6 +100,8 @@ export interface PhaseContext {
   readonly ledger: BudgetLedger;
   readonly sessionId: string;
   readonly signal: AbortSignal;
+  /** Acquire must reuse durable source/effects but provision fresh ephemeral resources. */
+  readonly replayingAcquisition: boolean;
   /** The only allocation path supplied to steps; reservation precedes create. */
   readonly createVm: (spec: Omit<VmSpec, 'runId' | 'limits'>) => Promise<VmHandle>;
 }
@@ -256,6 +258,9 @@ export class RunController {
   private recovering = false;
   private oldHolds = new Set<string>();
   private unfundedCleanup = new Set<string>();
+  private operation = Symbol();
+  private phaseLease?: symbol;
+  private replayingAcquisition = false;
   private cached = new Map<string, Outcome>();
   private last?: RunRecord;
   constructor(private readonly deps: ControllerDependencies) {}
@@ -313,13 +318,25 @@ export class RunController {
         });
         this.unfundedCleanup.delete(vmId);
       }
-      this.notify(this.store.run);
-      await this.recover(() =>
-        this.deps.recovery.reconcileVms(this.context(), () => this.cleanup())
+      const failures: unknown[] = [];
+      try {
+        this.notify(this.store.run);
+      } catch (error) {
+        failures.push(error);
+      }
+      await this.attemptRecovery(
+        () => this.deps.recovery.reconcileVms(this.context(), () => this.cleanup()),
+        failures
       );
       // A wrapper cannot bypass actual listByRun/teardown reconciliation.
-      await this.cleanup();
-      await this.recover(() => this.deps.recovery.recoverCredentials(this.context()));
+      await this.attemptRecovery(() => this.cleanup(), failures);
+      await this.attemptRecovery(
+        () => this.deps.recovery.recoverCredentials(this.context()),
+        failures
+      );
+      if (this.incident)
+        await this.attemptRecovery(() => this.deps.recovery.killAll(this.context()), failures);
+      if (failures.length) throw failures[0];
       await this.recovered(
         await this.recover(() => this.deps.recovery.resumeIntents(this.context()))
       );
@@ -331,14 +348,27 @@ export class RunController {
         await this.recovered(
           await this.recover(() => this.deps.recovery.resumeTracker(this.context()))
         );
-      if (this.incident) await this.recover(() => this.deps.recovery.killAll(this.context()));
       this.recovering = false;
+      if (
+        !this.incident &&
+        ['planning', 'implementing', 'verifying', 'revising'].includes(this.store.run.state)
+      ) {
+        this.replayingAcquisition = true;
+        try {
+          if (!(await this.apply(await this.step('acquire', true)))) return this.store.run;
+        } finally {
+          this.replayingAcquisition = false;
+        }
+      }
       return this.loop(true);
     });
   }
   private launch(work: () => Promise<RunRecord>): Promise<RunRecord> {
     if (this.running) throw new ControllerError('busy');
     this.abort = new AbortController();
+    this.operation = Symbol();
+    this.phaseLease = undefined;
+    this.replayingAcquisition = false;
     this.incident = false;
     this.incidentKill = undefined;
     this.recovering = false;
@@ -378,14 +408,34 @@ export class RunController {
       throw new ControllerError('invalid_journal');
     return session.id;
   }
-  private context(): PhaseContext {
+  private context(lease?: symbol, allocations?: Set<Promise<VmHandle>>): PhaseContext {
+    const operation = this.operation;
+    const store = this.held;
+    const ledger = this.budget;
+    const sessionId = this.sessionId();
+    const signal = this.abort.signal;
     return {
       store: this.held,
       run: this.held.run,
       ledger: this.budget,
       sessionId: this.sessionId(),
       signal: this.abort.signal,
-      createVm: (spec) => this.createVm(spec),
+      replayingAcquisition: this.replayingAcquisition,
+      createVm: (spec) => {
+        if (
+          !lease ||
+          this.phaseLease !== lease ||
+          this.operation !== operation ||
+          this.store !== store ||
+          signal.aborted
+        )
+          return Promise.reject(new ControllerError('admission_closed'));
+        const task = this.createVm(spec, store, ledger, sessionId, signal);
+        allocations?.add(task);
+        // Keep a rejection observed even when an injected step forgot to await it.
+        void task.catch(() => {});
+        return task;
+      },
     };
   }
   private notify(run: RunRecord): void {
@@ -432,6 +482,13 @@ export class RunController {
       return await work();
     } catch {
       throw new ControllerError('recovery_failed');
+    }
+  }
+  private async attemptRecovery(work: () => Promise<unknown>, failures: unknown[]): Promise<void> {
+    try {
+      await this.recover(work);
+    } catch (error) {
+      failures.push(error);
     }
   }
   private openJournal(resuming: boolean): void {
@@ -528,13 +585,13 @@ export class RunController {
       throw new ControllerError('invalid_outcome');
     }
   }
-  private async step(phase: PhaseName): Promise<Outcome> {
+  private async step(phase: PhaseName, reacquire = false): Promise<Outcome> {
     if (this.incident || this.abort.signal.aborted) throw new ControllerError('admission_closed');
     if (this.unfundedCleanup.size)
       return stopped(this.held.run.state) ? { kind: 'waiting' } : { kind: 'hand_off' };
     const key = this.key(phase);
     const cached = this.cached.get(key);
-    if (cached) return cached;
+    if (cached && !reacquire) return cached;
     const status = assembleStatus({
       run: this.held.run,
       now: this.deps.now(),
@@ -550,11 +607,27 @@ export class RunController {
     )
       return stopped(this.held.run.state) ? { kind: 'waiting' } : { kind: 'hand_off' };
     let result: Outcome;
+    const lease = Symbol();
+    const allocations = new Set<Promise<VmHandle>>();
+    this.phaseLease = lease;
     try {
-      result = this.validatedOutcome(phase, await this.deps.steps[phase](this.context()));
+      const proposed = await this.deps.steps[phase](this.context(lease, allocations));
+      this.phaseLease = undefined;
+      const pending = await Promise.allSettled(allocations);
+      result = this.validatedOutcome(phase, proposed);
+      if (
+        pending.some((entry) => entry.status === 'rejected') &&
+        !['hand_off', 'blocked', 'unsupported', 'failed', 'cancelled', 'waiting'].includes(
+          result.kind
+        )
+      )
+        throw new ControllerError('invalid_outcome');
     } catch (error) {
       if (error instanceof ControllerError) throw error;
       throw new ControllerError('step_failed');
+    } finally {
+      this.phaseLease = undefined;
+      await Promise.allSettled(allocations);
     }
     // A completed publication remains evidence even when cancellation races it.
     if (this.incident && result.kind !== 'submitted') throw new ControllerError('admission_closed');
@@ -648,6 +721,17 @@ export class RunController {
       return this.held.run;
     } catch (error) {
       if (this.incident) return this.cancel();
+      if (error instanceof ControllerError && error.code === 'invalid_outcome') {
+        this.abort.abort();
+        await this.cleanup();
+        if (
+          this.held.run.state !== 'blocked_cleanup' &&
+          !TERMINAL_STATES.includes(this.held.run.state)
+        )
+          await this.persist(
+            transitionRun(this.held.run, ReasonCode.PolicyBlocked, this.deps.now().toISOString())
+          );
+      }
       throw error;
     }
   }
@@ -703,26 +787,32 @@ export class RunController {
     if (!verified || verified.kind !== 'verified') throw new ControllerError('invalid_journal');
     return verified.record;
   }
-  private async createVm(input: Omit<VmSpec, 'runId' | 'limits'>): Promise<VmHandle> {
+  private async createVm(
+    input: Omit<VmSpec, 'runId' | 'limits'>,
+    store: RunStore,
+    ledger: BudgetLedger,
+    sessionId: string,
+    signal: AbortSignal
+  ): Promise<VmHandle> {
     if (
       this.incident ||
       this.recovering ||
       this.unfundedCleanup.size > 0 ||
-      this.abort.signal.aborted ||
-      stopped(this.held.run.state)
+      signal.aborted ||
+      stopped(store.run.state)
     )
       throw new ControllerError('admission_closed');
     const spec: VmSpec = {
       ...structuredClone(input),
-      runId: this.held.runId,
-      limits: this.held.config.limits,
+      runId: store.runId,
+      limits: store.config.limits,
     };
     assertSecretFree(spec);
-    const hold = this.budget.reserve(this.sessionId(), this.deps.estimateVm(spec, 'work'));
+    const hold = ledger.reserve(sessionId, this.deps.estimateVm(spec, 'work'));
     const vm = await this.deps.vm.create(spec);
-    if (vm.runId !== this.held.runId) throw new ControllerError('invalid_outcome');
-    this.budget.settle(hold.id, await this.deps.observeVm(hold, vm));
-    if (this.incident) throw new ControllerError('admission_closed');
+    if (vm.runId !== spec.runId) throw new ControllerError('invalid_outcome');
+    ledger.settle(hold.id, await this.deps.observeVm(hold, vm));
+    if (signal.aborted || this.store !== store) throw new ControllerError('admission_closed');
     return vm;
   }
   private async cleanup(): Promise<void> {

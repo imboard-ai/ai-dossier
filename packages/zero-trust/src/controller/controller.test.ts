@@ -469,7 +469,7 @@ describe('RunController', () => {
     await expect(h.controller.start(h.config)).rejects.toMatchObject({ code: 'invalid_outcome' });
     expect(h.steps.calls).toEqual(['gate']);
     const store = open(h, h.controller.snapshot().runId);
-    expect(store.run.state).toBe('gating');
+    expect(store.run.state).toBe('blocked');
     store.close();
   });
   it('throws illegal edges instead of coercing handoff outcomes', async () => {
@@ -898,5 +898,161 @@ describe('RunController', () => {
     const resumed = await new RunController(h.deps).resume(run.runId);
     expect(resumed.state).toBe('submitted');
     expect(h.duplicates()).toBe(0);
+  });
+  it('VM-dependent acquisition provisions fresh resources after recovery while source writes stay idempotent', async () => {
+    const h = rig();
+    let sourceWrites = 0;
+    const acquire = async (c: PhaseContext) => {
+      const file = path.join(c.store.storeDirectory('artifacts'), 'source.txt');
+      if (!fs.existsSync(file)) {
+        c.store.replaceArtifact('source.txt', Buffer.from('source'));
+        sourceWrites++;
+      }
+      await c.createVm({ scope: 'container' });
+      return { kind: 'acquired' as const };
+    };
+    h.steps.scripts.acquire = [acquire, acquire];
+    h.steps.scripts.plan = [
+      () => {
+        throw new Error('next-step crash');
+      },
+      async (c) => {
+        expect(await h.vm.listByRun(c.run.runId)).toHaveLength(1);
+        c.store.replaceArtifact('plan.txt', Buffer.from('plan'));
+        return {
+          kind: 'planned',
+          bindings: {
+            policyDigest: 'a'.repeat(64),
+            budgetSessionId: c.sessionId,
+            planDigest: sha256('plan'),
+          },
+        };
+      },
+    ];
+    await expect(h.controller.start(h.config)).rejects.toMatchObject({ code: 'step_failed' });
+    const id = h.controller.snapshot().runId;
+    expect((await new RunController(h.deps).resume(id)).state).toBe('submitted');
+    expect(h.vm.calls.filter((call) => call.op === 'create')).toHaveLength(2);
+    expect(sourceWrites).toBe(1);
+    expect(h.duplicates()).toBe(0);
+    expect(await h.vm.listByRun(id)).toHaveLength(0);
+  });
+  it('invalid phase output aborts and cleans its allocated guest before releasing the run fence', async () => {
+    const h = rig();
+    h.steps.scripts.gate = [
+      async (c) => {
+        await c.createVm({ scope: 'container' });
+        return { kind: 'proceed', extra: true } as never;
+      },
+    ];
+    await expect(h.controller.start(h.config)).rejects.toMatchObject({ code: 'invalid_outcome' });
+    const run = h.controller.snapshot();
+    expect(run.state).toBe('blocked');
+    expect(await h.vm.listByRun(run.runId)).toHaveLength(0);
+    const store = open(h, run.runId);
+    expect(store.run.state).toBe('blocked');
+    store.close();
+  });
+  it('observer refusal during reopen cannot suppress VM, credential or incident revocation recovery', async () => {
+    const h = rig();
+    h.steps.scripts.plan = [
+      async (c) => {
+        await c.createVm({ scope: 'container' });
+        throw new Error('crash');
+      },
+    ];
+    await expect(h.controller.start(h.config)).rejects.toMatchObject({ code: 'step_failed' });
+    const id = h.controller.snapshot().runId;
+    h.deps.drivers.push({
+      observeRun: () => {
+        throw new Error('driver refused');
+      },
+    });
+    h.recovery.calls.length = 0;
+    await expect(h.controller.resume(id)).rejects.toMatchObject({ code: 'driver_failed' });
+    expect(h.recovery.calls).toEqual(['store', 'budget', 'vm', 'credentials']);
+    expect(await h.vm.listByRun(id)).toHaveLength(0);
+  });
+  it('an expired allocation capability cannot allocate against a later run', async () => {
+    const h = rig();
+    let previous: PhaseContext | undefined;
+    h.steps.scripts.gate = [
+      async (c) => {
+        previous = c;
+        return { kind: 'request_permission' };
+      },
+    ];
+    const first = await h.controller.start(h.config);
+    h.steps.scripts.gate = [
+      async (current) => {
+        if (!previous) throw new Error('missing old context');
+        await expect(previous.createVm({ scope: 'container' })).rejects.toMatchObject({
+          code: 'admission_closed',
+        });
+        expect(h.vm.calls.filter((call) => call.op === 'create')).toHaveLength(0);
+        const vm = await current.createVm({ scope: 'container' });
+        expect(vm.runId).not.toBe(first.runId);
+        return { kind: 'request_permission' };
+      },
+    ];
+    const second = await h.controller.start(h.config);
+    expect(second.runId).not.toBe(first.runId);
+    expect(await h.vm.listByRun(second.runId)).toHaveLength(0);
+  });
+  it('a finished phase allocation capability expires within the same run', async () => {
+    const h = rig();
+    let previous: PhaseContext | undefined;
+    h.steps.scripts.gate = [
+      async (c) => {
+        previous = c;
+        return { kind: 'proceed' };
+      },
+    ];
+    h.steps.scripts.acquire = [
+      async () => {
+        if (!previous) throw new Error('missing old context');
+        await expect(previous.createVm({ scope: 'container' })).rejects.toMatchObject({
+          code: 'admission_closed',
+        });
+        return { kind: 'acquired' };
+      },
+    ];
+    expect((await h.controller.start(h.config)).state).toBe('submitted');
+    expect(h.vm.calls.filter((call) => call.op === 'create')).toHaveLength(0);
+  });
+  it('joins an admitted delayed VM allocation before committing a stop or releasing the store', async () => {
+    const h = rig();
+    let entered!: () => void;
+    let release!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const create = h.vm.create.bind(h.vm);
+    vi.spyOn(h.vm, 'create').mockImplementation(async (spec) => {
+      entered();
+      await barrier;
+      return create(spec);
+    });
+    h.steps.scripts.gate = [
+      async (c) => {
+        void c.createVm({ scope: 'container' });
+        return { kind: 'request_permission' };
+      },
+    ];
+    const task = h.controller.start(h.config);
+    await ready;
+    try {
+      expect(h.controller.snapshot().state).toBe('gating');
+      expect(() => open(h, h.controller.snapshot().runId)).toThrow('lock held');
+    } finally {
+      release();
+      await task;
+    }
+    const stopped = await task;
+    expect(stopped.state).toBe('awaiting_maintainer');
+    expect(await h.vm.listByRun(stopped.runId)).toHaveLength(0);
   });
 });
