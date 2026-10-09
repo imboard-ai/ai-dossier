@@ -57,8 +57,13 @@ credential-module imports; the composition root supplies authenticated adapters.
   cannot replace the held authorization. Signing and probe failures have fixed,
   non-echoing refusal codes.
   `HandoffAdmission.commitPr(candidateSha, digest)` is mandatory and rechecks fresh
-  run/boundary/policy/verification/receipt admission after PR reconciliation and
-  before durable link publication, retaining the current receipt reservation.
+   authenticated contributor, fork readiness and verified remote SHA, followed by
+   run/boundary/policy/verification/receipt admission after PR reconciliation and
+   before durable link publication. Reservations commit only after the enclosing
+   authority check and atomic replay check; refused final admission rolls back only
+   its own reservation. The driver binds admission methods once at construction and
+   detaches and recursively freezes the PR request before queueing; admission,
+   rendering and persistence use that same snapshot.
   Supply `ForkPusher.handoffReadBack`, rather than an ordinary remote read, as
   `remoteBranchSha` so a matching but unverified branch cannot admit a PR.
 - `prContentInput(input): PrContentInput` binds model `candidateReady` title/cause/
@@ -73,6 +78,12 @@ verified remote SHA. `ReceiptContextDeps`, `ShippingReceiptDeps`,
 `ShippingAuthorizeDeps`, `ShippingHandoffDeps`, `ShippingPrContentDeps` and
 `ShippingAuthorization` describe these public dependency and result shapes.
 Verification checkpoints point to `artifacts/verification/<candidateSha>.json`.
+
+The controller threat model trusts its own in-process modules and constructed
+adapters. External responses/timing, VM/model/repository/policy output, run-store
+filesystem contents and concurrent legitimate cancellation/pause/kill-switch
+changes remain untrusted. Hostile in-process method substitution is out-of-scope
+hardening, not an admission guarantee; captured callbacks are cheap bind-once hygiene.
 `loadPinnedVerification(artifactsDescriptorPath, candidateSha, options)` is the
 descriptor-rooted immutable loader for callers inside `RunStore.withStoreDirectory`.
 The descriptor must remain live for the synchronous call; its private verification

@@ -120,6 +120,8 @@ function refuse(code: string): never {
 function heldStore(store: ReceiptContextDeps['store']): ReceiptContextDeps['store'] {
   const validate = store.validateEvidence;
   const directory = store.withStoreDirectory;
+  const validateEvidence = validate.bind(store);
+  const withStoreDirectory = directory?.bind(store);
   const unchangedMethods = () => {
     if (store.validateEvidence !== validate || store.withStoreDirectory !== directory)
       refuse('shipping_authority_changed');
@@ -129,14 +131,15 @@ function heldStore(store: ReceiptContextDeps['store']): ReceiptContextDeps['stor
     upstreamRepositoryId: store.upstreamRepositoryId,
     validateEvidence: () => {
       unchangedMethods();
-      return validate.call(store);
+      return validateEvidence();
     },
     withStoreDirectory: <T>(
       name: Parameters<typeof directory>[0],
       work: (directory: string) => T & (T extends PromiseLike<unknown> ? never : unknown)
     ): T => {
       unchangedMethods();
-      return directory.call(store, name, work) as T;
+      if (!withStoreDirectory) refuse('shipping_identity');
+      return withStoreDirectory(name, work) as T;
     },
   });
 }
@@ -445,12 +448,14 @@ export function makeHandoffAdmission(deps: ShippingHandoffDeps): HandoffAdmissio
     if (authorityFields.some((field) => caller[field] !== deps[field]))
       refuse('shipping_authority_changed');
   };
-  const used = new Set<string>();
+  // The token identifies exactly the invocation that owns a reservation.
+  const used = new Map<string, symbol>();
   const check = async (probe: () => Promise<boolean>) => {
     try {
       assertAuthority();
       const result = (await probe()) === true;
       assertAuthority();
+      facts(contextDeps);
       return result;
     } catch {
       return false;
@@ -489,10 +494,9 @@ export function makeHandoffAdmission(deps: ShippingHandoffDeps): HandoffAdmissio
     )
       return false;
     assertAuthority();
-    if (reserve) used.add(digest);
     return true;
   };
-  return Object.freeze<HandoffAdmission>({
+  const admission: HandoffAdmission = {
     prBindingVerified: (binding) =>
       check(async () => {
         const requested = snapshotJson(binding);
@@ -534,9 +538,32 @@ export function makeHandoffAdmission(deps: ShippingHandoffDeps): HandoffAdmissio
           sameLogin(result.run.contributor, held.contributor)
         );
       }),
-    receiptValid: (candidateSha, digest) =>
-      check(() => validateReceipt(candidateSha, digest, true)),
-    commitPr: (candidateSha, digest) => check(() => validateReceipt(candidateSha, digest, false)),
+    receiptValid: async (candidateSha, digest) => {
+      if (!(await check(() => validateReceipt(candidateSha, digest, true)))) return false;
+      // No await between the enclosing authority check, replay check and commit.
+      try {
+        assertAuthority();
+        facts(contextDeps);
+        if (used.has(digest)) return false;
+        used.set(digest, Symbol());
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    commitPr: async (candidateSha, digest) => {
+      const reservation = used.get(digest);
+      if (reservation === undefined) return false;
+      const permitted = await check(async () => {
+        if (!(await admission.contributorVerified())) return false;
+        if (!(await admission.forkBindingVerified())) return false;
+        if ((await admission.remoteBranchSha()) !== candidateSha) return false;
+        return validateReceipt(candidateSha, digest, false);
+      });
+      // A refused final admission must not strand (or release someone else's) hold.
+      if (!permitted && used.get(digest) === reservation) used.delete(digest);
+      return permitted && used.get(digest) === reservation;
+    },
     remoteBranchSha: async () => {
       assertAuthority();
       const held = facts(contextDeps);
@@ -551,7 +578,8 @@ export function makeHandoffAdmission(deps: ShippingHandoffDeps): HandoffAdmissio
       if (sha !== held.candidateSha) refuse('remote_sha_mismatch');
       return sha;
     },
-  });
+  };
+  return Object.freeze(admission);
 }
 
 export interface ShippingPrContentDeps {

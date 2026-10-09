@@ -89,3 +89,20 @@ Last full package gate: 4,464 tests passed; 14 opt-in VM tests skipped. Coverage
 test-inclusive typecheck, warning-as-error lint and version-bump check passed.
 The checkpoint path regression was independently reproduced red on isolated
 origin/main and green with the corrected source.
+
+## Owner-authorized renewal (2026-10-09)
+
+Owner comment 6089198490 renews one standard cycle, at most three progressing
+repair loops, on the preserved run and branch. The explicit threat model trusts
+controller modules and constructed adapters; external responses/timing, VM/model/
+repository/policy output, run-store filesystem contents and legitimate concurrent
+lifecycle changes remain untrusted. Prior hostile method-substitution findings
+are out-of-scope hardening notes, not unresolved blockers.
+
+Renewed loop 1 binds driver admission and store validation callbacks once, freezes
+one detached PR request at entry, commits receipt reservations only after the
+enclosing authority/replay checks, and refreshes contributor/fork/verified remote
+SHA before final receipt/context checks. Refused commit admission releases only its
+own reservation token. Offline real-driver tests observe unchanged rendered/journal
+provenance, changed external facts after PR reads, zero body/link effects on refusal,
+and same-instance retry after legitimate pause/resume.

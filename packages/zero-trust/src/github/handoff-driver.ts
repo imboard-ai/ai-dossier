@@ -417,16 +417,39 @@ export function renderHandoffStatus(status: HandoffStatus): string {
 
 const drivenJournals = new WeakSet<Journal>();
 
+/** Freeze the detached request recursively; callers retain no queued provenance alias. */
+function freezeRequest<T>(value: T): T {
+  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const child of Object.values(value)) freezeRequest(child);
+  }
+  return value;
+}
+
 /** Serial controller driver; the journal directory is controller-owned, never worker storage. */
 export class HandoffDriver {
   private state: HandoffState;
   private tail: Promise<unknown> = Promise.resolve();
+  private readonly admission: HandoffAdmission;
 
   constructor(
     private readonly journal: Journal,
     private readonly deps: HandoffDeps,
     initial: { run: RunRecord; contributionId: string }
   ) {
+    const { admission } = deps;
+    this.admission = Object.freeze({
+      prBindingVerified: admission.prBindingVerified.bind(admission),
+      commitPr: admission.commitPr.bind(admission),
+      ...(admission.releaseReceipt
+        ? { releaseReceipt: admission.releaseReceipt.bind(admission) }
+        : {}),
+      policyFresh: admission.policyFresh.bind(admission),
+      contributorVerified: admission.contributorVerified.bind(admission),
+      forkBindingVerified: admission.forkBindingVerified.bind(admission),
+      receiptValid: admission.receiptValid.bind(admission),
+      remoteBranchSha: admission.remoteBranchSha.bind(admission),
+    });
     if (drivenJournals.has(journal)) throw new HandoffError('journal_in_use');
     const events = journal.read().filter((event) => !isRecoveryEvent(event));
     if (!events.length) {
@@ -488,6 +511,11 @@ export class HandoffDriver {
 
   /** Prefilled pull request for the verified, pushed candidate. */
   issuePr(request: { binding: PrBinding; content: PrContentInput }): Promise<HandoffOutcome> {
+    try {
+      request = freezeRequest(structuredClone(request));
+    } catch {
+      return Promise.reject(new HandoffError('invalid_request'));
+    }
     return this.serial(async () => {
       const intent = request.content?.intent;
       const prior = await this.reconcileFirst(intent);
@@ -500,7 +528,7 @@ export class HandoffDriver {
       // The driver renders the content itself: the receipt it checks is the one in the body.
       const content = buildPrContent(request.content);
       const digest = receiptDigest(parseReceipt(request.content.receipt));
-      const { admission } = this.deps;
+      const { admission } = this;
       let issued = false;
       let receiptReserved = false;
       try {
@@ -545,7 +573,7 @@ export class HandoffDriver {
       const binding = bindingFor(this.state.run, intent, request.binding) as IssueBinding;
       if (intent.operationKind !== 'engagement_comment') throw new HandoffError('not_a_handoff');
       if (this.state.run.state !== 'gating') throw new HandoffError('admission_state');
-      const { admission } = this.deps;
+      const { admission } = this;
       await this.check('policy', () => admission.policyFresh());
       await this.check('contributor', () => admission.contributorVerified());
       const existing = await reconcileComment(this.deps.read, binding, {

@@ -256,6 +256,95 @@ async function handoff(h: Awaited<ReturnType<typeof rig>>, receipt = h.authoriza
 }
 
 describe('persisted verification to real local shipping (#1105)', () => {
+  it('detaches queued PR provenance before caller mutation and persists the rendered candidate', async () => {
+    const h = await rig();
+    await h.driver.execute(h.input);
+    const p = await handoff(h);
+    const pending = p.driver.issuePr(p.request);
+    Object.assign(p.request.content.intent, { candidateSha: 'f'.repeat(40) });
+    p.request.binding.branch = 'unverified-other';
+    p.request.content.title = 'Replacement title';
+    await expect(pending).resolves.toMatchObject({ kind: 'awaiting_contributor' });
+    expect(p.rows.read()).toMatchObject([
+      { type: 'handoff_run' },
+      {
+        type: 'link_issued',
+        input: { candidateSha: h.input.candidateSha },
+        binding: { branch: BRANCH },
+        title: 'Fix duration rounding',
+      },
+    ]);
+    expect(p.driver.status()?.link).toContain(`/compare/main...${OWNER}:${BRANCH}`);
+    const status = p.driver.status();
+    if (!status) throw new Error('no status');
+    expect(fs.readFileSync(status.bodyFile, 'utf8')).toContain(h.input.candidateSha);
+  });
+
+  it.each([
+    'contributor',
+    'fork',
+    'remote',
+  ])('refreshes %s after the final PR read and releases refused admission', async (kind) => {
+    const h = await rig();
+    await h.driver.execute(h.input);
+    const p = await handoff(h);
+    const get = p.fake.publicResponses.get.bind(p.fake.publicResponses);
+    const probe = vi.spyOn(p.fake.publicResponses, 'get').mockImplementation((route) => {
+      if (kind === 'contributor') p.fake.login = 'other';
+      if (kind === 'fork')
+        p.admissionDeps.checkForkReadiness.mockResolvedValue({
+          kind: 'ready',
+          run: h.store.run,
+          fork: { ...h.deps.fork, repositoryId: FORK_ID + 1 },
+        });
+      if (kind === 'remote') h.fork.git(['update-ref', '-d', `refs/heads/${BRANCH}`]);
+      return get(route);
+    });
+    await expect(p.driver.issuePr(p.request)).rejects.toThrow('admission_commit');
+    expect(p.rows.read()).toHaveLength(1);
+    expect(fs.readdirSync(p.bodyDirectory)).toEqual([]);
+    probe.mockRestore();
+    p.fake.login = OWNER;
+    p.admissionDeps.checkForkReadiness.mockResolvedValue({
+      kind: 'ready',
+      run: h.store.run,
+      fork: h.deps.fork,
+    });
+    if (kind === 'remote')
+      h.fork.git(['update-ref', `refs/heads/${BRANCH}`, h.deps.bindings.candidateSha]);
+    await expect(p.driver.issuePr(p.request)).resolves.toMatchObject({
+      kind: 'awaiting_contributor',
+    });
+  });
+
+  it('rolls back a final reservation on a legitimate pause and admits a resumed retry', async () => {
+    const h = await rig();
+    await h.driver.execute(h.input);
+    const p = await handoff(h);
+    const get = p.fake.publicResponses.get.bind(p.fake.publicResponses);
+    const probe = vi.spyOn(p.fake.publicResponses, 'get').mockImplementation((route) => {
+      h.store.persistRun(transitionRun(h.store.run, ReasonCode.UserPaused, TIME));
+      return get(route);
+    });
+    await expect(p.driver.issuePr(p.request)).rejects.toThrow('admission_commit');
+    expect(p.rows.read()).toHaveLength(1);
+    expect(fs.readdirSync(p.bodyDirectory)).toEqual([]);
+    probe.mockRestore();
+    h.store.persistRun(transitionRun(h.store.run, ReasonCode.ResumeShipping, TIME));
+    p.driver.observeRun(h.store.run);
+    // Probe reservation availability without driver cleanup: commitPr releases its own hold.
+    const sha = h.deps.bindings.candidateSha;
+    const digest = h.authorization().receipt.digest;
+    expect(await p.admission.receiptValid(sha, digest)).toBe(true);
+    h.store.persistRun(transitionRun(h.store.run, ReasonCode.UserPaused, TIME));
+    expect(await p.admission.commitPr(sha, digest)).toBe(false);
+    h.store.persistRun(transitionRun(h.store.run, ReasonCode.ResumeShipping, TIME));
+    p.driver.observeRun(h.store.run);
+    await expect(p.driver.issuePr(p.request)).resolves.toMatchObject({
+      kind: 'awaiting_contributor',
+    });
+  });
+
   it.each([
     'policy',
     'boundary',
