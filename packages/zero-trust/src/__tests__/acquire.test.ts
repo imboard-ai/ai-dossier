@@ -1,4 +1,4 @@
-import childProcess, { execFileSync } from 'node:child_process';
+import childProcess from 'node:child_process';
 import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -9,6 +9,7 @@ import { acquireSource, resolveBase, sourceUrl } from '../canonical/acquire';
 import { CanonicalError, exportSource } from '../canonical/export';
 import { baseManifest, createCandidate, MAX_PACK_BYTES } from '../canonical/reconstruct';
 import { TrustedGit } from '../canonical/trusted-git';
+import { localGit as git } from './local-git';
 
 const temps: string[] = [];
 const upstream = { owner: 'owner', repo: 'repo' };
@@ -16,19 +17,6 @@ function temp(): string {
   const root = fs.mkdtempSync(join(tmpdir(), 'acquire-test-'));
   temps.push(root);
   return root;
-}
-function git(root: string, args: string[], input?: string | Buffer): Buffer {
-  return execFileSync('/usr/bin/git', ['-C', root, ...args], {
-    input,
-    env: {
-      PATH: '/usr/bin:/bin',
-      HOME: root,
-      GIT_CONFIG_NOSYSTEM: '1',
-      GIT_CONFIG_GLOBAL: '/dev/null',
-      GIT_TERMINAL_PROMPT: '0',
-    },
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
 }
 function fixture(parent = true) {
   const root = temp();

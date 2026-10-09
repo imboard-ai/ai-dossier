@@ -1,9 +1,9 @@
-import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { localGit } from '../__tests__/local-git';
 import { acquireSource, type SourceGitHubRead } from '../canonical/acquire';
 import { createManifest, sha256 } from '../canonical/export';
 import * as canonical from '../canonical/reconstruct';
@@ -39,20 +39,7 @@ function shipping(): RunRecord {
 function rig() {
   const root = fs.mkdtempSync(join(tmpdir(), 'zt-drift-'));
   temps.push(root);
-  const git = (args: string[], input?: string) =>
-    execFileSync('/usr/bin/git', ['-C', root, ...args], {
-      input,
-      env: {
-        PATH: '/usr/bin:/bin',
-        HOME: root,
-        GIT_CONFIG_NOSYSTEM: '1',
-        GIT_CONFIG_GLOBAL: '/dev/null',
-        GIT_TERMINAL_PROMPT: '0',
-      },
-      stdio: ['pipe', 'pipe', 'pipe'],
-    })
-      .toString()
-      .trim();
+  const git = (args: string[], input?: string) => localGit(root, args, input).toString().trim();
   git(['init', '--bare', '--template=', '.']);
   let head: string | undefined;
   const advance = (files: Record<string, string>, mode = '100644') => {
@@ -98,6 +85,7 @@ function rig() {
     run: shipping(),
     overlay,
     approval,
+    basePack: old.pack,
     rebases: 0,
     pushIntentJournaled: false,
   };
@@ -115,6 +103,84 @@ afterEach(() => {
 });
 
 describe('upstream drift admission', () => {
+  it.each([
+    'malformed',
+    'non-200',
+    'throw',
+  ])('unknown %s records no candidate, transition or shipping admission', async (failure) => {
+    const f = rig();
+    const read: SourceGitHubRead = async () => {
+      if (failure === 'throw') throw new Error('read unavailable');
+      return failure === 'non-200'
+        ? { status: 503, body: {} }
+        : { status: 200, body: { commit: { sha: 'bad' } } };
+    };
+    const construct = vi.spyOn(canonical, 'createCandidate');
+    const transition = vi.spyOn(lifecycle, 'transitionRun');
+    const ship = vi.fn();
+    const result = await checkShippingBase({ ...f.deps, read }, f.input);
+    // Only the real guard's unchanged result admits progression to shipping.
+    if (result.kind === 'unchanged') ship(result);
+    expect(result).toEqual({ kind: 'hand_off', reason: 'base_unknown' });
+    expect(ship).not.toHaveBeenCalled();
+    expect(construct).not.toHaveBeenCalled();
+    expect(transition).not.toHaveBeenCalled();
+    expect(f.deps.acquire).not.toHaveBeenCalled();
+    // The admission recording assertion is non-vacuous: injecting a forbidden
+    // callback makes it fail, then clearing restores the clean guard result.
+    ship(result);
+    expect(() => expect(ship).not.toHaveBeenCalled()).toThrow();
+    ship.mockClear();
+  });
+
+  it('retains implementation plus repair writes when the unrelated upstream advances', async () => {
+    const f = rig();
+    f.overlay.write('other', 'one'); // Byte-identical touched path must survive repair.
+    const repair = new WorkspaceOverlay(f.overlay.manifest());
+    repair.write('other', 'repaired');
+    // An uncomposed repair is not an upstream-baselined contribution and refuses.
+    await expect(checkShippingBase(f.deps, { ...f.input, overlay: repair })).rejects.toThrow();
+    f.overlay.applyRepair(repair);
+    expect(f.overlay.writtenEntries().map((entry) => entry.path)).toEqual(['file', 'other']);
+    f.advance({ file: 'old', other: 'one', new: 'upstream' });
+    const result = await checkShippingBase(f.deps, f.input);
+    if (result.kind !== 'rebased') throw new Error('expected rebase');
+    expect(result.manifest.entries.find((entry) => entry.path === 'file')?.bytes).toBe(
+      Buffer.from('fixed').toString('base64')
+    );
+    expect(result.manifest.entries.find((entry) => entry.path === 'other')?.bytes).toBe(
+      Buffer.from('repaired').toString('base64')
+    );
+    expect(result.manifest.entries.find((entry) => entry.path === 'new')?.bytes).toBe(
+      Buffer.from('upstream').toString('base64')
+    );
+    f.advance({ file: 'upstream changed inherited fix', other: 'one', new: 'upstream' });
+    const construct = vi.spyOn(canonical, 'createCandidate');
+    expect(await checkShippingBase(f.deps, f.input)).toEqual({
+      kind: 'hand_off',
+      reason: 'rebase_conflict',
+      paths: ['file'],
+    });
+    expect(construct).not.toHaveBeenCalled();
+  });
+
+  it('composes multiple repairs atomically and preserves identical original touches', () => {
+    const f = rig();
+    f.overlay.write('other', 'one');
+    const first = new WorkspaceOverlay(f.overlay.manifest());
+    first.write('file', 'repair-one');
+    f.overlay.applyRepair(first);
+    const second = new WorkspaceOverlay(f.overlay.manifest());
+    second.write('file', 'repair-two');
+    f.overlay.applyRepair(second);
+    expect(f.overlay.writtenEntries().map((entry) => entry.path)).toEqual(['file', 'other']);
+    expect(f.overlay.manifest().entries.find((entry) => entry.path === 'file')?.bytes).toBe(
+      Buffer.from('repair-two').toString('base64')
+    );
+    const before = f.overlay.manifest();
+    expect(() => f.overlay.applyRepair(new WorkspaceOverlay(f.old.manifest))).toThrow();
+    expect(f.overlay.manifest()).toEqual(before);
+  });
   it('negative-effect recording controls fail when construction/transition are injected', async () => {
     const f = rig();
     const construct = vi.spyOn(canonical, 'createCandidate');
@@ -238,6 +304,7 @@ describe('upstream drift admission', () => {
         ...input,
         overlay: result.overlay,
         approval: result.candidate.record,
+        basePack: result.candidate.pack,
         rebases: result.rebases,
         run: transitionRun(result.run, R.VerificationPassed, result.run.updatedAt),
       };
@@ -459,6 +526,7 @@ describe('upstream drift admission', () => {
           run: verified.run,
           overlay,
           approval: fixture.approved(),
+          basePack: fixture.BASE_COMMIT.pack,
           rebases: 0,
           pushIntentJournaled: false,
         }

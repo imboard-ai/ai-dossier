@@ -106,6 +106,8 @@ export interface ShippingBaseInput {
   readonly run: RunRecord;
   readonly overlay: WorkspaceOverlay;
   readonly approval: CommitInputs;
+  /** Source pack for the CURRENT verified upstream parent, binding the cumulative baseline. */
+  readonly basePack: Buffer;
   /** Durable session-wide count; unchanged checks do not reset it. */
   readonly rebases: number;
   /** True as soon as THIS candidate's push intent is journaled, not just after success. */
@@ -158,6 +160,8 @@ export async function checkShippingBase(
   )
     throw new CanonicalError('invalid_manifest');
   const verifiedBase = approval.baseSha;
+  if (baseManifest(input.basePack, verifiedBase).digest !== overlay.base.digest)
+    throw new CanonicalError('tree_mismatch');
   const check = await checkBase(deps.read, deps.upstream, verifiedBase);
   if (pushIntentJournaled || run.state === 'awaiting_contributor') {
     const currentBase =

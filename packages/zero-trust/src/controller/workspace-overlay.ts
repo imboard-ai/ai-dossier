@@ -70,6 +70,17 @@ export class WorkspaceOverlay {
     return createManifest([...this.entries.values()]);
   }
 
+  /** Compose a repair workspace into the cumulative contribution delta. The repair
+   * must start at our exact candidate; inherited and byte-identical writes remain touched. */
+  applyRepair(repair: WorkspaceOverlay): void {
+    if (repair.base.digest !== this.manifest().digest) throw new CanonicalError('tree_mismatch');
+    const next = new WorkspaceOverlay(this.base);
+    for (const entry of [...this.writtenEntries(), ...repair.writtenEntries()])
+      next.write(entry.path, Buffer.from(entry.bytes, 'base64').toString('utf8'));
+    this.entries = next.entries;
+    for (const file of next.written) this.written.add(file);
+  }
+
   /** `directory` must be absent under a controller-owned parent. Never merge into an
    * existing tree (including a symlink). Returns the freshly exported candidate. */
   materialize(directory: string): SourceManifest {

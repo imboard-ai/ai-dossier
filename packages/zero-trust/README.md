@@ -131,7 +131,8 @@ Canonical collisions/invalid input throw fixed `CanonicalError` codes.
 `checkShippingBase(deps, input)` is the orchestration API for both initial shipping
 and before `shipRevision`. Dependencies are `read`, `upstream`, `acquire(baseSha)`
 (production: `acquireSource`), and controller `now(): Date`. Input holds the restored
-`run`, admitted `overlay`, current candidate's recorded `CommitInputs` as `approval`, persisted session-wide
+`run`, cumulative admitted `overlay`, current candidate's recorded `CommitInputs` as `approval`,
+`basePack` for that current verified upstream parent, persisted session-wide
 `rebases` count (0–2), and boolean `pushIntentJournaled` for **this candidate**.
 Only a `shipping` run before any push intent can return `unchanged` admission.
 An advance constructs a new candidate, returns the run transitioned through
@@ -145,8 +146,9 @@ Conflicts hand off `rebase_conflict`; unknown reads defer pushing via
 `rebase_unavailable`, without a candidate or weaker fallback.
 
 Only `shipping` and `awaiting_contributor` are accepted; other phases reject.
-After the candidate's push intent is journaled (even if execution failed or is
-uncertain), while still in either accepted phase, the result is only `recorded`:
+In `awaiting_contributor` regardless of intent status, and in `shipping` after
+the candidate's push intent is journaled (even if execution failed or is uncertain),
+every check returns only `recorded`:
 unchanged `run`, and `observation: { verifiedBase, currentBase, limitation }`.
 `currentBase` is null on unknown reads. The limitation names both known SHAs and
 never claims verification of the current merge result; feed it to PR limitations.
@@ -163,6 +165,19 @@ use `checkBase` with caller-owned recording rather than `checkShippingBase`.
 Counts are session-wide across resumes and checks;
 only an explicitly allocated new budget session gets a fresh allowance.
 These APIs do not construct receipts, access credentials, publish, or poll.
+
+The overlay must retain the **upstream** baseline and all admitted writes across
+repairs. Before shipping, call `cumulativeOverlay.applyRepair(repairOverlay)` for
+each repair returned from implementation: it requires the repair's workspace base
+to equal the cumulative candidate manifest, then atomically composes repair writes
+while retaining inherited and byte-identical touched paths. Wrong baselines refuse
+with `tree_mismatch`. `checkShippingBase` binds the cumulative baseline to
+`basePack` at the current approval parent before any read; passing an uncomposed
+repair workspace fails closed rather than silently dropping the original fix.
+After rebase, use the acquired new-parent pack (or the returned candidate pack,
+which contains that parent) as `basePack` for the next check. Unknown/read/rebase
+hand-offs apply only to pre-intent `shipping`; unknown contributor-wait observations
+carry `currentBase: null`.
 
 ## Independent verifier (#1102)
 
