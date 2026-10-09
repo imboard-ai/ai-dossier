@@ -20,7 +20,7 @@ import {
 import { isCommitSha } from '../github/fork-ref';
 import { assertNoSecrets } from '../redaction';
 import { ReasonCode, type RunRecord, restoreRun, transitionRun } from '../state';
-import { WorkspaceOverlay } from './workspace-overlay';
+import type { WorkspaceOverlay } from './workspace-overlay';
 
 export type BaseCheck =
   | { readonly kind: 'unchanged' }
@@ -88,9 +88,7 @@ export function rebaseCandidate(input: RebaseInput): RebaseResult {
     .map((entry) => entry.path)
     .sort(comparePaths);
   if (conflicts.length) return Object.freeze({ kind: 'conflict', paths: Object.freeze(conflicts) });
-  const overlay = new WorkspaceOverlay(nextBase);
-  for (const entry of writes)
-    overlay.write(entry.path, Buffer.from(entry.bytes, 'base64').toString('utf8'));
+  const overlay = input.overlay.onBase(nextBase);
   const manifest = overlay.manifest();
   const candidate = createCandidate(manifest, input.approval, pack);
   return Object.freeze({ kind: 'rebased', candidate, manifest, overlay });
@@ -147,9 +145,7 @@ export async function checkShippingBase(
     ...input.approval,
     author: Object.freeze({ ...input.approval.author }),
   });
-  const overlay = new WorkspaceOverlay(input.overlay.base);
-  for (const entry of input.overlay.writtenEntries())
-    overlay.write(entry.path, Buffer.from(entry.bytes, 'base64').toString('utf8'));
+  const overlay = input.overlay.snapshot();
   if (
     !['shipping', 'awaiting_contributor'].includes(run.state) ||
     !Number.isSafeInteger(rebases) ||

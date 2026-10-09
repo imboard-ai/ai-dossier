@@ -5,6 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { localGit } from '../__tests__/local-git';
 import { acquireSource, type SourceGitHubRead } from '../canonical/acquire';
+import * as source from '../canonical/export';
 import { createManifest, sha256 } from '../canonical/export';
 import * as canonical from '../canonical/reconstruct';
 import { type CommitInputs, createCandidate, reconstructCandidate } from '../canonical/reconstruct';
@@ -571,6 +572,36 @@ describe('synthetic structural overlays', () => {
     mode: '100644' as const,
     bytes: Buffer.from(text).toString('base64'),
     sha256: sha256(text),
+  });
+  it('snapshots and bulk composition validate the source a constant number of times', () => {
+    const overlay = new WorkspaceOverlay(createManifest([file('base', 'baseline')]));
+    for (let n = 0; n < 60; n++) overlay.write(`file-${n}`, `write ${n}`);
+    const validate = vi.spyOn(source, 'createManifest');
+    const snapshot = overlay.snapshot();
+    expect(validate).not.toHaveBeenCalled();
+    expect(snapshot.writtenEntries()).toEqual(overlay.writtenEntries());
+    const rebased = overlay.onBase(overlay.base);
+    expect(validate).toHaveBeenCalledTimes(1);
+    validate.mockClear();
+    overlay.write('later', 'later');
+    expect(snapshot.writtenEntries()).toHaveLength(60);
+    expect(rebased.writtenEntries()).toHaveLength(60);
+    const repair = new WorkspaceOverlay(snapshot.manifest());
+    repair.write('file-0', 'repair');
+    validate.mockClear();
+    snapshot.applyRepair(repair);
+    expect(validate).toHaveBeenCalledTimes(2); // one baseline comparison, one combined validation
+    expect(snapshot.writtenEntries()).toHaveLength(60);
+  });
+  it('bulk rebasing refuses file/directory and case collisions', () => {
+    const overlay = new WorkspaceOverlay(createManifest([]));
+    overlay.write('a', 'admitted');
+    const directory = createManifest([
+      { path: 'a', mode: '040000', bytes: '', sha256: sha256('') },
+    ]);
+    expect(() => overlay.onBase(directory)).toThrow();
+    expect(() => overlay.onBase(createManifest([file('A', 'upstream')]))).toThrow();
+    expect(overlay.manifest().entries.map((entry) => entry.path)).toEqual(['a']);
   });
   it('rejects an overlay based on a different old manifest', () => {
     const f = rig();

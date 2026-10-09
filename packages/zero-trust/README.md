@@ -178,6 +178,11 @@ After rebase, use the acquired new-parent pack (or the returned candidate pack,
 which contains that parent) as `basePack` for the next check. Unknown/read/rebase
 hand-offs apply only to pre-intent `shipping`; unknown contributor-wait observations
 carry `currentBase: null`.
+`snapshot()` detaches an overlay by copying its maps and sharing only frozen entries.
+`onBase(baseManifest)` replays the held delta in bulk after the drift conflict check;
+it does not itself decide conflicts. Rebase and repair composition validate the
+combined manifest once per operation rather than rehashing the entire source once
+per written file. Both preserve modes and touched paths and refuse canonical collisions.
 
 ## Independent verifier (#1102)
 
