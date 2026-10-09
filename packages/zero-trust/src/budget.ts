@@ -480,7 +480,9 @@ export class BudgetLedger {
       if (
         state.reservations.some(
           (row) =>
-            row.status === 'reserved' && (pending.has(row.id) || !this.acknowledged.has(row.id))
+            row.status === 'reserved' &&
+            (purpose === 'work' || row.purpose === 'teardown') &&
+            (pending.has(row.id) || !this.acknowledged.has(row.id))
         )
       )
         throw new BudgetError(
@@ -507,8 +509,9 @@ export class BudgetLedger {
       if (committed + BigInt(e.money.minor) > ceiling)
         throw new BudgetError('ceiling_exceeded', 'Insufficient unreserved budget');
       if (
-        t.tokens + BigInt(e.tokens) > BigInt(s.tokenLimit) ||
-        t.timeMs + BigInt(e.timeMs) > BigInt(s.timeLimitMs)
+        purpose === 'work' &&
+        (t.tokens + BigInt(e.tokens) > BigInt(s.tokenLimit) ||
+          t.timeMs + BigInt(e.timeMs) > BigInt(s.timeLimitMs))
       )
         throw new BudgetError('limit_exceeded', 'Token or time limit exceeded');
       const r: BudgetReservation = {

@@ -10,6 +10,112 @@ plus ecosystem detection, runtime profiles, command plans and package-proxy poli
 (see the gate 2 section below).
 Publication remains gated on S1 feasibility.
 
+## Injected run controller core (#1106)
+
+`new RunController(deps)` supplies `start(config)`, `resume(runId)`,
+`snapshot(): RunRecord`, and `incidentStop(reason): Promise<RunRecord>`.
+Dependencies contain the controller-owned storage `root`, `PhaseSteps`,
+`RecoveryHooks`, all `ObservingDriver`s, the VM adapter's `create`/`destroy`/
+`listByRun`, `estimateVm(spec, purpose)`, `observeVm(hold, vm)` and a trusted
+`now(): Date` clock. This core never constructs a credential broker or upstream
+write adapter. There are no scheduled tasks, timers or polling loops.
+
+`PhaseSteps` has `gate`, `acquire`, `plan`, `implement`, `review`, `verify`,
+`drift`, `ship`, `resumeHandoff`, and `track`. Each receives a `PhaseContext`:
+the locked store, current immutable run, ledger, session ID, an `AbortSignal`,
+and reserved `createVm(spec)` (run ID and limits come from the held store).
+Production wiring must use this allocation path, honor cancellation, and keep
+effects journaled/idempotent through the existing drivers. Steps return facts;
+they must not persist lifecycle transitions themselves. The controller maps
+typed outcomes to `ReasonCode` and uses `transitionRun`; an illegal edge throws,
+never silently changes phase. Unknown/malformed results refuse progress with
+fixed `ControllerError` diagnostics (no provider/guest error text).
+
+Success outcomes are `proceed`, `acquired`, `planned { bindings }`,
+`candidate { bindings }`, `approved`, `verified { record }`,
+`unchanged` / `advanced { bindings }`, and `submitted`. Gate also accepts
+`request_permission`, `terminate`, `ineligible`; shipping accepts
+`contributor_handoff`, `fork_missing`, `installation_missing`. Explicit hand-off
+resume accepts `waiting`, `invited`, `engagement_observed`, `submitted`,
+`resume_gating`, `resume_shipping`, `declined`. Tracking accepts `waiting`,
+`awaiting_review`, `accepted`, `merged`, `declined`, `revision`.
+All phases accept `hand_off`, `blocked`, `unsupported`, `failed`, `cancelled`.
+A gating hand-off stops in gating; other active hand-offs pause. Wait outcomes
+do not poll. Start stops at any durable wait, user pause, submission, review wait,
+accepted/terminal state or cleanup block. Explicit resume performs at most one
+wait/tracker observation before continuing a newly admitted active phase.
+
+After **each** legal transition the core calls `RunStore.persistRun`, then
+`observeRun` on **every** registered driver, in order. Recovery snapshots that
+contain several transitions are persisted and fanned out individually. One
+observer failure does not prevent the others from seeing the fence, but refuses
+further progress. The current snapshot is also delivered at open/start. Successful
+phase results are journaled under `control/controller/events.jsonl` before applying
+their transitions: acquisition/review/drift completion and checkpoint content
+survive crashes without repeating completed steps. A step interrupted before it
+returns must reconcile its own effects through recovery; a phase-result cache
+alone is not a write-once network adapter. Recovered/truncated or invalid
+controller journals refuse admission. Checkpoint approval reuses the completed
+phase result; no new plan/patch write is required.
+
+Resume order is store open/lifetime lock → budget open and old-hold reconciliation
+→ VM reconciliation (`listByRun` plus `teardownVm`) → credential recovery hook
+(`broker.recover` in wiring) → intent resume → state-specific hand-off/tracker
+resume → next phase. Every item is injected in `RecoveryHooks`; VM reconciliation
+also runs directly so an injected wrapper cannot skip actual teardown. Recovery
+hooks may return a forward run snapshot to be persisted/fanned out; they do not
+admit new execution. They must reconcile and return observations, never create
+VMs or introduce new upstream writes. They execute under the run lock. Unknown
+old budget holds use `settle(id, null)`, retain their entire reservation, and fence
+new work. Credentials and write reconciliation still precede phase admission.
+
+Start initializes the ledger and starts `<runId>-s1` with the persisted ceiling,
+protected cleanup allowance, token limit and active-minutes limit. Resume never
+resets a session or spend. VM allocation reserves an injected priced estimate
+**before** create; `observeVm` returns an actual observation or null (unknown).
+Teardown reserves with purpose `teardown`, whose protected funds and cleanup
+time remain available even with unresolved work holds or exhausted work limits.
+Work reservations retain their resume barrier. The ledger also retains the
+barrier for unknown **cleanup** holds, preventing repeated
+unaccounted cleanup charges; only unknown work holds get the protected-cleanup
+exception. If cleanup cannot reserve, it
+still destroys guests, records unfunded cleanup, and refuses continuation;
+financial denial never leaves execution running. Active elapsed time is derived
+from `assembleStatus` history and checked before every new step; replaying a
+completed phase result does not repeat its effect. Reaching a work ceiling pauses
+without scheduling anything.
+
+The three configured checkpoints use `checkpointDue` / `pauseAtCheckpoint`:
+plan before approval, patch before review/verification, verification before drift
+and shipping. Steps write their private artifacts and return controller-held
+bindings; verification records are reloaded from
+`artifacts/verification/<candidateSha>.json` with run/digest/boundary/log validation,
+bound to the current candidate, then passed to `applyVerification`. A boundary
+failure blocks regardless of verdict; the existing two-repair cap applies.
+An `advanced` drift result supplies the new candidate's bindings and requires
+fresh verification. Shipping still owns receipt issuance/authorization and
+contributor-confirmed publication through its injected drivers.
+
+Every hand-off/terminal stop destroys all run VMs with the shared three-attempt
+`teardownVm`. Terminal rows have no `CleanupFailed` edge, so cleanup completes
+before committing a new terminal transition; a failure instead persists
+`blocked_cleanup`, fans out the fence and denies later execution/publication.
+Other durable waits are persisted before teardown. Remaining VMs are attempted
+even after one fails. Reconciliation of an already terminal/cleanup-blocked run
+retains its existing lifecycle history and records the cleanup result rather
+than inventing an illegal edge. This uses `teardownVm`'s explicit
+`reconcileStopped: true` option; ordinary callers still throw on an illegal
+`CleanupFailed` edge. Reconciliation never reopens execution.
+
+`incidentStop` durably records the bounded, secret-free reason, closes admission,
+aborts the current step, calls `killAll`, joins the active operation, tears down,
+then records cancellation or cleanup block. An already completed publication
+remains in history even when cancellation races its return. The incident journal
+fences subsequent resumes, including after a crash. `snapshot` is available after
+completion/error; start/resume own and release their handles, reject concurrent
+entry, and do not hold idle locks at durable stops. Scripted test steps and hooks
+live in `src/controller/__tests__/fake-steps.ts`.
+
 ## Local outcome metrics (#1103)
 
 `contributionOutcome(store, now?)` reads the locked `RunStore` history, the existing

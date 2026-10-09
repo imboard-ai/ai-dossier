@@ -337,9 +337,12 @@ describe('ownership-proven store recovery', () => {
     expect(() => reopened.reserve('s', estimate)).toThrow('Reconcile recovered reservations');
     reopened.settle(held.id, null);
     expect(() => reopened.reserve('s', estimate)).toThrow('Reconcile recovered reservations');
-    expect(() => reopened.reserve('s', estimate, 'teardown')).toThrow(
-      'Reconcile recovered reservations'
+    // An unknown WORK hold fences work, but scenario 19 keeps cleanup available.
+    const cleanup = reopened.reserve('s', estimate, 'teardown');
+    expect(reopened.snapshot().reservations.find((row) => row.id === held.id)?.status).toBe(
+      'reserved'
     );
+    expect(cleanup.purpose).toBe('teardown');
     reopened.release(held.id, 'provider proves never started');
     reopened.reserve('s', estimate, 'teardown');
     reopened.reserve('s', estimate);

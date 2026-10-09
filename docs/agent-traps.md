@@ -9,6 +9,7 @@ search for first.
 
 | Symptom (grep this) | What went wrong | Fix | PR |
 |---|---|---|---|
+| `Reconcile recovered reservations` blocks run-controller VM teardown after a crash | The budget resume barrier treated unresolved work and cleanup holds identically, so an unknown work charge also fenced the protected cleanup allowance. Removing the barrier for all cleanup would instead admit new cleanup charges after an unresolved cleanup attempt | Only teardown may bypass unresolved **work** holds; unresolved **teardown** holds still fence every new reservation. Keep null settlements reserved, attempt guest destruction even when financial admission refuses, and deny continuation after unfunded cleanup | #1106 |
 | `checkShippingBase` admits `unchanged` after starting with a journaled push intent / a rebase uses changed author data | Readonly caller aliases were re-read after an asynchronous upstream read, so mutation could erase the intent fence or change validated counters/candidate inputs | Snapshot the intent flag, counter, nested approval and admitted overlay before the await; use only detached facts. Compare the new committer time at canonical whole-second precision before reconstruction. Deferred-read and same-second tests cover both traps | #1107 |
 
 | Symptom (grep this) | What went wrong | Fix | PR |

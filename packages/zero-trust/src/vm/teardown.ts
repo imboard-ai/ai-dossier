@@ -2,7 +2,7 @@
  * run in `blocked_cleanup`, which has no edge back to execution or shipping. */
 import { isAdmitted, type OperationKind } from '../intents';
 import type { Journal } from '../journal';
-import { ReasonCode, type RunRecord, transitionRun } from '../state';
+import { ReasonCode, type RunRecord, TERMINAL_STATES, transitionRun } from '../state';
 import { appendVmEvent, type VmAdapter, VmCleanupError, type VmHandle } from './adapter';
 
 export const MAX_CLEANUP_ATTEMPTS = 3;
@@ -37,6 +37,8 @@ export async function teardownVm(
     now: () => Date;
     retryDelayMs?: number;
     sleep?: (ms: number) => Promise<void>;
+    /** Reconcile an already fenced stop without inventing a new lifecycle edge. */
+    reconcileStopped?: boolean;
   }
 ): Promise<TeardownOutcome> {
   const sleep = options.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
@@ -64,7 +66,13 @@ export async function teardownVm(
     }
   }
   const failure = last as VmCleanupError;
-  const blocked = transitionRun(run, ReasonCode.CleanupFailed, options.now().toISOString());
+  // Reconciliation of an already fenced stop must not invent an illegal lifecycle
+  // edge or erase a previously recorded terminal outcome.
+  const blocked =
+    options.reconcileStopped &&
+    (run.state === 'blocked_cleanup' || TERMINAL_STATES.includes(run.state))
+      ? run
+      : transitionRun(run, ReasonCode.CleanupFailed, options.now().toISOString());
   options.observeRun?.(blocked);
   appendVmEvent(options.journal, options.now(), {
     type: 'vm_cleanup_blocked',
