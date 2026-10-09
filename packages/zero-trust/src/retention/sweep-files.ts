@@ -30,6 +30,8 @@ export function inventory(root: string, pending: readonly SweepFile[] = []) {
     for (const name of directoryEntries(directory)) {
       if (++entries > INVENTORY_LIMITS.entries) refuse('size-limit', 'inventory');
       if (!prefix && ['summary.json', '.snapshot-expired'].includes(name)) continue;
+      if (!prefix && /^\.retention-(generation|completed)-[a-f0-9]{64}\.json$/u.test(name))
+        continue;
       const named = prefix ? `${prefix}/${name}` : name;
       const held =
         prefix === QUARANTINE ? pending.find((file) => heldName(file) === name) : undefined;

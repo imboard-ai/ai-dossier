@@ -422,6 +422,8 @@ export class RunStore {
     try {
       const pinned = `/proc/self/fd/${this.directoryFd}`;
       const config = readStoredConfig(pinned);
+      if (hash(boundedRead(path.join(pinned, 'config.json'))) !== this.configDigest)
+        fail('run_diverged');
       if (JSON.stringify(config) !== JSON.stringify(this.storedConfig)) fail('run_diverged');
       return config;
     } catch (error) {
@@ -445,21 +447,7 @@ export class RunStore {
       if (named.isSymbolicLink() || named.dev !== pinned.dev || named.ino !== pinned.ino)
         fail('invalid_store');
       const directory = `/proc/self/fd/${this.directoryFd}`;
-      const raw = parseStored(boundedRead(path.join(directory, 'run.json')));
-      if (!sameRunRecord(restoreRun(raw), this.current)) fail('run_diverged');
-      const config = boundedRead(path.join(directory, 'config.json'));
-      if (
-        hash(config) !== this.configDigest ||
-        hash(config) !== boundedRead(path.join(directory, 'config.sha256')).toString()
-      )
-        fail('invalid_store');
-      const evidence = replayControl(readControl(directory), this.storedConfig);
-      if (
-        !evidence.confirmed ||
-        !sameRunRecord(evidence.run, evidence.confirmed) ||
-        !sameRunRecord(evidence.run, this.current)
-      )
-        fail('run_diverged');
+      this.validateOutcomeEvidence();
       return directory;
     } catch (error) {
       if (error instanceof RunStoreError) throw error;
@@ -612,7 +600,7 @@ export class RunStore {
       guard = acquire(pinned, !options.readOnly);
       const bytes = boundedRead(path.join(pinned, 'config.json'));
       const config = readStoredConfig(pinned);
-      validateRunConfig(runConfigInput(config));
+      if (!options.readOnly) validateRunConfig(runConfigInput(config));
       const raw = parseStrictUtf8Json(readPrivate(path.join(pinned, 'run.json')));
       assertSecretFree(raw);
       const run = restoreRun(raw);

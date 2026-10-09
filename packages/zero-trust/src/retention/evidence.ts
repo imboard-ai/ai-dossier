@@ -1,9 +1,17 @@
-import { budgetTotals, validateBudgetSnapshot } from '../budget';
+import path from 'node:path';
+import { BudgetLedger, budgetTotals, validateBudgetSnapshot } from '../budget';
 import type { RunStore } from '../controller/run-store';
+import { isTrackerContinuation } from '../controller/tracker-continuation';
 import { replayHandoffs } from '../github/handoff-driver';
-import { type RelocationEvidence, replayTrack, validateRelocationEvidence } from '../github/track';
+import {
+  type RelocationEvidence,
+  replayTrack,
+  type TrackedPr,
+  validateRelocationEvidence,
+} from '../github/track';
 import type { SignedReceipt } from '../receipt/issue';
 import type { CommandEvidence } from '../receipt/schema';
+import { isRecoveryEvent } from '../recovery';
 import { assertSecretFree } from '../redaction';
 import { isRunContinuation, restoreRun } from '../state';
 import { digest, JOURNAL_BYTES, jsonRecord, optionalBytes, refuse, strictJsonLines } from './files';
@@ -21,12 +29,18 @@ export function contributionEvidence(
   store: EvidenceStore,
   root: string,
   snapshot?: EvidenceSnapshot,
-  read: (name: string) => Buffer | null = (name) =>
-    optionalBytes(root, name, name.endsWith('jsonl') ? JOURNAL_BYTES : undefined)
+  read?: (name: string) => Buffer | null
 ): ContributionEvidence {
   const sources: Record<string, string> = {};
   const select = (name: string) => {
-    const bytes = read(name);
+    const bytes = read
+      ? read(name)
+      : name === 'budget/ledger.json'
+        ? (() => {
+            if (!optionalBytes(root, name)) return null;
+            return BudgetLedger.readOnlyEvidence(path.join(root, name), store.contributionId).bytes;
+          })()
+        : optionalBytes(root, name, name.endsWith('jsonl') ? JOURNAL_BYTES : undefined);
     if (bytes) sources[name] = digest(bytes);
     if (bytes && snapshot) {
       snapshot.sources[name] = { length: bytes.length, digest: digest(bytes) };
@@ -50,6 +64,7 @@ export function contributionEvidence(
   const links: string[] = [store.run.upstreamIssue];
   if (handoffs) {
     const events = strictJsonLines(handoffs);
+    if (events.some(isRecoveryEvent)) refuse();
     const state = replayHandoffs(events);
     if (state.contributionId !== store.contributionId || !isRunContinuation(state.run, store.run))
       refuse();
@@ -64,11 +79,17 @@ export function contributionEvidence(
   }
   const tracking = select('track/events.jsonl');
   const relocations: RelocationEvidence[] = [];
+  let originalPr: TrackedPr | null = null;
   if (tracking) {
     const events = strictJsonLines(tracking);
+    if (events.some(isRecoveryEvent)) refuse();
     const track = replayTrack(events);
-    if (track.contributionId !== store.contributionId || !isRunContinuation(track.run, store.run))
+    if (
+      track.contributionId !== store.contributionId ||
+      !isTrackerContinuation(track.run, store.run)
+    )
       refuse();
+    originalPr = replayTrack(events.slice(0, 1)).pr;
     for (const event of events) {
       if (event && typeof event === 'object' && 'type' in event && event.type === 'rebound') {
         if (!('evidence' in event)) refuse();
@@ -79,10 +100,13 @@ export function contributionEvidence(
     verifiedSha = track.verifiedSha;
     outcomeSha = track.outcomeSha ?? null;
     outcome = track.outcomeSha
-      ? track.run.state
+      ? track.blockedReason === 'merged_during_revision'
+        ? 'merged'
+        : track.run.state
       : track.blockedReason
         ? 'blocked'
         : 'awaiting_review';
+    if (track.blockedReason === 'merged_during_revision' && !track.outcomeSha) outcome = 'unknown';
     if (!links.includes(pr)) links.push(pr);
   }
   const budget = select('budget/ledger.json');
@@ -145,6 +169,7 @@ export function contributionEvidence(
     outcomeSha,
     outcome,
     relocations,
+    originalPr,
     costTotals,
     receipts,
     verification: verificationRecords,
@@ -199,6 +224,7 @@ export function historicalEvidence(store: RunStore, root: string, snapshot: Evid
   return facts;
 }
 export interface ContributionEvidence {
+  originalPr: TrackedPr | null;
   relocations: RelocationEvidence[];
   upstreamIssue: string;
   links: string[];

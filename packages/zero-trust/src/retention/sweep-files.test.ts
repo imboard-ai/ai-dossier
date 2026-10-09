@@ -55,7 +55,9 @@ it('worker-surface writes cannot replace a quarantined leaf; unplanned leaves re
   expect(fs.readFileSync(artifact, 'utf8')).toBe('unplanned replacement');
   expect(fs.readdirSync(path.join(r.directory, QUARANTINE))).toEqual([]);
   expect(fs.statSync(path.join(r.directory, QUARANTINE)).mode & 0o777).toBe(0o700);
-  expect(() => planSweep(r.root, NOW)).toThrow();
+  const next = planSweep(r.root, NOW);
+  applySweep(next);
+  expect(fs.readFileSync(artifact, 'utf8')).toBe('unplanned replacement');
 });
 it('single artifact deletion accepts missing only on replay, and never consumes unknown quarantine leaves', () => {
   const r = rig(),

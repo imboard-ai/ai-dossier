@@ -76,6 +76,22 @@ includes #1103's strict RunStore evidence and #1102 verification schema; preserv
 while reconciling read-only retention opening and shared strict-object construction.
 
 ## Visual Review
+### Additional owner-authorized bounded repair (2026-10-09)
+Authorization: https://github.com/imboard-ai/ai-dossier/issues/1104#issuecomment-6075163342.
+Exactly one additional repair covers all nine preserved technical findings. AC2 and
+the tracker contract remain unchanged. Validate actual detailed replacement identity
+before the merged shortcut and append-only rebound publication. Cross-bind portable
+relocation to the original tracked PR and intact signed receipt identities and marker.
+Reuse the complete RunStore and tracker completeness predicates, refuse recovered
+selected journals, and read exact budget provenance under its existing non-reclaiming
+transaction fence. Keep blocked revision execution distinct from its observed upstream
+merge; do not infer a missing legacy SHA. Read-only archives use stored configuration
+without execution-key readiness. Later artifact batches get separate content-addressed
+manifests and completion markers, their own eligibility and crash replay; the first
+summary and expiry marker remain immutable.
+Fresh independent full-tier and blind final-head conformance follow implementation.
+Another AC2 failure triggers the authorized handoff, with no further repair loop.
+
 - [x] Not required (local backend persistence only).
 
 ## Base Branch

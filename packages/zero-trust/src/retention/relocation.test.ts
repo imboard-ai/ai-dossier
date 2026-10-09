@@ -10,7 +10,7 @@ import { inventory } from './sweep-files';
 
 const { rig, cleanup } = createFixtures();
 afterEach(cleanup);
-async function relocated() {
+async function relocated(fault?: 'author' | 'fork' | 'missing-author' | 'missing-fork') {
   const r = rig();
   await producerEvidence(r, false);
   r.artifact();
@@ -57,12 +57,25 @@ async function relocated() {
               status: 200,
               body: { ref: 'refs/heads/task', object: { type: 'commit', sha: SHA } },
             };
-          return { status: 200, body: pull(endpoint.endsWith('/3') ? 3 : 2) };
+          const body = pull(endpoint.endsWith('/3') ? 3 : 2);
+          if (endpoint.endsWith('/3')) {
+            if (fault === 'author') body.user.login = 'intruder';
+            if (fault === 'fork') body.head.repo.id = 9;
+            if (fault === 'missing-author') Reflect.deleteProperty(body, 'user');
+            if (fault === 'missing-fork') Reflect.deleteProperty(body.head, 'repo');
+          }
+          return { status: 200, body };
         },
       },
       { run: store.run, contributionId: store.contributionId, pr, headSha: SHA }
     );
-    expect(await tracker.resume()).toMatchObject({ kind: 'merged' });
+    const result = await tracker.resume();
+    if (fault) {
+      expect(result.kind).not.toBe('merged');
+      expect(journal.read().some((event) => (event as { type: string }).type === 'rebound')).toBe(
+        false
+      );
+    } else expect(result).toMatchObject({ kind: 'merged' });
     store.persistRun(tracker.snapshot().run);
   } finally {
     journal.close();
@@ -94,10 +107,38 @@ it('AC2 real sweep → marked relocation → merge → export/replan preserves e
   expect(inventory(r.directory).protectedDigest).toBe(before);
   expect(fs.readFileSync(path.join(r.directory, 'summary.json'))).toEqual(summary);
 });
+it.each([
+  'author',
+  'fork',
+  'missing-author',
+  'missing-fork',
+] as const)('AC2 detailed replacement %s contradicts or omits listing identity: no rebound or merge', async (fault) => {
+  const { r, store, summary } = await relocated(fault);
+  const bundle = exportContribution(store, path.join(r.temp, 'refused-relocation'));
+  expect(bundle.pr).toBe('https://github.com/owner/repo/pull/2');
+  expect(bundle.relocations).toEqual([]);
+  expect(bundle.outcome).not.toBe('merged');
+  expect(() => store.assertResumable()).toThrow('snapshot_expired');
+  expect(fs.readFileSync(path.join(r.directory, 'summary.json'))).toEqual(summary);
+});
 it('missing and contradictory portable relocation proof refuses invalid-evidence', async () => {
   const { r, store } = await relocated();
   const bundle = exportContribution(store, path.join(r.temp, 'original-export'));
   const mutations = [
+    (b: typeof bundle) => {
+      b.relocations = b.relocations.map((proof) => ({
+        ...proof,
+        from: { ...proof.from, fork: { ...proof.from.fork, repositoryId: 9 } },
+        to: { ...proof.to, fork: { ...proof.to.fork, repositoryId: 9 } },
+      }));
+    },
+    (b: typeof bundle) => {
+      b.relocations = b.relocations.map((proof) => ({
+        ...proof,
+        from: { ...proof.from, fork: { ...proof.from.fork, repo: 'other' } },
+        to: { ...proof.to, fork: { ...proof.to.fork, repo: 'other' } },
+      }));
+    },
     (b: typeof bundle) => {
       b.relocations = [];
     },

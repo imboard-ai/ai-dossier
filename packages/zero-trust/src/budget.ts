@@ -355,9 +355,16 @@ export class BudgetLedger {
   /** Non-mutating snapshot through a caller-pinned path. Never canonicalize it:
    * resolving /proc/self/fd back to a name discards descriptor authority. */
   static readOnlySnapshot(file: string, contributionId: string): BudgetState {
+    return BudgetLedger.readOnlyEvidence(file, contributionId).state;
+  }
+  /** Exact scanned bytes and parsed state under the same non-reclaiming transaction fence. */
+  static readOnlyEvidence(
+    file: string,
+    contributionId: string
+  ): { state: BudgetState; bytes: Buffer } {
     try {
       return withReadOnlyStoreLock(ledgerLockFile(file), () =>
-        BudgetLedger.readSnapshot(file, contributionId)
+        BudgetLedger.readEvidence(file, contributionId)
       );
     } catch (error) {
       if (error instanceof BudgetError) throw error;
@@ -369,6 +376,13 @@ export class BudgetLedger {
   }
   // biome-ignore lint/correctness/noUnusedPrivateClassMembers: Called through BudgetLedger by both snapshot paths.
   private static readSnapshot(file: string, contributionId: string): BudgetState {
+    return BudgetLedger.readEvidence(file, contributionId).state;
+  }
+  // biome-ignore lint/correctness/noUnusedPrivateClassMembers: Called through BudgetLedger by the guarded and transaction snapshot paths.
+  private static readEvidence(
+    file: string,
+    contributionId: string
+  ): { state: BudgetState; bytes: Buffer } {
     let bytes: Buffer;
     try {
       bytes = readPrivate(file, (stat) => {
@@ -381,7 +395,7 @@ export class BudgetLedger {
       throw new BudgetError('corrupt_ledger', 'Unreadable budget ledger; reconciliation required');
     }
     try {
-      return validate(parseStrictUtf8Json(bytes), contributionId);
+      return { state: validate(parseStrictUtf8Json(bytes), contributionId), bytes };
     } catch (error) {
       if (error instanceof BudgetError) throw error;
       throw new BudgetError('corrupt_ledger', 'Unreadable budget ledger; reconciliation required');

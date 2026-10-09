@@ -40,7 +40,8 @@ function hashes(directory: string) {
       if (
         relative === 'artifacts' ||
         relative === 'summary.json' ||
-        relative === '.snapshot-expired'
+        relative === '.snapshot-expired' ||
+        /^\.retention-(generation|completed)-[a-f0-9]{64}\.json$/u.test(relative)
       )
         continue;
       const file = path.join(dir, name);
@@ -465,6 +466,16 @@ describe('sanitized contribution export and evidence', () => {
       expect(bundle.pr).toBeNull();
       expect(bundle.outcome).toBe('unknown');
       expect(JSON.stringify(bundle)).not.toContain(r.temp);
+      journal.close();
+      fs.appendFileSync(path.join(r.directory, 'handoff/events.jsonl'), '{');
+      new Journal(store.storeDirectory('handoff')).close();
+      const protectedBefore = hashes(r.directory);
+      expect(() => exportContribution(store, path.join(r.temp, 'recovered-handoff.json'))).toThrow(
+        'invalid-evidence'
+      );
+      store.close();
+      expect(() => planSweep(r.root, NOW)).toThrow();
+      expect(hashes(r.directory)).toEqual(protectedBefore);
     } finally {
       journal.close();
     }

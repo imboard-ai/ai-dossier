@@ -92,6 +92,8 @@ export type PrTrack =
       readonly branchSha: string | null;
       readonly title: string;
       readonly body: string | null;
+      /** Actual detail author, required when validating a replacement identity. */
+      readonly author?: string;
       /** Open PRs only. */
       readonly ci?: CiState;
       /** Open PRs only; null when the remarks could not be read. */
@@ -256,7 +258,11 @@ export async function observeFeedback(
 
 /** The tracked PR, its fork branch, and (when open) its checks and remarks. Merged wins over
  * a deleted fork or branch; otherwise a deleted PR, fork or branch is `gone` (PRD §5.9). */
-export async function observePr(read: GitHubRead, pr: TrackedPr): Promise<PrTrack> {
+export async function observePr(
+  read: GitHubRead,
+  pr: TrackedPr,
+  replacementAuthor?: string
+): Promise<PrTrack> {
   const b = prBinding(pr.binding);
   const response = await get(read, `${repoPath(b)}/pulls/${pr.number}`);
   if (response?.status === 404 || response?.status === 410)
@@ -280,6 +286,28 @@ export async function observePr(read: GitHubRead, pr: TrackedPr): Promise<PrTrac
   )
     return { kind: 'unknown', detail: `pull:${response?.status ?? 'unreachable'}` };
   const merged = body.merged === true || typeof body.merged_at === 'string';
+  const author = isRecord(body.user) ? body.user.login : undefined;
+  if (replacementAuthor !== undefined) {
+    // A listing is not authority for a different detail answer. Check before the
+    // merged shortcut: a deleted fork is normal for an established PR, but cannot
+    // prove the identity of a replacement we have never observed.
+    const repo = isRecord(head.repo) ? head.repo : null;
+    if (
+      typeof author !== 'string' ||
+      !sameLogin(author, replacementAuthor) ||
+      !repo ||
+      repo.id !== pr.fork.repositoryId ||
+      (repo.name !== undefined && repo.name !== pr.fork.repo) ||
+      (repo.owner !== undefined &&
+        (!isRecord(repo.owner) ||
+          typeof repo.owner.login !== 'string' ||
+          !sameLogin(repo.owner.login, pr.fork.owner))) ||
+      (repo.full_name !== undefined &&
+        (typeof repo.full_name !== 'string' ||
+          repo.full_name.toLowerCase() !== `${pr.fork.owner}/${pr.fork.repo}`.toLowerCase()))
+    )
+      return { kind: 'unknown', detail: 'replacement_identity' };
+  }
   const facts = {
     kind: 'observed' as const,
     number: pr.number,
@@ -289,6 +317,7 @@ export async function observePr(read: GitHubRead, pr: TrackedPr): Promise<PrTrac
     headSha: head.sha as string,
     title: body.title,
     body: body.body as string | null,
+    ...(typeof author === 'string' ? { author } : {}),
   };
   if (merged) return Object.freeze({ ...facts, branchSha: null });
   if (head.repo === null) return { kind: 'gone', reason: 'fork_deleted' };
@@ -1113,7 +1142,7 @@ export class PrTracker {
       if (moved.kind === 'found') {
         const from = this.state.pr;
         const to = trackedPr({ ...from, number: moved.number, url: moved.url });
-        track = await observePr(this.deps.read, to);
+        track = await observePr(this.deps.read, to, this.state.run.contributor);
         if (track.kind !== 'observed') return track;
         if (!hasOnlyMarker(track.body ?? '', from.marker))
           return { kind: 'handoff', reason: 'marker_missing' };
@@ -1122,7 +1151,7 @@ export class PrTracker {
           type: 'rebound',
           number: moved.number,
           url: moved.url,
-          evidence: { from, to, author: this.state.run.contributor, body: track.body ?? '' },
+          evidence: { from, to, author: track.author as string, body: track.body ?? '' },
         });
       }
     }

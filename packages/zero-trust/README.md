@@ -1236,7 +1236,7 @@ hide corrupt or divergent selected files.
   each store under the lifetime guard, pins directory descriptors, and revalidates
   contribution identity, activity, configuration, protected bytes, selected
   evidence and every remaining artifact before deleting. Symlinks, traversal,
-  hard links, stale files, new files and unreadable/corrupt evidence fail closed.
+   hard links, stale files, files added after planning and unreadable/corrupt evidence fail closed.
   Root and ancestor symlinks are refused too.
 - Publication order is durable `summary.json`, then durable `.snapshot-expired`,
   then deletion. Both maintenance records live beside the immutable `run.json`.
@@ -1278,15 +1278,28 @@ hide corrupt or divergent selected files.
   edge is checked, so batching continuation with a later cancellation cannot bypass
   expiry. Observed public status, decline, cancellation, failure, pause and cleanup
   transitions remain permitted. Read-only open/status/export remain possible.
-  Replay checks still require the original artifact identities/digests and reject new
-  artifacts; permitted confirmed observations do not invalidate frozen summary facts.
+   Pending replay checks still require original artifact identities/digests.
+   Completed batches have a durable `.retention-completed-<digest>.json` marker;
+   later artifacts (including voluntary `recordAdoption` notes) remain untouched
+   until a new explicit plan authenticates their own identities, selected evidence
+   and retention eligibility. Later batches publish separate content-addressed
+   `.retention-generation-<digest>.json` manifests before deletion. They crash-replay
+   independently, including quarantine recovery, without replacing the first summary
+   or expiry marker. These controller-owned maintenance records are retained and
+   excluded from activity timestamps and protected-store inventory digests; all
+   pre-existing fail-closed stores remain unchanged.
+   Permitted confirmed observations do not invalidate frozen summary facts.
   Resuming work requires fresh acquisition/reconstruction and independent
   verification in a **fresh run**, never clearing expiry on the old snapshot.
 - `RunStore.withPinnedDirectory(work)` runs synchronous trusted controller
   maintenance against the pinned contribution directory while its lifetime guard
   is held, and refuses a closed, poisoned or replaced store. It is not a worker
   API; never retain the descriptor path or start asynchronous work in the callback.
-  Preflight filesystem failures become fixed `RunStoreError('invalid_store')` diagnostics,
+   Maintenance shares the complete fresh RunStore evidence comparison, including
+   held upstream repository ID, checkpoint records and bindings. Read-only archive
+   opening validates stored configuration without requiring the old signing key to
+   remain available; execution opening still enforces signing readiness.
+   Preflight filesystem failures become fixed `RunStoreError('invalid_store')` diagnostics,
   without native paths/messages/causes. `RunStore.assertObservationContinuation(prior)`
   validates a historical run against the current confirmed run, refusing identity/history
   divergence or any new edge that requires an unexpired snapshot (`run_diverged`).
@@ -1296,13 +1309,19 @@ hide corrupt or divergent selected files.
 This slice consumes actual producer records, independently of the metrics slice.
 `PrTracker` and `HandoffDriver` already persist `track/events.jsonl` and
 `handoff/events.jsonl`: raw events are scanned, then their existing replay
-validators establish identity, history, public links and outcome facts. A missing
+validators establish identity, history, public links and outcome facts. Complete-line
+tracker tail loss is refused using `isTrackerContinuation`; repaired selected
+handoff/tracker journals are refused rather than presented as complete evidence. A missing
 tracker file is **unknown**, never inferred merged from a lifecycle label. A valid
 pending tracker reports `awaiting_review`, or `blocked` when its replay says so.
 `BudgetLedger` snapshots live at `budget/ledger.json`. The new
-`validateBudgetSnapshot(raw, contributionId)` validates/detaches a pinned raw
-snapshot using the ledger's existing validation, without reopening a path or
-acquiring/mutating a budget lock. Costs use existing `budgetTotals`, preserving
+`BudgetLedger.readOnlyEvidence(file, contributionId)` returns `{ state, bytes }`
+under the existing non-reclaiming transaction guard, preserving exact scanned bytes
+and digests. `readOnlySnapshot` delegates to this same read and returns only `state`.
+An unresolved owner (live or retained after a crash) refuses reporting/sweep until
+controller reconciliation; reporting never creates or steals the lock.
+`validateBudgetSnapshot(raw, contributionId)` remains the shared detached decoder
+for the already-authenticated historical bytes. Costs use existing `budgetTotals`, preserving
 reservations and conservative maxima, with currencies kept per session. No
 ledger or no session means null, not zero. Present invalid evidence throws.
 
@@ -1367,7 +1386,10 @@ a detached bundle. Merged/declined outcomes require the matching lifecycle state
 an observed PR and outcome SHA; unknown has no observed outcome SHA. Historical PR
 and verified SHA observations can survive later cancellation/blocking, but cannot
 be promoted to a merge/decline claim. Offline receipt integrity never changes
-trusted-key or expiry authority in shipping.
+trusted-key or expiry authority in shipping. A tracker-proven `merged_during_revision`
+with `observedMergeSha` reports upstream outcome `merged` while execution remains
+`blocked`; the legacy block without an observed SHA reports outcome `unknown`.
+Neither representation authorizes further execution.
 `parseCommandEvidence(input)` is the shared detached receipt/standalone command parser:
 it validates the receipt command schema (1–128 records) and unique command IDs,
 throwing fixed `ReceiptError('invalid_json'|'invalid_schema'|'invalid_evidence')`
@@ -1391,6 +1413,15 @@ export with `invalid-evidence`; legacy rebound entries without provenance cannot
 a relocation for export. Tracker observation now persists that provenance only after
 the replacement PR and fork identity are read successfully. Both historical and current
 URLs and SHAs remain visible; relocation never clears expired-snapshot refusal.
+The bundle also retains `originalPr`, the first tracker record's independent binding.
+The relocation chain must start at that exact record, and its fork ID, contributor,
+base and creation marker must agree with intact receipt-v2 evidence. Receipt v2 signs
+numeric repository IDs, not repository names: portable fork names are consistency-bound
+to the independent original tracker record, not claimed as signed receipt fields.
+Replacement detail author and fork identity are checked before accepting even a
+merged replacement, and actual observed author is persisted; absent or contradictory
+detail identity cannot produce rebound or merge evidence. Established merged PRs
+retain their existing deleted-fork semantics.
 `validateRelocationEvidence(input)` validates and detaches this credential-free
 tracker provenance, throwing `TrackError('invalid_journal')` on contradiction.
 Export status includes `snapshotExpired` explicitly.

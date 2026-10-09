@@ -25,6 +25,8 @@ export interface SweepFile {
   readonly sha256: string;
 }
 export interface SweepContribution {
+  /** Content-addressed later batch; never replaces the first expiry summary. */
+  readonly generation?: string;
   readonly runId: string;
   readonly dev: number;
   readonly ino: number;
@@ -49,6 +51,55 @@ export interface ContributionSummary {
   readonly evidence: EvidenceSnapshot;
 }
 const issuedPlans = new WeakMap<SweepPlan, string>();
+const issuedGenerations = new WeakMap<SweepPlan, Map<string, Buffer>>();
+function completionName(planned: SweepContribution): string {
+  return `.retention-completed-${digest(JSON.stringify(planned))}.json`;
+}
+function isCompleted(root: string, planned: SweepContribution): boolean {
+  const bytes = optionalBytes(root, completionName(planned));
+  if (!bytes) return false;
+  if (
+    JSON.stringify(jsonRecord(bytes)) !==
+    JSON.stringify({ runId: planned.runId, sweepDigest: digest(JSON.stringify(planned)) })
+  )
+    refuse('invalid-summary', 'summary');
+  return true;
+}
+function complete(root: string, planned: SweepContribution): void {
+  publishPrivate(
+    path.join(root, completionName(planned)),
+    Buffer.from(
+      JSON.stringify({
+        runId: planned.runId,
+        sweepDigest: digest(JSON.stringify(planned)),
+      })
+    )
+  );
+}
+function generationSummary(
+  store: RunStore,
+  root: string,
+  planned: SweepContribution,
+  pending?: Buffer
+): ContributionSummary {
+  const name = planned.generation;
+  if (!name || !/^\.retention-generation-[a-f0-9]{64}\.json$/u.test(name))
+    refuse('invalid-summary', 'summary');
+  const bytes = optionalBytes(root, name, SUMMARY_BYTES) ?? pending;
+  if (!bytes) refuse('invalid-summary', 'summary');
+  const value = jsonRecord(bytes, SUMMARY_BYTES) as ContributionSummary;
+  const { generation: _name, ...sweep } = planned;
+  if (
+    name !== `.retention-generation-${digest(bytes)}.json` ||
+    value.runId !== store.runId ||
+    value.schemaVersion !== 'ztfc-summary-v1' ||
+    value.snapshotExpired !== true ||
+    JSON.stringify(value.sweep) !== JSON.stringify(sweep) ||
+    JSON.stringify(value.facts) !== JSON.stringify(historicalEvidence(store, root, value.evidence))
+  )
+    refuse('invalid-summary', 'summary');
+  return value;
+}
 export function readContributionSummary(store: RunStore): ContributionSummary | null {
   return maintenanceBoundary('summary', () =>
     store.withPinnedDirectory((root) => {
@@ -137,6 +188,7 @@ export function planSweep(root: string, now: Date | string, retentionDays?: numb
       refuse('invalid-input', 'input');
     root = path.resolve(root);
     const contributions: SweepContribution[] = [];
+    const generations = new Map<string, Buffer>();
     let entries = 0;
     for (const name of directoryEntries(root)) {
       if (++entries > 10000) refuse('size-limit', 'inventory');
@@ -147,8 +199,70 @@ export function planSweep(root: string, now: Date | string, retentionDays?: numb
         store.withPinnedDirectory((directory) => {
           const summary = readContributionSummary(store);
           if (summary) {
-            revalidateSweep(store, directory, summary.sweep, summary, at, retentionDays);
-            contributions.push(summary.sweep);
+            const pendingFiles: SweepFile[] = isCompleted(directory, summary.sweep)
+              ? []
+              : [...summary.sweep.files];
+            const batches: { planned: SweepContribution; prior: ContributionSummary }[] = [];
+            let pending = false;
+            for (const name of directoryEntries(directory)) {
+              if (!name.startsWith('.retention-generation-')) continue;
+              if (!/^\.retention-generation-[a-f0-9]{64}\.json$/u.test(name))
+                refuse('invalid-summary', 'summary');
+              const bytes = optionalBytes(directory, name, SUMMARY_BYTES);
+              if (!bytes) refuse('invalid-summary', 'summary');
+              const raw = jsonRecord(bytes, SUMMARY_BYTES) as ContributionSummary;
+              const planned = { ...raw.sweep, generation: name };
+              const prior = generationSummary(store, directory, planned);
+              batches.push({ planned, prior });
+              if (!isCompleted(directory, planned)) {
+                contributions.push(planned);
+                pending = true;
+                pendingFiles.push(...planned.files);
+              }
+            }
+            revalidateSweep(
+              store,
+              directory,
+              summary.sweep,
+              summary,
+              at,
+              retentionDays,
+              pendingFiles
+            );
+            for (const { planned, prior } of batches)
+              revalidateSweep(store, directory, planned, prior, at, retentionDays, pendingFiles);
+            const scan = inventory(directory, pendingFiles);
+            const pendingPaths = new Set(pendingFiles.map((file) => file.path));
+            const extras = scan.artifacts.filter((file) => !pendingPaths.has(file.path));
+            const days = retentionDays ?? store.config.retentionDays;
+            const activity = Math.max(Date.parse(store.run.updatedAt), scan.activity);
+            if (!pending && extras.length && activity < Date.parse(at) - days * 86400000) {
+              const evidence: EvidenceSnapshot = { run: '', sources: {} };
+              const facts = contributionEvidence(store, directory, evidence);
+              const stat = fs.statSync(directory);
+              const sweep: SweepContribution = {
+                runId: store.runId,
+                dev: stat.dev,
+                ino: stat.ino,
+                retentionDays: days,
+                activity,
+                protectedDigest: scan.protectedDigest,
+                evidenceDigest: facts.evidenceDigest,
+                files: extras,
+              };
+              const next: ContributionSummary = {
+                schemaVersion: 'ztfc-summary-v1',
+                runId: store.runId,
+                snapshotExpired: true,
+                facts,
+                sweep,
+                evidence,
+              };
+              const bytes = summaryBytes(next);
+              const generation = `.retention-generation-${digest(bytes)}.json`;
+              generations.set(generation, bytes);
+              contributions.push({ ...sweep, generation });
+            } else if (!pending) contributions.push(summary.sweep);
             return;
           }
           const scan = inventory(directory);
@@ -191,6 +305,7 @@ export function planSweep(root: string, now: Date | string, retentionDays?: numb
       contributions,
     };
     issuedPlans.set(plan, JSON.stringify(plan));
+    issuedGenerations.set(plan, generations);
     return plan;
   });
 }
@@ -235,17 +350,21 @@ function revalidateSweep(
   planned: SweepContribution,
   prior: ContributionSummary | null,
   now: string,
-  override?: number
+  override?: number,
+  pendingFiles?: readonly SweepFile[]
 ) {
   const stat = fs.statSync(root);
-  const scan = inventory(root, prior ? planned.files : []);
+  const completed = prior !== null && isCompleted(root, planned);
+  const scan = inventory(root, pendingFiles ?? (prior ? planned.files : []));
   const facts = contributionEvidence(store, root);
   const activity = Math.max(Date.parse(store.run.updatedAt), scan.activity);
   if (
     stat.dev !== planned.dev ||
     stat.ino !== planned.ino ||
     store.run.state === 'blocked_cleanup' ||
-    (prior && JSON.stringify(prior.sweep) !== JSON.stringify(planned)) ||
+    (prior &&
+      JSON.stringify(prior.sweep) !==
+        JSON.stringify((({ generation: _name, ...sweep }) => sweep)(planned))) ||
     (!prior &&
       (scan.protectedDigest !== planned.protectedDigest ||
         facts.evidenceDigest !== planned.evidenceDigest ||
@@ -255,13 +374,14 @@ function revalidateSweep(
   )
     refuse('stale-plan', 'revalidate');
   const remaining = new Map(scan.artifacts.map((file) => [file.path, file]));
+  if (completed) return facts;
   for (const file of planned.files) {
     const present = remaining.get(file.path);
     if ((!present && !prior) || (present && JSON.stringify(present) !== JSON.stringify(file)))
       refuse('stale-plan', 'revalidate');
     remaining.delete(file.path);
   }
-  if (remaining.size) refuse('stale-plan', 'revalidate');
+  if (remaining.size && !prior) refuse('stale-plan', 'revalidate');
   return facts;
 }
 /** Explicit application. The original process-local plan is required; replan after restart.
@@ -282,6 +402,7 @@ export function applySweep(plan: SweepPlan, fault?: (point: FaultPoint) => void)
     'delete',
     () => {
       const serialized = issuedPlans.get(plan);
+      const generations = issuedGenerations.get(plan);
       if (!serialized || serialized !== JSON.stringify(plan)) refuse('stale-plan', 'input');
       // Never reread caller-controlled accessors or arrays after authentication.
       plan = JSON.parse(serialized) as SweepPlan;
@@ -290,11 +411,18 @@ export function applySweep(plan: SweepPlan, fault?: (point: FaultPoint) => void)
         try {
           store.withPinnedDirectory((root) => {
             const prior = readContributionSummary(store);
+            const generation = planned.generation
+              ? generationSummary(store, root, planned, generations?.get(planned.generation))
+              : null;
+            const generationPublished = planned.generation
+              ? optionalBytes(root, planned.generation, SUMMARY_BYTES) !== null
+              : false;
+            const replay = generation ? generationPublished : prior !== null;
             const facts = revalidateSweep(
               store,
               root,
               planned,
-              prior,
+              generationPublished ? generation : planned.generation ? null : prior,
               plan.now,
               plan.retentionDays
             );
@@ -309,13 +437,19 @@ export function applySweep(plan: SweepPlan, fault?: (point: FaultPoint) => void)
               evidence,
             };
             preflightExport(store, facts, summary);
-            publishExpiry(root, summary, notify);
+            if (planned.generation) {
+              if (!generation) refuse('invalid-summary', 'summary');
+              publishPrivate(path.join(root, planned.generation), summaryBytes(generation));
+              notify('summary');
+            } else publishExpiry(root, summary, notify);
+            if (isCompleted(root, planned)) return;
             withQuarantine(root, (quarantine) => {
               for (const file of planned.files) {
-                deleteArtifact(root, quarantine, file, prior !== null, () => notify('quarantined'));
+                deleteArtifact(root, quarantine, file, replay, () => notify('quarantined'));
                 notify('deleted');
               }
             });
+            complete(root, planned);
           });
         } finally {
           store.close();

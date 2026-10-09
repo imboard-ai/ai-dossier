@@ -4,7 +4,12 @@ import Ajv from 'ajv';
 import { contributionIdOf } from '../controller/ids';
 import type { RunStore } from '../controller/run-store';
 import { assertDirectoryAncestors, syncDirectory } from '../durable-fs';
-import { type RelocationEvidence, validateRelocationEvidence } from '../github/track';
+import { handoffMarker } from '../github/handoff';
+import {
+  type RelocationEvidence,
+  type TrackedPr,
+  validateRelocationEvidence,
+} from '../github/track';
 import {
   canonicalJson,
   evidenceVerified,
@@ -95,6 +100,7 @@ export const EXPORT_SCHEMA = object({
     }),
   }),
   pr: nullable(text),
+  originalPr: nullable(trackedPrSchema),
   relocations: {
     type: 'array',
     maxItems: 128,
@@ -142,6 +148,7 @@ export interface ContributionExport {
   receipts: ReturnType<typeof contributionEvidence>['receipts'];
   verification: ReturnType<typeof contributionEvidence>['verification'];
   pr: string | null;
+  originalPr: TrackedPr | null;
   relocations: RelocationEvidence[];
   outcome: string;
   disclosure: string | null;
@@ -173,6 +180,7 @@ export function validateContributionExport(input: unknown): ContributionExport {
     const boundPr = (url: string) =>
       url.startsWith(prPrefix) && /^[1-9][0-9]*$/u.test(url.slice(prPrefix.length));
     let previous: RelocationEvidence | undefined;
+    if (input.relocations.length && !input.originalPr) refuse();
     for (const raw of input.relocations) {
       const proof = validateRelocationEvidence(raw);
       if (
@@ -185,6 +193,11 @@ export function validateContributionExport(input: unknown): ContributionExport {
         refuse();
       previous = proof;
     }
+    if (
+      input.relocations.length &&
+      JSON.stringify(input.relocations[0].from) !== JSON.stringify(input.originalPr)
+    )
+      refuse();
     if (previous && previous.to.url !== input.pr) refuse();
     const historicalPr = input.summary?.pr;
     if (historicalPr !== null && historicalPr !== undefined) {
@@ -204,7 +217,12 @@ export function validateContributionExport(input: unknown): ContributionExport {
     )
       refuse();
     if (input.outcome === 'merged' || input.outcome === 'declined') {
-      if (run.state !== input.outcome || !input.pr || !input.status.outcomeSha) refuse();
+      const revisionMerge =
+        input.outcome === 'merged' &&
+        run.state === 'blocked' &&
+        run.history.some((entry) => entry.to === 'revising');
+      if ((!revisionMerge && run.state !== input.outcome) || !input.pr || !input.status.outcomeSha)
+        refuse();
     } else if (
       input.status.outcomeSha !== null ||
       (input.outcome === 'awaiting_review' && !input.pr) ||
@@ -222,6 +240,29 @@ export function validateContributionExport(input: unknown): ContributionExport {
       refuse();
     for (const envelope of input.receipts) {
       offlineReceipt(envelope, run, contributionId);
+    }
+    for (const proof of input.relocations) {
+      const target = run.upstreamIssue.replace('https://github.com/', '').replace('/issues/', '#');
+      const applicable = input.receipts;
+      if (
+        !applicable.some(
+          ({ receipt }) =>
+            proof.from.marker ===
+            handoffMarker({
+              contributionId,
+              target,
+              operationKind: 'pr_create',
+              candidateSha: receipt.candidateSha,
+            })
+        ) ||
+        applicable.some(
+          ({ receipt }) =>
+            receipt.forkRepositoryId !== proof.from.fork.repositoryId ||
+            receipt.defaultBranch !== proof.from.binding.base ||
+            receipt.contributor.toLowerCase() !== proof.from.fork.owner.toLowerCase()
+        )
+      )
+        refuse();
     }
     for (const envelope of input.receipts) {
       if (
@@ -292,6 +333,7 @@ export function preflightExport(
     receipts: facts.receipts,
     verification: facts.verification,
     pr: facts.pr,
+    originalPr: facts.originalPr,
     relocations: facts.relocations,
     outcome: facts.outcome,
     disclosure: facts.disclosure,
