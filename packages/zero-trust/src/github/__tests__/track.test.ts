@@ -133,9 +133,12 @@ class Upstream {
         label: `${OWNER}:${BRANCH}`,
         ref: BRANCH,
         sha: p.headSha ?? this.branchSha() ?? SHA1,
-        repo: p.headRepoId === null ? null : { id: p.headRepoId ?? FORK_ID },
+        repo:
+          p.headRepoId === null
+            ? null
+            : { id: p.headRepoId ?? FORK_ID, name: 'fixture', owner: { login: OWNER } },
       },
-      base: { ref: 'main' },
+      base: { ref: 'main', repo: { id: 1, name: 'proj', owner: { login: 'up' } } },
     };
   }
   readonly read: GitHubRead = async (p) => {
@@ -231,6 +234,7 @@ function tracker(
 ) {
   const deps: TrackDeps = {
     read: up.read,
+    retainedIdentity: { upstreamRepositoryId: 1, forkRepositoryId: FORK_ID },
     admission: options.admission ?? admitAll(),
     bodyDirectory: options.bodies ?? temp('zt-track-bodies-'),
     now,

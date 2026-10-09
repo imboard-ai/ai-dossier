@@ -27,6 +27,7 @@ export * from './github/fork-ref';
 export * from './github/handoff';
 export * from './github/handoff-driver';
 export * from './github/pr-body';
+export * from './github/pr-identity';
 export * from './github/reconcile';
 export * from './github/track';
 export * from './intents';
@@ -55,6 +56,17 @@ export * from './receipt/render';
 export * from './receipt/schema';
 export * from './receipt/verify';
 export * from './redaction';
+export type { MaintenanceCode, MaintenanceStage } from './retention/errors';
+export { MaintenanceError } from './retention/errors';
+export { retainedPrIdentity } from './retention/evidence';
+export type { ContributionExport } from './retention/export';
+export {
+  EXPORT_SCHEMA,
+  EXPORT_VERSION,
+  exportContribution,
+  validateContributionExport,
+} from './retention/export';
+export * from './retention/retention';
 export * from './review/integrity';
 export * from './state';
 export * from './status';

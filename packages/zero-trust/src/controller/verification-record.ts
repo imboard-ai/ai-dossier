@@ -5,13 +5,13 @@
  * ID and expire after 15 minutes, so nothing is signed here). Reading it back fails
  * closed: anything unreadable, unknown, inconsistent or detached from its evidence
  * artifacts throws. */
-import fs from 'node:fs';
 import path from 'node:path';
 import Ajv from 'ajv';
 import { sha256 } from '../canonical/export';
 import {
   assertDirectoryAncestors,
   createPrivateOnce,
+  lstatIfPresent,
   privateDir,
   readPrivate,
 } from '../durable-fs';
@@ -182,10 +182,8 @@ function recordPath(artifactsDir: string, candidateSha: string, suffix = '.json'
 
 function exists(file: string): boolean {
   try {
-    fs.lstatSync(file);
-    return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    return lstatIfPresent(file) !== null;
+  } catch {
     throw new VerificationRecordError('unavailable');
   }
 }

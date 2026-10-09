@@ -121,6 +121,7 @@ export interface ListedPull {
   readonly author: string | null;
   /** The head repository no longer resolves (fork deleted or renamed). */
   readonly headRepoGone: boolean;
+  readonly headRepositoryId: number | null;
 }
 
 /** Every PR on exactly this head and base, in any state, or null when the listing is
@@ -173,6 +174,9 @@ export async function listPulls(
       body: pr.body as string | null,
       author: login(pr.user),
       headRepoGone: head.repo === null,
+      headRepositoryId: Number.isSafeInteger(obj(head.repo)?.id)
+        ? (obj(head.repo)?.id as number)
+        : null,
     });
   }
   return pulls;

@@ -10,7 +10,7 @@ import { isTrackerContinuation } from '../controller/tracker-continuation';
 import { writePrivateFile } from '../durable-fs';
 import { type IntentInput, isAdmitted, WriteBlockedError } from '../intents';
 import type { Journal } from '../journal';
-import type { CommandEvidence } from '../receipt/schema';
+import { type CommandEvidence, canonicalJson } from '../receipt/schema';
 import { isRecoveryEvent } from '../recovery';
 import { assertNoSecrets } from '../redaction';
 import {
@@ -42,6 +42,13 @@ import {
   upstreamIssueBinding,
 } from './handoff';
 import type { HandoffAdmission, HandoffRecord } from './handoff-driver';
+import {
+  extractPrIdentity,
+  type PrIdentity,
+  prIdentityDigest,
+  samePrIdentity,
+  validatePrIdentity,
+} from './pr-identity';
 import { type AmbiguityReason, type GitHubRead, listAll, listPulls } from './reconcile';
 import { assertContentPolicy, HandoffError, untrustedText } from './text';
 
@@ -92,6 +99,9 @@ export type PrTrack =
       readonly branchSha: string | null;
       readonly title: string;
       readonly body: string | null;
+      /** Actual detail author, required when validating a replacement identity. */
+      readonly author?: string;
+      readonly identity?: PrIdentity;
       /** Open PRs only. */
       readonly ci?: CiState;
       /** Open PRs only; null when the remarks could not be read. */
@@ -256,12 +266,25 @@ export async function observeFeedback(
 
 /** The tracked PR, its fork branch, and (when open) its checks and remarks. Merged wins over
  * a deleted fork or branch; otherwise a deleted PR, fork or branch is `gone` (PRD §5.9). */
-export async function observePr(read: GitHubRead, pr: TrackedPr): Promise<PrTrack> {
+export async function observePr(
+  read: GitHubRead,
+  pr: TrackedPr,
+  replacementAuthor?: string,
+  retainedIdentity?: { upstreamRepositoryId: number; forkRepositoryId: number }
+): Promise<PrTrack> {
   const b = prBinding(pr.binding);
+  const authority = retainedIdentity ? { ...retainedIdentity } : undefined;
   const response = await get(read, `${repoPath(b)}/pulls/${pr.number}`);
   if (response?.status === 404 || response?.status === 410)
     return { kind: 'gone', reason: 'pr_deleted' };
-  const body = response?.status === 200 && isRecord(response.body) ? response.body : null;
+  let body = response?.status === 200 && isRecord(response.body) ? response.body : null;
+  if (body && replacementAuthor !== undefined) {
+    try {
+      body = JSON.parse(canonicalJson(body, 1024 * 1024));
+    } catch {
+      return { kind: 'unknown', detail: 'replacement_identity' };
+    }
+  }
   const head = isRecord(body?.head) ? body.head : null;
   const base = isRecord(body?.base) ? body.base : null;
   if (
@@ -280,6 +303,21 @@ export async function observePr(read: GitHubRead, pr: TrackedPr): Promise<PrTrac
   )
     return { kind: 'unknown', detail: `pull:${response?.status ?? 'unreachable'}` };
   const merged = body.merged === true || typeof body.merged_at === 'string';
+  const author = isRecord(body.user) ? body.user.login : undefined;
+  let identity: PrIdentity | undefined;
+  if (replacementAuthor !== undefined) {
+    // A listing is not authority for a different detail answer. Check before the
+    // merged shortcut: a deleted fork is normal for an established PR, but cannot
+    // prove the identity of a replacement we have never observed.
+    try {
+      if (!authority) throw new Error('identity');
+      identity = extractPrIdentity(body);
+      const expected = expectedPrIdentity(pr, replacementAuthor, authority);
+      if (!samePrIdentity(identity, expected)) throw new Error('identity');
+    } catch {
+      return { kind: 'unknown', detail: 'replacement_identity' };
+    }
+  }
   const facts = {
     kind: 'observed' as const,
     number: pr.number,
@@ -289,6 +327,8 @@ export async function observePr(read: GitHubRead, pr: TrackedPr): Promise<PrTrac
     headSha: head.sha as string,
     title: body.title,
     body: body.body as string | null,
+    ...(typeof author === 'string' ? { author } : {}),
+    ...(identity ? { identity } : {}),
   };
   if (merged) return Object.freeze({ ...facts, branchSha: null });
   if (head.repo === null) return { kind: 'gone', reason: 'fork_deleted' };
@@ -350,7 +390,8 @@ export async function relocatePr(
   if (!hasOnlyMarker(found.body, pr.marker)) return { kind: 'ambiguous', reason: 'marker_missing' };
   if (found.author !== contributor.toLowerCase())
     return { kind: 'ambiguous', reason: 'foreign_author' };
-  if (found.headRepoGone) return { kind: 'ambiguous', reason: 'fork_unverifiable' };
+  if (found.headRepoGone || found.headRepositoryId !== pr.fork.repositoryId)
+    return { kind: 'ambiguous', reason: 'fork_unverifiable' };
   return { kind: 'found', number: found.number, url: found.url };
 }
 
@@ -436,6 +477,13 @@ export type RevisionAdmission = Pick<
 /** What a `PrTracker` reads and writes with; all controller-owned. */
 export interface TrackDeps {
   readonly read: GitHubRead;
+  /** Controller-held numeric authority: upstream from RunStore, fork from a validated
+   * retained signed receipt. Never populate from fresh GitHub responses. Absent means
+   * replacement observation refuses; ordinary tracking remains available. */
+  readonly retainedIdentity?: {
+    readonly upstreamRepositoryId: number;
+    readonly forkRepositoryId: number;
+  };
   readonly admission: RevisionAdmission;
   /** Controller-owned directory for prepared texts the contributor pastes. */
   readonly bodyDirectory: string;
@@ -572,7 +620,7 @@ type Event =
   | { v: 1; type: 'review_awaited'; run: RunRecord }
   | { v: 1; type: 'outcome'; outcome: 'merged' | 'declined'; headSha: string; run: RunRecord }
   | { v: 1; type: 'blocked'; reason: TrackBlockReason; run: RunRecord; observedMergeSha?: string }
-  | { v: 1; type: 'rebound'; number: number; url: string }
+  | { v: 1; type: 'rebound'; number: number; url: string; evidence?: RelocationEvidence }
   | { v: 1; type: 'revision_started'; feedback: FeedbackRef[]; run: RunRecord }
   | { v: 1; type: 'revision_pushing'; candidateSha: string }
   | { v: 1; type: 'revision_confirmed'; headSha: string; run: RunRecord }
@@ -609,7 +657,7 @@ function prUrl(pr: Pick<TrackedPr, 'binding' | 'number'>): string {
   return `https://github.com/${enc(owner)}/${enc(repo)}/pull/${pr.number}`;
 }
 
-function trackedPr(value: unknown): TrackedPr {
+export function trackedPr(value: unknown): TrackedPr {
   if (!isRecord(value) || !isRecord(value.fork)) fail('pr');
   const binding = prBinding(value.binding);
   const fork = value.fork as unknown as ForkRef;
@@ -635,6 +683,83 @@ function trackedPr(value: unknown): TrackedPr {
     url: value.url,
     marker: value.marker,
   });
+}
+
+/** Controller-observed relocation provenance, retained in the append-only tracker journal. */
+export interface RelocationEvidence {
+  from: TrackedPr;
+  to: TrackedPr;
+  author: string;
+  body: string;
+  identity: PrIdentity;
+  identityDigest: string;
+}
+function expectedPrIdentity(
+  pr: TrackedPr,
+  contributor: string,
+  retained: { upstreamRepositoryId: number; forkRepositoryId: number }
+): PrIdentity {
+  if (retained.forkRepositoryId !== pr.fork.repositoryId) fail('rebound');
+  return validatePrIdentity({
+    upstreamId: retained.upstreamRepositoryId,
+    upstreamOwner: pr.binding.upstream.owner.toLowerCase(),
+    upstreamName: pr.binding.upstream.repo.toLowerCase(),
+    baseRef: pr.binding.base,
+    forkId: retained.forkRepositoryId,
+    forkOwner: pr.fork.owner.toLowerCase(),
+    forkName: pr.fork.repo.toLowerCase(),
+    headRef: pr.binding.branch,
+    contributor: contributor.toLowerCase(),
+    number: pr.number,
+    htmlUrl: pr.url.toLowerCase(),
+    apiUrl: `https://api.github.com/repos/${pr.binding.upstream.owner.toLowerCase()}/${pr.binding.upstream.repo.toLowerCase()}/pulls/${pr.number}`,
+  });
+}
+export function validateRelocationEvidence(value: unknown): RelocationEvidence {
+  if (
+    !isRecord(value) ||
+    Object.keys(value).sort().join(',') !== 'author,body,from,identity,identityDigest,to'
+  )
+    fail('rebound');
+  const from = trackedPr(value.from);
+  const to = trackedPr(value.to);
+  if (
+    from.number === to.number ||
+    JSON.stringify(from.binding) !== JSON.stringify(to.binding) ||
+    JSON.stringify(from.fork) !== JSON.stringify(to.fork) ||
+    from.marker !== to.marker ||
+    typeof value.author !== 'string' ||
+    !sameLogin(value.author, from.binding.headOwner) ||
+    typeof value.body !== 'string' ||
+    !hasOnlyMarker(value.body, from.marker)
+  )
+    fail('rebound');
+  assertNoSecrets(value.body);
+  let identity: PrIdentity;
+  try {
+    identity = validatePrIdentity(value.identity);
+  } catch {
+    fail('rebound');
+  }
+  if (
+    value.identityDigest !== prIdentityDigest(identity) ||
+    !samePrIdentity(
+      identity,
+      expectedPrIdentity(to, value.author, {
+        upstreamRepositoryId: identity.upstreamId,
+        forkRepositoryId: from.fork.repositoryId,
+      })
+    )
+  )
+    fail('rebound');
+  return {
+    from,
+    to,
+    author: value.author,
+    body: value.body,
+    identity,
+    identityDigest: value.identityDigest as string,
+  };
 }
 
 function bodyFileName(input: IntentInput, kind: ActionKind): string {
@@ -772,6 +897,15 @@ function reduce(state: TrackState | undefined, raw: unknown, directory: string |
       };
     case 'rebound':
       if (raw.number === state.pr.number || state.action || state.revision) fail('rebound');
+      if (raw.evidence !== undefined) {
+        const evidence = validateRelocationEvidence(raw.evidence);
+        if (
+          JSON.stringify(evidence.from) !== JSON.stringify(state.pr) ||
+          evidence.to.number !== raw.number ||
+          evidence.to.url !== raw.url
+        )
+          fail('rebound');
+      }
       return { ...state, pr: trackedPr({ ...state.pr, number: raw.number, url: raw.url }) };
     case 'revision_started': {
       if (state.revision || state.action || !Array.isArray(raw.feedback) || !raw.feedback.length)
@@ -889,6 +1023,7 @@ type Read = PrTrack | { kind: 'handoff'; reason: AmbiguityReason };
 /** Serial controller driver over its own journal; the directory is controller-owned. */
 export class PrTracker {
   private state: TrackState;
+  private readonly retainedIdentity: TrackDeps['retainedIdentity'];
   private seen: Seen | undefined;
   private tail: Promise<unknown> = Promise.resolve();
 
@@ -897,6 +1032,9 @@ export class PrTracker {
     private readonly deps: TrackDeps,
     initial: { run: RunRecord; contributionId: string; pr: TrackedPr; headSha: string }
   ) {
+    this.retainedIdentity = deps.retainedIdentity
+      ? Object.freeze({ ...deps.retainedIdentity })
+      : undefined;
     if (drivenJournals.has(journal)) throw new TrackError('journal_in_use');
     const directory = path.resolve(deps.bodyDirectory);
     const events = journal.read().filter((event) => !isRecoveryEvent(event));
@@ -1074,8 +1212,31 @@ export class PrTracker {
       if (moved.kind === 'unknown') return { kind: 'unknown', detail: 'relocate' };
       if (moved.kind === 'ambiguous') return { kind: 'handoff', reason: moved.reason };
       if (moved.kind === 'found') {
-        this.persist({ v: 1, type: 'rebound', number: moved.number, url: moved.url });
-        track = await observePr(this.deps.read, this.state.pr);
+        const from = this.state.pr;
+        const to = trackedPr({ ...from, number: moved.number, url: moved.url });
+        track = await observePr(
+          this.deps.read,
+          to,
+          this.state.run.contributor,
+          this.retainedIdentity
+        );
+        if (track.kind !== 'observed') return track;
+        if (!hasOnlyMarker(track.body ?? '', from.marker))
+          return { kind: 'handoff', reason: 'marker_missing' };
+        this.persist({
+          v: 1,
+          type: 'rebound',
+          number: moved.number,
+          url: moved.url,
+          evidence: {
+            from,
+            to,
+            author: track.author as string,
+            body: track.body ?? '',
+            identity: track.identity as PrIdentity,
+            identityDigest: prIdentityDigest(track.identity as PrIdentity),
+          },
+        });
       }
     }
     // CI and feedback are reported only for a head the run can vouch for.
