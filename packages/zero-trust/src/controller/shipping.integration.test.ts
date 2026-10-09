@@ -298,7 +298,7 @@ describe('persisted verification to real local shipping (#1105)', () => {
     const pending = p.driver.issuePr(p.request);
     Object.assign(p.request.content.intent, { candidateSha: 'f'.repeat(40) });
     p.request.binding.branch = 'unverified-other';
-    p.request.content.title = 'Replacement title';
+    Object.assign(p.request.content, { title: 'Replacement title' });
     await expect(pending).resolves.toMatchObject({ kind: 'awaiting_contributor' });
     expect(p.rows.read()).toMatchObject([
       { type: 'handoff_run' },
