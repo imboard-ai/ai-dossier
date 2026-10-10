@@ -666,3 +666,30 @@ test('second CLI start for the same trusted config exits 4 while its first run i
   }
   await Promise.all(h.callbacks);
 });
+
+test('incident-fenced resume preserves immediate lock exit 4, and both sweep modes work after incident stop', async () => {
+  const h = rig();
+  const store = h.seed();
+  const runId = store.runId;
+  fs.writeFileSync(path.join(h.root, '.incident'), 'incident', { mode: 0o600 });
+  try {
+    const err = [];
+    const commands = await createCommands({ root: h.root, createController });
+    const started = Date.now();
+    const code = await main(['resume', '--root', h.root, '--run', runId], {
+      createController: () => commands,
+      out: () => assert.fail('locked resume has no status output'),
+      err: (s) => err.push(s),
+    });
+    assert.equal(code, 4);
+    assert.deepEqual(err, ['error: store_locked']);
+    assert.ok(Date.now() - started < 5000);
+  } finally {
+    store.close();
+  }
+  const commands = await createCommands({ root: h.root, createController });
+  await commands.killAll('Incident');
+  assert.equal(commands.sweep().applied, false);
+  assert.equal(commands.sweep({ apply: true }).applied, true);
+  assert.equal(fs.readFileSync(path.join(h.root, '.incident'), 'utf8'), 'incident');
+});

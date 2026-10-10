@@ -192,6 +192,11 @@ export function planSweep(root: string, now: Date | string, retentionDays?: numb
     let entries = 0;
     for (const name of directoryEntries(root)) {
       if (++entries > 10000) refuse('size-limit', 'inventory');
+      if (name === '.incident') {
+        if (!optionalBytes(root, name, 16)?.equals(Buffer.from('incident')))
+          refuse('invalid-input', 'input');
+        continue;
+      }
       if (!/^ztc-[a-f0-9]{16}$/u.test(name)) refuse('invalid-input', 'input');
       const store = RunStore.open(root, `${name}-run-1`, { readOnly: true });
       try {

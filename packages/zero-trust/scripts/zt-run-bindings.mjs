@@ -241,6 +241,8 @@ export async function createCommands({ root, createController, onAuthorizationUr
     async resume(runId, { revise } = {}) {
       if (revise) refuse('revision_unavailable');
       if (incidentRequested(root)) {
+        const held = RunStore.open(root, runId, { cleanup: true });
+        held.close();
         await stopStoredRun(root, runId, 'Incident root fence');
         return status(runId);
       }
