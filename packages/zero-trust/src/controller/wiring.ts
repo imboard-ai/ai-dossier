@@ -434,6 +434,7 @@ export function createController(
   overrides: ControllerOverrides = {}
 ): RunController & {
   readonly authorizationUrl: string | null;
+  readonly nextPermittedAction: 'authorize' | null;
   authorize(runId: string): Promise<void>;
 } {
   if (
@@ -749,15 +750,18 @@ export function createController(
   const identity = async (c: PhaseContext) => {
     controller.assertAdmission();
     c.store.validateEvidence();
-    if (artifacts(c).get('authorization_required')) requireAuthorization(c);
     if (!c.store.config.authorApproval) throw new AuthorApprovalError('author_approval_missing');
     await credentials(c);
+    // Cleanup recovery precedes an authorization fence: a crash may have left
+    // journaled credentials whose values the new process cannot revoke.
+    if (artifacts(c).get('authorization_required')) requireAuthorization(c);
     controller.assertAdmission();
     c.signal.throwIfAborted();
     if (!contributor) throw new Error('authorization_unavailable');
     const parent = broker
       ?.status()
-      .tokens.find((token) => token.kind === 'user' && token.status === 'live');
+      .tokens.filter((token) => token.kind === 'user' && token.status === 'live')
+      .at(-1);
     if (parent?.expiresAt && Date.parse(parent.expiresAt) <= now().getTime()) {
       const refreshed = await contributor.refresh();
       controller.assertAdmission();
@@ -1369,6 +1373,28 @@ export function createController(
         if (activeStore && TERMINAL_STATES.includes(activeStore.run.state))
           await broker?.endRun(activeStore.run.state === 'cancelled' ? 'cancelled' : 'completed');
         else if (broker) {
+          const parent = broker
+            .status()
+            .tokens.filter((token) => token.kind === 'user' && token.status === 'live')
+            .at(-1);
+          // An expired access token can still have a usable refresh chain. Rotate
+          // while its refresh value is held, then revoke the live replacement.
+          // Unavailable rotation cannot be mistaken for confirmed chain death.
+          if (parent?.expiresAt && Date.parse(parent.expiresAt) <= now().getTime() && contributor) {
+            const refreshed = await contributor.refresh();
+            if (refreshed.kind === 'unavailable') {
+              const current = activeStore?.run;
+              if (
+                current &&
+                !TERMINAL_STATES.includes(current.state) &&
+                current.state !== 'blocked_cleanup'
+              )
+                activeStore?.persistRun(
+                  transitionRun(current, ReasonCode.CleanupFailed, now().toISOString())
+                );
+              throw new Error('cleanup_incomplete');
+            }
+          }
           // A dormant controller has no operation that needs a credential. Sweep
           // held values before stopping lease timers, without closing resumable
           // admission permanently as endRun would do.

@@ -1,10 +1,10 @@
 /** Offline real composition. Only GitHub transport, model, VM and clock edges are scripted. */
 
-import { execFileSync } from 'node:child_process';
 import { createHash, generateKeyPairSync } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { BareFork as Fork } from '../../__tests__/bare-fork';
 import { junit } from '../../__tests__/fake-vm';
 import {
   BASE_COMMIT,
@@ -36,36 +36,6 @@ import { validateRunConfig } from '../config';
 import { RunStore } from '../run-store';
 import { StepArtifacts } from '../steps';
 import { createController } from '../wiring';
-
-class Fork {
-  constructor(readonly dir: string) {
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    this.git(['init', '--bare', '--quiet']);
-  }
-  git(args: string[], input?: Buffer | string, extraEnv: Record<string, string> = {}) {
-    return execFileSync('/usr/bin/git', ['--git-dir', this.dir, ...args], {
-      input,
-      env: {
-        PATH: '/usr/bin:/bin',
-        HOME: this.dir,
-        GIT_CONFIG_NOSYSTEM: '1',
-        GIT_CONFIG_GLOBAL: '/dev/null',
-        GIT_TERMINAL_PROMPT: '0',
-        ...extraEnv,
-      },
-      stdio: ['pipe', 'pipe', 'ignore'],
-    })
-      .toString()
-      .trim();
-  }
-  sha(branch: string): string | null {
-    try {
-      return this.git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]);
-    } catch {
-      return null;
-    }
-  }
-}
 
 export const TIME = '2026-10-10T00:00:00.000Z';
 const POLICY =
@@ -794,6 +764,9 @@ export function rig(options: RigOptions = {}) {
     reopen: () => createController(config, edges),
     forkPresent: () => {
       options.missingFork = false;
+    },
+    forkMissing: () => {
+      options.missingFork = true;
     },
     planCalls: () => planCalls,
     planReached,

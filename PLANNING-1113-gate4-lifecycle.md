@@ -45,7 +45,14 @@ N/A — release tests exercise existing states and external failure conditions. 
 Gate suite under 60 seconds without live providers or VM; real local git is allowed. All existing composition tests remain. Full zero-trust coverage (90% statements/functions/lines, 85% branches), strict TypeScript build, isolation scanner and root CI lint. Repo CI workflows determine broader parity.
 
 ## Open Questions
-None.
+- Review hand-off: must Scope 7 prove a shipping-origin missing-fork wait, or is the existing gating-origin prerequisite wait followed by initial shipping the intended fork-delay case? `createController` binds the numeric fork ID during gating. A later complete missing-fork read at shipping returns `blocked` (`github/fork.ts`, bound-fork deletion rule), matching PRD §5.9: deleted fork/PR blocks. Changing that to `awaiting_contributor` would alter the approved authority contract. The strengthened assembled test reproduces this conflict without modifying the production deletion rule.
+
+## Review Evidence and Preserved Work
+All seven independent report-only review dimensions completed on c1d75cd (DRY, security, supportability, maintainability, documentation, convention, blind conformance). Seven reviews took 247–880 seconds; full-tier duration floor passed. Visual review is not applicable. Reviewer findings were deduplicated by root cause: durable authorization status, stale release snapshot, missing public getter type, refresh cleanup after native access expiry, authorization-fence crash recovery, active-token selection after refresh, stale API read-back falsely voiding a push, bare-fork fixture duplication, duplicate physical push audit, exact shipping-origin fork delay, verification no-pass assertion, and cleanup publication-capability denial. All are actionable except the fork-delay interpretation, which conflicts with the approved PRD and requires an owner decision.
+
+Implementation checkpoint c1d75cd passed all workspace coverage: 9,467 tests, zero-trust 4,674 tests, zero-trust coverage 95.38% statements / 92.62% branches / 97.27% functions / 97.17% lines. Root strict lint and build-all passed. A detached base 6f945b9 reproduction failed the pause/checkpoint credential audit with live access/refresh authority; the repaired implementation passed it.
+
+Partial review repairs are preserved above that checkpoint: core snapshot finalization, cleanup-before-authorization-fence recovery, newest-token expiry selection, refresh-before-release cleanup, structural durable status input and CLI read, declared getter type, Git-server read-back after aborted push, shared bare-fork fixture, and strengthened invariant/scenario assertions. They are not yet a reviewed or fully gated shipping head. The focused review run passed cleanup, verification exhaustion, pause/checkpoint audit and expired-contributor cases; the shipping-origin fork-delay case failed with observed `blocked` versus requested `awaiting_contributor`. Full regression validation and remaining review regression fixtures must resume after the decision. No PR or merge authorization was issued.
 
 ## Visual Review
 - [x] Not required (backend/offline tests only)

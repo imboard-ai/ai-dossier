@@ -437,15 +437,20 @@ export class RunController {
       .finally(async () => {
         clearInterval(watcher);
         try {
-          this.last = this.store?.run ?? this.last;
           await this.deps.release?.();
         } finally {
-          this.journal?.close();
-          this.store?.close();
-          this.store = undefined;
-          this.ledger = undefined;
-          this.journal = undefined;
-          this.running = undefined;
+          // Release can persist a cleanup block even when revocation rejects.
+          // Publish that final durable state before the store pins are closed.
+          try {
+            if (this.store && this.last !== this.store.run) this.notify(this.store.run);
+          } finally {
+            this.journal?.close();
+            this.store?.close();
+            this.store = undefined;
+            this.ledger = undefined;
+            this.journal = undefined;
+            this.running = undefined;
+          }
         }
       });
     this.running = task;

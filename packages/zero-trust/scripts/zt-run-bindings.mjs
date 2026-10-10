@@ -158,6 +158,7 @@ export async function createCommands({ root, createController, onAuthorizationUr
             tracking: artifacts.get('tracking'),
             publication: artifacts.get('publication'),
             withdrawal: artifacts.get('withdrawal'),
+            authorizationRequired: artifacts.get('authorization_required'),
           };
         });
         let handoff;
@@ -208,6 +209,7 @@ export async function createCommands({ root, createController, onAuthorizationUr
               }
             : {}),
           authorApproval: store.config.authorApproval,
+          authorizationRequired: retained.authorizationRequired,
         });
         const control = readControlRequests(store);
         if (control.invalid) {

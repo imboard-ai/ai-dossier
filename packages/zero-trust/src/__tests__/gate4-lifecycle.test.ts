@@ -172,16 +172,18 @@ async function assertGlobalInvariants(h: Rig) {
       );
     }
   }
+  const unmatched = [...attempts];
   for (const call of vi
     .mocked(TrustedGit.prototype.execAsync)
     .mock.calls.filter((c) => c[0][0] === 'push' && c[0].includes(`file://${h.fork.dir}`))) {
     const refspec = call[0].at(-1) as string;
-    expect(attempts).toContainEqual(
-      expect.objectContaining({
-        candidateSha: refspec.split(':')[0],
-        branch: refspec.split('refs/heads/')[1],
-      })
+    const index = unmatched.findIndex(
+      (attempt) =>
+        attempt.candidateSha === refspec.split(':')[0] &&
+        attempt.branch === refspec.split('refs/heads/')[1]
     );
+    expect(index, 'one physical push per authorized attempt').toBeGreaterThanOrEqual(0);
+    unmatched.splice(index, 1);
   }
 }
 
@@ -311,13 +313,21 @@ describe('gate 4 lifecycle', () => {
       .mocked(TrustedGit.prototype.execAsync)
       .mock.calls.filter((call) => call[0][0] === 'push').length;
     const calls = h.modelCalls();
+    const links = rows(h, 'handoff');
+    const before = h.artifacts(run.runId);
+    const publication = before.get('publication');
+    const tracking = before.get('tracking');
+    before.close();
     expect((await h.controller.resume(run.runId)).state).toBe('blocked_cleanup');
     expect(h.modelCalls()).toBe(calls);
     expect(h.vm.execs()).toHaveLength(executions);
     expect(
       vi.mocked(TrustedGit.prototype.execAsync).mock.calls.filter((call) => call[0][0] === 'push')
     ).toHaveLength(pushes);
+    expect(rows(h, 'handoff')).toEqual(links);
     const a = h.artifacts(run.runId);
+    expect(a.get('publication')).toEqual(publication);
+    expect(a.get('tracking')).toEqual(tracking);
     a.store.persistRun(transitionRun(a.store.run, ReasonCode.CleanupCompleted, TIME));
     expect(a.store.run.state).toBe('blocked');
     a.close();
@@ -342,6 +352,20 @@ describe('gate 4 lifecycle', () => {
     expect(['paused_user', 'failed', 'blocked']).toContain(run.state);
     const a = h.artifacts(run.runId);
     expect(a.get('receipt')).toBeUndefined();
+    expect(run.state).not.toBe('shipping');
+    expect(
+      h.controller
+        .snapshot()
+        .history.some((event) => event.reasonCode === ReasonCode.VerificationPassed)
+    ).toBe(false);
+    const verificationDir = path.join(a.dir, 'verification');
+    for (const file of fs.existsSync(verificationDir) ? fs.readdirSync(verificationDir) : []) {
+      if (/^[a-f0-9]{40}\.json$/u.test(file))
+        expect(loadVerification(a.dir, file.slice(0, -5), { runId: run.runId }).verdict).not.toBe(
+          'passed'
+        );
+    }
+    expect(a.get('publication')).toBeUndefined();
     a.close();
   });
 
@@ -385,19 +409,42 @@ describe('gate 4 lifecycle', () => {
     ] as never);
     await expect(assertGlobalInvariants(h)).rejects.toThrow();
     transport.mock.calls.pop();
+    const actual = transport.mock.calls.find((call) => call[0][0] === 'push');
+    if (!actual) throw new Error('missing positive push control');
+    transport.mock.calls.push(actual);
+    await expect(assertGlobalInvariants(h)).rejects.toThrow();
+    transport.mock.calls.pop();
     const observed = h.executions.splice(0);
     await expect(assertGlobalInvariants(h)).rejects.toThrow();
     h.executions.push(...observed);
   });
 
   it('actor=GitHub fork timing outcome=wait without compute then resumes shipping owner=S4/S5', async () => {
-    const h = fixture({ missingFork: true });
+    let h!: Rig;
+    let missing = false;
+    h = fixture({
+      beforeRead: async (p) => {
+        if (
+          !missing &&
+          p === `/repos/${OWNER}/fixture` &&
+          h.controller.snapshot().state === 'shipping'
+        ) {
+          missing = true;
+          h.forkMissing();
+        }
+      },
+    });
     const run = (await h.authorize(h.controller.start(h.config))) as {
       state: string;
       runId: string;
     };
     expect(run.state).toBe('awaiting_contributor');
     expect(h.controller.snapshot().reasonCode).toBe(ReasonCode.ForkMissing);
+    expect(h.controller.snapshot().history.at(-1)?.from).toBe('shipping');
+    const retained = h.artifacts(run.runId);
+    const candidate = retained.get('candidate');
+    const verification = retained.get('verification');
+    retained.close();
     const calls = h.modelCalls();
     const creates = h.vm.calls.filter((c) => c.op === 'create').length;
     expect((await h.controller.resume(run.runId)).state).toBe('awaiting_contributor');
@@ -407,7 +454,13 @@ describe('gate 4 lifecycle', () => {
     expect(((await h.authorize(h.controller.resume(run.runId))) as { state: string }).state).toBe(
       'awaiting_contributor'
     );
-    expect(h.controller.snapshot().history.some((row) => row.to === 'shipping')).toBe(true);
+    expect(h.controller.snapshot().history).toContainEqual(
+      expect.objectContaining({ from: 'awaiting_contributor', to: 'shipping' })
+    );
+    const resumed = h.artifacts(run.runId);
+    expect(resumed.get('candidate')).toEqual(candidate);
+    expect(resumed.get('verification')).toEqual(verification);
+    resumed.close();
   });
 
   it('actor=contributor App configuration outcome=broad installation blocked owner=S1/S4', async () => {

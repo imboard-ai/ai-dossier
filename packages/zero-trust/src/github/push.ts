@@ -302,11 +302,25 @@ export class ForkPusher implements WriteAdapter {
       throw diverged(expected, outcome.remote);
     if (outcome.git === 'killed' && outcome.stoppedAfterStart && !this.options.signal?.aborted) {
       // withForkPush joined the stopped Git operation and confirmed revocation.
-      // Only a fresh, identity-bound observation that nothing landed permits a
-      // void. An unavailable read, a changed ref, or cancellation remains closed.
+      // The API can trail a landed write. Bind identity with it, but ask the Git
+      // server itself for the ref before claiming that nothing landed.
       let observed: string | null;
       try {
-        observed = await this.readRef(at);
+        await this.readRef(at);
+        const { url, config } = this.remote(at);
+        const git = new TrustedGit();
+        try {
+          const listed = await git.execAsync(['ls-remote', url, `refs/heads/${at.branch}`], {
+            config,
+            timeoutMs: PUSH_TIMEOUT_MS,
+            signal: this.options.signal ?? new AbortController().signal,
+          });
+          const sha = lsRemote(listed, `refs/heads/${at.branch}`);
+          if (sha === undefined) throw new ForkPushError('push_uncertain', outcome.git);
+          observed = sha;
+        } finally {
+          git.close();
+        }
       } catch {
         throw new ForkPushError('push_uncertain', outcome.git);
       }

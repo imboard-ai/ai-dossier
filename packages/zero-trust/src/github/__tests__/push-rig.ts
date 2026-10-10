@@ -2,13 +2,13 @@
  * repository stands in for the fork, ref reads go through an HTTP fake answering from it,
  * and the broker, nonce store, push ledger and intent journal are real. No network, no
  * real credentials. */
-import { execFileSync } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
 import fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { Ed25519Signer } from '@ai-dossier/core';
 import { afterEach, beforeEach, expect, vi } from 'vitest';
+import { BareFork } from '../../__tests__/bare-fork';
 import { createManifest, sha256 } from '../../canonical/export';
 import { type CanonicalCandidate, createCandidate } from '../../canonical/reconstruct';
 import { TrustedGit } from '../../canonical/trusted-git';
@@ -116,31 +116,13 @@ export const C2 = candidateWith('rebased revision\n');
 export const SHA1 = C1.record.candidateSha;
 export const SHA2 = C2.record.candidateSha;
 
-const FORK_GIT_ENV = {
-  PATH: '/usr/bin:/bin',
-  GIT_CONFIG_NOSYSTEM: '1',
-  GIT_CONFIG_GLOBAL: '/dev/null',
-};
 /** The contributor fork: a local bare repository. */
-export class Fork {
-  readonly dir = temp('zt-fork-');
+export class Fork extends BareFork {
   constructor() {
-    this.git(['init', '--bare', '--quiet']);
+    super(temp('zt-fork-'));
   }
-  git(args: string[], input?: Buffer | string, extraEnv: Record<string, string> = {}): string {
-    return execFileSync('/usr/bin/git', ['--git-dir', this.dir, ...args], {
-      input,
-      env: { ...FORK_GIT_ENV, ...extraEnv },
-    })
-      .toString()
-      .trim();
-  }
-  sha(branch = BRANCH): string | null {
-    try {
-      return this.git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]);
-    } catch {
-      return null;
-    }
+  override sha(branch = BRANCH): string | null {
+    return super.sha(branch);
   }
   /** Someone else moves the branch: a commit of their own on top of `base`. */
   outOfBand(branch = BRANCH): string {

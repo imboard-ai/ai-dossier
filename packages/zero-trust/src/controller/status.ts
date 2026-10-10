@@ -31,6 +31,7 @@ export const DEFAULT_STATE_ACTIONS: Readonly<Record<RunState, string>> = Object.
   blocked_cleanup: 'Reconcile remaining resources and credentials before closing cleanup.',
 });
 export interface StatusParts {
+  readonly authorizationRequired?: unknown;
   readonly run: RunRecord;
   readonly now: Date | string;
   readonly phase?: string;
@@ -54,6 +55,16 @@ export interface StatusParts {
 }
 /** Pure assembly, no reads/polling or external writes. Monetary amounts are minor units. */
 export function assembleStatus(parts: StatusParts): StatusRecord {
+  const authorization = parts.authorizationRequired;
+  if (
+    authorization != null &&
+    (typeof authorization !== 'object' ||
+      Array.isArray(authorization) ||
+      Object.keys(authorization).length !== 1 ||
+      !('nextPermittedAction' in authorization) ||
+      authorization.nextPermittedAction !== 'authorize')
+  )
+    throw new InvalidStatusError();
   parts = structuredClone(parts);
   assertSecretFree(parts);
   const run = restoreRun(parts.run);
@@ -90,7 +101,7 @@ export function assembleStatus(parts: StatusParts): StatusRecord {
         parts.prerequisite.forkName
       )
     : null;
-  const status: StatusRecord = {
+  let status: StatusRecord = {
     runId: run.runId,
     phase: parts.phase ?? run.state,
     state: run.state,
@@ -111,6 +122,11 @@ export function assembleStatus(parts: StatusParts): StatusRecord {
       prerequisite?.nextPermittedAction ??
       DEFAULT_STATE_ACTIONS[run.state],
   };
+  if (
+    authorization &&
+    !['blocked_cleanup', 'blocked', 'cancelled', 'failed', 'merged', 'declined'].includes(run.state)
+  )
+    status = { ...status, nextPermittedAction: 'authorize' };
   // Validate every emitted fact through the same whitelist used by both renderers.
   renderJson(status);
   return status;
