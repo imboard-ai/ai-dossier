@@ -148,6 +148,8 @@ export interface RecoveryHooks {
   killAll(context: PhaseContext): Promise<void>;
 }
 export interface ControllerDependencies {
+  /** Stop-only external fence. It can revoke admission, never grant authority. */
+  readonly incidentRequested?: () => boolean;
   /** Release run-owned journals/credential leases before the RunStore pins close. */
   readonly release?: () => Promise<void>;
   readonly root: string;
@@ -359,12 +361,15 @@ export class RunController {
       );
       // A wrapper cannot bypass actual listByRun/teardown reconciliation.
       await this.attemptRecovery(() => this.cleanup(), failures);
-      await this.attemptRecovery(
-        () => this.deps.recovery.recoverCredentials(this.context()),
-        failures
-      );
+      this.observeIncident();
+      if (!this.incident)
+        await this.attemptRecovery(
+          () => this.deps.recovery.recoverCredentials(this.context()),
+          failures
+        );
       if (this.incident)
         await this.attemptRecovery(() => this.deps.recovery.killAll(this.context()), failures);
+      if (this.incident) return this.cancel();
       if (failures.length) throw failures[0];
       await this.recovered(
         await this.recover(() => this.deps.recovery.resumeIntents(this.context()))
@@ -395,10 +400,12 @@ export class RunController {
     this.oldHolds.clear();
     this.unfundedCleanup.clear();
     this.cached.clear();
+    const watcher = setInterval(() => this.observeIncident(), 20);
     // Fence synchronous observer/hook re-entry before invoking any injected code.
     const task = Promise.resolve()
       .then(work)
       .finally(async () => {
+        clearInterval(watcher);
         try {
           this.last = this.store?.run ?? this.last;
           await this.deps.release?.();
@@ -413,6 +420,17 @@ export class RunController {
       });
     this.running = task;
     return task;
+  }
+  private observeIncident(): void {
+    if (!this.running || !this.journal || this.incident || !this.deps.incidentRequested?.()) return;
+    // incidentStop aborts synchronously before its first await. The launch joins
+    // its independent cleanup obligation; observing it here must not await itself.
+    void this.incidentStop('Incident root fence').catch(() => {});
+  }
+  /** Recheck external stop authority synchronously at every admission boundary. */
+  assertAdmission(): void {
+    this.observeIncident();
+    if (this.incident || this.abort.signal.aborted) throw new ControllerError('admission_closed');
   }
   private get held(): RunStore {
     if (!this.store) throw new ControllerError('not_running');
@@ -503,7 +521,9 @@ export class RunController {
   }
   private async recover<T>(work: () => Promise<T>): Promise<T> {
     try {
-      return await work();
+      const result = await work();
+      this.observeIncident();
+      return result;
     } catch (error) {
       if (error instanceof AuthorApprovalError) throw error;
       if (error instanceof ControllerError && error.code === 'recovery_failed' && error.diagnostic)
@@ -613,6 +633,7 @@ export class RunController {
     }
   }
   private async step(phase: PhaseName, reacquire = false): Promise<Outcome> {
+    this.observeIncident();
     if (this.incident || this.abort.signal.aborted) throw new ControllerError('admission_closed');
     if (this.unfundedCleanup.size)
       return stopped(this.held.run.state) ? { kind: 'waiting' } : { kind: 'hand_off' };
@@ -639,6 +660,7 @@ export class RunController {
     this.phaseLease = lease;
     try {
       const proposed = await this.deps.steps[phase](this.context(lease, allocations));
+      this.observeIncident();
       this.phaseLease = undefined;
       const pending = await Promise.allSettled(allocations);
       result = this.validatedOutcome(phase, proposed);
@@ -832,6 +854,7 @@ export class RunController {
     sessionId: string,
     signal: AbortSignal
   ): Promise<VmHandle> {
+    this.observeIncident();
     if (
       this.incident ||
       this.recovering ||

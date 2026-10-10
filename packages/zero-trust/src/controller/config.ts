@@ -90,7 +90,7 @@ export interface AuthorApproval {
   readonly approvedAt: string;
 }
 
-function authorApproval(raw: unknown, contributor: string): AuthorApproval {
+export function validateAuthorApproval(raw: unknown, contributor: string): AuthorApproval {
   const a = object(
     raw,
     ['userId', 'login', 'name', 'email', 'source', 'approvedAt'],
@@ -244,14 +244,12 @@ export function validateStoredRunConfig(raw: unknown): RunConfig {
   const e = object(
     r.executionProfile,
     ['provider', 'profileDir', 'stateDir', 'accelerator', 'proxyEndpointsFile'],
-    'unsupported_environment'
+    'invalid_config'
   );
-  if (
-    e.provider !== 'local-qemu' ||
-    typeof e.accelerator !== 'string' ||
-    !['auto', 'kvm', 'tcg'].includes(e.accelerator)
-  )
-    fail('unsupported_environment');
+  if (typeof e.provider !== 'string' || !e.provider) fail('invalid_config');
+  if (e.provider !== 'local-qemu') fail('unsupported_environment');
+  if (typeof e.accelerator !== 'string' || !['auto', 'kvm', 'tcg'].includes(e.accelerator))
+    fail('invalid_config');
   const m = object(r.modelProfile, ['phases', 'rates'], 'invalid_model_profile');
   const phases = object(m.phases, ['planning', 'implementing', 'repair'], 'invalid_model_profile');
   const planning = phase(phases.planning);
@@ -342,13 +340,13 @@ export function validateStoredRunConfig(raw: unknown): RunConfig {
     contributor,
     ...(r.authorApproval === undefined
       ? {}
-      : { authorApproval: authorApproval(r.authorApproval, contributor) }),
+      : { authorApproval: validateAuthorApproval(r.authorApproval, contributor) }),
     executionProfile: {
       provider: 'local-qemu',
-      profileDir: path.resolve(text(e.profileDir, 'unsupported_environment')),
-      stateDir: path.resolve(text(e.stateDir, 'unsupported_environment')),
+      profileDir: path.resolve(text(e.profileDir, 'invalid_config')),
+      stateDir: path.resolve(text(e.stateDir, 'invalid_config')),
       accelerator: e.accelerator as 'auto' | 'kvm' | 'tcg',
-      proxyEndpointsFile: path.resolve(text(e.proxyEndpointsFile, 'unsupported_environment')),
+      proxyEndpointsFile: path.resolve(text(e.proxyEndpointsFile, 'invalid_config')),
     },
     modelProfile: { phases: { planning, implementing, ...(repair ? { repair } : {}) }, rates },
     budget,

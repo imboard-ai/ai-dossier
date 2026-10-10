@@ -89,6 +89,21 @@ afterEach(() => {
 });
 
 describe('RunStore', () => {
+  it('unlocked observers refuse stale or unconfirmed publication and cannot write', () => {
+    const h = rig();
+    expect(() => RunStore.open(h.root, h.store.runId, { observe: true })).toThrow(RunStoreError);
+    const reader = RunStore.open(h.root, h.store.runId, { readOnly: true, observe: true });
+    handles.push(reader);
+    expect(reader.validateEvidence()).toEqual(h.store.run);
+    expect(() => reader.replaceArtifact('note.json', Buffer.from('{}'))).toThrow(RunStoreError);
+    h.store.persistRun(transitionRun(h.store.run, ReasonCode.GatePassed, LATER));
+    expect(() => reader.validateEvidence()).toThrow(RunStoreError);
+    expect(() => RunStore.open(h.root, h.store.runId)).toThrow(StoreLockedError);
+    const bytes = fs.readFileSync(path.join(h.store.directory, 'run.json'));
+    fs.appendFileSync(path.join(h.store.directory, 'control', 'events.jsonl'), '{');
+    expect(() => RunStore.open(h.root, h.store.runId, { readOnly: true, observe: true })).toThrow();
+    expect(fs.readFileSync(path.join(h.store.directory, 'run.json'))).toEqual(bytes);
+  });
   it('contains public evidence decoder errors without raw input or causes', () => {
     for (const bytes of [Buffer.from('ghp_demo\n'), Buffer.from([0xff, 10])]) {
       expect(() => parseJournalEvents(bytes)).toThrow(JournalError);

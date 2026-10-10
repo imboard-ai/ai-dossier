@@ -1,14 +1,17 @@
 /** Controller-only credential composition root. Deliberately absent from index.ts.
  * Scripts import this file; no other production src module may reach it. */
+
+import fs from 'node:fs';
 import path from 'node:path';
 import { Ed25519Signer, type Signer } from '@ai-dossier/core';
 import { BudgetLedger } from '../budget';
 import type { BudgetEstimate, BudgetObservation } from '../budget-types';
 import { resolveBase } from '../canonical/acquire';
-import { readPrivate } from '../durable-fs';
+import { assertDirectoryAncestors, readPrivate, replacePrivate } from '../durable-fs';
 import { AppCredentials, fetchGitHubHttp, fetchOAuthHttp } from '../github/app-auth';
 import { ForkCredentialBroker } from '../github/broker';
 import {
+  ContributorAuthError,
   ContributorAuthorization,
   installationSource,
   listenLoopback,
@@ -19,10 +22,11 @@ import { handoffMarker } from '../github/handoff';
 import { type HandoffAdmission, HandoffDriver } from '../github/handoff-driver';
 import { ForkPusher, type ForkPusherOptions } from '../github/push';
 import { anonymousReader, type GitHubRead } from '../github/reconcile';
-import { TokenVault } from '../github/token-journal';
+import { OUTSTANDING, TokenJournal, TokenVault } from '../github/token-journal';
 import { PrTracker, trackFromHandoff } from '../github/track';
 import { IntentDriver } from '../intents';
 import { Journal } from '../journal';
+import { StoreLockedError } from '../lock';
 import { type ModelAdapter, ModelError } from '../model/adapter';
 import { OpenAICompatibleAdapter } from '../model/openai-compatible';
 import { assessIssue } from '../policy/eligibility';
@@ -48,6 +52,7 @@ import {
 } from '../vm/adapter';
 import { preflightHost } from '../vm/host';
 import { LocalQemuAdapter } from '../vm/local-qemu';
+import { teardownVm } from '../vm/teardown';
 import { AuthorApprovalError, requireAuthorApproval } from './author-approval';
 import { validateCheckpointReview } from './checkpoints';
 import { type RunConfig, runConfigInput, validateRunConfig } from './config';
@@ -58,6 +63,7 @@ import {
   RunController,
 } from './controller';
 import { ProvisioningFailedError } from './evidence-runner';
+import { readOutcomeBudget } from './outcome-records';
 import { RunStore } from './run-store';
 import {
   makeAuthorize,
@@ -78,6 +84,284 @@ export interface ControllerOverrides {
   readonly gitRemoteUrl?: { readonly upstream: string; readonly fork: string };
   readonly now?: () => Date;
   readonly signer?: Signer;
+  /** Immediate production UI notification, never a credential or provider response. */
+  readonly onAuthorizationUrl?: (url: string) => void;
+}
+
+export function incidentRequested(root: string): boolean {
+  try {
+    fs.lstatSync(path.join(root, '.incident'));
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ENOENT';
+  }
+}
+/** Durable root-wide stop-only authority, installed before run enumeration. */
+export function fenceIncident(root: string, reason: string): void {
+  assertSecretFree(reason);
+  if (path.basename(path.resolve(root)) !== 'runs') throw new Error('root_mismatch');
+  assertDirectoryAncestors(root);
+  const flags = fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW;
+  let parent = fs.openSync('/', flags);
+  const children: number[] = [];
+  try {
+    // Descriptor-relative traversal prevents ancestor swaps from redirecting a
+    // stop write after the non-mutating pathname preflight.
+    for (const name of path.resolve(root, '..').split(path.sep).filter(Boolean)) {
+      const next = fs.openSync(`/proc/self/fd/${parent}/${name}`, flags);
+      fs.closeSync(parent);
+      parent = next;
+    }
+    if (fs.fstatSync(parent).uid !== process.getuid?.()) throw new Error('invalid_store');
+    const child = (name: string) => {
+      const file = `/proc/self/fd/${parent}/${name}`;
+      try {
+        fs.mkdirSync(file, { mode: 0o700 });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      }
+      const fd = fs.openSync(file, flags);
+      children.push(fd);
+      if (fs.fstatSync(fd).uid !== process.getuid?.()) throw new Error('invalid_store');
+      fs.fchmodSync(fd, 0o700);
+      return fd;
+    };
+    const runFd = child('runs');
+    replacePrivate(`/proc/self/fd/${runFd}/.incident`, Buffer.from('incident'));
+    const vmFd = child('vms');
+    new LocalQemuAdapter({
+      stateDir: path.join(path.dirname(root), 'vms'),
+      profileDir: '.',
+      verifyImage: false,
+    }).engageKillSwitch(reason, vmFd);
+  } finally {
+    for (const fd of children) fs.closeSync(fd);
+    fs.closeSync(parent);
+  }
+}
+function configuredApp(config: RunConfig): AppCredentials {
+  return new AppCredentials({
+    appId: String(config.githubApp.appId),
+    clientId: config.githubApp.clientId,
+    privateKey: process.env[config.githubApp.privateKeyEnv] ?? '',
+    clientSecret: process.env[config.githubApp.clientSecretEnv] ?? '',
+  });
+}
+function sameConfig(left: RunConfig, right: RunConfig): boolean {
+  const { resumeRunId: _left, ...a } = runConfigInput(left);
+  const { resumeRunId: _right, ...b } = runConfigInput(right);
+  return canonicalJson(a, 1024 * 1024) === canonicalJson(b, 1024 * 1024);
+}
+
+/** Pre-start OAuth identity acquisition: no fabricated fork, run, or durable token. */
+export async function prepareAuthor(
+  input: RunConfig,
+  identity: { readonly name?: string; readonly email?: string; readonly userId?: number } = {},
+  edges: Pick<ControllerOverrides, 'fetch' | 'now' | 'onAuthorizationUrl'> = {}
+) {
+  const config = validateRunConfig(runConfigInput(input));
+  const fetcher = edges.fetch ?? fetch;
+  const auth = new ContributorAuthorization({
+    app: configuredApp(config),
+    http: fetchGitHubHttp(undefined, fetcher),
+    oauth: fetchOAuthHttp(undefined, fetcher),
+    contributor: config.contributor,
+    appSlug: config.githubApp.slug,
+    now: () => (edges.now?.() ?? new Date()).getTime(),
+  });
+  const receiver = await listenLoopback({ isExpected: (state) => auth.matchesPending(state) });
+  try {
+    const url = auth.begin(receiver.redirectUri).url;
+    if (!edges.onAuthorizationUrl) throw new Error('authorization_ui_unavailable');
+    edges.onAuthorizationUrl(url);
+    try {
+      return await auth.completeAuthor(await receiver.callback, identity);
+    } catch (error) {
+      if (error instanceof ContributorAuthError && error.code === 'author_approval_mismatch')
+        throw new AuthorApprovalError('author_approval_mismatch');
+      throw error;
+    }
+  } finally {
+    receiver.close();
+  }
+}
+
+/** Incident cleanup opens a dormant run directly. It never authenticates, gates,
+ * resumes work or depends on a model/proxy configuration being available. */
+export async function stopStoredRun(
+  root: string,
+  runId: string,
+  reason: string,
+  edges: Pick<ControllerOverrides, 'fetch' | 'vm' | 'now'> = {}
+): Promise<void> {
+  assertSecretFree(reason);
+  if (typeof reason !== 'string' || !reason.trim() || reason.length > 500)
+    throw new ControllerError('invalid_outcome');
+  let acquired: RunStore | undefined;
+  const deadline = Date.now() + 30000;
+  while (!acquired) {
+    try {
+      acquired = RunStore.open(root, runId, { cleanup: true });
+    } catch (error) {
+      if (!(error instanceof StoreLockedError)) throw error;
+      if (!incidentRequested(root) || Date.now() >= deadline) throw new Error('cleanup_incomplete');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+  const store = acquired;
+  const opened: Journal[] = [];
+  let broker: ForkCredentialBroker | undefined;
+  const journal = (name: Parameters<RunStore['storeDirectory']>[0], child?: string) => {
+    const j = new Journal(path.join(store.storeDirectory(name), ...(child ? [child] : [])));
+    opened.push(j);
+    return j;
+  };
+  try {
+    const config = store.config;
+    if (path.resolve(root) !== path.resolve(config.executionProfile.stateDir, 'runs'))
+      throw new Error('root_mismatch');
+    const now = edges.now ?? (() => new Date());
+    const control = journal('control', 'controller');
+    control.append({ v: 1, type: 'incident', runId, reason });
+    const vm =
+      edges.vm ??
+      new LocalQemuAdapter({
+        stateDir: path.join(config.executionProfile.stateDir, 'vms'),
+        profileDir: config.executionProfile.profileDir,
+        accelerator: config.executionProfile.accelerator,
+        journal: journal('vm'),
+        now,
+      });
+    let failed = false;
+    let unfunded = false;
+    const incidentVm: Pick<VmAdapter, 'listByRun' | 'destroy'> = {
+      listByRun: vm.listByRun.bind(vm),
+      destroy: async (handle) => {
+        let ledger: BudgetLedger | undefined;
+        let hold: ReturnType<BudgetLedger['reserve']> | undefined;
+        try {
+          ledger = new BudgetLedger(
+            path.join(store.storeDirectory('budget'), 'ledger.json'),
+            store.contributionId
+          );
+          const session = ledger.snapshot().sessions.at(-1);
+          if (!session) throw new Error('missing_budget_session');
+          hold = ledger.reserve(
+            session.id,
+            {
+              money: { currency: config.budget.currency, minor: 0 },
+              tokens: 0,
+              timeMs: 5000,
+              rates: config.modelProfile.rates.filter(
+                (r) => r.resource === 'local-qemu' && r.unit === 'millisecond' && r.price === 0
+              ),
+            },
+            'teardown'
+          );
+        } catch {
+          // Incident destruction remains mandatory when accounting is unavailable.
+          // Preserve an unfunded obligation rather than claiming free cleanup.
+          unfunded = true;
+          try {
+            control.append({
+              v: 1,
+              type: 'cleanup',
+              runId,
+              vmId: handle.vmId,
+              kind: 'pending',
+              funded: false,
+            });
+          } catch {
+            failed = true;
+          }
+        }
+        const at = now().getTime();
+        try {
+          const result = await teardownVm(vm, handle, store.run, {
+            now,
+            reconcileStopped: true,
+            retryDelayMs: 0,
+          });
+          if (result.kind !== 'destroyed') throw new Error('cleanup_incomplete');
+        } catch (error) {
+          if (hold) ledger?.settle(hold.id, null);
+          throw error;
+        }
+        if (hold)
+          ledger?.settle(hold.id, {
+            money: { currency: config.budget.currency, minor: 0 },
+            tokens: 0,
+            timeMs: Math.max(0, now().getTime() - at),
+            source: 'local-qemu-observed',
+          });
+        else
+          control.append({
+            v: 1,
+            type: 'cleanup',
+            runId,
+            vmId: handle.vmId,
+            kind: 'destroyed',
+            funded: false,
+          });
+      },
+    };
+    try {
+      await stopResources(incidentVm, runId, async () => {
+        const tokens = journal('tokens');
+        const ledger = new TokenJournal(tokens).state;
+        if (![...ledger.tokens.values()].some((t) => OUTSTANDING.includes(t.status))) return;
+        const fork = new StepArtifacts(journal('control', 'steps'), runId).require<ForkReady>(
+          'fork'
+        );
+        broker = new ForkCredentialBroker({
+          store: tokens,
+          fork,
+          http: fetchGitHubHttp(undefined, edges.fetch ?? fetch),
+          app: configuredApp(config),
+          intents: () => {
+            throw new Error('admission_closed');
+          },
+          now: () => now().getTime(),
+        });
+        const report = await broker.killAll();
+        if (!report.complete) throw new Error('cleanup_incomplete');
+      });
+    } catch {
+      failed = true;
+    }
+    failed ||= unfunded;
+    const unresolved = control
+      .read()
+      .some(
+        (event) =>
+          event &&
+          typeof event === 'object' &&
+          'type' in event &&
+          event.type === 'cleanup' &&
+          'funded' in event &&
+          event.funded === false
+      );
+    if (
+      !failed &&
+      store.run.state === 'blocked_cleanup' &&
+      !unresolved &&
+      !readOutcomeBudget(store).reservations.some((r) => r.status === 'reserved')
+    )
+      store.persistRun(transitionRun(store.run, ReasonCode.CleanupCompleted, now().toISOString()));
+    if (!TERMINAL_STATES.includes(store.run.state) && store.run.state !== 'blocked_cleanup')
+      store.persistRun(
+        transitionRun(
+          store.run,
+          failed ? ReasonCode.CleanupFailed : ReasonCode.UserCancelled,
+          now().toISOString()
+        )
+      );
+    if (failed && store.run.state !== 'blocked_cleanup') throw new Error('cleanup_incomplete');
+  } finally {
+    broker?.close();
+    for (const j of opened) j.close();
+    store.close();
+  }
 }
 
 class EdgeForkPusher extends ForkPusher {
@@ -114,7 +398,11 @@ function readProxyFile(file: string): unknown {
 }
 
 /** Revocation is independent of guest availability; join every obligation before refusing. */
-async function stopResources(vm: VmAdapter, runId: string, revoke: () => Promise<void>) {
+async function stopResources(
+  vm: Pick<VmAdapter, 'listByRun' | 'destroy'>,
+  runId: string,
+  revoke: () => Promise<void>
+) {
   const failures: unknown[] = [];
   await Promise.all([
     revoke().catch((error: unknown) => {
@@ -144,10 +432,23 @@ async function stopResources(vm: VmAdapter, runId: string, revoke: () => Promise
 export function createController(
   input: RunConfig,
   overrides: ControllerOverrides = {}
-): RunController & { readonly authorizationUrl: string | null } {
+): RunController & {
+  readonly authorizationUrl: string | null;
+  authorize(runId: string): Promise<void>;
+} {
   if (
     Object.keys(overrides).some(
-      (k) => !['vm', 'fetch', 'read', 'models', 'gitRemoteUrl', 'now', 'signer'].includes(k)
+      (k) =>
+        ![
+          'vm',
+          'fetch',
+          'read',
+          'models',
+          'gitRemoteUrl',
+          'now',
+          'signer',
+          'onAuthorizationUrl',
+        ].includes(k)
     )
   )
     throw new Error('invalid_controller_override');
@@ -334,12 +635,7 @@ export function createController(
     return a;
   };
   const appCredentials = () => {
-    app ??= new AppCredentials({
-      appId: String(config.githubApp.appId),
-      clientId: config.githubApp.clientId,
-      privateKey: process.env[config.githubApp.privateKeyEnv] ?? '',
-      clientSecret: process.env[config.githubApp.clientSecretEnv] ?? '',
-    });
+    app ??= configuredApp(config);
     return app;
   };
   const http = fetchGitHubHttp(undefined, fetcher);
@@ -369,6 +665,7 @@ export function createController(
     );
   };
   const credentials = async (c: PhaseContext) => {
+    controller.assertAdmission();
     if (broker && contributor) return;
     const stored = artifacts(c).get<ForkReady>('fork');
     const result = stored ? undefined : await checkFork(c);
@@ -383,6 +680,7 @@ export function createController(
     const fork =
       stored ??
       (result as Extract<ReadinessOutcome, { kind: 'ready' | 'authorization_required' }>).fork;
+    controller.assertAdmission();
     if (stored && stored.repositoryId !== fork.repositoryId) throw new Error('fork_replaced');
     artifacts(c).put('fork', fork);
     broker = new ForkCredentialBroker({
@@ -414,12 +712,15 @@ export function createController(
     await broker.recover();
   };
   const identity = async (c: PhaseContext) => {
+    controller.assertAdmission();
     c.store.validateEvidence();
     if (!c.store.config.authorApproval) throw new AuthorApprovalError('author_approval_missing');
     await credentials(c);
+    controller.assertAdmission();
     c.signal.throwIfAborted();
     if (!contributor) throw new Error('authorization_unavailable');
     let bound = await contributor.bindLogin(c.store.run, c.store.config.authorApproval?.userId);
+    controller.assertAdmission();
     c.signal.throwIfAborted();
     if (bound.kind === 'reauthorize') {
       const receiver = await listenLoopback({
@@ -428,14 +729,19 @@ export function createController(
       const aborted = () => receiver.close();
       c.signal.addEventListener('abort', aborted, { once: true });
       try {
+        controller.assertAdmission();
         if (c.signal.aborted) receiver.close();
         c.signal.throwIfAborted();
         authUrl = contributor.begin(receiver.redirectUri).url;
+        overrides.onAuthorizationUrl?.(authUrl);
+        const callback = await receiver.callback;
+        controller.assertAdmission();
         bound = await contributor.complete(
-          await receiver.callback,
+          callback,
           c.store.run,
           c.store.config.authorApproval?.userId
         );
+        controller.assertAdmission();
       } finally {
         authUrl = null;
         receiver.close();
@@ -854,6 +1160,7 @@ export function createController(
     receipt = artifacts(c).get<SignedReceipt>('receipt');
   };
   const controller = new RunController({
+    incidentRequested: () => incidentRequested(root),
     root,
     steps,
     vm,
@@ -872,11 +1179,7 @@ export function createController(
     recovery: {
       openStore: (r, id) => {
         const store = RunStore.open(r, id);
-        const { resumeRunId: _storedResume, ...storedInput } = runConfigInput(store.config);
-        const { resumeRunId: _requestedResume, ...requestedInput } = runConfigInput(config);
-        if (
-          canonicalJson(storedInput, 1024 * 1024) !== canonicalJson(requestedInput, 1024 * 1024)
-        ) {
+        if (!sameConfig(store.config, config)) {
           store.close();
           throw new Error('resume_identity_mismatch');
         }
@@ -953,6 +1256,19 @@ export function createController(
     },
   });
   const start = controller.start.bind(controller);
+  const authorize = async (runId: string) => {
+    const store = RunStore.open(root, runId);
+    try {
+      if (!sameConfig(store.config, config)) throw new Error('resume_identity_mismatch');
+      const approval = store.config.authorApproval;
+      if (!approval) throw new AuthorApprovalError('author_approval_missing');
+      await prepareAuthor(store.config, { userId: approval.userId }, overrides);
+      store.validateEvidence();
+    } finally {
+      store.close();
+    }
+  };
+  Object.defineProperty(controller, 'authorize', { value: authorize });
   Object.defineProperty(controller, 'start', {
     value: (next: RunConfig) => {
       if (
@@ -965,5 +1281,8 @@ export function createController(
   });
   return Object.defineProperty(controller, 'authorizationUrl', {
     get: () => authUrl,
-  }) as RunController & { readonly authorizationUrl: string | null };
+  }) as RunController & {
+    readonly authorizationUrl: string | null;
+    authorize(runId: string): Promise<void>;
+  };
 }

@@ -10,6 +10,131 @@ plus ecosystem detection, runtime profiles, command plans and package-proxy poli
 (see the gate 2 section below).
 Publication remains gated on S1 feasibility.
 
+## Controller CLI (#1109)
+
+This private package supplies a repository script, not an installed binary. From
+`packages/zero-trust`, build first with `npm run build`, then run
+`node scripts/zt-run.mjs --help`. `--root` is the **run-store directory**:
+it must equal `<executionProfile.stateDir>/runs` for start/resume. Config paths
+are resolved from the invoking working directory. The closed config schema and
+signer requirements are documented below; secrets are supplied through its
+environment references, never literal configuration values.
+
+| Command | Required command-specific arguments | Optional arguments |
+|---|---|---|
+| `start` | `--config <file.json>` | `--confirm-author`, `--author-name <name>`, `--author-email <email>` |
+| `resume` | `--run <id>` | `--revise` (currently refused as `revision_unavailable`) |
+| `status` | `--run <id>` | `--json` |
+| `approve` | `--run <id> --checkpoint <plan\|patch\|verification> --digest <sha256>` | |
+| `reject` | same as approve, plus `--reason <text>` | |
+| `authorize` | `--run <id>` | |
+| `kill-all` | `--reason <text>` | |
+| `metrics` | | `--json` |
+| `adoption` | `--run <id> --note <text>` | |
+| `sweep` | | `--apply` |
+| `export` | `--run <id> --out <file>` | |
+
+Every command also requires `--root <dir>`. Unknown, repeated, missing and
+cross-command flags, positional arguments and malformed identifiers are refused.
+Exit codes: **0** durable stop (including hand-offs); **2** blocked, failed,
+unsupported, cancelled, cleanup blocked or operation unavailable; **3** invalid
+input (fixed error code plus usage); **4** writer lock held by another controller.
+Provider exception text is never printed. Human status quotes each value; JSON
+status carries identical facts, including the recorded `authorApproval`.
+Overlapping starts for the same trusted configuration hold a kernel guard keyed
+by its digest (excluding newly confirmed author data); the second exits 4 while
+the first run is executing. Different configurations can start independently.
+The guard releases at the first durable stop. Resume targets the existing run ID
+and retains its per-run writer guard.
+
+The filesystem threat model covers accidental/environmental corruption (including
+crashes, torn writes, invalid bytes and older-run leftovers) and concurrent
+legitimate controllers. Active filesystem tampering by an adversary with the same
+OS-user privileges is outside that boundary, as clarified in the
+[owner decision on #1109](https://github.com/imboard-ai/ai-dossier/issues/1109#issuecomment-6097937051).
+Two out-of-scope hardening notes remain: substituting a `stateDir` ancestor with a
+symlink can redirect start-guard creation/permission changes, and unlinking a held
+start guard permits a new inode to be locked. **Never manually delete or replace
+files in `<stateDir>/.start-guards` while controllers may be active: doing so defeats
+overlapping-start exclusion.** These notes do not weaken refusal of corrupt
+evidence or exclusion between legitimate concurrent starts.
+
+Start performs real GitHub App OAuth/PKCE through a loopback callback, prints
+`authorization_url`, then reads `/user`. Its author default is profile `name`
+(or login) and `<userId>+<login>@users.noreply.github.com`. The script displays
+the selected identity as `author_identity` and requires an interactive `yes`,
+or `--confirm-author` for noninteractive invocation. Overrides require that exact
+noreply address or a verified `/user/emails` address of the authenticated account;
+missing email permission, unreadable answers and unverified addresses refuse.
+Config-supplied author approval cannot substitute for this start-side consent.
+The identity is recorded once, bound into the config digest, and never replaced
+on resume. Another authenticated numeric account refuses with
+`author_approval_mismatch`. An authorization URL contains no access/refresh token.
+Pre-start and explicit-authorize credentials are revoked after identity checks;
+execution may request a separate authorization when it needs a fork credential.
+
+`status` performs observational reads without the writer lock, never creates or
+repairs files, and refuses incomplete/corrupt or concurrently changed evidence.
+Maintenance retains the guarded read-only API; adoption and checkpoint decisions
+take the writer lock. Approve/reject resolve only the selected checkpoint and
+print status; execution continues only on explicit resume. `kill-all` joins every
+run's incident cleanup without executing phases, including dormant runs, and
+reports `blocked_cleanup` when revocation/destruction cannot be confirmed. It
+installs a persistent root `.incident` fence and the VM admission kill switch
+before enumerating runs. Active owners observe the fence, abort work and join
+cleanup; dormant cleanup waits up to 30 seconds for the writer to acknowledge.
+Unacknowledged or accounting-uncertain cleanup remains a refusal. A successful
+cleanup retry closes an enumeration-only cleanup block; unresolved reservations
+or unfunded obligations retain it. An incident-fenced root cannot start new work;
+use a new root after resolving the incident. Signing readiness is not required
+for incident cleanup.
+Metrics are local evidence-derived aggregates; adoption is a voluntary local note.
+Sweep is dry-run unless `--apply` and prints counts only. Export uses the real
+sanitized portable exporter and refuses an existing output file.
+
+Example session (substitute the run ID/digest and use a complete valid config):
+
+```sh
+npm run build
+node scripts/zt-run.mjs start --config run-config.json --root state/runs --confirm-author
+# Open the printed authorization_url; inspect author_identity.
+# A permission hand-off reaches awaiting_contributor; complete the printed link.
+node scripts/zt-run.mjs status --root state/runs --run ztc-0123456789abcdef-run-1 --json
+node scripts/zt-run.mjs resume --root state/runs --run ztc-0123456789abcdef-run-1
+# If paused_user, review artifacts/plan.txt and approve its displayed digest:
+node scripts/zt-run.mjs approve --root state/runs --run ztc-0123456789abcdef-run-1 --checkpoint plan --digest <displayed-sha256>
+node scripts/zt-run.mjs resume --root state/runs --run ztc-0123456789abcdef-run-1
+node scripts/zt-run.mjs metrics --root state/runs --json
+node scripts/zt-run.mjs sweep --root state/runs
+node scripts/zt-run.mjs export --root state/runs --run ztc-0123456789abcdef-run-1 --out contribution.json
+```
+
+`zt-run-lib.mjs` exports `main(argv, { createController, out, err, confirmAuthor? })`.
+The injected factory builds the command facade; the thin entry binds it to
+`createCommands` and the real `dist/controller/wiring.js:createController`.
+No production environment-variable test override exists. Credential-bound
+`prepareAuthor(config, identity?, edges?)` and `stopStoredRun(root, runId, reason,
+edges?)` remain in wiring, outside the public index. `onAuthorizationUrl` is a
+production UI callback for immediate loopback URL display, not phase injection.
+The composed controller also exposes `authorize(runId)` for explicit account
+authorization without phase execution.
+
+`RunStore.open` has three modes: default writable execution/recovery (writer lock
+and signer readiness), `{ readOnly: true }` guarded non-repairing maintenance,
+and `{ readOnly: true, observe: true }` lock-free observation. Observation never
+authorizes writes and requires a final `store.validateEvidence()` before returning
+facts, then `store.close()`. Incomplete publication or evidence changed during
+the read refuses; supported interrupted publication is recovered only by the
+writable resume path. `{ cleanup: true }` is a locked incident-cleanup writer:
+it validates stored config/evidence but skips signing readiness. Execution uses
+the default writer, never cleanup mode. `LocalQemuAdapter.engageKillSwitch(reason)`
+closes VM admission without bypassing controller-accounted teardown; its optional
+directory descriptor lets controller-owned publication retain a pinned private
+directory across pathname substitution. Root incident publication traverses
+directory descriptors without following symlinks before creating/changing files.
+`RunController.assertAdmission()` synchronously rechecks external stop authority
+at recovery/credential admission boundaries; the watcher also interrupts waits.
+
 ## Controller composition (#1108)
 
 Scripts import `createController(config, overrides?)` directly from
@@ -1629,8 +1754,9 @@ live network, and production must never set that option.
 
 ## Artifact retention and portable export (#1104)
 
-These offline controller APIs are exported from the package index. No CLI or
-upstream write is added. The caller must close live controllers before sweeping;
+These offline controller APIs are exported from the package index. The `zt-run sweep`
+and `zt-run export` commands expose them without upstream writes.
+The caller must close live controllers before sweeping;
 `RunStore.open` holds the same permanent lifetime flock used for execution.
 `RunStore.open(root, runId, { readOnly: true })` is the maintenance open used by
 sweep: it validates the complete confirmed control journal without running tail

@@ -368,7 +368,7 @@ export class RunStore {
   private constructor(
     readonly directory: string,
     readonly contributionId: string,
-    private readonly guard: number,
+    private readonly guard: number | undefined,
     private readonly directoryFd: number,
     private readonly journal: Pick<Journal, 'read' | 'append' | 'close'>,
     private readonly storedConfig: RunConfig,
@@ -573,7 +573,11 @@ export class RunStore {
   static open(
     root: string,
     runId: string,
-    options: { readonly readOnly?: boolean } = {}
+    options: {
+      readonly readOnly?: boolean;
+      readonly observe?: boolean;
+      readonly cleanup?: boolean;
+    } = {}
   ): RunStore {
     const contributionId = contributionIdOf(runId);
     if (!contributionId) fail('invalid_run_id');
@@ -594,10 +598,14 @@ export class RunStore {
       }
       directoryFd = pinDirectory(directory);
       const pinned = `/proc/self/fd/${directoryFd}`;
-      guard = acquire(pinned, !options.readOnly);
+      // Observational status is deliberately lock-free. It accepts only complete,
+      // confirmed evidence and fresh equality checks; a concurrent publication
+      // refuses the read instead of repairing it. Maintenance keeps its guard.
+      if (options.observe && !options.readOnly) fail('invalid_store');
+      if (!options.observe) guard = acquire(pinned, !options.readOnly);
       const bytes = boundedRead(path.join(pinned, 'config.json'));
       const config = readStoredConfig(pinned, undefined, bytes);
-      if (!options.readOnly) validateRunConfig(runConfigInput(config));
+      if (!options.readOnly && !options.cleanup) validateRunConfig(runConfigInput(config));
       const raw = jsonRecord(boundedRead(path.join(pinned, 'run.json')));
       assertSecretFree(raw);
       const run = restoreRun(raw);
@@ -797,7 +805,7 @@ export class RunStore {
     this.closed = true;
     this.journal.close();
     if (!this.poisoned) {
-      fs.closeSync(this.guard);
+      if (this.guard !== undefined) fs.closeSync(this.guard);
       fs.closeSync(this.directoryFd);
     }
   }

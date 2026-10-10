@@ -5,6 +5,7 @@ import { type HandoffState, handoffStatus } from '../github/handoff-driver';
 import { assertSecretFree } from '../redaction';
 import { type RunRecord, type RunState, restoreRun, sameRunRecord } from '../state';
 import { InvalidStatusError, renderJson, type StatusRecord } from '../status';
+import type { AuthorApproval } from './config';
 import { contributionIdOf } from './ids';
 import { lifecycleTimes } from './lifecycle-times';
 export const DEFAULT_STATE_ACTIONS: Readonly<Record<RunState, string>> = Object.freeze({
@@ -36,6 +37,7 @@ export interface StatusParts {
   readonly candidateSha?: string;
   readonly budget: BudgetState;
   readonly sessionId: string;
+  readonly authorApproval?: AuthorApproval;
   readonly handoff?: HandoffState;
   /** Structural type: credential modules are never imported, even for types. */
   readonly tracker?: { readonly state: RunState; readonly nextPermittedAction: string };
@@ -91,6 +93,7 @@ export function assembleStatus(parts: StatusParts): StatusRecord {
     state: run.state,
     upstreamIssue: run.upstreamIssue,
     contributor: run.contributor,
+    ...(parts.authorApproval === undefined ? {} : { authorApproval: parts.authorApproval }),
     ...(parts.candidateSha === undefined ? {} : { candidateSha: parts.candidateSha }),
     activeTimeMs,
     estimatedSpend: { amount: spend, currency: session.ceiling.currency },
