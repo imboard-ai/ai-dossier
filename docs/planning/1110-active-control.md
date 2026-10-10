@@ -56,3 +56,29 @@ None.
 
 ## Base Branch
 `main`, updated origin/main at 8971e4b.
+
+## Review evidence and repair (iteration 1)
+Full seven-dimension report-only dispatch used the actual model openai/gpt-6.1-sol.
+The first pass finished below the full-tier five-minute floor; its verdict is not
+used as ship authority, and a complete fresh-head redo follows the scoped repairs.
+Its findings were nevertheless concrete repair inputs. Validity/dedupe: 12 unique
+Fix-now findings retained; the Convention duplicate of the README finding was
+dismissed as duplicate-of-9; no product/business escalation.
+
+1. Shared push/intent construction — private wiring helper, with explicit deny-only recovery authorization.
+2. Stop during mint — broker checks synchronous stop admission after mint and revokes before credential hand-out; pusher receives phase signal.
+3. Engagement reconciliation race — final synchronous stop fence before link/body publication.
+4. Late complete model response — retain original data and known usage, never synthesize malformed interruption.
+5. Unfunded cleanup crash prefix — share reconciliation, block unresolved obligations and still revoke.
+6. Repair resume identity — derive interrupted repair from validated history and bind continuation to the attempt.
+7. New test typing — use typed `vi.mocked` call tuples; supplemental strict check covers E2E/control tests.
+8. CLI help — include required pause/cancel arguments and executable help assertions.
+9. README contract — distinguish active user pause from an open checkpoint.
+10. Recovered publication observers — core persists/notifies before separate withdrawal preparation.
+11. Candidate identity across paused wall time — persist attempt timestamp before interruptible work; comparison tests advance resume clock.
+12. Cancel sequencing — close admission immediately, reconcile publication, then destroy resources; ordered stale-guest and observer tests.
+
+Focused repaired-edge gate: 13 composition E2Es pass, including deferred write,
+exec, model, token mint, engagement read, repair and cancellation races. Core/CLI
+gate: 97 tests pass, including unresolved/resolved real durable cleanup prefixes.
+Final package coverage and complete independent review redo are required before ship.

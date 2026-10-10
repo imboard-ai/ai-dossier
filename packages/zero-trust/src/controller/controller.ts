@@ -159,6 +159,7 @@ export interface RecoveryHooks {
     context: PhaseContext,
     kind: 'pause' | 'cancel'
   ): Promise<undefined | RunRecord>;
+  prepareCancellation?(context: PhaseContext): Promise<void>;
 }
 export interface ControllerDependencies {
   /** Stop-only external fence. It can revoke admission, never grant authority. */
@@ -309,6 +310,8 @@ export class RunController {
   private last?: RunRecord;
   private control?: ControlRequest | 'invalid';
   private controlCleanup?: Promise<void>;
+  private controlReconciled?: Promise<void>;
+  private controlReconciledKind?: 'pause' | 'cancel';
   constructor(private readonly deps: ControllerDependencies) {}
   snapshot(): RunRecord {
     if (!this.last) throw new ControllerError('not_running');
@@ -349,23 +352,7 @@ export class RunController {
       this.openJournal(true);
       this.observeControl();
       if (this.control) return this.applyControl();
-      for (const vmId of this.unfundedCleanup) {
-        const evidence = await this.recover(
-          () => this.deps.recovery.reconcileCleanup?.(vmId, this.context()) ?? Promise.resolve(null)
-        );
-        if (evidence === null) continue;
-        assertSecretFree(evidence);
-        if (typeof evidence !== 'string' || !evidence.trim() || evidence.length > 500)
-          throw new ControllerError('invalid_outcome');
-        this.journal?.append({
-          v: 1,
-          type: 'cleanup_reconciled',
-          runId: this.held.runId,
-          vmId,
-          evidence,
-        });
-        this.unfundedCleanup.delete(vmId);
-      }
+      await this.reconcileCleanupObligations();
       const failures: unknown[] = [];
       try {
         this.notify(this.store.run);
@@ -438,6 +425,8 @@ export class RunController {
     this.cached.clear();
     this.control = undefined;
     this.controlCleanup = undefined;
+    this.controlReconciled = undefined;
+    this.controlReconciledKind = undefined;
     const watcher = setInterval(() => {
       this.observeIncident();
       this.observeControl();
@@ -500,8 +489,42 @@ export class RunController {
     this.abort.abort();
     this.phaseLease = undefined;
     // Start destruction while the active command/provider promise is blocked.
-    this.controlCleanup = this.cleanup();
+    if (this.control !== 'invalid' && this.control.kind === 'cancel')
+      this.controlCleanup = this.reconcileControlOnce('cancel')
+        .catch(() => {})
+        .then(() => this.cleanup());
+    else this.controlCleanup = this.cleanup();
     void this.controlCleanup.catch(() => {});
+  }
+  private reconcileControlOnce(kind: 'pause' | 'cancel'): Promise<void> {
+    if (this.controlReconciled && this.controlReconciledKind === kind)
+      return this.controlReconciled;
+    this.controlReconciledKind = kind;
+    this.controlReconciled = (async () => {
+      await this.recovered(await this.deps.recovery.reconcileControl?.(this.context(), kind));
+      if (kind === 'cancel') await this.deps.recovery.prepareCancellation?.(this.context());
+    })();
+    void this.controlReconciled.catch(() => {});
+    return this.controlReconciled;
+  }
+  private async reconcileCleanupObligations(): Promise<void> {
+    for (const vmId of this.unfundedCleanup) {
+      const evidence = await this.recover(
+        () => this.deps.recovery.reconcileCleanup?.(vmId, this.context()) ?? Promise.resolve(null)
+      );
+      if (evidence === null) continue;
+      assertSecretFree(evidence);
+      if (typeof evidence !== 'string' || !evidence.trim() || evidence.length > 500)
+        throw new ControllerError('invalid_outcome');
+      this.journal?.append({
+        v: 1,
+        type: 'cleanup_reconciled',
+        runId: this.held.runId,
+        vmId,
+        evidence,
+      });
+      this.unfundedCleanup.delete(vmId);
+    }
   }
   private async applyControl(): Promise<RunRecord> {
     await this.controlCleanup?.catch(() => {});
@@ -514,11 +537,10 @@ export class RunController {
     // Observation-only reconciliation is allowed after stop admission. Never
     // authenticate or authorize a new effect to discover an existing outcome.
     if (selected !== 'invalid') {
-      await this.attemptRecovery(async () => {
-        await this.recovered(
-          await this.deps.recovery.reconcileControl?.(this.context(), selected?.kind ?? 'pause')
-        );
-      }, failures);
+      await this.attemptRecovery(
+        () => this.reconcileControlOnce(selected?.kind ?? 'pause'),
+        failures
+      );
       if (selected?.kind === 'cancel')
         await this.attemptRecovery(
           () => this.deps.recovery.endRun?.(this.context()) ?? Promise.resolve(),
@@ -526,6 +548,8 @@ export class RunController {
         );
     }
     await this.attemptRecovery(() => this.cleanup(), failures);
+    await this.attemptRecovery(() => this.reconcileCleanupObligations(), failures);
+    if (this.unfundedCleanup.size) failures.push(new ControllerError('admission_closed'));
     for (const hold of this.budget.snapshot().reservations.filter((h) => h.status === 'reserved')) {
       await this.attemptRecovery(
         async () =>

@@ -27,7 +27,7 @@ const COMMANDS = Object.freeze({
 const BOOLEAN = new Set(['confirm-author', 'revise', 'json', 'apply']);
 export const USAGE =
   'Usage: zt-run <start|resume|status|pause|cancel|approve|reject|authorize|kill-all|metrics|adoption|sweep|export> --root <dir> [command options]';
-const HELP = `${USAGE}\nstart --config <file.json> [--confirm-author] [--author-name <name>] [--author-email <email>]\nresume --run <id> [--revise]\nstatus --run <id> [--json]\napprove --run <id> --checkpoint <plan|patch|verification> --digest <sha256>\nreject --run <id> --checkpoint <plan|patch|verification> --digest <sha256> --reason <text>\nauthorize --run <id>\nkill-all --reason <text>\nmetrics [--json]\nadoption --run <id> --note <text>\nsweep [--apply]\nexport --run <id> --out <file>`;
+const HELP = `${USAGE}\nstart --config <file.json> [--confirm-author] [--author-name <name>] [--author-email <email>]\nresume --run <id> [--revise]\nstatus --run <id> [--json]\npause --run <id> --reason <text>\ncancel --run <id> --reason <text>\napprove --run <id> --checkpoint <plan|patch|verification> --digest <sha256>\nreject --run <id> --checkpoint <plan|patch|verification> --digest <sha256> --reason <text>\nauthorize --run <id>\nkill-all --reason <text>\nmetrics [--json]\nadoption --run <id> --note <text>\nsweep [--apply]\nexport --run <id> --out <file>`;
 const ERROR_CODES = new Set([
   'invalid_input',
   'invalid_control',

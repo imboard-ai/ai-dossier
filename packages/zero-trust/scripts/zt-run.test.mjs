@@ -304,6 +304,8 @@ test('built entry help/status smoke is offline, reads a locked store and prints 
     });
     assert.equal(help.status, 0, help.stderr);
     assert.match(help.stdout, /Usage: zt-run/u);
+    assert.match(help.stdout, /pause --run <id> --reason <text>/u);
+    assert.match(help.stdout, /cancel --run <id> --reason <text>/u);
     const result = spawnSync(
       process.execPath,
       ['scripts/zt-run.mjs', 'status', '--root', h.root, '--run', store.runId, '--json'],

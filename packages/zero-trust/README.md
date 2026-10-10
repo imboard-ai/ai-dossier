@@ -68,6 +68,8 @@ environment references, never literal configuration values.
 | `start` | `--config <file.json>` | `--confirm-author`, `--author-name <name>`, `--author-email <email>` |
 | `resume` | `--run <id>` | `--revise` (currently refused as `revision_unavailable`) |
 | `status` | `--run <id>` | `--json` |
+| `pause` | `--run <id> --reason <text>` | |
+| `cancel` | `--run <id> --reason <text>` | |
 | `approve` | `--run <id> --checkpoint <plan\|patch\|verification> --digest <sha256>` | |
 | `reject` | same as approve, plus `--reason <text>` | |
 | `authorize` | `--run <id>` | |
@@ -144,7 +146,7 @@ node scripts/zt-run.mjs start --config run-config.json --root state/runs --confi
 # A permission hand-off reaches awaiting_contributor; complete the printed link.
 node scripts/zt-run.mjs status --root state/runs --run ztc-0123456789abcdef-run-1 --json
 node scripts/zt-run.mjs resume --root state/runs --run ztc-0123456789abcdef-run-1
-# If paused_user, review artifacts/plan.txt and approve its displayed digest:
+# If an open plan checkpoint is displayed, review artifacts/plan.txt and approve its digest:
 node scripts/zt-run.mjs approve --root state/runs --run ztc-0123456789abcdef-run-1 --checkpoint plan --digest <displayed-sha256>
 node scripts/zt-run.mjs resume --root state/runs --run ztc-0123456789abcdef-run-1
 node scripts/zt-run.mjs metrics --root state/runs --json
@@ -507,11 +509,10 @@ fences subsequent resumes, including after a crash. `snapshot` is available afte
 completion/error; start/resume own and release their handles, reject concurrent
 entry, and do not hold idle locks at durable stops. Scripted test steps and hooks
 live in `src/controller/__tests__/fake-steps.ts`.
-`resume(runId)` recovers but does not itself authorize leaving `paused_user`.
-Approve/reject a configured checkpoint's exact open record before resuming.
-For a non-checkpoint pause, trusted orchestration first reconciles the stopping
-condition and persists or supplies a legal continuation to the interrupted phase
-(for example via `resumeIntents`). There is no general unpause or replacement
+`resume(runId)` recovers and explicitly continues a non-checkpoint user pause to
+its history-bound interrupted phase on a fresh VM. Recovery, unresolved budget
+holds and cleanup obligations still fence admission. An open configured checkpoint
+requires approval/rejection of its exact record first. There is no replacement
 budget-session method in this core.
 
 ## Local outcome metrics (#1103)

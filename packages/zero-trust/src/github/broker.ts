@@ -122,6 +122,8 @@ export interface CleanupReport {
 }
 
 export interface BrokerOptions {
+  /** Stop-only controller admission at credential hand-out, after mint awaits. */
+  readonly assertAdmission?: () => void;
   /** A dedicated durable store (a `Journal` in its own controller directory). */
   readonly store: TokenStore;
   readonly http: GitHubHttp;
@@ -608,6 +610,12 @@ export class ForkCredentialBroker {
   ): Promise<T> {
     if (cancel?.aborted) throw new CredentialBrokerError('cancelled');
     const lease = await this.mintForkPush(intent, target);
+    try {
+      this.options.assertAdmission?.();
+    } catch {
+      await this.revoke(lease.tokenId);
+      throw new CredentialBrokerError('cancelled');
+    }
     // A cancel that arrived during the mint fired before any listener existed.
     if (cancel?.aborted) {
       await this.revoke(lease.tokenId);

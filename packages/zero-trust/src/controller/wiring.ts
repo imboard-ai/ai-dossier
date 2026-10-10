@@ -509,8 +509,8 @@ export function createController(
             ? AbortSignal.any([request.signal, context.signal])
             : context.signal,
         });
-        if (context.signal.aborted)
-          return { kind: 'malformed', reason: 'invalid_response', usage: result.usage };
+        // Interruption does not invalidate a complete response or its known
+        // usage. The loop saves it as data before checking stop admission.
         return result;
       },
     };
@@ -703,6 +703,7 @@ export function createController(
     if (stored && stored.repositoryId !== fork.repositoryId) throw new Error('fork_replaced');
     artifacts(c).put('fork', fork);
     broker = new ForkCredentialBroker({
+      assertAdmission: controller.assertAdmission.bind(controller),
       store: journal(c, 'tokens'),
       http,
       app: appCredentials(),
@@ -850,6 +851,7 @@ export function createController(
         {
           read,
           admission,
+          assertAdmission: controller.assertAdmission.bind(controller),
           bodyDirectory: c.store.storeDirectory('bodies'),
           now: () => now().toISOString(),
         },
@@ -883,26 +885,35 @@ export function createController(
       }
       artifacts(c).put('nonces_initialized', true);
     }
+    await bindPushDrivers(c, deps.fork, async (intent) => {
+      await identity(c);
+      if (!shipping || !pusher) throw new Error('shipping_unavailable');
+      const authorization = await makeAuthorize({
+        ...shipping,
+        bindings: { ...shipping.bindings, expectedRemoteSha: pusher.expectedRemoteSha(intent) },
+      })(intent);
+      controller.assertAdmission();
+      receipt = authorization.receipt;
+      artifacts(c).put('receipt', receipt);
+      return authorization;
+    });
+  };
+  const bindPushDrivers = async (
+    c: PhaseContext,
+    fork: ForkPusherOptions['fork'],
+    authorize: ForkPusherOptions['authorize']
+  ) => {
     pusher ??= new EdgeForkPusher(
       {
         broker: broker as ForkCredentialBroker,
         read,
-        fork: deps.fork,
+        fork,
         ledger: journal(c, 'push-ledger'),
         trustedControllerKey: await signer.getPublicKey(),
-        nonces,
-        authorize: async (intent) => {
-          await identity(c);
-          if (!shipping || !pusher) throw new Error('shipping_unavailable');
-          const authorization = await makeAuthorize({
-            ...shipping,
-            bindings: { ...shipping.bindings, expectedRemoteSha: pusher.expectedRemoteSha(intent) },
-          })(intent);
-          controller.assertAdmission();
-          receipt = authorization.receipt;
-          artifacts(c).put('receipt', receipt);
-          return authorization;
-        },
+        nonces: new ReceiptNonceStore(c.store.storeDirectory('nonces')),
+        authorize,
+        signal: c.signal,
+        assertAdmission: c.assertAdmission,
         now: () => now().getTime(),
       },
       overrides.gitRemoteUrl?.fork
@@ -1199,7 +1210,7 @@ export function createController(
     });
     receipt = artifacts(c).get<SignedReceipt>('receipt');
   };
-  const controller = new RunController({
+  const controller: RunController = new RunController({
     incidentRequested: () => incidentRequested(root),
     root,
     steps,
@@ -1234,31 +1245,13 @@ export function createController(
         }
         await broker?.endRun('cancelled');
       },
-      reconcileControl: async (c, kind) => {
+      reconcileControl: async (c) => {
         if (!intents && artifacts(c).get('shipping')) {
           const held = artifacts(c).require<ShippingAuthorizeDeps>('shipping');
           // Recovery uses read-back only. The authorize path remains closed.
-          pusher ??= new EdgeForkPusher(
-            {
-              broker: broker as ForkCredentialBroker,
-              read,
-              fork: held.fork,
-              ledger: journal(c, 'push-ledger'),
-              trustedControllerKey: await signer.getPublicKey(),
-              nonces: new ReceiptNonceStore(c.store.storeDirectory('nonces')),
-              authorize: async () => {
-                throw new Error('admission_closed');
-              },
-              now: () => now().getTime(),
-            },
-            overrides.gitRemoteUrl?.fork
-          );
-          intents = new IntentDriver(
-            journal(c, 'intents'),
-            pusher,
-            { run: c.store.run, contributionId: c.store.contributionId },
-            () => now().toISOString()
-          );
+          await bindPushDrivers(c, held.fork, async () => {
+            throw new Error('admission_closed');
+          });
         }
         await intents?.resume();
         const driver = openHandoff(c, contactAdmission(c));
@@ -1270,24 +1263,20 @@ export function createController(
             headSha: observed.headSha,
           });
         const run = driver.snapshot().run;
-        if (isRunContinuation(c.store.run, run)) {
-          c.store.persistRun(run);
-          for (const d of [intents, handoff, tracker])
-            if (d && isRunContinuation(d.snapshot().run, run)) d.observeRun(run);
-        }
+        return run;
+      },
+      prepareCancellation: async (c) => {
         if (
-          kind === 'cancel' &&
           artifacts(c).get('publication') &&
-          ['submitted', 'awaiting_review', 'accepted'].includes(run.state)
+          ['submitted', 'awaiting_review', 'accepted'].includes(c.store.run.state)
         ) {
-          const t = await openTracker({ ...c, run });
+          const t = await openTracker(c);
           await t.requestWithdrawal({
             reason: 'user_instruction',
             explanation: 'The contributor cancelled this run.',
           });
           artifacts(c).put('withdrawal', t.status().nextPermittedAction);
         }
-        return run;
       },
       openStore: (r, id) => {
         const store = RunStore.open(r, id);

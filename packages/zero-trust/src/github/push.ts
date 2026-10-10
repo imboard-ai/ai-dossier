@@ -97,6 +97,8 @@ export interface ForkPusherOptions {
   readonly nonces: ReceiptNonceStore;
   /** Supplies the receipt, context and candidate for the attempt being made. */
   readonly authorize: (intent: Intent) => Promise<ShippingAuthorization>;
+  readonly signal?: AbortSignal;
+  readonly assertAdmission?: () => void;
   readonly now?: () => number;
 }
 
@@ -280,9 +282,11 @@ export class ForkPusher implements WriteAdapter {
         intent,
         { repositoryId: at.fork.repositoryId },
         (credential, signal) => {
+          this.options.assertAdmission?.();
           handedOut = true;
           return this.casPush(candidate, at, expected, credential.env(), signal);
-        }
+        },
+        this.options.signal
       );
     } catch (error) {
       // No credential ever reached git (the mint failed, was refused, or was cancelled), so
