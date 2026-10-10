@@ -17,6 +17,43 @@ const status: StatusRecord = {
 };
 
 describe('status contract', () => {
+  it('renders recorded approval in both forms and rejects malformed or secret identity facts', () => {
+    const approval = {
+      userId: 12,
+      login: 'alice',
+      name: 'Approved Name',
+      email: '12+alice@users.noreply.github.com',
+      source: 'default' as const,
+      approvedAt: '2026-10-10T00:00:00.000Z',
+    };
+    const value = { ...status, authorApproval: approval };
+    expect(JSON.parse(renderJson(value)).authorApproval).toEqual(approval);
+    expect(renderHuman(value)).toContain(`authorApproval: ${JSON.stringify(approval)}`);
+    for (const patch of [
+      { userId: 0 },
+      { login: 'bad login' },
+      { name: '' },
+      { email: 'bad' },
+      { source: 'other' },
+      { approvedAt: 'invalid' },
+    ]) {
+      expect(() =>
+        renderJson({ ...value, authorApproval: { ...approval, ...patch } } as StatusRecord)
+      ).toThrow(InvalidStatusError);
+    }
+    expect(() =>
+      renderJson({ ...value, authorApproval: { ...approval, name: 'ghp_syntheticSecret' } })
+    ).toThrow(SecretRedactionError);
+    const held = { ...approval };
+    let reads = 0;
+    Object.defineProperty(held, 'name', {
+      get: () => (++reads === 1 ? 'Approved Name' : 'ghp_syntheticSecret'),
+    });
+    expect(JSON.parse(renderJson({ ...value, authorApproval: held })).authorApproval.name).toBe(
+      'Approved Name'
+    );
+    expect(reads).toBe(1);
+  });
   it.each([
     status,
     { ...status, candidateSha: 'a'.repeat(40) },

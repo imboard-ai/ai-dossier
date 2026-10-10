@@ -9,6 +9,7 @@ import { readPrivate } from '../durable-fs';
 import { AppCredentials, fetchGitHubHttp, fetchOAuthHttp } from '../github/app-auth';
 import { ForkCredentialBroker } from '../github/broker';
 import {
+  ContributorAuthError,
   ContributorAuthorization,
   installationSource,
   listenLoopback,
@@ -19,7 +20,7 @@ import { handoffMarker } from '../github/handoff';
 import { type HandoffAdmission, HandoffDriver } from '../github/handoff-driver';
 import { ForkPusher, type ForkPusherOptions } from '../github/push';
 import { anonymousReader, type GitHubRead } from '../github/reconcile';
-import { TokenVault } from '../github/token-journal';
+import { OUTSTANDING, TokenJournal, TokenVault } from '../github/token-journal';
 import { PrTracker, trackFromHandoff } from '../github/track';
 import { IntentDriver } from '../intents';
 import { Journal } from '../journal';
@@ -78,6 +79,195 @@ export interface ControllerOverrides {
   readonly gitRemoteUrl?: { readonly upstream: string; readonly fork: string };
   readonly now?: () => Date;
   readonly signer?: Signer;
+  /** Immediate production UI notification, never a credential or provider response. */
+  readonly onAuthorizationUrl?: (url: string) => void;
+}
+
+/** Pre-start OAuth identity acquisition: no fabricated fork, run, or durable token. */
+export async function prepareAuthor(
+  input: RunConfig,
+  identity: { readonly name?: string; readonly email?: string; readonly userId?: number } = {},
+  edges: Pick<ControllerOverrides, 'fetch' | 'now' | 'onAuthorizationUrl'> = {}
+) {
+  const config = validateRunConfig(runConfigInput(input));
+  const fetcher = edges.fetch ?? fetch;
+  const auth = new ContributorAuthorization({
+    app: new AppCredentials({
+      appId: String(config.githubApp.appId),
+      clientId: config.githubApp.clientId,
+      privateKey: process.env[config.githubApp.privateKeyEnv] ?? '',
+      clientSecret: process.env[config.githubApp.clientSecretEnv] ?? '',
+    }),
+    http: fetchGitHubHttp(undefined, fetcher),
+    oauth: fetchOAuthHttp(undefined, fetcher),
+    contributor: config.contributor,
+    appSlug: config.githubApp.slug,
+    now: () => (edges.now?.() ?? new Date()).getTime(),
+  });
+  const receiver = await listenLoopback({ isExpected: (state) => auth.matchesPending(state) });
+  try {
+    const url = auth.begin(receiver.redirectUri).url;
+    if (!edges.onAuthorizationUrl) throw new Error('authorization_ui_unavailable');
+    edges.onAuthorizationUrl(url);
+    try {
+      return await auth.completeAuthor(await receiver.callback, identity);
+    } catch (error) {
+      if (error instanceof ContributorAuthError && error.code === 'author_approval_mismatch')
+        throw new AuthorApprovalError('author_approval_mismatch');
+      throw error;
+    }
+  } finally {
+    receiver.close();
+  }
+}
+
+/** Incident cleanup opens a dormant run directly. It never authenticates, gates,
+ * resumes work or depends on a model/proxy configuration being available. */
+export async function stopStoredRun(
+  root: string,
+  runId: string,
+  reason: string,
+  edges: Pick<ControllerOverrides, 'fetch' | 'vm' | 'now'> = {}
+): Promise<void> {
+  assertSecretFree(reason);
+  if (typeof reason !== 'string' || !reason.trim() || reason.length > 500)
+    throw new ControllerError('invalid_outcome');
+  const store = RunStore.open(root, runId);
+  const opened: Journal[] = [];
+  let broker: ForkCredentialBroker | undefined;
+  const journal = (name: Parameters<RunStore['storeDirectory']>[0], child?: string) => {
+    const j = new Journal(path.join(store.storeDirectory(name), ...(child ? [child] : [])));
+    opened.push(j);
+    return j;
+  };
+  try {
+    const config = store.config;
+    if (path.resolve(root) !== path.resolve(config.executionProfile.stateDir, 'runs'))
+      throw new Error('root_mismatch');
+    const now = edges.now ?? (() => new Date());
+    const control = journal('control', 'controller');
+    control.append({ v: 1, type: 'incident', runId, reason });
+    const vm =
+      edges.vm ??
+      new LocalQemuAdapter({
+        stateDir: path.join(config.executionProfile.stateDir, 'vms'),
+        profileDir: config.executionProfile.profileDir,
+        accelerator: config.executionProfile.accelerator,
+        journal: journal('vm'),
+        now,
+      });
+    let failed = false;
+    let unfunded = false;
+    const incidentVm: Pick<VmAdapter, 'listByRun' | 'destroy'> = {
+      listByRun: vm.listByRun.bind(vm),
+      destroy: async (handle) => {
+        let ledger: BudgetLedger | undefined;
+        let hold: ReturnType<BudgetLedger['reserve']> | undefined;
+        try {
+          ledger = new BudgetLedger(
+            path.join(store.storeDirectory('budget'), 'ledger.json'),
+            store.contributionId
+          );
+          const session = ledger.snapshot().sessions.at(-1);
+          if (!session) throw new Error('missing_budget_session');
+          hold = ledger.reserve(
+            session.id,
+            {
+              money: { currency: config.budget.currency, minor: 0 },
+              tokens: 0,
+              timeMs: 5000,
+              rates: config.modelProfile.rates.filter(
+                (r) => r.resource === 'local-qemu' && r.unit === 'millisecond' && r.price === 0
+              ),
+            },
+            'teardown'
+          );
+        } catch {
+          // Incident destruction remains mandatory when accounting is unavailable.
+          // Preserve an unfunded obligation rather than claiming free cleanup.
+          unfunded = true;
+          try {
+            control.append({
+              v: 1,
+              type: 'cleanup',
+              runId,
+              vmId: handle.vmId,
+              kind: 'pending',
+              funded: false,
+            });
+          } catch {
+            failed = true;
+          }
+        }
+        const at = now().getTime();
+        try {
+          await vm.destroy(handle);
+        } catch (error) {
+          if (hold) ledger?.settle(hold.id, null);
+          throw error;
+        }
+        if (hold)
+          ledger?.settle(hold.id, {
+            money: { currency: config.budget.currency, minor: 0 },
+            tokens: 0,
+            timeMs: Math.max(0, now().getTime() - at),
+            source: 'local-qemu-observed',
+          });
+        else
+          control.append({
+            v: 1,
+            type: 'cleanup',
+            runId,
+            vmId: handle.vmId,
+            kind: 'destroyed',
+            funded: false,
+          });
+      },
+    };
+    try {
+      await stopResources(incidentVm, runId, async () => {
+        const tokens = journal('tokens');
+        const ledger = new TokenJournal(tokens).state;
+        if (![...ledger.tokens.values()].some((t) => OUTSTANDING.includes(t.status))) return;
+        const fork = new StepArtifacts(journal('control', 'steps'), runId).require<ForkReady>(
+          'fork'
+        );
+        broker = new ForkCredentialBroker({
+          store: tokens,
+          fork,
+          http: fetchGitHubHttp(undefined, edges.fetch ?? fetch),
+          app: new AppCredentials({
+            appId: String(config.githubApp.appId),
+            clientId: config.githubApp.clientId,
+            privateKey: process.env[config.githubApp.privateKeyEnv] ?? '',
+            clientSecret: process.env[config.githubApp.clientSecretEnv] ?? '',
+          }),
+          intents: () => {
+            throw new Error('admission_closed');
+          },
+          now: () => now().getTime(),
+        });
+        const report = await broker.killAll();
+        if (!report.complete) throw new Error('cleanup_incomplete');
+      });
+    } catch {
+      failed = true;
+    }
+    failed ||= unfunded;
+    if (!TERMINAL_STATES.includes(store.run.state) && store.run.state !== 'blocked_cleanup')
+      store.persistRun(
+        transitionRun(
+          store.run,
+          failed ? ReasonCode.CleanupFailed : ReasonCode.UserCancelled,
+          now().toISOString()
+        )
+      );
+    if (failed && store.run.state !== 'blocked_cleanup') throw new Error('cleanup_incomplete');
+  } finally {
+    broker?.close();
+    for (const j of opened) j.close();
+    store.close();
+  }
 }
 
 class EdgeForkPusher extends ForkPusher {
@@ -114,7 +304,11 @@ function readProxyFile(file: string): unknown {
 }
 
 /** Revocation is independent of guest availability; join every obligation before refusing. */
-async function stopResources(vm: VmAdapter, runId: string, revoke: () => Promise<void>) {
+async function stopResources(
+  vm: Pick<VmAdapter, 'listByRun' | 'destroy'>,
+  runId: string,
+  revoke: () => Promise<void>
+) {
   const failures: unknown[] = [];
   await Promise.all([
     revoke().catch((error: unknown) => {
@@ -144,10 +338,23 @@ async function stopResources(vm: VmAdapter, runId: string, revoke: () => Promise
 export function createController(
   input: RunConfig,
   overrides: ControllerOverrides = {}
-): RunController & { readonly authorizationUrl: string | null } {
+): RunController & {
+  readonly authorizationUrl: string | null;
+  authorize(runId: string): Promise<void>;
+} {
   if (
     Object.keys(overrides).some(
-      (k) => !['vm', 'fetch', 'read', 'models', 'gitRemoteUrl', 'now', 'signer'].includes(k)
+      (k) =>
+        ![
+          'vm',
+          'fetch',
+          'read',
+          'models',
+          'gitRemoteUrl',
+          'now',
+          'signer',
+          'onAuthorizationUrl',
+        ].includes(k)
     )
   )
     throw new Error('invalid_controller_override');
@@ -431,6 +638,7 @@ export function createController(
         if (c.signal.aborted) receiver.close();
         c.signal.throwIfAborted();
         authUrl = contributor.begin(receiver.redirectUri).url;
+        overrides.onAuthorizationUrl?.(authUrl);
         bound = await contributor.complete(
           await receiver.callback,
           c.store.run,
@@ -953,6 +1161,22 @@ export function createController(
     },
   });
   const start = controller.start.bind(controller);
+  const authorize = async (runId: string) => {
+    const store = RunStore.open(root, runId);
+    try {
+      const { resumeRunId: _storedResume, ...storedInput } = runConfigInput(store.config);
+      const { resumeRunId: _requestedResume, ...requestedInput } = runConfigInput(config);
+      if (canonicalJson(storedInput, 1024 * 1024) !== canonicalJson(requestedInput, 1024 * 1024))
+        throw new Error('resume_identity_mismatch');
+      const approval = store.config.authorApproval;
+      if (!approval) throw new AuthorApprovalError('author_approval_missing');
+      await prepareAuthor(store.config, { userId: approval.userId }, overrides);
+      store.validateEvidence();
+    } finally {
+      store.close();
+    }
+  };
+  Object.defineProperty(controller, 'authorize', { value: authorize });
   Object.defineProperty(controller, 'start', {
     value: (next: RunConfig) => {
       if (
@@ -965,5 +1189,8 @@ export function createController(
   });
   return Object.defineProperty(controller, 'authorizationUrl', {
     get: () => authUrl,
-  }) as RunController & { readonly authorizationUrl: string | null };
+  }) as RunController & {
+    readonly authorizationUrl: string | null;
+    authorize(runId: string): Promise<void>;
+  };
 }

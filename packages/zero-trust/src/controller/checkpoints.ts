@@ -180,8 +180,8 @@ export function checkpointStatus(
   const nextPermittedAction =
     record.status === 'open'
       ? stale
-        ? `Checkpoint ${record.point} is stale; reject with <zt-run> reject --run ${record.runId} --point ${record.point} --digest ${record.digest} --reason <reason>.`
-        : `Checkpoint ${record.point}: review ${review}; approve exactly with <zt-run> approve --run ${record.runId} --point ${record.point} --digest ${record.digest}.`
+        ? `Checkpoint ${record.point} is stale; reject with <zt-run> reject --root <root> --run ${record.runId} --checkpoint ${record.point} --digest ${record.digest} --reason <reason>.`
+        : `Checkpoint ${record.point}: review ${review}; approve exactly with <zt-run> approve --root <root> --run ${record.runId} --checkpoint ${record.point} --digest ${record.digest}.`
       : `Checkpoint ${record.point} is ${record.status}; no further approval is permitted.`;
   assertSecretFree(nextPermittedAction);
   return { nextPermittedAction };

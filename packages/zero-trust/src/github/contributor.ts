@@ -2,14 +2,17 @@
  * authorization web flow with a loopback redirect and a checked `state`, the login binding,
  * refresh rotation, and the installation reads that need a credential.
  *
- * Credential module, controller-only. A new access token is used for exactly one call of
- * its own, `GET /user`, so that only the run's contributor's token ever reaches the broker
- * (#1064); every later use goes through the broker. The refresh token lives in this object's
+ * Credential module, controller-only. A new run token is used for `GET /user`, so that
+ * only the run's contributor's token ever reaches the broker (#1064); every later use
+ * goes through the broker. Pre-start consent instead reads `/user` and any requested
+ * verified email, then revokes its one-shot token without fabricating a fork or run.
+ * The refresh token lives in this object's
  * private memory. Neither, nor the authorization code, is ever persisted, logged or
  * returned. */
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import http from 'node:http';
 import { inspect } from 'node:util';
+import { assertSecretFree } from '../redaction';
 import { isRecord, ReasonCode, type RunRecord, transitionRun } from '../state';
 import {
   type AppCredentials,
@@ -63,6 +66,11 @@ const REFUSAL_HINTS = Object.freeze({
   app_misconfigured:
     'GitHub refused the App credentials or redirect, or the App does not issue expiring user tokens; the operator must fix the App',
   revoke_failed: `a token could not be revoked; revoke the App's authorization at ${AUTHORIZATIONS_URL}`,
+  author_approval_mismatch:
+    'the authenticated account differs from the recorded contributor identity',
+  author_email_unverified: 'the selected email could not be verified on the authenticated account',
+  invalid_author_approval: 'the selected author identity is malformed',
+  contributor_authorization_unavailable: 'the authenticated account could not be read',
 } as const);
 export type ContributorRefusal = keyof typeof REFUSAL_HINTS;
 export const CONTRIBUTOR_REFUSALS = Object.freeze(
@@ -117,7 +125,7 @@ export interface ContributorOptions {
   /** Token endpoint transport (`https://github.com/login/oauth/access_token`). */
   readonly oauth: OAuthHttp;
   /** Built with the fork binding `checkForkReadiness` returned. */
-  readonly broker: ForkCredentialBroker;
+  readonly broker?: ForkCredentialBroker;
   /** The run's recorded contributor login. */
   readonly contributor: string;
   readonly appSlug: string;
@@ -202,6 +210,120 @@ export class ContributorAuthorization {
     return result;
   }
 
+  private get broker(): ForkCredentialBroker {
+    if (!this.options.broker) throw new ContributorAuthError('invalid_options');
+    return this.options.broker;
+  }
+
+  /** Pre-run consent has no fork or durable token ledger yet. The token is confined to
+   * this one-shot identity read and revoked on every exit, including invalid overrides. */
+  async completeAuthor(
+    callback: CallbackParams,
+    overrides: { readonly name?: string; readonly email?: string; readonly userId?: number } = {}
+  ): Promise<{
+    userId: number;
+    login: string;
+    name: string;
+    email: string;
+    source: 'default' | 'override';
+    approvedAt: string;
+  }> {
+    const pending = this.#pending;
+    this.#pending = undefined;
+    return this.serial(async () => {
+      if (!pending) throw new ContributorAuthError('no_pending_authorization');
+      if (this.now() >= pending.expiresAt) throw new ContributorAuthError('authorization_expired');
+      if (!isRecord(callback)) throw new ContributorAuthError('invalid_callback');
+      if (typeof callback.state !== 'string' || !sameSecret(callback.state, pending.state))
+        throw new ContributorAuthError('state_mismatch');
+      if (callback.error !== undefined) throw new ContributorAuthError('authorization_denied');
+      if (typeof callback.code !== 'string' || !/^[A-Za-z0-9_-]{1,512}$/u.test(callback.code))
+        throw new ContributorAuthError('invalid_callback');
+      const pair = await this.exchange({
+        grant_type: 'authorization_code',
+        code: callback.code,
+        redirect_uri: pending.redirectUri,
+        code_verifier: pending.verifier,
+      });
+      if (pair === 'misconfigured') throw new ContributorAuthError('app_misconfigured');
+      if (typeof pair === 'string') throw new ContributorAuthError('exchange_failed');
+      try {
+        const response = await this.options.http({
+          method: 'GET',
+          path: '/user',
+          authorization: bearer(pair.access),
+        });
+        const who = identity(response);
+        if (!who || who === 'unauthorized')
+          throw new ContributorAuthError('contributor_authorization_unavailable');
+        if (
+          !sameLogin(who.login, this.options.contributor) ||
+          (overrides.userId !== undefined && overrides.userId !== who.userId)
+        )
+          throw new ContributorAuthError('author_approval_mismatch');
+        const profile = isRecord(response.json) ? response.json.name : undefined;
+        const name =
+          overrides.name ??
+          (profile === null || profile === undefined || profile === '' ? who.login : profile);
+        const noreply = `${who.userId}+${who.login}@users.noreply.github.com`;
+        const email = overrides.email ?? noreply;
+        if (email !== noreply) {
+          let verified = false;
+          for (let page = 1; page <= 10; page++) {
+            const emails = await this.options.http({
+              method: 'GET',
+              path: `/user/emails?per_page=100&page=${page}`,
+              authorization: bearer(pair.access),
+            });
+            if (
+              emails.status !== 200 ||
+              !Array.isArray(emails.json) ||
+              emails.json.length > 100 ||
+              emails.json.some(
+                (row) =>
+                  !isRecord(row) ||
+                  typeof row.email !== 'string' ||
+                  typeof row.verified !== 'boolean'
+              )
+            )
+              throw new ContributorAuthError('author_email_unverified');
+            verified ||= emails.json.some((row) => row.email === email && row.verified === true);
+            if (verified || emails.json.length < 100) break;
+          }
+          if (!verified) throw new ContributorAuthError('author_email_unverified');
+        }
+        const approval = {
+          ...who,
+          name,
+          email,
+          source:
+            overrides.name !== undefined || overrides.email !== undefined
+              ? ('override' as const)
+              : ('default' as const),
+          approvedAt: new Date(this.now()).toISOString(),
+        };
+        assertSecretFree(approval);
+        // GitHub profile text is data, never a trusted canonical git identity.
+        if (
+          typeof name !== 'string' ||
+          !name ||
+          name.trim() !== name ||
+          Buffer.byteLength(name) > 256 ||
+          // biome-ignore lint/suspicious/noControlCharactersInRegex: Untrusted profile names must not contain git/header control characters.
+          /[<>\r\n\x00-\x1f\x7f]/u.test(name) ||
+          typeof email !== 'string' ||
+          Buffer.byteLength(email) > 256 ||
+          !/^[^<>\s@]+@[^<>\s@]+$/u.test(email)
+        )
+          throw new ContributorAuthError('invalid_author_approval');
+        return Object.freeze({ ...approval, name });
+      } finally {
+        // biome-ignore lint/correctness/noUnsafeFinally: A possibly live orphan token takes precedence over identity success or refusal.
+        if (!(await this.discard(pair.access))) throw new ContributorAuthError('revoke_failed');
+      }
+    });
+  }
+
   /** Starts the web flow: a fresh CSPRNG `state` and PKCE verifier, kept in memory only.
    * Returns the page the contributor opens; a newer `begin` replaces an older one. */
   begin(redirectUri: string): { readonly url: string; readonly expiresAt: string } {
@@ -241,6 +363,9 @@ export class ContributorAuthorization {
     // Single use, whatever happens next: a replayed or second callback finds nothing.
     this.#pending = undefined;
     return this.serial(async () => {
+      // A pre-start instance has no durable token owner. Refuse before exchanging
+      // a code rather than discovering the absent broker after GitHub issued a token.
+      if (!this.options.broker) throw new ContributorAuthError('invalid_options');
       if (!pending) throw new ContributorAuthError('no_pending_authorization');
       if (this.now() >= pending.expiresAt) throw new ContributorAuthError('authorization_expired');
       if (!isRecord(callback)) throw new ContributorAuthError('invalid_callback');
@@ -281,13 +406,13 @@ export class ContributorAuthorization {
         return this.blocked(run, tokenRevoked);
       }
       // Re-authorizing while the broker still holds a token: the new one replaces it.
-      const held = this.options.broker
+      const held = this.broker
         .status()
         .tokens.some((token) => token.kind === 'user' && token.status === 'live');
       await this.hold(pair, (value, expiresAt) =>
         held
-          ? this.options.broker.rotateUserToken(value, expiresAt)
-          : this.options.broker.registerUserToken(value, expiresAt)
+          ? this.broker.rotateUserToken(value, expiresAt)
+          : this.broker.registerUserToken(value, expiresAt)
       );
       this.#refresh = pair.refresh;
       this.#boundUserId = who.userId;
@@ -301,7 +426,7 @@ export class ContributorAuthorization {
     return this.serial(async () => {
       let who: Identity;
       try {
-        who = identity(await this.options.broker.readAsContributor('/user'));
+        who = identity(await this.broker.readAsContributor('/user'));
       } catch (error) {
         if (refusesNoToken(error)) return this.reauthorize();
         if (error instanceof CredentialBrokerError) throw error;
@@ -312,7 +437,7 @@ export class ContributorAuthorization {
       if (this.mismatch(run, who, boundUserId)) {
         this.#refresh = undefined;
         // Revoke first: a run record that cannot transition must not keep the token alive.
-        await this.options.broker.endRun('cancelled');
+        await this.broker.endRun('cancelled');
         return this.blocked(run, true);
       }
       this.#boundUserId = who.userId;
@@ -372,7 +497,7 @@ export class ContributorAuthorization {
     if (typeof pair === 'string') return { kind: 'unavailable' };
     try {
       const tokenId = await this.hold(pair, (value, expiresAt) =>
-        this.options.broker.rotateUserToken(value, expiresAt)
+        this.broker.rotateUserToken(value, expiresAt)
       );
       this.#refresh = pair.refresh;
       return { kind: 'refreshed', tokenId };
@@ -407,7 +532,7 @@ export class ContributorAuthorization {
   }
 
   private chainUsable(): boolean {
-    const status = this.options.broker.status();
+    const status = this.broker.status();
     return (
       !status.reauthorizationRequired &&
       (status.admissions === 'open' || status.admissions === 'not_recovered') &&
@@ -451,7 +576,7 @@ export class ContributorAuthorization {
         authorization: 'authorized',
         nextPermittedAction: 'None: the contributor authorization is live.',
       };
-    const required = this.options.broker.status().reauthorizationRequired;
+    const required = this.broker.status().reauthorizationRequired;
     return {
       authorization: required ? 'reauthorization_required' : 'not_authorized',
       nextPermittedAction: this.reauthorize().nextPermittedAction,
@@ -490,7 +615,7 @@ export class ContributorAuthorization {
     for (let page = 1; page <= MAX_REPOSITORY_PAGES; page++) {
       let response: GitHubResponse;
       try {
-        response = await this.options.broker.readAsContributor(
+        response = await this.broker.readAsContributor(
           `/user/installations/${installationId}/repositories?per_page=${PAGE_SIZE}&page=${page}`
         );
       } catch (error) {

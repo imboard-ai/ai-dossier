@@ -10,6 +10,90 @@ plus ecosystem detection, runtime profiles, command plans and package-proxy poli
 (see the gate 2 section below).
 Publication remains gated on S1 feasibility.
 
+## Controller CLI (#1109)
+
+This private package supplies a repository script, not an installed binary. From
+`packages/zero-trust`, build first with `npm run build`, then run
+`node scripts/zt-run.mjs --help`. `--root` is the **run-store directory**:
+it must equal `<executionProfile.stateDir>/runs` for start/resume. Config paths
+are resolved from the invoking working directory. The closed config schema and
+signer requirements are documented below; secrets are supplied through its
+environment references, never literal configuration values.
+
+| Command | Required command-specific arguments | Optional arguments |
+|---|---|---|
+| `start` | `--config <file.json>` | `--confirm-author`, `--author-name <name>`, `--author-email <email>` |
+| `resume` | `--run <id>` | `--revise` (currently refused as `revision_unavailable`) |
+| `status` | `--run <id>` | `--json` |
+| `approve` | `--run <id> --checkpoint <plan\|patch\|verification> --digest <sha256>` | |
+| `reject` | same as approve, plus `--reason <text>` | |
+| `authorize` | `--run <id>` | |
+| `kill-all` | `--reason <text>` | |
+| `metrics` | | `--json` |
+| `adoption` | `--run <id> --note <text>` | |
+| `sweep` | | `--apply` |
+| `export` | `--run <id> --out <file>` | |
+
+Every command also requires `--root <dir>`. Unknown, repeated, missing and
+cross-command flags, positional arguments and malformed identifiers are refused.
+Exit codes: **0** durable stop (including hand-offs); **2** blocked, failed,
+unsupported, cancelled, cleanup blocked or operation unavailable; **3** invalid
+input (fixed error code plus usage); **4** writer lock held by another controller.
+Provider exception text is never printed. Human status quotes each value; JSON
+status carries identical facts, including the recorded `authorApproval`.
+
+Start performs real GitHub App OAuth/PKCE through a loopback callback, prints
+`authorization_url`, then reads `/user`. Its author default is profile `name`
+(or login) and `<userId>+<login>@users.noreply.github.com`. The script displays
+the selected identity as `author_identity` and requires an interactive `yes`,
+or `--confirm-author` for noninteractive invocation. Overrides require that exact
+noreply address or a verified `/user/emails` address of the authenticated account;
+missing email permission, unreadable answers and unverified addresses refuse.
+Config-supplied author approval cannot substitute for this start-side consent.
+The identity is recorded once, bound into the config digest, and never replaced
+on resume. Another authenticated numeric account refuses with
+`author_approval_mismatch`. An authorization URL contains no access/refresh token.
+Pre-start and explicit-authorize credentials are revoked after identity checks;
+execution may request a separate authorization when it needs a fork credential.
+
+`status` performs observational reads without the writer lock, never creates or
+repairs files, and refuses incomplete/corrupt or concurrently changed evidence.
+Maintenance retains the guarded read-only API; adoption and checkpoint decisions
+take the writer lock. Approve/reject resolve only the selected checkpoint and
+print status; execution continues only on explicit resume. `kill-all` joins every
+run's incident cleanup without executing phases, including dormant runs, and
+reports `blocked_cleanup` when revocation/destruction cannot be confirmed.
+Metrics are local evidence-derived aggregates; adoption is a voluntary local note.
+Sweep is dry-run unless `--apply` and prints counts only. Export uses the real
+sanitized portable exporter and refuses an existing output file.
+
+Example session (substitute the run ID/digest and use a complete valid config):
+
+```sh
+npm run build
+node scripts/zt-run.mjs start --config run-config.json --root state/runs --confirm-author
+# Open the printed authorization_url; inspect author_identity.
+# A permission hand-off reaches awaiting_contributor; complete the printed link.
+node scripts/zt-run.mjs status --root state/runs --run ztc-0123456789abcdef-run-1 --json
+node scripts/zt-run.mjs resume --root state/runs --run ztc-0123456789abcdef-run-1
+# If paused_user, review artifacts/plan.txt and approve its displayed digest:
+node scripts/zt-run.mjs approve --root state/runs --run ztc-0123456789abcdef-run-1 --checkpoint plan --digest <displayed-sha256>
+node scripts/zt-run.mjs resume --root state/runs --run ztc-0123456789abcdef-run-1
+node scripts/zt-run.mjs metrics --root state/runs --json
+node scripts/zt-run.mjs sweep --root state/runs
+node scripts/zt-run.mjs export --root state/runs --run ztc-0123456789abcdef-run-1 --out contribution.json
+```
+
+`zt-run-lib.mjs` exports `main(argv, { createController, out, err, confirmAuthor? })`.
+The injected factory builds the command facade; the thin entry binds it to
+`createCommands` and the real `dist/controller/wiring.js:createController`.
+No production environment-variable test override exists. Credential-bound
+`prepareAuthor(config, identity?, edges?)` and `stopStoredRun(root, runId, reason,
+edges?)` remain in wiring, outside the public index. `onAuthorizationUrl` is a
+production UI callback for immediate loopback URL display, not phase injection.
+The composed controller also exposes `authorize(runId)` for explicit account
+authorization without phase execution.
+
 ## Controller composition (#1108)
 
 Scripts import `createController(config, overrides?)` directly from

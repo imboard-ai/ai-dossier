@@ -273,7 +273,7 @@ describe('durable checkpoints', () => {
     assertNoSecrets(JSON.stringify(record));
     const status = checkpointStatus(record);
     assertNoSecrets(status.nextPermittedAction);
-    expect(status.nextPermittedAction).toContain(`--point ${point} --digest ${record.digest}`);
+    expect(status.nextPermittedAction).toContain(`--checkpoint ${point} --digest ${record.digest}`);
     expect(status.nextPermittedAction).toContain(
       point === 'plan'
         ? 'artifacts/plan.txt'

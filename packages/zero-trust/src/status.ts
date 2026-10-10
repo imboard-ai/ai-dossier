@@ -26,6 +26,14 @@ export interface StatusRecord {
   readonly budgetRemaining: MoneyEstimate;
   readonly reasonCode: ReasonCode;
   readonly nextPermittedAction: string;
+  readonly authorApproval?: {
+    readonly userId: number;
+    readonly login: string;
+    readonly name: string;
+    readonly email: string;
+    readonly source: 'default' | 'override';
+    readonly approvedAt: string;
+  };
 }
 
 export class InvalidStatusError extends Error {
@@ -64,6 +72,7 @@ function safeStatus(input: StatusRecord): StatusRecord {
     budgetRemaining: input.budgetRemaining,
     reasonCode: input.reasonCode,
     nextPermittedAction: input.nextPermittedAction,
+    authorApproval: input.authorApproval,
   };
   // Inspect actual strings (JSON escapes whitespace), never invoke input toJSON.
   // Unknown properties are stripped rather than visited or serialized.
@@ -86,6 +95,36 @@ function safeStatus(input: StatusRecord): StatusRecord {
     throw new InvalidStatusError();
   const estimatedSpend = money(value.estimatedSpend);
   const budgetRemaining = money(value.budgetRemaining);
+  let authorApproval: StatusRecord['authorApproval'];
+  if (value.authorApproval !== undefined) {
+    const a = value.authorApproval;
+    if (!isRecord(a)) throw new InvalidStatusError();
+    const held = {
+      userId: a.userId,
+      login: a.login,
+      name: a.name,
+      email: a.email,
+      source: a.source,
+      approvedAt: a.approvedAt,
+    };
+    for (const fact of Object.values(held)) if (typeof fact === 'string') assertNoSecrets(fact);
+    if (
+      !Number.isSafeInteger(held.userId) ||
+      held.userId <= 0 ||
+      typeof held.login !== 'string' ||
+      !/^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$/u.test(held.login) ||
+      typeof held.name !== 'string' ||
+      !held.name.trim() ||
+      held.name.length > 256 ||
+      typeof held.email !== 'string' ||
+      !/^[^<>\s@]+@[^<>\s@]+$/u.test(held.email) ||
+      !['default', 'override'].includes(held.source) ||
+      typeof held.approvedAt !== 'string' ||
+      !Number.isFinite(Date.parse(held.approvedAt))
+    )
+      throw new InvalidStatusError();
+    authorApproval = held;
+  }
   if (estimatedSpend.currency !== budgetRemaining.currency) throw new InvalidStatusError();
   return {
     runId: value.runId,
@@ -99,6 +138,7 @@ function safeStatus(input: StatusRecord): StatusRecord {
     budgetRemaining,
     reasonCode: value.reasonCode,
     nextPermittedAction: value.nextPermittedAction,
+    ...(authorApproval === undefined ? {} : { authorApproval }),
   };
 }
 
