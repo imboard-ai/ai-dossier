@@ -35,6 +35,7 @@ import {
   controlRefusal,
   readControlRequests,
 } from './control';
+import { publicationWaitTime } from './lifecycle-times';
 import { RunStore } from './run-store';
 import { assembleStatus } from './status';
 import { loadVerification, type VerificationRecord } from './verification-record';
@@ -342,7 +343,6 @@ export class RunController {
   private revise = false;
   private actionResult?: TrackerActionResult;
   private publicationWait?: { sessionId: string; at: string };
-  private publicationWaitMs = 0;
   constructor(private readonly deps: ControllerDependencies) {}
   snapshot(): RunRecord {
     if (!this.last) throw new ControllerError('not_running');
@@ -450,7 +450,8 @@ export class RunController {
         !this.incident &&
         !failures.length &&
         beforeTracker === 'shipping' &&
-        this.store.run.state === 'submitted'
+        this.store.run.state === 'submitted' &&
+        !action
       ) {
         this.ensureRevisionSession();
         return this.store.run;
@@ -462,6 +463,13 @@ export class RunController {
         this.deps.recovery.revisionWaiting?.(this.context())
       )
         return this.store.run;
+      if (!this.incident && !failures.length && action) {
+        this.ensureRevisionSession();
+        this.recovering = false;
+        return this.performAction(action);
+      }
+      if (!action && !this.deps.recovery.revisionWaiting?.(this.context()))
+        this.finishPublicationWait();
       this.observeIncident();
       if (!this.incident)
         await this.attemptRecovery(
@@ -481,12 +489,6 @@ export class RunController {
         );
       this.ensureRevisionSession();
       this.recovering = false;
-      if (action) {
-        this.assertAdmission();
-        if (!this.deps.trackerAction) throw new ControllerError('invalid_outcome');
-        this.actionResult = await this.deps.trackerAction(this.context(), action);
-        return this.store.run;
-      }
       this.needsAcquisition = true;
       if (
         this.store.run.state === 'paused_user' &&
@@ -509,6 +511,26 @@ export class RunController {
       }
       return this.loop(true);
     });
+  }
+  private async performAction(action: TrackerActionRequest): Promise<RunRecord> {
+    try {
+      this.assertAdmission();
+      if (!this.deps.trackerAction) throw new ControllerError('invalid_outcome');
+      const result = await this.deps.trackerAction(this.context(), action);
+      this.observeControl();
+      this.observeIncident();
+      if (this.control) return this.applyControl();
+      if (this.incident) return this.cancel();
+      this.assertAdmission();
+      this.actionResult = result;
+      return this.held.run;
+    } catch (error) {
+      this.observeControl();
+      this.observeIncident();
+      if (this.control) return this.applyControl();
+      if (this.incident) return this.cancel();
+      throw error;
+    }
   }
   /** The result belongs to this locked invocation, never a prior artifact. A stop
    * request may preempt the command; then no contributor capability is returned. */
@@ -537,7 +559,6 @@ export class RunController {
     this.revise = false;
     this.actionResult = undefined;
     this.publicationWait = undefined;
-    this.publicationWaitMs = 0;
     const watcher = setInterval(() => {
       this.observeIncident();
       this.observeControl();
@@ -901,8 +922,6 @@ export class RunController {
             Date.parse(event.at) < Date.parse(this.publicationWait.at)
           )
             throw new ControllerError('invalid_journal');
-          if (event.sessionId === this.sessionId())
-            this.publicationWaitMs += Date.parse(event.at) - Date.parse(this.publicationWait.at);
           this.publicationWait = undefined;
         }
       } else if (
@@ -947,7 +966,6 @@ export class RunController {
       sessionId: this.publicationWait.sessionId,
       at,
     });
-    if (this.publicationWait.sessionId === this.sessionId()) this.publicationWaitMs += elapsed;
     this.publicationWait = undefined;
   }
   private validatedOutcome(phase: PhaseName, input: unknown, historical = false): Outcome {
@@ -992,12 +1010,18 @@ export class RunController {
     const key = this.key(phase);
     const cached = this.cached.get(key);
     if (cached && !reacquire && !['track', 'ship'].includes(phase)) return cached;
+    const observedAt = this.deps.now();
     const status = assembleStatus({
       run: this.held.run,
-      now: this.deps.now(),
+      now: observedAt,
       budget: this.budget.snapshot(),
       sessionId: this.sessionId(),
-      publicationWaitMs: this.publicationWaitMs,
+      publicationWaitMs: publicationWaitTime(
+        this.journal?.read() ?? [],
+        this.sessionId(),
+        observedAt.getTime(),
+        this.held.runId
+      ),
     });
     if (
       (phase !== 'track' &&

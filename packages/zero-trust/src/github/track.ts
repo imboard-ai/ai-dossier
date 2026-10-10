@@ -196,7 +196,18 @@ export async function observeCi(
     get(read, `${repo}/commits/${sha}/status`),
   ]);
   const status = combined?.status === 200 && isRecord(combined.body) ? combined.body : null;
-  if (!checks || !runs || !status || !Number.isSafeInteger(status.total_count)) return 'unknown';
+  if (
+    !checks ||
+    !runs ||
+    !status ||
+    !Number.isSafeInteger(status.total_count) ||
+    (status.total_count as number) < 0 ||
+    (status.statuses !== undefined &&
+      (!Array.isArray(status.statuses) ||
+        status.statuses.length > (status.total_count as number))) ||
+    (status.total_count === 0 && status.state !== 'pending')
+  )
+    return 'unknown';
   const verdicts = [...checks, ...runs].map((item) => runVerdict(item, sha));
   // GitHub reports `pending` for a commit with no statuses at all: count only real ones.
   if ((status.total_count as number) > 0) verdicts.push(statusVerdict(status.state));
@@ -1212,6 +1223,15 @@ export class PrTracker {
       (track.branchSha !== null && !allowed.includes(track.branchSha))
     );
   }
+  private headBlockReason(
+    track: Observed,
+    candidate = this.state.revision?.candidateSha
+  ): TrackBlockReason {
+    return track.branchSha !== null &&
+      ![this.state.verifiedSha, candidate].includes(track.branchSha)
+      ? 'push_blocked'
+      : 'unexpected_head_sha';
+  }
 
   /** One read of the tracked PR, following a replacement PR when the tracked one is closed
    * (AC6). Records only a rebind; every other decision is the caller's. */
@@ -1314,7 +1334,7 @@ export class PrTracker {
       this.persist({ v: 1, type: 'outcome', outcome, headSha: track.headSha, run });
       return { kind: outcome, status: this.status() };
     }
-    if (this.unexpectedHead(track)) return this.block('unexpected_head_sha');
+    if (this.unexpectedHead(track)) return this.block(this.headBlockReason(track));
     if (state === 'submitted')
       this.persist({
         v: 1,
@@ -1329,7 +1349,7 @@ export class PrTracker {
   private duringRevision(track: Observed, revision: Revision): TrackOutcome {
     if (track.merged) return this.block('merged_during_revision', track.headSha);
     if (track.state === 'closed') return this.closedDuringRevision();
-    if (this.unexpectedHead(track)) return this.block('unexpected_head_sha');
+    if (this.unexpectedHead(track)) return this.block(this.headBlockReason(track));
     if (this.state.run.state !== 'shipping' || !revision.candidateSha)
       return { kind: 'tracking', status: this.status() };
     if (track.headSha !== revision.candidateSha)
@@ -1439,7 +1459,8 @@ export class PrTracker {
       if (track.merged) return this.block('merged_during_revision', track.headSha);
       if (track.state === 'closed') return this.closedDuringRevision();
       // Only the last verified SHA, or this candidate after a lost push response (scenario 18).
-      if (this.unexpectedHead(track, candidateSha)) return this.block('unexpected_head_sha');
+      if (this.unexpectedHead(track, candidateSha))
+        return this.block(this.headBlockReason(track, candidateSha));
       if (!revision.candidateSha) this.persist({ v: 1, type: 'revision_pushing', candidateSha });
       if (track.branchSha !== candidateSha) {
         try {
@@ -1498,7 +1519,10 @@ export class PrTracker {
       if (settled) return settled;
       if (!this.state.revision || !isAdmitted('pr_update', this.state.run.state))
         throw new TrackError('admission_state', this.state.run.state);
-      if (this.state.action) return this.pendingAction(this.state.action);
+      if (this.state.action) {
+        const stale = await this.fresh();
+        return stale ? this.block(stale) : this.pendingAction(this.state.action);
+      }
       const title = prTitle(request.title);
       const body = request.body;
       if (typeof body !== 'string' || body.length > MAX_BODY_LENGTH)
@@ -1508,6 +1532,8 @@ export class PrTracker {
       assertVisibleBody(body, this.state.pr.marker);
       assertNoSecrets(body);
       assertContentPolicy(`${title}\n${body}`, request.evidence);
+      const stale = await this.fresh();
+      if (stale) return this.block(stale);
       const input = this.input('pr_update');
       const action: PendingAction = {
         kind: 'edit',

@@ -209,7 +209,8 @@ export async function createCommands({ root, createController, onAuthorizationUr
               return publicationWaitTime(
                 parseJournalEvents(readPrivate(file)),
                 sessionId,
-                statusNow.getTime()
+                statusNow.getTime(),
+                store.runId
               );
             } catch (error) {
               if (error?.code === 'ENOENT') return 0;
@@ -292,18 +293,8 @@ export async function createCommands({ root, createController, onAuthorizationUr
       }
       const config = configFor(runId, true);
       if (!config.authorApproval) refuse('author_approval_missing');
-      const control = withStore(runId, true, readControlRequests, true);
-      const state = withStore(runId, true, (store) => store.run.state);
-      if (
-        !control.invalid &&
-        !control.pending.length &&
-        !['submitted', 'awaiting_review', 'accepted'].includes(state)
-      )
-        await prepareAuthor(
-          config,
-          { userId: config.authorApproval.userId },
-          { onAuthorizationUrl }
-        );
+      // Locked controller reconciliation decides whether identity is needed.
+      // Pending publication must reach read-back before any OAuth preflight.
       const run = await createController(config, { onAuthorizationUrl }).resume(runId, {
         revise: Boolean(revise),
       });

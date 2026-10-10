@@ -1428,7 +1428,10 @@ export function createController(
           if (!t.snapshot().revision?.candidateSha) artifacts(c).put('push_intended', false);
         }
         revisionObservationWaiting = false;
-        if (c.store.run.state === 'shipping' && t.snapshot().revision?.candidateSha) {
+        if (
+          c.store.run.state === 'shipping' &&
+          (t.snapshot().revision?.candidateSha || t.snapshot().action?.kind === 'reopen')
+        ) {
           const result = await t.resume();
           artifacts(c).put('tracking', t.status());
           if (result.kind === 'revision_pending') {

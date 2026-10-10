@@ -679,7 +679,7 @@ function rig(
           html_url: 'https://github.com/upstream/fixture/pull/8#issuecomment-11',
           user: { login: 'maintainer', type: 'User' },
           author_association: 'MEMBER',
-          updated_at: TIME,
+          updated_at: new Date(clock).toISOString(),
           body,
         },
       ];
@@ -689,6 +689,9 @@ function rig(
     },
     replaceUpstream() {
       options.upstreamReplaced = true;
+    },
+    banPolicy() {
+      policy = 'AI contributions are banned.';
     },
     idleMinutes(minutes: number) {
       clock += minutes * 60000;
@@ -849,6 +852,9 @@ describe('createController real composition', () => {
     expect((await h.controller.resume(id, { revise: true })).state).toBe('blocked');
     expect(pushCalls()).toHaveLength(pushes);
     expect(h.fork.sha(branch)).toBe(BASE_COMMIT.baseSha);
+    const blocked = h.artifacts(id);
+    expect(blocked.get<{ blockedReason: string }>('tracking').blockedReason).toBe('push_blocked');
+    blocked.close();
   }, 30000);
   it('CAS refuses divergence introduced after freshness admission, retaining remote bytes', async () => {
     const h = rig({ revisionDivergeOnMint: true });
@@ -1008,6 +1014,116 @@ describe('createController real composition', () => {
     expect(pushCalls()).toHaveLength(pushes);
     expect(h.modelCalls()).toBe(calls);
     expect(h.fake.oauthCalls.length).toBe(oauth);
+  }, 30000);
+  it('new feedback after a nonzero confirmation wait allocates an independent third session', async () => {
+    const h = rig({ revisionPending: true });
+    const id = await published(h);
+    h.feedback();
+    await h.authorize(h.controller.resume(id, { revise: true }));
+    h.idleMinutes(10);
+    h.showRevision();
+    expect((await h.controller.resume(id)).state).toBe('submitted');
+    h.advanceClock();
+    h.feedback('Please clarify rounding in this same duration fix.');
+    expect(
+      ((await h.authorize(h.controller.resume(id, { revise: true }))) as { state: string }).state
+    ).toBe('submitted');
+    const a = h.artifacts(id);
+    expect(readOutcomeBudget(a.store).sessions).toHaveLength(3);
+    a.close();
+  }, 30000);
+  it('a long pre-push reopen wait preserves active allowance and ships only after observed reopen', async () => {
+    const h = rig({ revisionStop: 'closed' });
+    const id = await published(h);
+    h.feedback();
+    expect(
+      ((await h.authorize(h.controller.resume(id, { revise: true }))) as { state: string }).state
+    ).toBe('shipping');
+    const pushes = pushCalls().length;
+    h.idleMinutes(121);
+    h.reopenPr();
+    expect(((await h.authorize(h.controller.resume(id))) as { state: string }).state).toBe(
+      'submitted'
+    );
+    expect(pushCalls()).toHaveLength(pushes + 1);
+  }, 30000);
+  it('confirmation catching up does not drop an explicit withdrawal request', async () => {
+    const h = rig({ revisionPending: true });
+    const id = await published(h);
+    h.feedback();
+    await h.authorize(h.controller.resume(id, { revise: true }));
+    h.showRevision();
+    const action = await h.controller.prAction(id, {
+      kind: 'withdraw',
+      reason: 'user_instruction',
+      explanation: 'Stop.',
+    });
+    expect(action.kind).toBe('withdraw');
+    expect(h.controller.snapshot().state).toBe('submitted');
+  }, 30000);
+  it('local cancel-action remains credential-free while confirmation is pending', async () => {
+    const h = rig({ revisionPending: true });
+    const id = await published(h);
+    h.feedback();
+    await h.authorize(h.controller.resume(id, { revise: true }));
+    const body = `Updated fix.\n\n${findHandoffMarkers(String(h.pr()?.body))[0]}`;
+    await h.authorize(h.controller.prAction(id, { kind: 'edit', title: 'Updated fix', body }));
+    h.identityUnavailable();
+    const oauth = h.fake.oauthCalls.length;
+    expect((await h.controller.prAction(id, { kind: 'cancel-action' })).kind).toBe('cancel-action');
+    expect(h.fake.oauthCalls).toHaveLength(oauth);
+  }, 30000);
+  it('revoked policy refuses an edit handoff and retains current refusal evidence', async () => {
+    const h = rig({ revisionPending: true });
+    const id = await published(h);
+    h.feedback();
+    await h.authorize(h.controller.resume(id, { revise: true }));
+    h.banPolicy();
+    const body = `Updated fix.\n\n${findHandoffMarkers(String(h.pr()?.body))[0]}`;
+    await expect(
+      h.controller.prAction(id, { kind: 'edit', title: 'Updated fix', body })
+    ).rejects.toThrow();
+    const a = h.artifacts(id);
+    expect(a.store.run.state).toBe('blocked');
+    expect(a.get<{ fresh: boolean }>('revision_freshness').fresh).toBe(false);
+    a.close();
+  }, 30000);
+  it('a legitimate cancellation during action issuance suppresses delivery and joins cleanup', async () => {
+    const h = rig();
+    const id = await published(h);
+    const original = Journal.prototype.append;
+    let requested = false;
+    const fault = vi.spyOn(Journal.prototype, 'append').mockImplementation(function (
+      this: Journal,
+      event
+    ) {
+      original.call(this, event);
+      if (!requested && (event as { type?: string }).type === 'action_issued') {
+        requested = true;
+        const store = RunStore.open(path.join(h.config.executionProfile.stateDir, 'runs'), id, {
+          readOnly: true,
+          observe: true,
+        });
+        try {
+          requestControl(store, { kind: 'cancel', reason: 'Stop' }, new Date(TIME));
+        } finally {
+          store.close();
+        }
+      }
+    });
+    await expect(
+      h.controller.prAction(id, {
+        kind: 'withdraw',
+        reason: 'user_instruction',
+        explanation: 'Stop.',
+      })
+    ).rejects.toThrow('admission_closed');
+    fault.mockRestore();
+    expect(requested).toBe(true);
+    expect(h.controller.snapshot().state).toBe('cancelled');
+    const a = h.artifacts(id);
+    expect(readControlRequests(a.store).pending).toHaveLength(0);
+    a.close();
   }, 30000);
   it.each([
     false,

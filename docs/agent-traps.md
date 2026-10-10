@@ -128,6 +128,7 @@ search for first.
 | Symptom (grep this) | What went wrong | Fix | PR |
 |---|---|---|---|
 | A typed feedback disagreement becomes `invalid_step_artifact`, or a real CAS refusal becomes `driver_failed` after its block is durable | StepArtifacts intentionally stores safe-integer numeric values, but a typed verdict can contain fractional confidence. IntentDriver also latches observations after a durable block, even when the caller is passing the identical blocked history back. | Retain the exact verdict as secret-scanned JSON text, and allow only an already-journaled identical blocked intent history to satisfy synchronization. Never swallow a missing/different history or a persistence failure. Keep real bare-fork CAS and uncertain-decision E2E cases. | #1111 |
+| Session 3 throws `InvalidStatusError` after session 2 had a pending-publication wait, or a reopened PR exhausts active time while idle | A cached wait accumulator outlives its selected budget session and omits open waits; a CLI OAuth preflight can also prevent the controller's observation-only recovery from running. | Project both open/completed publication waits from the durable journal for the selected session and one captured clock. Reconcile tracker outcomes/actions before work admission and let the locked controller decide when OAuth is needed. Test a second revision after a nonzero wait and a long pre-push reopen wait through the real composition. | #1111 |
 
 | Symptom (grep this) | What went wrong | Fix | PR |
 |---|---|---|---|

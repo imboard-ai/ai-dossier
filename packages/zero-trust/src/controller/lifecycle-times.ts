@@ -46,7 +46,8 @@ export function lifecycleTimes(
 export function publicationWaitTime(
   events: readonly unknown[],
   sessionId: string,
-  now: number
+  now: number,
+  runId?: string
 ): number {
   let open: { sessionId: string; at: number } | undefined;
   let total = 0;
@@ -55,6 +56,7 @@ export function publicationWaitTime(
     const at = typeof event.at === 'string' ? Date.parse(event.at) : NaN;
     if (
       event.v !== 1 ||
+      (runId !== undefined && event.runId !== runId) ||
       Object.keys(event).length !== 6 ||
       !Number.isFinite(at) ||
       at > now ||

@@ -276,14 +276,18 @@ test('start overrides file-supplied approval only with fresh OAuth consent; stat
   await Promise.all(h.callbacks);
 });
 
-test('pure resume refuses changed authenticated account before constructing a controller or continuing work', async () => {
+test('resume delegates identity admission to the locked controller without a CLI OAuth preflight', async () => {
   const h = rig();
+  const calls = [];
   const commands = await createCommands({
     root: h.root,
     onAuthorizationUrl: h.onAuthorizationUrl,
-    createController: () => {
-      assert.fail('no continuation before identity binding');
-    },
+    createController: (config) => ({
+      resume: async (...args) => {
+        calls.push({ config, args });
+        throw Object.assign(new Error(), { code: 'author_approval_mismatch' });
+      },
+    }),
   });
   const approval = await commands.prepareAuthor(h.config);
   const store = h.seed({ ...h.config, authorApproval: approval });
@@ -295,7 +299,50 @@ test('pure resume refuses changed authenticated account before constructing a co
     code: 'author_approval_mismatch',
   });
   assert.equal(commands.status(runId).state, 'gating');
-  assert.deepEqual(h.counts(), { revoked: 3, userReads: 3 });
+  assert.deepEqual(h.counts(), { revoked: 1, userReads: 1 });
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].config.authorApproval.userId, approval.userId);
+  assert.deepEqual(
+    calls.map((c) => c.args),
+    [
+      [runId, { revise: false }],
+      [runId, { revise: true }],
+    ]
+  );
+  await Promise.all(h.callbacks);
+});
+test('shipping resume reaches the controller with an unavailable OAuth UI', async () => {
+  const h = rig();
+  const setup = await createCommands({
+    root: h.root,
+    onAuthorizationUrl: h.onAuthorizationUrl,
+    createController,
+  });
+  const approval = await setup.prepareAuthor(h.config);
+  const store = h.seed({ ...h.config, authorApproval: approval });
+  const runId = store.runId;
+  for (const reason of [
+    ReasonCode.GatePassed,
+    ReasonCode.PlanApproved,
+    ReasonCode.CandidateReady,
+    ReasonCode.VerificationPassed,
+  ])
+    store.persistRun(transitionRun(store.run, reason, store.run.updatedAt));
+  store.close();
+  let reached = false;
+  const commands = await createCommands({
+    root: h.root,
+    onAuthorizationUrl: () => assert.fail('no OAuth for observation'),
+    createController: () => ({
+      resume: async (id) => {
+        reached = true;
+        return { runId: id };
+      },
+    }),
+  });
+  assert.equal((await commands.resume(runId)).state, 'shipping');
+  assert.equal(reached, true);
+  assert.deepEqual(h.counts(), { revoked: 1, userReads: 1 });
   await Promise.all(h.callbacks);
 });
 

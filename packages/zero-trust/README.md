@@ -2298,6 +2298,10 @@ lock and stop fences as resume; none writes upstream. `prAction` returns only th
 invocation's result; a stop-preempted command refuses rather than printing a prior
 action. The body file must be a regular, single-link private file (mode `0600`),
 strict UTF-8, at most 65,536 bytes, and preserve the original PR marker.
+Edit issuance rechecks current policy/issue/permission, contributor identity and
+fork admission; that explicit update may request OAuth. Local cancel-action and
+withdrawal preparation do not recover shipping credentials. Any stop arriving
+during action issuance is joined before returning, and suppresses capability delivery.
 
 These are conditional examples, not a sequential session: a successful revision
 returns to submitted, where editing is not admitted. Issue `pr-edit` while a
@@ -2355,8 +2359,9 @@ other drivers' `observeRun`; a restart may hand it an older copy of the run.
   (`freshness_unavailable`, naming the probe). The returned feedback is untrusted
   input for the isolated revision. After independent verification brings the run to
   `shipping`, `shipRevision({ candidateSha, push })` rechecks freshness, blocks on a
-  head that is neither the last verified SHA nor the candidate
-  (`unexpected_head_sha`), journals the candidate, and pushes through the caller's
+   head that is neither the last verified SHA nor the candidate
+   (`push_blocked` for observed fork divergence; `unexpected_head_sha` for other
+   unexpected PR heads), journals the candidate, and pushes through the caller's
   `IntentDriver.execute` (`ForkPusher`: a fresh receipt, CAS from the last verified
   SHA). The revision is confirmed only when the PR head equals the candidate
   (`revised`, back to `submitted`); until then it is `revision_pending`, and
