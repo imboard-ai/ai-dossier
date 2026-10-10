@@ -460,8 +460,13 @@ export class ContributorAuthorization {
       this.#refresh = undefined;
       return this.reauthorize();
     }
+    const parent = this.broker
+      .status()
+      .tokens.filter((t) => t.kind === 'user' && t.status === 'live')
+      .at(-1);
     const pair = await this.exchange({ grant_type: 'refresh_token', refresh_token: refresh });
     if (pair === 'bad_refresh_token') {
+      if (parent) this.broker.confirmRefreshChainEnded(parent.id);
       this.#refresh = undefined;
       return this.reauthorize();
     }

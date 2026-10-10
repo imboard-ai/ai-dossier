@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { setTimeout as realDelay } from 'node:timers/promises';
 import { describe, expect, it, vi } from 'vitest';
+import { BudgetLedger } from '../budget';
 import { TrustedGit } from '../canonical/trusted-git';
 import { rig, TIME } from '../controller/__tests__/composition-fixture';
 import { compositionHooks } from '../controller/__tests__/composition-hooks';
@@ -699,6 +700,17 @@ describe('gate 4 lifecycle', () => {
       (row) => row.status === 'reserved' && row.estimate.tokens > 0
     );
     expect(hold).toBeDefined();
+    if (!hold) throw new Error('missing crash hold');
+    const ledger = new BudgetLedger(
+      path.join(a.store.storeDirectory('budget'), 'ledger.json'),
+      a.store.contributionId
+    );
+    // Independent admission observation: even before credential recovery runs,
+    // this real reopened ledger rejects fresh work because the crash hold is unknown.
+    expect(() => ledger.reserve(hold.sessionId, hold.estimate)).toThrow(
+      'Reconcile recovered reservations'
+    );
+    expect(ledger.snapshot().reservations).toEqual(before.reservations);
     // A crash may also durably record a reauthorization fence. That fence must
     // not bypass recovery of credentials whose secret values died with the process.
     a.put('authorization_required', { nextPermittedAction: 'authorize' });

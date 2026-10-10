@@ -80,7 +80,18 @@ now sweeps held credentials through `ForkCredentialBroker.recover()` **before**
 closing lease timers and journals. This does not permanently close admission as
 `endRun()` would. Explicit resume obtains fresh contributor authorization; a
 credential-revocation failure keeps the cleanup fence and fails the operation.
-Terminal completion/cancellation continues to use `endRun()`.
+Terminal completion/cancellation uses `endRun()` before the terminal transition
+is persisted, so credential cleanup failure can still produce `blocked_cleanup`.
+`RecoveryHooks.endRun(context, reason?)` receives `completed` or `cancelled` (the
+default for existing cancellation callers). Wiring refreshes an expired held
+chain before pause, terminal or incident cleanup. The broker never treats a
+user access-token DELETE 404 as refresh-chain revocation: a successful deletion,
+or an old chain known spent by successful rotation, is required. Expiry during
+the DELETE await therefore leaves a durable reported cleanup obligation.
+The credential owner may call `ForkCredentialBroker.confirmRefreshChainEnded(tokenId)`
+only after an observed `bad_refresh_token` for that exact held pair. That
+process-local observation lets normal cleanup accept an expired access token;
+it never substitutes for the access liveness probe and is not invented on reopen.
 
 CI additionally runs the lifecycle suite in isolation on Node 20 and 22 with a
 60-second wall-clock deadline, logging `wall_seconds` and the Node version.

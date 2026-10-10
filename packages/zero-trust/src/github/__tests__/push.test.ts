@@ -389,6 +389,43 @@ describe('verified CAS push to the fork (#1066)', () => {
     expect(r.events()).toEqual(['push_intended', 'push_verified']);
   });
 
+  it('stopped production HTTPS pushes read back with TLS, no redirects/proxy/helpers and HTTPS explicitly enabled', async () => {
+    const r = await new Rig().start(undefined, true);
+    r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
+    const lease = new AbortController();
+    const transport = vi
+      .spyOn(TrustedGit.prototype, 'execAsync')
+      .mockImplementation(async (args) => {
+        if (args[0] === 'push') {
+          lease.abort();
+          return { status: null, stdout: Buffer.alloc(0) };
+        }
+        return { status: 0, stdout: Buffer.alloc(0) };
+      });
+    r.wrap = (inner) => async (intent, target, operation, cancel) =>
+      inner(intent, target, (credential) => operation(credential, lease.signal), cancel);
+    await expect(r.driver.execute(pushOf(SHA1))).rejects.toThrow(MutationVoidedError);
+    const call = transport.mock.calls.find(([args]) => args[0] === 'ls-remote');
+    expect(call?.[0][1]).toBe(`https://github.com/${OWNER}/fixture.git`);
+    expect(call?.[1]?.config).toEqual([
+      'protocol.https.allow=always',
+      'http.sslVerify=true',
+      'http.followRedirects=false',
+      'http.proxy=',
+    ]);
+    expect(call?.[1]?.env).toBeUndefined();
+    const git = new TrustedGit();
+    try {
+      expect(
+        git
+          .exec(['config', '--get', 'credential.helper'], { config: call?.[1]?.config })
+          .stdout.toString()
+      ).toBe('\n');
+    } finally {
+      git.close();
+    }
+  });
+
   it('an already-aborted lease kills the push and leaves the attempt to reconciliation', async () => {
     const r = await rig();
     r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });

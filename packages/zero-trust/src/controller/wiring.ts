@@ -1253,6 +1253,27 @@ export function createController(
     });
     receipt = artifacts(c).get<SignedReceipt>('receipt');
   };
+  const refreshBeforeCleanup = async () => {
+    const parent = broker
+      ?.status()
+      .tokens.filter((t) => t.kind === 'user' && t.status === 'live')
+      .at(-1);
+    if (!parent?.expiresAt || Date.parse(parent.expiresAt) > now().getTime() || !contributor)
+      return;
+    const refreshed = await contributor.refresh();
+    if (refreshed.kind === 'unavailable') {
+      const current = activeStore?.run;
+      if (
+        current &&
+        !TERMINAL_STATES.includes(current.state) &&
+        current.state !== 'blocked_cleanup'
+      )
+        activeStore?.persistRun(
+          transitionRun(current, ReasonCode.CleanupFailed, now().toISOString())
+        );
+      throw new Error('cleanup_incomplete');
+    }
+  };
   const controller: RunController = new RunController({
     incidentRequested: () => incidentRequested(root),
     root,
@@ -1271,7 +1292,7 @@ export function createController(
       },
     ],
     recovery: {
-      endRun: async (c) => {
+      endRun: async (c, reason = 'cancelled') => {
         // Dormant cancellation must not perform OAuth to revoke an old lease.
         if (!broker && artifacts(c).get('fork')) {
           broker = new ForkCredentialBroker({
@@ -1286,7 +1307,8 @@ export function createController(
             now: () => now().getTime(),
           });
         }
-        await broker?.endRun('cancelled');
+        await refreshBeforeCleanup();
+        await broker?.endRun(reason);
       },
       reconcileControl: async (c) => {
         if (!intents && artifacts(c).get('shipping')) {
@@ -1378,37 +1400,17 @@ export function createController(
       resumeTracker: async (c) => (await openTracker(c)).snapshot().run,
       killAll: async (c) => {
         await stopResources(localVm(c), c.run.runId, async () => {
+          await refreshBeforeCleanup();
           await broker?.killAll();
         });
       },
     },
     release: async () => {
       try {
+        await refreshBeforeCleanup();
         if (activeStore && TERMINAL_STATES.includes(activeStore.run.state))
           await broker?.endRun(activeStore.run.state === 'cancelled' ? 'cancelled' : 'completed');
         else if (broker) {
-          const parent = broker
-            .status()
-            .tokens.filter((token) => token.kind === 'user' && token.status === 'live')
-            .at(-1);
-          // An expired access token can still have a usable refresh chain. Rotate
-          // while its refresh value is held, then revoke the live replacement.
-          // Unavailable rotation cannot be mistaken for confirmed chain death.
-          if (parent?.expiresAt && Date.parse(parent.expiresAt) <= now().getTime() && contributor) {
-            const refreshed = await contributor.refresh();
-            if (refreshed.kind === 'unavailable') {
-              const current = activeStore?.run;
-              if (
-                current &&
-                !TERMINAL_STATES.includes(current.state) &&
-                current.state !== 'blocked_cleanup'
-              )
-                activeStore?.persistRun(
-                  transitionRun(current, ReasonCode.CleanupFailed, now().toISOString())
-                );
-              throw new Error('cleanup_incomplete');
-            }
-          }
           // A dormant controller has no operation that needs a credential. Sweep
           // held values before stopping lease timers, without closing resumable
           // admission permanently as endRun would do.

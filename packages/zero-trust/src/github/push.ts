@@ -439,7 +439,15 @@ export class ForkPusher implements WriteAdapter {
    * to exactly that repository, so if the name were renamed or transferred to another
    * repository in between, GitHub refuses the push (403) and the read-back stays put. */
   protected remote(at: ForkBranch): { url: string; config: readonly string[] } {
-    return { url: `https://github.com/${at.fork.owner}/${at.fork.repo}.git`, config: [] };
+    return {
+      url: `https://github.com/${at.fork.owner}/${at.fork.repo}.git`,
+      config: [
+        'protocol.https.allow=always',
+        'http.sslVerify=true',
+        'http.followRedirects=false',
+        'http.proxy=',
+      ],
+    };
   }
 
   private verified(intent: Intent, at: ForkBranch, sha: string): MutationResult {

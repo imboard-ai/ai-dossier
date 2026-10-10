@@ -21,6 +21,7 @@ import { createRun, ReasonCode, type RunRecord, transitionRun } from '../../stat
 import { type BoundaryInput, evaluateBoundary } from '../../vm/evidence';
 import { AppCredentials } from '../app-auth';
 import { ForkCredentialBroker } from '../broker';
+import type { ForkBranch } from '../fork-ref';
 import { ForkPusher, type ShippingAuthorization } from '../push';
 import type { GitHubRead, GitHubResponse } from '../reconcile';
 import { CLIENT_ID, FORK_ID, GitHubFake, INSTALLATION_ID, OWNER, UPSTREAM_ID } from './github-fake';
@@ -288,7 +289,8 @@ class LocalForkPusher extends ForkPusher {
   ) {
     super(options);
   }
-  protected override remote(): { url: string; config: readonly string[] } {
+  protected override remote(at: ForkBranch): { url: string; config: readonly string[] } {
+    if (!this.bare) return super.remote(at);
     return { url: `file://${this.bare}`, config: ['protocol.file.allow=always'] };
   }
 }
@@ -318,7 +320,7 @@ export class Rig {
     if (!previous) new ReceiptNonceStore(this.dirs.nonces).initialize();
   }
   /** `run`: the lifecycle the intent driver starts from (a revision ships later in it). */
-  async start(run: RunRecord = shipping): Promise<this> {
+  async start(run: RunRecord = shipping, productionRemote = false): Promise<this> {
     const tokens = journal(this.dirs.tokens);
     this.broker = new ForkCredentialBroker({
       store: tokens,
@@ -346,7 +348,7 @@ export class Rig {
           return authorization(grant);
         },
       },
-      this.fork.dir
+      productionRemote ? '' : this.fork.dir
     );
     this.driver = new IntentDriver(
       journal(this.dirs.intents),

@@ -155,7 +155,7 @@ export interface RecoveryHooks {
   resumeTracker(context: PhaseContext): Promise<undefined | RunRecord>;
   killAll(context: PhaseContext): Promise<void>;
   /** Per-run cancellation, distinct from the root-wide incident kill switch. */
-  endRun?(context: PhaseContext): Promise<void>;
+  endRun?(context: PhaseContext, reason?: 'completed' | 'cancelled'): Promise<void>;
   reconcileControl?(
     context: PhaseContext,
     kind: 'pause' | 'cancel'
@@ -673,6 +673,21 @@ export class RunController {
     if (TERMINAL_STATES.includes(run.state)) {
       await this.cleanup();
       if (this.held.run.state === 'blocked_cleanup') return;
+      const before = this.held.run;
+      try {
+        await this.deps.recovery.endRun?.(
+          this.context(),
+          run.state === 'cancelled' ? 'cancelled' : 'completed'
+        );
+      } catch (error) {
+        if (this.snapshot().state !== 'blocked_cleanup')
+          this.persistObserved(
+            transitionRun(this.held.run, ReasonCode.CleanupFailed, this.deps.now().toISOString())
+          );
+        else if (!sameRunRecord(before, this.held.run)) this.notify(this.held.run);
+        throw error;
+      }
+      if (this.snapshot().state === 'blocked_cleanup') return;
     }
     const previous = this.held.run;
     // Recovery drivers may return several transitions. Deliver each, never just the tail.
