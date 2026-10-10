@@ -70,7 +70,7 @@ export function rebaseCandidate(input: RebaseInput): RebaseResult {
     throw new CanonicalError('tree_mismatch');
   const oldEntries = new Map(oldBase.entries.map((entry) => [entry.path, entry]));
   const nextEntries = new Map(nextBase.entries.map((entry) => [entry.path, entry]));
-  const writes = input.overlay.writtenEntries();
+  const writes = input.overlay.touchedPaths().map((path) => ({ path }));
   const conflicts = writes
     .filter((entry) => {
       assertNoSecrets(entry.path);

@@ -751,6 +751,15 @@ export function rig(options: RigOptions = {}) {
   };
   return {
     controller,
+    switchModel(next: typeof config) {
+      const replacement = {
+        ...model,
+        id: next.modelProfile.phases.implementing.model,
+        complete: model.complete.bind(model),
+      };
+      edges.models.implementing = replacement;
+      return replacement;
+    },
     config,
     fake,
     vm,

@@ -15,6 +15,9 @@ export function noShipping() {
   expect(issued.mock.calls).toHaveLength(0);
   expect(pushCalls()).toHaveLength(0);
 }
+export function receiptCalls() {
+  return issued.mock.calls;
+}
 export function compositionHooks(audit?: () => Promise<void>) {
   beforeEach(() => {
     fixtureInstrumentation(

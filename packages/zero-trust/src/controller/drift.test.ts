@@ -104,6 +104,26 @@ afterEach(() => {
 });
 
 describe('upstream drift admission', () => {
+  it('hands off an upstream change to a contributor-deleted path after repair and reconstruction', () => {
+    const f = rig();
+    f.overlay.replaceSource(
+      createManifest(f.old.manifest.entries.filter((e) => e.path !== 'file')),
+      ['file']
+    );
+    const repair = new WorkspaceOverlay(f.overlay.manifest());
+    repair.write('other', 'repair');
+    f.overlay.applyRepair(repair);
+    const restored = new WorkspaceOverlay(f.old.manifest);
+    restored.replaceSource(f.overlay.manifest(), f.overlay.touchedPaths());
+    const newSha = f.advance({ file: 'upstream changed deleted file', other: 'one' });
+    const result = rebaseCandidate({
+      overlay: restored,
+      oldBaseManifest: f.old.manifest,
+      newBase: f.acquire(newSha),
+      approval: { ...f.approval, baseSha: newSha },
+    });
+    expect(result).toEqual({ kind: 'conflict', paths: ['file'] });
+  });
   it.each([
     'malformed',
     'non-200',
