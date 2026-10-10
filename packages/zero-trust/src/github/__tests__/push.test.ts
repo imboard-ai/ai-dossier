@@ -365,6 +365,30 @@ describe('verified CAS push to the fork (#1066)', () => {
     expect(r.fork.refReads()).toBe(1);
   });
 
+  it('a landed push with lost client result and stale API absence is never voided', async () => {
+    const r = await rig();
+    r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
+    const lease = new AbortController();
+    const real = TrustedGit.prototype.execAsync;
+    vi.spyOn(TrustedGit.prototype, 'execAsync').mockImplementation(async function (args, options) {
+      const result = await real.call(this, args, options);
+      if (args[0] === 'push') {
+        lease.abort();
+        return { status: null, stdout: Buffer.alloc(0) };
+      }
+      return result;
+    });
+    r.fork.overrides.push((p) =>
+      p.includes('/git/ref/') ? { status: 404, body: null } : undefined
+    );
+    r.wrap = (inner) => async (intent, target, operation, cancel) =>
+      inner(intent, target, (credential) => operation(credential, lease.signal), cancel);
+    expect(await r.driver.execute(pushOf(SHA1))).toBe(`${TARGET}@${SHA1}`);
+    expect(r.fork.sha()).toBe(SHA1);
+    expect(r.driver.snapshot().intents.get(idempotencyKey(pushOf(SHA1)))?.voided ?? 0).toBe(0);
+    expect(r.events()).toEqual(['push_intended', 'push_verified']);
+  });
+
   it('an already-aborted lease kills the push and leaves the attempt to reconciliation', async () => {
     const r = await rig();
     r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });

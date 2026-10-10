@@ -211,6 +211,24 @@ test('second-process pause/cancel are durable under the active guard and observa
   }
 });
 
+test('fresh CLI status reads the retained authorization fence without constructing execution', async () => {
+  const h = rig();
+  const store = h.seed();
+  store.persistRun(transitionRun(store.run, ReasonCode.UserPaused, new Date().toISOString()));
+  const journal = new Journal(path.join(store.storeDirectory('control'), 'steps'));
+  new StepArtifacts(journal, store.runId).put('authorization_required', {
+    nextPermittedAction: 'authorize',
+  });
+  journal.close();
+  store.close();
+  const commands = await createCommands({
+    root: h.root,
+    createController: () => assert.fail('status cannot execute'),
+  });
+  assert.equal(commands.status(store.runId).nextPermittedAction, 'authorize');
+  assert.deepEqual(h.counts(), { revoked: 0, userReads: 0 });
+});
+
 test('cancelled CLI status retains publication URL and contributor withdrawal instructions', async () => {
   const h = rig();
   const store = h.seed();

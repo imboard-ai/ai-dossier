@@ -58,6 +58,9 @@ function rows(h: Rig, name: Parameters<RunStore['storeDirectory']>[0], child?: s
 /** One audit for every scenario, including refusal paths. Load real supervisor evidence,
  * compare durable write identities and verify each outstanding guest is reported. */
 async function assertGlobalInvariants(h: Rig) {
+  // Check physical writes first so mutation controls fail before expensive
+  // supervisor evidence revalidation; all checks still run on the positive path.
+  assertPushInvariants(h);
   const id = h.controller.snapshot().runId;
   const a = h.artifacts(id);
   try {
@@ -143,6 +146,10 @@ async function assertGlobalInvariants(h: Rig) {
   } finally {
     a.close();
   }
+}
+
+function assertPushInvariants(h: Rig) {
+  const id = h.controller.snapshot().runId;
   const links = rows(h, 'handoff').filter((row) => row.type === 'link_issued');
   const linkKeys = links.map((row) => idempotencyKey(row.input as IntentInput));
   expect(new Set(linkKeys).size).toBe(links.length);
@@ -419,7 +426,35 @@ describe('gate 4 lifecycle', () => {
     h.executions.push(...observed);
   });
 
-  it('actor=GitHub fork timing outcome=wait without compute then resumes shipping owner=S4/S5', async () => {
+  it('actor=GitHub fork timing outcome=gating prerequisite wait without compute then initial shipping owner=S4/S5', async () => {
+    const h = fixture({ missingFork: true });
+    const run = (await h.authorize(h.controller.start(h.config))) as {
+      state: string;
+      runId: string;
+    };
+    expect(run.state).toBe('awaiting_contributor');
+    expect(h.controller.snapshot().reasonCode).toBe(ReasonCode.ForkMissing);
+    expect(h.controller.snapshot().history.at(-1)?.from).toBe('gating');
+    const calls = h.modelCalls();
+    expect(h.vm.calls.filter((c) => c.op === 'create')).toHaveLength(0);
+    expect((await h.controller.resume(run.runId)).state).toBe('awaiting_contributor');
+    expect(h.modelCalls()).toBe(calls);
+    expect(h.vm.calls.filter((c) => c.op === 'create')).toHaveLength(0);
+    h.forkPresent();
+    expect(((await h.authorize(h.controller.resume(run.runId))) as { state: string }).state).toBe(
+      'awaiting_contributor'
+    );
+    expect(h.controller.snapshot().history).toContainEqual(
+      expect.objectContaining({ from: 'verifying', to: 'shipping' })
+    );
+    const a = h.artifacts(run.runId);
+    expect(h.fork.sha(`ztfc/${a.store.contributionId}`)).toBe(
+      a.get<{ record: { candidateSha: string } }>('candidate').record.candidateSha
+    );
+    a.close();
+  });
+
+  it('actor=GitHub bound fork deletion outcome=blocked at shipping without rebind owner=S1/S4/S5', async () => {
     let h!: Rig;
     let missing = false;
     h = fixture({
@@ -438,8 +473,7 @@ describe('gate 4 lifecycle', () => {
       state: string;
       runId: string;
     };
-    expect(run.state).toBe('awaiting_contributor');
-    expect(h.controller.snapshot().reasonCode).toBe(ReasonCode.ForkMissing);
+    expect(run.state).toBe('blocked');
     expect(h.controller.snapshot().history.at(-1)?.from).toBe('shipping');
     const retained = h.artifacts(run.runId);
     const candidate = retained.get('candidate');
@@ -447,16 +481,16 @@ describe('gate 4 lifecycle', () => {
     retained.close();
     const calls = h.modelCalls();
     const creates = h.vm.calls.filter((c) => c.op === 'create').length;
-    expect((await h.controller.resume(run.runId)).state).toBe('awaiting_contributor');
+    expect((await h.controller.resume(run.runId)).state).toBe('blocked');
     expect(h.modelCalls()).toBe(calls);
     expect(h.vm.calls.filter((c) => c.op === 'create')).toHaveLength(creates);
     h.forkPresent();
-    expect(((await h.authorize(h.controller.resume(run.runId))) as { state: string }).state).toBe(
-      'awaiting_contributor'
-    );
-    expect(h.controller.snapshot().history).toContainEqual(
-      expect.objectContaining({ from: 'awaiting_contributor', to: 'shipping' })
-    );
+    expect((await h.controller.resume(run.runId)).state).toBe('blocked');
+    expect(h.modelCalls()).toBe(calls);
+    expect(h.vm.calls.filter((c) => c.op === 'create')).toHaveLength(creates);
+    expect(
+      vi.mocked(TrustedGit.prototype.execAsync).mock.calls.filter((c) => c[0][0] === 'push')
+    ).toHaveLength(0);
     const resumed = h.artifacts(run.runId);
     expect(resumed.get('candidate')).toEqual(candidate);
     expect(resumed.get('verification')).toEqual(verification);
@@ -665,6 +699,9 @@ describe('gate 4 lifecycle', () => {
       (row) => row.status === 'reserved' && row.estimate.tokens > 0
     );
     expect(hold).toBeDefined();
+    // A crash may also durably record a reauthorization fence. That fence must
+    // not bypass recovery of credentials whose secret values died with the process.
+    a.put('authorization_required', { nextPermittedAction: 'authorize' });
     a.close();
     const guests = await h.vm.listByRun(id);
     expect(guests.length).toBeGreaterThan(0);

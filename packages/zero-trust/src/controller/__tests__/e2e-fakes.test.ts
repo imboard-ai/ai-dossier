@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { BASE_COMMIT } from '../../__tests__/verifier-fixture';
-import { OWNER, USER_ID } from '../../github/__tests__/github-fake';
+import { CLIENT_ID, OWNER, USER_ID } from '../../github/__tests__/github-fake';
 import { ForkCredentialBroker } from '../../github/broker';
 import { Journal } from '../../journal';
 import { discoverPolicy } from '../../policy/discover';
@@ -34,6 +34,58 @@ describe('createController real composition', () => {
       store.close();
     }
   }
+  it('revokes the refresh chain when a pause outlives the native access token', async () => {
+    const h = rig({ activeControl: 'write', oauthExpiresIn: 1 });
+    const task = h.authorize(h.controller.start(h.config));
+    await h.controlReady;
+    h.advanceClock(2000);
+    request(h, 'pause');
+    expect(((await task) as { state: string }).state).toBe('paused_user');
+    expect(h.fake.oauthCalls.filter((form) => form.grant_type === 'refresh_token')).toHaveLength(1);
+    expect([...h.fake.tokens.values()].filter((token) => token.live || token.refreshAlive)).toEqual(
+      []
+    );
+    expect([...h.fake.refreshTokens.values()].filter((token) => token.live)).toEqual([]);
+    noShipping();
+  }, 60000);
+
+  it('publishes the final cleanup block to snapshots and observers when release fails', async () => {
+    const h = rig({ checkpoint: 'plan' });
+    h.fake.override(`DELETE /applications/${CLIENT_ID}/token`, { status: 503, json: null }, 3);
+    await expect(h.authorize(h.controller.start(h.config))).rejects.toThrow('cleanup_incomplete');
+    expect(h.controller.snapshot().state).toBe('blocked_cleanup');
+    const a = h.artifacts(h.controller.snapshot().runId);
+    expect(h.controller.snapshot()).toEqual(a.store.run);
+    a.close();
+    expect((await h.controller.resume(h.controller.snapshot().runId)).state).toBe(
+      'blocked_cleanup'
+    );
+    noShipping();
+  }, 60000);
+
+  it('does not repeatedly refresh the current token because an older token probe was unavailable', async () => {
+    let h!: ReturnType<typeof rig>;
+    let expired = false;
+    h = rig({
+      oauthExpiresIn: 1,
+      beforeRead: async (p) => {
+        if (
+          !expired &&
+          p === `/repos/${OWNER}/fixture` &&
+          h.controller.snapshot().state === 'shipping'
+        ) {
+          expired = true;
+          h.advanceClock(2000);
+          h.fake.override(`GET /applications/${CLIENT_ID}/token`, { status: 503, json: null }, 1);
+        }
+      },
+    });
+    expect(((await h.authorize(h.controller.start(h.config))) as { state: string }).state).toBe(
+      'awaiting_contributor'
+    );
+    expect(h.fake.oauthCalls.filter((form) => form.grant_type === 'refresh_token')).toHaveLength(1);
+    expect([...h.fake.refreshTokens.values()].filter((token) => token.live)).toEqual([]);
+  }, 60000);
   it.each([
     'write',
     'exec',
