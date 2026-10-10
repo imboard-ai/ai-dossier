@@ -699,7 +699,7 @@ describe('AC9 scoped user tokens are independent credentials', () => {
       via: 'user_scoped',
     });
     const next = r.fake.refresh(user);
-    await r.broker.rotateUserToken(next, expires);
+    await r.broker.rotateUserToken(next, expires, parentId);
     const tokens = ledgerOf(r).tokens;
     expect(tokens.get(parentId)?.status).toBe('rotated');
     expect(tokens.get(child.tokenId)?.status).toBe('live');

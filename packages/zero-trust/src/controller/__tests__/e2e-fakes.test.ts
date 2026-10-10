@@ -54,7 +54,9 @@ describe('createController real composition', () => {
     noShipping();
   }, 60000);
 
-  it('access expiry during DELETE never fabricates refresh-chain cleanup', async () => {
+  it.each([
+    404, 401,
+  ])('access expiry during DELETE %s never fabricates refresh-chain cleanup', async (status) => {
     const h = rig({ checkpoint: 'plan', oauthExpiresIn: 1 });
     const http = h.fake.http;
     let expired = false;
@@ -62,6 +64,7 @@ describe('createController real composition', () => {
       if (!expired && req.method === 'DELETE' && req.path === `/applications/${CLIENT_ID}/token`) {
         expired = true;
         h.advanceClock(2000);
+        h.fake.override(`DELETE /applications/${CLIENT_ID}/token`, { status, json: null }, 3);
       }
       return http(req);
     });
@@ -71,7 +74,7 @@ describe('createController real composition', () => {
     expect(a.store.run.state).toBe('blocked_cleanup');
     const tokens = new Journal(a.store.storeDirectory('tokens'));
     expect(tokens.read()).toContainEqual(
-      expect.objectContaining({ type: 'token_revoke_failed', status: 404, id: expect.any(String) })
+      expect.objectContaining({ type: 'token_revoke_failed', status, id: expect.any(String) })
     );
     tokens.close();
     a.close();

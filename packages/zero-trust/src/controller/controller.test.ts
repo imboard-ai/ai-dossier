@@ -1190,4 +1190,24 @@ describe('RunController', () => {
     expect(store.validateEvidence().state).toBe('blocked_cleanup');
     store.close();
   });
+  it.each([
+    true,
+    false,
+  ])('terminal credential cleanup already persisted by its hook notifies the block (throws=%s)', async (throws) => {
+    const h = rig();
+    const failure = new Error('original credential cleanup failure');
+    h.steps.scripts.gate = [{ kind: 'blocked' }];
+    h.deps.recovery.endRun = async (c) => {
+      c.store.persistRun(transitionRun(c.store.run, ReasonCode.CleanupFailed, TIME));
+      if (throws) throw failure;
+    };
+    const task = h.controller.start(h.config);
+    if (throws) await expect(task).rejects.toBe(failure);
+    else expect((await task).state).toBe('blocked_cleanup');
+    expect(h.controller.snapshot().state).toBe('blocked_cleanup');
+    for (const seen of h.seen) expect(seen).toEqual(['gating', 'blocked_cleanup']);
+    const store = open(h, h.controller.snapshot().runId);
+    expect(store.run.state).toBe('blocked_cleanup');
+    store.close();
+  });
 });

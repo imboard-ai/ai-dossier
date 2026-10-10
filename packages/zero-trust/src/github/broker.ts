@@ -379,19 +379,28 @@ export class ForkCredentialBroker {
 
   /** A refresh replaced the user token. The old one is marked rotated only once
    * observed dead (401); its scoped children stay live and journaled. */
-  async rotateUserToken(value: string, expiresAt: string): Promise<string> {
+  async rotateUserToken(
+    value: string,
+    expiresAt: string,
+    spentRefreshParentId?: string
+  ): Promise<string> {
     this.assertOpen();
     const previous = this.liveUserToken();
     if (!previous) throw new CredentialBrokerError('no_user_token');
-    // The credential owner calls this only after a successful refresh exchange:
-    // the old refresh token is spent even if its access-token probe is lost.
-    this.replacedUserChains.add(previous.id);
+    if (spentRefreshParentId !== undefined) {
+      if (spentRefreshParentId !== previous.id) throw new CredentialBrokerError('no_user_token');
+      this.replacedUserChains.add(previous.id);
+    }
     const observed = await statusOf(
       probeToken(this.options.http, 'user', this.vault.get(previous.id) as string)
     );
     // The kill switch or run end may have acted during the probe.
     this.assertOpen();
-    if (observed === UNAUTHORIZED && this.ledger.tokens.get(previous.id)?.status === 'live') {
+    if (
+      observed === UNAUTHORIZED &&
+      this.replacedUserChains.has(previous.id) &&
+      this.ledger.tokens.get(previous.id)?.status === 'live'
+    ) {
       this.record({ v: 1, type: 'token_rotated', id: previous.id, at: this.iso() });
       this.vault.delete(previous.id);
     }
@@ -748,7 +757,8 @@ export class ForkCredentialBroker {
     if (!TOKEN_GONE.includes(deleted)) return { ok: false, stage: 'delete', status: deleted };
     // 404 plus access 401 may mean native expiry, while refresh authority lives.
     // Only successful deletion or a chain known spent by rotation proves death.
-    if (deleted === 404 && !acceptMissing) return { ok: false, stage: 'delete', status: deleted };
+    if ((deleted === 404 || deleted === 401) && !acceptMissing)
+      return { ok: false, stage: 'delete', status: deleted };
     const probed = await statusOf(probeToken(this.options.http, kind, value));
     return probed === UNAUTHORIZED ? { ok: true } : { ok: false, stage: 'probe', status: probed };
   }

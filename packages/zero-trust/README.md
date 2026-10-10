@@ -85,13 +85,17 @@ is persisted, so credential cleanup failure can still produce `blocked_cleanup`.
 `RecoveryHooks.endRun(context, reason?)` receives `completed` or `cancelled` (the
 default for existing cancellation callers). Wiring refreshes an expired held
 chain before pause, terminal or incident cleanup. The broker never treats a
-user access-token DELETE 404 as refresh-chain revocation: a successful deletion,
+user access-token DELETE 404/401 as refresh-chain revocation: a successful deletion,
 or an old chain known spent by successful rotation, is required. Expiry during
 the DELETE await therefore leaves a durable reported cleanup obligation.
 The credential owner may call `ForkCredentialBroker.confirmRefreshChainEnded(tokenId)`
 only after an observed `bad_refresh_token` for that exact held pair. That
 process-local observation lets normal cleanup accept an expired access token;
 it never substitutes for the access liveness probe and is not invented on reopen.
+`rotateUserToken(value, expiresAt, spentRefreshParentId?)` accepts the third
+argument only for a successful refresh exchange tied to the exact prior held
+token. A new OAuth consent without that proof retains the old chain as a cleanup
+obligation, even when its access token expired.
 
 CI additionally runs the lifecycle suite in isolation on Node 20 and 22 with a
 60-second wall-clock deadline, logging `wall_seconds` and the Node version.

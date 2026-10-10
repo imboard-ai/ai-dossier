@@ -473,7 +473,7 @@ export class ContributorAuthorization {
     if (typeof pair === 'string') return { kind: 'unavailable' };
     try {
       const tokenId = await this.hold(pair, (value, expiresAt) =>
-        this.broker.rotateUserToken(value, expiresAt)
+        this.broker.rotateUserToken(value, expiresAt, parent?.id)
       );
       this.#refresh = pair.refresh;
       return { kind: 'refreshed', tokenId };

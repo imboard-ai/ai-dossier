@@ -680,14 +680,19 @@ export class RunController {
           run.state === 'cancelled' ? 'cancelled' : 'completed'
         );
       } catch (error) {
-        if (this.snapshot().state !== 'blocked_cleanup')
+        const after = this.store?.run ?? before;
+        if (after.state !== 'blocked_cleanup')
           this.persistObserved(
             transitionRun(this.held.run, ReasonCode.CleanupFailed, this.deps.now().toISOString())
           );
-        else if (!sameRunRecord(before, this.held.run)) this.notify(this.held.run);
+        else if (!sameRunRecord(before, after)) this.notify(after);
         throw error;
       }
-      if (this.snapshot().state === 'blocked_cleanup') return;
+      const after = this.store?.run ?? before;
+      if (after.state === 'blocked_cleanup') {
+        if (!sameRunRecord(before, after)) this.notify(after);
+        return;
+      }
     }
     const previous = this.held.run;
     // Recovery drivers may return several transitions. Deliver each, never just the tail.
