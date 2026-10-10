@@ -21,6 +21,24 @@ export class WorkspaceOverlay {
   readonly base: SourceManifest;
   private entries: Map<string, SourceEntry>;
   private readonly written = new Set<string>();
+  private readonly removed = new Set<string>();
+
+  /** Controller-exported source only. Retain deletions and exec-bit changes in the delta. */
+  replaceSource(source: SourceManifest, touched: readonly string[]): void {
+    const manifest = validateManifest(source);
+    const entries = new Map(manifest.entries.map((e) => [e.path, e]));
+    for (const file of touched) {
+      assertWorkspacePath(file);
+      if (entries.get(file)?.mode === '040000') throw new CanonicalError('path_collision');
+      this.written.add(file);
+      if (!entries.has(file)) this.removed.add(file);
+      else this.removed.delete(file);
+    }
+    this.entries = entries;
+  }
+  touchedPaths(): readonly string[] {
+    return Object.freeze([...this.written].sort(comparePaths));
+  }
 
   constructor(base: SourceManifest) {
     this.base = validateManifest(base);
@@ -61,7 +79,10 @@ export class WorkspaceOverlay {
    * Drift must check every touched path, not just the final diff. */
   writtenEntries(): readonly SourceEntry[] {
     return Object.freeze(
-      [...this.written].sort(comparePaths).map((file) => this.entries.get(file) as SourceEntry)
+      [...this.written]
+        .filter((file) => !this.removed.has(file))
+        .sort(comparePaths)
+        .map((file) => this.entries.get(file) as SourceEntry)
     );
   }
 
@@ -75,6 +96,7 @@ export class WorkspaceOverlay {
     const next = new WorkspaceOverlay(this.base);
     next.entries = new Map(this.entries);
     for (const file of this.written) next.written.add(file);
+    for (const file of this.removed) next.removed.add(file);
     return next;
   }
 
@@ -82,6 +104,11 @@ export class WorkspaceOverlay {
   onBase(base: SourceManifest): WorkspaceOverlay {
     const next = new WorkspaceOverlay(base);
     next.applyEntries(this.writtenEntries());
+    for (const file of this.removed) {
+      next.entries.delete(file);
+      next.removed.add(file);
+      next.written.add(file);
+    }
     return next;
   }
 
@@ -96,7 +123,7 @@ export class WorkspaceOverlay {
       for (const parent of parentPaths(entry.path))
         if (!next.has(parent))
           next.set(parent, { path: parent, mode: '040000', bytes: '', sha256: sha256('') });
-      next.set(entry.path, Object.freeze({ ...entry, mode: old?.mode ?? '100644' }));
+      next.set(entry.path, Object.freeze({ ...entry }));
     }
     const manifest = createManifest([...next.values()]);
     this.entries = new Map(manifest.entries.map((entry) => [entry.path, entry]));

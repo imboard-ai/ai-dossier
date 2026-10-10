@@ -56,6 +56,7 @@ import type {
   ResumeHandoffOutcome,
 } from './controller';
 import { checkShippingBase } from './drift';
+import { latestSourceEdit, sourceEditCount } from './edits';
 import {
   baselineEvidence,
   provisionWorkspace,
@@ -81,7 +82,7 @@ export interface GateRecord {
   readonly body: string;
   readonly invitation?: InvitationEvidence;
 }
-interface Candidate {
+export interface Candidate {
   readonly touched: readonly string[];
   readonly manifest: SourceManifest;
   readonly record: CandidateRecord;
@@ -132,29 +133,36 @@ export function gateFreshness(
   });
 }
 
-function candidateOverlay(base: SourceManifest, held: Candidate): WorkspaceOverlay {
+export function candidateOverlay(base: SourceManifest, held: Candidate): WorkspaceOverlay {
   const overlay = new WorkspaceOverlay(base);
   if (!Array.isArray(held.touched)) throw new Error('invalid_step_artifact');
-  for (const name of held.touched) {
-    const entry = held.manifest.entries.find((e) => e.path === name && e.mode !== '040000');
-    if (!entry) throw new Error('invalid_step_artifact');
-    overlay.write(name, Buffer.from(entry.bytes, 'base64').toString('utf8'));
-  }
+  overlay.replaceSource(held.manifest, held.touched);
   if (overlay.manifest().digest !== held.manifest.digest) throw new Error('invalid_step_artifact');
   return overlay;
 }
 
 /** Human checkpoint material is derived only from held snapshots, never VM reads. */
-function reviewDiff(base: SourceManifest, next: SourceManifest): Buffer {
+export function reviewDiff(base: SourceManifest, next: SourceManifest): Buffer {
   const chunks: string[] = [];
-  for (const entry of next.entries) {
-    if (entry.mode === '040000') continue;
-    const old = base.entries.find((e) => e.path === entry.path);
-    if (old?.sha256 === entry.sha256) continue;
+  const beforeEntries = new Map(
+    base.entries.filter((e) => e.mode !== '040000').map((e) => [e.path, e])
+  );
+  const afterEntries = new Map(
+    next.entries.filter((e) => e.mode !== '040000').map((e) => [e.path, e])
+  );
+  for (const name of [...new Set([...beforeEntries.keys(), ...afterEntries.keys()])].sort()) {
+    const old = beforeEntries.get(name);
+    const entry = afterEntries.get(name);
+    if (old?.sha256 === entry?.sha256 && old?.mode === entry?.mode) continue;
+    chunks.push(`diff --git a/${name} b/${name}\n`);
+    if (!old) chunks.push(`new file mode ${entry?.mode}\n`);
+    else if (!entry) chunks.push(`deleted file mode ${old.mode}\n`);
+    else if (old.mode !== entry.mode) chunks.push(`old mode ${old.mode}\nnew mode ${entry.mode}\n`);
+    if (old?.sha256 === entry?.sha256) continue;
     const before = old ? Buffer.from(old.bytes, 'base64').toString('utf8').split('\n') : [];
-    const after = Buffer.from(entry.bytes, 'base64').toString('utf8').split('\n');
+    const after = entry ? Buffer.from(entry.bytes, 'base64').toString('utf8').split('\n') : [];
     chunks.push(
-      `--- ${old ? `a/${entry.path}` : '/dev/null'}\n+++ b/${entry.path}\n@@ -${before.length ? 1 : 0},${before.length} +1,${after.length} @@\n${before.map((l) => `-${l}\n`).join('')}${after.map((l) => `+${l}\n`).join('')}`
+      `--- ${old ? `a/${name}` : '/dev/null'}\n+++ ${entry ? `b/${name}` : '/dev/null'}\n@@ -${before.length ? 1 : 0},${before.length} +${after.length ? 1 : 0},${after.length} @@\n${before.map((l) => `-${l}\n`).join('')}${after.map((l) => `+${l}\n`).join('')}`
     );
   }
   const bytes = Buffer.from(chunks.join(''));
@@ -285,7 +293,11 @@ export function createSteps(
   };
   const gate = (c: PhaseContext) => artifacts(c).require<GateRecord>('gate');
   const candidate = (c: PhaseContext): Candidate => {
-    const held = artifacts(c).require<Candidate>('candidate');
+    const edit = latestSourceEdit(c.store);
+    const held =
+      edit && artifacts(c).get<number>('applied_user_edit') !== sourceEditCount(c.store)
+        ? edit.candidate
+        : artifacts(c).require<Candidate>('candidate');
     const author = c.store.config.authorApproval;
     if (
       !author ||
@@ -522,6 +534,22 @@ export function createSteps(
     },
     async implement(c) {
       const author = await approval(c);
+      const edit = latestSourceEdit(c.store);
+      if (edit && artifacts(c).get<number>('applied_user_edit') !== sourceEditCount(c.store)) {
+        const held = candidate(c);
+        artifacts(c).put('candidate', held);
+        artifacts(c).put('applied_user_edit', sourceEditCount(c.store));
+        const diff = reviewDiff(source(c).manifest, held.manifest);
+        c.store.replaceArtifact('candidate.diff', diff);
+        return {
+          kind: 'candidate',
+          bindings: {
+            ...bindings(c),
+            candidateSha: held.record.candidateSha,
+            reviewDigest: sha256(diff),
+          },
+        };
+      }
       const phaseKey = c.run.history.filter(
         (e) =>
           ![
@@ -651,6 +679,14 @@ export function createSteps(
     },
     async review(c) {
       const held = candidate(c);
+      if (
+        latestSourceEdit(c.store) &&
+        artifacts(c).get<number>('applied_user_edit') !== sourceEditCount(c.store)
+      ) {
+        artifacts(c).put('candidate', held);
+        artifacts(c).put('applied_user_edit', sourceEditCount(c.store));
+        c.store.replaceArtifact('candidate.diff', reviewDiff(source(c).manifest, held.manifest));
+      }
       const base = source(c);
       const baseEntries = new Map(base.manifest.entries.map((entry) => [entry.path, entry]));
       const testFiles = held.manifest.entries

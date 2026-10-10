@@ -2,7 +2,13 @@ import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { types } from 'node:util';
-import { assertDirectoryAncestors, privateDir, replacePrivate, syncDirectory } from '../durable-fs';
+import {
+  assertDirectoryAncestors,
+  privateDir,
+  readPrivate,
+  replacePrivate,
+  syncDirectory,
+} from '../durable-fs';
 import { Journal } from '../journal';
 import { acquirePrivateGuard, StoreLockedError } from '../lock';
 import { isRecoveryEvent, isTailRecovery } from '../recovery';
@@ -18,6 +24,7 @@ import {
   createRun,
   isRecord,
   isRunContinuation,
+  isTimestamp,
   ReasonCode,
   type RunRecord,
   restoreRun,
@@ -80,6 +87,56 @@ export class RunStoreError extends Error {
     super(`Run store refused (${code})`);
     this.name = 'RunStoreError';
   }
+}
+export interface UserChange {
+  readonly kind: 'model' | 'checkpoints' | 'source';
+  readonly at: string;
+  readonly value: unknown;
+  readonly digest: string;
+}
+function restoreUserChange(
+  raw: unknown,
+  run: RunRecord,
+  config: RunConfig,
+  directory: string
+): UserChange {
+  if (
+    !isRecord(raw) ||
+    Object.keys(raw).sort().join(',') !== 'at,digest,kind,value' ||
+    run.state !== 'paused_user' ||
+    !isTimestamp(raw.at) ||
+    Date.parse(raw.at) < Date.parse(run.updatedAt) ||
+    !['model', 'checkpoints', 'source'].includes(String(raw.kind)) ||
+    raw.digest !==
+      hash(Buffer.from(JSON.stringify({ kind: raw.kind, at: raw.at, value: raw.value })))
+  )
+    fail('invalid_store');
+  if (raw.kind === 'model' || raw.kind === 'checkpoints') {
+    validateStoredRunConfig({
+      ...runConfigInput(config),
+      [raw.kind === 'model' ? 'modelProfile' : 'checkpoints']: raw.value,
+    });
+  } else if (!['implementing', 'verifying'].includes(run.history.at(-1)?.from ?? ''))
+    fail('invalid_store');
+  if (raw.kind === 'source') {
+    const ref = raw.value;
+    if (
+      !isRecord(ref) ||
+      Object.keys(ref).sort().join(',') !== 'artifact,digest' ||
+      typeof ref.digest !== 'string' ||
+      !/^[a-f0-9]{64}$/u.test(ref.digest) ||
+      ref.artifact !== `user-change-${ref.digest}.json`
+    )
+      fail('invalid_store');
+    const bytes = readPrivate(path.join(directory, 'artifacts', String(ref.artifact)), (stat) => {
+      if (stat.size > 96 * 1024 * 1024) fail('invalid_store');
+    });
+    if (hash(bytes) !== ref.digest) fail('invalid_store');
+    const value: unknown = JSON.parse(strictUtf8(bytes));
+    assertSecretFree(value);
+    return { ...raw, value } as unknown as UserChange;
+  }
+  return raw as unknown as UserChange;
 }
 function fail(code: RunStoreErrorCode): never {
   throw new RunStoreError(code);
@@ -230,19 +287,23 @@ function validateCheckpointContinuation(
 }
 function replayControl(
   events: unknown[],
-  config: RunConfig
+  config: RunConfig,
+  directory: string
 ): {
   run: RunRecord;
   confirmed?: RunRecord;
   upstreamId?: number;
   checkpoints: Map<CheckpointPoint, CheckpointRecord>;
   bindings: Map<CheckpointPoint, CheckpointBindings>;
+  changes: UserChange[];
+  config: RunConfig;
 } {
   let run: RunRecord | undefined;
   let confirmed: RunRecord | undefined;
   let upstreamId: number | undefined;
   const checkpoints = new Map<CheckpointPoint, CheckpointRecord>();
   const bindings = new Map<CheckpointPoint, CheckpointBindings>();
+  const changes: UserChange[] = [];
   for (const event of events) {
     assertSecretFree(event);
     if (isTailRecovery(event)) continue;
@@ -279,6 +340,30 @@ function replayControl(
       validateCheckpoint(record, run, config, checkpoints, bindings);
       checkpoints.set(record.point, record);
     } else if (
+      event.type === 'user_change' &&
+      run &&
+      confirmed &&
+      sameRunRecord(run, confirmed) &&
+      Object.keys(event).sort().join(',') === 'change,type,v'
+    ) {
+      const change = restoreUserChange(event.change, run, config, directory);
+      changes.push(change);
+      if (change.kind === 'model' || change.kind === 'checkpoints')
+        config = validateStoredRunConfig({
+          ...runConfigInput(config),
+          [change.kind === 'model' ? 'modelProfile' : 'checkpoints']: change.value,
+        });
+      if (change.kind === 'checkpoints') {
+        checkpoints.clear();
+        bindings.clear();
+      }
+      if (change.kind === 'source') {
+        for (const point of ['patch', 'verification'] as const) {
+          checkpoints.delete(point);
+          bindings.delete(point);
+        }
+      }
+    } else if (
       event.type === 'snapshot' &&
       run &&
       event.sha256 === hash(Buffer.from(JSON.stringify(run)))
@@ -294,7 +379,7 @@ function replayControl(
     } else fail('invalid_store');
   }
   if (!run) fail('invalid_store');
-  return { run, confirmed, upstreamId, checkpoints, bindings };
+  return { run, confirmed, upstreamId, checkpoints, bindings, changes, config };
 }
 /** Maintenance never invokes journal tail recovery or snapshot repair. */
 function readControl(directory: string): unknown[] {
@@ -336,6 +421,8 @@ export class RunStore {
   private upstreamId: number | undefined;
   private checkpoints = new Map<CheckpointPoint, CheckpointRecord>();
   private bindings = new Map<CheckpointPoint, CheckpointBindings>();
+  private changes: UserChange[] = [];
+  private effectiveConfig?: RunConfig;
   private constructor(
     readonly directory: string,
     readonly contributionId: string,
@@ -374,7 +461,7 @@ export class RunStore {
       const pinned = `/proc/self/fd/${this.directoryFd}`;
       const events = readControl(pinned);
       if (events.some(isRecoveryEvent)) throw new RunEvidenceError('run', 'recovered');
-      const evidence = replayControl(events, config);
+      const evidence = replayControl(events, this.storedConfig, pinned);
       const raw = jsonRecord(boundedRead(path.join(pinned, 'run.json')));
       assertSecretFree(raw);
       const snapshot = restoreRun(raw);
@@ -385,7 +472,9 @@ export class RunStore {
         !sameRunRecord(snapshot, this.current) ||
         evidence.upstreamId !== this.upstreamId ||
         JSON.stringify([...evidence.checkpoints]) !== JSON.stringify([...this.checkpoints]) ||
-        JSON.stringify([...evidence.bindings]) !== JSON.stringify([...this.bindings])
+        JSON.stringify([...evidence.bindings]) !== JSON.stringify([...this.bindings]) ||
+        JSON.stringify(evidence.changes) !== JSON.stringify(this.changes) ||
+        JSON.stringify(evidence.config) !== JSON.stringify(config)
       )
         fail('run_diverged');
       return snapshot;
@@ -400,14 +489,56 @@ export class RunStore {
       const pinned = `/proc/self/fd/${this.directoryFd}`;
       const config = readStoredConfig(pinned, this.configDigest);
       if (JSON.stringify(config) !== JSON.stringify(this.storedConfig)) fail('run_diverged');
-      return config;
+      return structuredClone(this.effectiveConfig ?? config);
     } catch (error) {
       refuseEvidence('config', error);
     }
   }
   get config(): RunConfig {
     this.check();
-    return structuredClone(this.storedConfig);
+    return structuredClone(this.effectiveConfig ?? this.storedConfig);
+  }
+  get userChanges(): readonly UserChange[] {
+    this.check();
+    return structuredClone(this.changes);
+  }
+  /** One append publishes a paused mutation; original config and budget bytes never change. */
+  recordUserChange(kind: UserChange['kind'], value: unknown, at: string): void {
+    this.assertResumable();
+    value = structuredClone(value);
+    assertSecretFree(value);
+    if (kind === 'source') {
+      const bytes = Buffer.from(JSON.stringify(value));
+      if (bytes.length > 96 * 1024 * 1024) fail('invalid_store');
+      const digest = hash(bytes);
+      const artifact = `user-change-${digest}.json`;
+      this.replaceArtifact(artifact, bytes);
+      value = { artifact, digest };
+    }
+    const body = { kind, at, value };
+    const change = restoreUserChange(
+      { ...body, digest: hash(Buffer.from(JSON.stringify(body))) },
+      this.current,
+      this.config,
+      `/proc/self/fd/${this.directoryFd}`
+    );
+    const storedChange = { ...body, digest: hash(Buffer.from(JSON.stringify(body))) };
+    this.write(() => this.journal.append({ v: 1, type: 'user_change', change: storedChange }));
+    this.changes.push(change);
+    if (kind === 'model' || kind === 'checkpoints')
+      this.effectiveConfig = validateStoredRunConfig({
+        ...runConfigInput(this.config),
+        [kind === 'model' ? 'modelProfile' : 'checkpoints']: value,
+      });
+    if (kind === 'checkpoints') {
+      this.checkpoints.clear();
+      this.bindings.clear();
+    }
+    if (kind === 'source')
+      for (const point of ['patch', 'verification'] as const) {
+        this.checkpoints.delete(point);
+        this.bindings.delete(point);
+      }
   }
   /** Synchronous maintenance under the lifetime guard; never expose a worker path. */
   withPinnedDirectory<T>(
@@ -593,7 +724,7 @@ export class RunStore {
         boundedRead(path.join(directory, 'control', 'events.jsonl'), JOURNAL_BYTES);
         journal = new Journal(path.join(directory, 'control'));
       }
-      const evidence = replayControl(journal.read(), config);
+      const evidence = replayControl(journal.read(), config, pinned);
       if (!sameRunRecord(evidence.run, run)) {
         if (
           !evidence.confirmed ||
@@ -620,6 +751,8 @@ export class RunStore {
       store.upstreamId = evidence.upstreamId;
       store.checkpoints = evidence.checkpoints;
       store.bindings = evidence.bindings;
+      store.changes = evidence.changes;
+      store.effectiveConfig = evidence.config;
       return store;
     } catch (error) {
       journal?.close();
@@ -686,7 +819,7 @@ export class RunStore {
   recordCheckpointBindings(point: CheckpointPoint, input: CheckpointBindings): void {
     this.check();
     const bindings = checkpointBindings(input, point, this.runId);
-    if (!this.storedConfig.checkpoints.includes(point)) fail('invalid_store');
+    if (!this.config.checkpoints.includes(point)) fail('invalid_store');
     const previous = this.bindings.get(point);
     if (previous && sameCheckpointBindings(previous, bindings)) return;
     this.write(() => this.journal.append({ v: 1, type: 'checkpoint_bindings', point, bindings }));
@@ -706,7 +839,7 @@ export class RunStore {
   persistCheckpoint(input: CheckpointRecord): void {
     this.check();
     const record = restoreCheckpoint(input);
-    validateCheckpoint(record, this.current, this.storedConfig, this.checkpoints, this.bindings);
+    validateCheckpoint(record, this.current, this.config, this.checkpoints, this.bindings);
     this.write(() => this.journal.append({ v: 1, type: 'checkpoint', record }));
     this.checkpoints.set(record.point, record);
   }
@@ -717,14 +850,7 @@ export class RunStore {
     const record = restoreCheckpoint(input);
     if (record.status === 'approved') this.assertResumable();
     next = restoreRun(structuredClone(next));
-    validateCheckpoint(
-      record,
-      this.current,
-      this.storedConfig,
-      this.checkpoints,
-      this.bindings,
-      next
-    );
+    validateCheckpoint(record, this.current, this.config, this.checkpoints, this.bindings, next);
     this.write(() => {
       this.journal.append({ v: 1, type: 'checkpoint_resolution', record, run: next });
       confirmSnapshot(this.journal, `/proc/self/fd/${this.directoryFd}`, next);

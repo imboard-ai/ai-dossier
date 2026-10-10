@@ -41,6 +41,7 @@ import { ReasonCode, transitionRun } from '../../state';
 import { approveCheckpoint } from '../checkpoints';
 import { validateRunConfig } from '../config';
 import { readControlRequests, requestControl } from '../control';
+import { applyUserPatch, changeCheckpoints, changeModelProfile } from '../edits';
 import { readOutcomeBudget } from '../outcome-records';
 import { RunStore } from '../run-store';
 import { StepArtifacts } from '../steps';
@@ -551,11 +552,12 @@ function rig(
     return originalDestroy(handle);
   });
   let clock = Date.parse(TIME);
+  const models = { planning: model, implementing: model, repair: model };
   const controller = createController(config, {
     vm,
     read,
     fetch: fetcher,
-    models: { planning: model, implementing: model, repair: model },
+    models,
     now: () => new Date(clock),
     gitRemoteUrl: { upstream: `file://${upstream.dir}`, fork: `file://${fork.dir}` },
   });
@@ -595,7 +597,18 @@ function rig(
     };
   };
   return {
-    controller,
+    get controller() {
+      return controller;
+    },
+    switchModel(next: typeof config) {
+      const replacement = {
+        ...model,
+        id: next.modelProfile.phases.implementing.model,
+        complete: vi.fn(model.complete.bind(model)),
+      };
+      models.implementing = replacement;
+      return replacement;
+    },
     config,
     fake,
     vm,
@@ -684,6 +697,109 @@ function rig(
 }
 
 describe('createController real composition', () => {
+  it('model switch preserves ledger bytes and uses the new adapter under the existing session', async () => {
+    const h = rig({ checkpoint: 'plan' });
+    const run = (await h.authorize(h.controller.start(h.config))) as {
+      runId: string;
+      state: string;
+    };
+    expect(run.state).toBe('paused_user');
+    const a = h.artifacts(run.runId);
+    const file = path.join(a.store.storeDirectory('budget'), 'ledger.json');
+    const before = fs.readFileSync(file);
+    const profile = {
+      ...h.config.modelProfile,
+      phases: {
+        ...h.config.modelProfile.phases,
+        implementing: { ...h.config.modelProfile.phases.implementing, model: 'next' },
+      },
+      rates: [
+        ...h.config.modelProfile.rates,
+        { ...h.config.modelProfile.rates[0], resource: 'next' },
+      ],
+    };
+    vi.stubEnv('ZT_MODEL_KEY', 'fixture-key');
+    changeModelProfile(a.store, a.store.run, profile, new Date(TIME));
+    changeCheckpoints(a.store, a.store.run, [], new Date(TIME));
+    expect(fs.readFileSync(file)).toEqual(before);
+    const changed = a.store.config;
+    a.close();
+    const adapter = h.switchModel(changed);
+    h.advanceClock();
+    const resumed = (await h.authorize(h.controller.resume(run.runId))) as { state: string };
+    expect(resumed.state).toBe('awaiting_contributor');
+    expect(adapter.complete).toHaveBeenCalled();
+    const b = h.artifacts(run.runId);
+    expect(readOutcomeBudget(b.store).sessions).toHaveLength(1);
+    expect(
+      readOutcomeBudget(b.store).reservations.some((r) =>
+        r.estimate.rates.some((rate) => rate.resource === 'next')
+      )
+    ).toBe(true);
+    b.close();
+  }, 60000);
+  it.each([
+    'implementing',
+    'verifying',
+  ] as const)('user edit paused from %s ships the edited candidate only after fresh verification', async (origin) => {
+    const h = rig(origin === 'implementing' ? { activeControl: 'exec' } : { checkpoint: 'patch' });
+    const running = h.authorize(h.controller.start(h.config));
+    if (origin === 'implementing') {
+      await h.controlReady;
+      request(h, 'pause');
+    }
+    const run = (await running) as { runId: string; state: string };
+    expect(run.state).toBe('paused_user');
+    const content = Buffer.from(
+      CANDIDATE.entries.find((e) => e.path === 'src/duration.js')?.bytes ?? '',
+      'base64'
+    ).toString('utf8');
+    const lines = content.trimEnd().split('\n');
+    const changed = ['// Contributor edit retained through fresh verification', ...lines];
+    const diff = Buffer.from(
+      `diff --git a/src/duration.js b/src/duration.js\n--- a/src/duration.js\n+++ b/src/duration.js\n@@ -1,${lines.length} +1,${changed.length} @@\n${lines.map((l) => `-${l}\n`).join('')}${changed.map((l) => `+${l}\n`).join('')}`
+    );
+    const store = RunStore.open(path.join(h.config.executionProfile.stateDir, 'runs'), run.runId);
+    const candidate = applyUserPatch(store, store.run, diff, new Date(TIME));
+    store.close();
+    h.advanceClock();
+    let resumed = (await h.authorize(h.controller.resume(run.runId))) as { state: string };
+    if (origin === 'verifying') {
+      expect(resumed.state).toBe('paused_user');
+      const b = h.artifacts(run.runId);
+      const checkpoint = b.store.checkpoint('patch');
+      expect(checkpoint?.bindings.candidateSha).toBe(candidate.record.candidateSha);
+      approveCheckpoint(
+        b.store,
+        b.store.run,
+        { point: 'patch', digest: checkpoint?.digest as string },
+        new Date('2026-10-10T00:01:00.000Z')
+      );
+      b.close();
+      resumed = (await h.authorize(h.controller.resume(run.runId))) as { state: string };
+    }
+    expect(resumed.state).toBe('awaiting_contributor');
+    const b = h.artifacts(run.runId);
+    const retained = b.get<{ record: { candidateSha: string } }>('candidate');
+    expect(retained.record.candidateSha).toBe(candidate.record.candidateSha);
+    const verification = loadVerification(b.dir, candidate.record.candidateSha, {
+      runId: run.runId,
+    });
+    expect(verification.verdict).toBe('passed');
+    expect(b.store.run.history.map((e) => e.reasonCode)).toContain(
+      origin === 'implementing' ? ReasonCode.ResumeImplementing : ReasonCode.ResumeVerifying
+    );
+    if (origin === 'implementing')
+      expect(b.store.run.history.slice(-5).map((e) => e.reasonCode)).toContain(
+        ReasonCode.CandidateReady
+      );
+    const hand = new Journal(b.store.storeDirectory('handoff'));
+    expect(JSON.stringify(hand.read())).toContain('Includes contributor edits');
+    hand.close();
+    b.close();
+    expect(issued).toHaveBeenCalled();
+    expect(pushCalls().length).toBeGreaterThan(0);
+  }, 60000);
   function request(h: ReturnType<typeof rig>, kind: 'pause' | 'cancel') {
     const id = h.controller.snapshot().runId;
     const store = RunStore.open(path.join(h.config.executionProfile.stateDir, 'runs'), id, {
