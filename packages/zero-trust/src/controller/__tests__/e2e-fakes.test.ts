@@ -25,6 +25,7 @@ import {
   USER_ID,
 } from '../../github/__tests__/github-fake';
 import { Fork } from '../../github/__tests__/push-rig';
+import { ForkCredentialBroker } from '../../github/broker';
 import { Journal } from '../../journal';
 import {
   type ModelAdapter,
@@ -39,6 +40,8 @@ import { ReceiptNonceStore } from '../../receipt/nonces';
 import { ReasonCode, transitionRun } from '../../state';
 import { approveCheckpoint } from '../checkpoints';
 import { validateRunConfig } from '../config';
+import { readControlRequests, requestControl } from '../control';
+import { readOutcomeBudget } from '../outcome-records';
 import { RunStore } from '../run-store';
 import { StepArtifacts } from '../steps';
 import { loadVerification } from '../verification-record';
@@ -95,6 +98,8 @@ function rig(
     corruptPolicy?: boolean;
     restrictPolicy?: boolean;
     delayFork?: boolean;
+    activeControl?: 'write' | 'exec';
+    teardownFails?: boolean;
   } = {}
 ) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zt-composition-'));
@@ -420,6 +425,20 @@ function rig(
           text: 'Add a regression for milliseconds, then correct the conversion.',
         };
       } else {
+        if (options.activeControl === 'exec' && implementTurn === 2) {
+          implementTurn++;
+          return {
+            kind: 'tool_calls',
+            calls: [
+              {
+                id: `call-${seq++}`,
+                name,
+                arguments: { kind: 'worker_exec', profile: 'node', argv: ['npm', 'test'] },
+              },
+            ],
+            usage: { inputTokens: 10, outputTokens: 10 },
+          };
+        }
         const writes = CANDIDATE.entries.filter((e) =>
           ['test/regression.test.js', 'src/duration.js'].includes(e.path)
         );
@@ -466,6 +485,43 @@ function rig(
     return fixtureScript(request, guest);
   });
   vm.acceptAbuse = options.breach ?? false;
+  let controlReached!: () => void;
+  const controlReady = new Promise<void>((resolve) => {
+    controlReached = resolve;
+  });
+  let interruptedVm = '';
+  let blocked = false;
+  const originalPut = vm.putFile.bind(vm);
+  const originalExec = vm.exec.bind(vm);
+  const originalDestroy = vm.destroy.bind(vm);
+  vi.spyOn(vm, 'putFile').mockImplementation(async (...args) => {
+    if (options.activeControl === 'write' && args[1] === 'test/regression.test.js' && !blocked) {
+      blocked = true;
+      interruptedVm = args[0].vmId;
+      controlReached();
+      return new Promise<void>(() => {});
+    }
+    return originalPut(...args);
+  });
+  vi.spyOn(vm, 'exec').mockImplementation(async (...args) => {
+    if (
+      options.activeControl === 'exec' &&
+      args[1].argv.join(' ') === 'npm test' &&
+      !blocked &&
+      implementTurn === 3
+    ) {
+      blocked = true;
+      interruptedVm = args[0].vmId;
+      controlReached();
+      return new Promise<never>(() => {});
+    }
+    return originalExec(...args);
+  });
+  vi.spyOn(vm, 'destroy').mockImplementation(async (handle) => {
+    if (options.teardownFails && handle.vmId === interruptedVm)
+      throw new Error('fixture cleanup failure');
+    return originalDestroy(handle);
+  });
   const controller = createController(config, {
     vm,
     read,
@@ -524,6 +580,8 @@ function rig(
     repairEvidence,
     forkReached,
     releaseFork,
+    controlReady,
+    interruptedVm: () => interruptedVm,
     identityUnavailable() {
       options.userUnavailable = true;
     },
@@ -592,6 +650,148 @@ function rig(
 }
 
 describe('createController real composition', () => {
+  function request(h: ReturnType<typeof rig>, kind: 'pause' | 'cancel') {
+    const id = h.controller.snapshot().runId;
+    const store = RunStore.open(path.join(h.config.executionProfile.stateDir, 'runs'), id, {
+      readOnly: true,
+      observe: true,
+    });
+    try {
+      return requestControl(store, { kind, reason: 'User control' }, new Date(TIME));
+    } finally {
+      store.close();
+    }
+  }
+  it.each([
+    'write',
+    'exec',
+  ] as const)('pauses blocked %s and resumes exact held candidate on a fresh VM', async (activeControl) => {
+    const uninterrupted = rig();
+    const normal = (await uninterrupted.authorize(
+      uninterrupted.controller.start(uninterrupted.config)
+    )) as { runId: string };
+    const expected = uninterrupted.artifacts(normal.runId);
+    const sha = expected.get<{ record: { candidateSha: string } }>('candidate').record.candidateSha;
+    expected.close();
+    const h = rig({ activeControl });
+    const running = h.authorize(h.controller.start(h.config));
+    await h.controlReady;
+    const calls = h.vm.exec.mock.calls.length;
+    const row = request(h, 'pause');
+    const run = (await running) as { state: string; runId: string };
+    expect(run.state).toBe('paused_user');
+    expect(h.vm.exec.mock.calls.length).toBe(calls);
+    expect(h.vm.destroy).toHaveBeenCalledWith(expect.objectContaining({ vmId: h.interruptedVm() }));
+    const a = h.artifacts(run.runId);
+    expect(readControlRequests(a.store).pending).toHaveLength(0);
+    expect(readOutcomeBudget(a.store).reservations.length).toBeGreaterThan(0);
+    expect(
+      fs.existsSync(path.join(a.store.storeDirectory('control'), 'requests', `${row.id}.json`))
+    ).toBe(true);
+    a.close();
+    const resumed = (await h.authorize(h.controller.resume(run.runId))) as { state: string };
+    expect(resumed.state).toBe('awaiting_contributor');
+    const b = h.artifacts(run.runId);
+    expect(b.get<{ record: { candidateSha: string } }>('candidate').record.candidateSha).toBe(sha);
+    b.close();
+    expect(h.vm.exec.mock.calls.slice(calls).some((c) => c[0].vmId !== h.interruptedVm())).toBe(
+      true
+    );
+  }, 60000);
+  it('cancel before shipping revokes the broker without a push', async () => {
+    const ended = vi.spyOn(ForkCredentialBroker.prototype, 'endRun');
+    const h = rig({ activeControl: 'write' });
+    const running = h.authorize(h.controller.start(h.config));
+    await h.controlReady;
+    request(h, 'cancel');
+    expect(((await running) as { state: string }).state).toBe('cancelled');
+    expect(ended).toHaveBeenCalledWith('cancelled');
+    noShipping();
+  }, 60000);
+  it('a legitimate cancel arriving during pause destruction wins and revokes once work is quiesced', async () => {
+    const h = rig({ activeControl: 'write' });
+    const ended = vi.spyOn(ForkCredentialBroker.prototype, 'endRun');
+    const destroy = vi.mocked(h.vm.destroy).getMockImplementation();
+    if (!destroy) throw new Error('fixture missing destruction edge');
+    let arrived!: () => void;
+    let release!: () => void;
+    const reached = new Promise<void>((resolve) => {
+      arrived = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.mocked(h.vm.destroy).mockImplementation(async (handle) => {
+      if (handle.vmId === h.interruptedVm()) {
+        arrived();
+        await released;
+      }
+      return destroy(handle);
+    });
+    const running = h.authorize(h.controller.start(h.config));
+    await h.controlReady;
+    request(h, 'pause');
+    await reached;
+    request(h, 'cancel');
+    release();
+    expect(((await running) as { state: string }).state).toBe('cancelled');
+    expect(ended).toHaveBeenCalledWith('cancelled');
+    noShipping();
+  }, 60000);
+  it.each([
+    'pause',
+    'cancel',
+  ] as const)('%s teardown failure retains blocked_cleanup and cancellation still revokes', async (kind) => {
+    const ended = vi.spyOn(ForkCredentialBroker.prototype, 'endRun');
+    const h = rig({ activeControl: 'write', teardownFails: true });
+    const running = h.authorize(h.controller.start(h.config));
+    await h.controlReady;
+    request(h, kind);
+    expect(((await running) as { state: string }).state).toBe('blocked_cleanup');
+    if (kind === 'cancel') expect(ended).toHaveBeenCalledWith('cancelled');
+    noShipping();
+  }, 60000);
+  it('cancel reconciles a submitted PR behind a pending contributor link before cancellation', async () => {
+    const h = rig();
+    const run = (await h.authorize(h.controller.start(h.config))) as { runId: string };
+    h.submit(run.runId);
+    const store = RunStore.open(path.join(h.config.executionProfile.stateDir, 'runs'), run.runId, {
+      readOnly: true,
+      observe: true,
+    });
+    requestControl(store, { kind: 'cancel', reason: 'Withdraw my run' }, new Date(TIME));
+    store.close();
+    const cancelled = await h.controller.resume(run.runId);
+    expect(cancelled.state).toBe('cancelled');
+    const a = h.artifacts(run.runId);
+    expect(a.get<{ url: string }>('publication').url).toBe(
+      'https://github.com/upstream/fixture/pull/8'
+    );
+    expect(a.get<string>('withdrawal')).toContain('then close the pull request');
+    a.close();
+  }, 60000);
+  it('corrupt control bytes block the active controller with inspectable evidence', async () => {
+    const h = rig({ activeControl: 'write' });
+    const running = h.authorize(h.controller.start(h.config));
+    await h.controlReady;
+    const row = request(h, 'pause');
+    const id = h.controller.snapshot().runId;
+    const store = RunStore.open(path.join(h.config.executionProfile.stateDir, 'runs'), id, {
+      readOnly: true,
+      observe: true,
+    });
+    fs.writeFileSync(
+      path.join(store.storeDirectory('control'), 'requests', `${row.id}.json`),
+      '{"torn":',
+      { mode: 0o600 }
+    );
+    store.close();
+    expect(((await running) as { state: string }).state).toBe('blocked');
+    const a = h.artifacts(id);
+    expect(readControlRequests(a.store).invalid).toBe(true);
+    a.close();
+    noShipping();
+  }, 60000);
   it.each([
     ['plan', 'corrupt'],
     ['plan', 'missing'],

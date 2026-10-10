@@ -13,6 +13,8 @@ const COMMANDS = Object.freeze({
   },
   resume: { required: ['root', 'run'], optional: ['revise'] },
   status: { required: ['root', 'run'], optional: ['json'] },
+  pause: { required: ['root', 'run', 'reason'], optional: [] },
+  cancel: { required: ['root', 'run', 'reason'], optional: [] },
   approve: { required: ['root', 'run', 'checkpoint', 'digest'], optional: [] },
   reject: { required: ['root', 'run', 'checkpoint', 'digest', 'reason'], optional: [] },
   authorize: { required: ['root', 'run'], optional: [] },
@@ -24,10 +26,14 @@ const COMMANDS = Object.freeze({
 });
 const BOOLEAN = new Set(['confirm-author', 'revise', 'json', 'apply']);
 export const USAGE =
-  'Usage: zt-run <start|resume|status|approve|reject|authorize|kill-all|metrics|adoption|sweep|export> --root <dir> [command options]';
+  'Usage: zt-run <start|resume|status|pause|cancel|approve|reject|authorize|kill-all|metrics|adoption|sweep|export> --root <dir> [command options]';
 const HELP = `${USAGE}\nstart --config <file.json> [--confirm-author] [--author-name <name>] [--author-email <email>]\nresume --run <id> [--revise]\nstatus --run <id> [--json]\napprove --run <id> --checkpoint <plan|patch|verification> --digest <sha256>\nreject --run <id> --checkpoint <plan|patch|verification> --digest <sha256> --reason <text>\nauthorize --run <id>\nkill-all --reason <text>\nmetrics [--json]\nadoption --run <id> --note <text>\nsweep [--apply]\nexport --run <id> --out <file>`;
 const ERROR_CODES = new Set([
   'invalid_input',
+  'invalid_control',
+  'nothing_to_pause',
+  'cleanup_required',
+  'terminal',
   'invalid_config',
   'unknown_key',
   'invalid_issue_url',
@@ -226,6 +232,18 @@ export async function main(argv, { createController, out, err, confirmAuthor } =
       case 'status':
         status = await controller.status(opts.run);
         break;
+      case 'pause':
+      case 'cancel': {
+        const request = await controller[command](opts.run, opts.reason);
+        if (
+          request?.kind !== command ||
+          request?.runId !== opts.run ||
+          !/^[a-f0-9-]{36}$/u.test(request?.id ?? '')
+        )
+          refuse('operation_failed');
+        out(`${command}_requested: ${JSON.stringify(request.id)}`);
+        return 0;
+      }
       case 'approve':
         status = await controller.approve(opts.run, {
           point: opts.checkpoint,

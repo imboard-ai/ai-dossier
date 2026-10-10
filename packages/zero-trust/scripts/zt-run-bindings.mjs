@@ -10,6 +10,7 @@ import {
   rejectCheckpoint,
 } from '../dist/controller/checkpoints.js';
 import { runConfigInput } from '../dist/controller/config.js';
+import { readControlRequests, requestControl } from '../dist/controller/control.js';
 import {
   readOutcomeBudget,
   readOutcomeHandoffs,
@@ -155,6 +156,8 @@ export async function createCommands({ root, createController, onAuthorizationUr
             gate: artifacts.get('gate'),
             candidate: artifacts.get('candidate'),
             tracking: artifacts.get('tracking'),
+            publication: artifacts.get('publication'),
+            withdrawal: artifacts.get('withdrawal'),
           };
         });
         let handoff;
@@ -206,6 +209,22 @@ export async function createCommands({ root, createController, onAuthorizationUr
             : {}),
           authorApproval: store.config.authorApproval,
         });
+        const control = readControlRequests(store);
+        if (control.invalid) {
+          result.phase = 'invalid_control';
+          result.nextPermittedAction =
+            'Control evidence is corrupt or unknown; inspect retained request files before resuming.';
+        } else if (control.pending.length) {
+          result.phase = control.pending.some((r) => r.kind === 'cancel')
+            ? 'cancel_requested'
+            : 'pause_requested';
+          result.nextPermittedAction =
+            'The durable control request is pending controller application.';
+        } else if (control.refused.length) {
+          result.nextPermittedAction = `Control refused: ${control.refused.join(',')}. ${result.nextPermittedAction}`;
+        }
+        if (run.state === 'cancelled' && retained.publication)
+          result.nextPermittedAction = `Submitted PR: ${retained.publication.url}. ${retained.withdrawal ?? 'The contributor may withdraw the submitted PR explicitly.'}`;
         store.validateEvidence();
         return result;
       },
@@ -248,11 +267,33 @@ export async function createCommands({ root, createController, onAuthorizationUr
       }
       const config = configFor(runId, true);
       if (!config.authorApproval) refuse('author_approval_missing');
-      await prepareAuthor(config, { userId: config.authorApproval.userId }, { onAuthorizationUrl });
+      const control = withStore(runId, true, readControlRequests, true);
+      if (!control.invalid && !control.pending.length)
+        await prepareAuthor(
+          config,
+          { userId: config.authorApproval.userId },
+          { onAuthorizationUrl }
+        );
       const run = await createController(config, { onAuthorizationUrl }).resume(runId);
       return status(run.runId);
     },
     status,
+    pause(runId, reason) {
+      return withStore(
+        runId,
+        true,
+        (store) => requestControl(store, { kind: 'pause', reason }, new Date()),
+        true
+      );
+    },
+    cancel(runId, reason) {
+      return withStore(
+        runId,
+        true,
+        (store) => requestControl(store, { kind: 'cancel', reason }, new Date()),
+        true
+      );
+    },
     approve(runId, answer) {
       withStore(runId, false, (store) => approveCheckpoint(store, store.run, answer, new Date()));
       return status(runId);

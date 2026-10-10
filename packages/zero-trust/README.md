@@ -12,6 +12,49 @@ Publication remains gated on S1 feasibility.
 
 ## Controller CLI (#1109)
 
+### Active pause and cancellation (#1110)
+
+`node scripts/zt-run.mjs pause|cancel --root <stateDir>/runs --run <id> --reason <text>`
+returns immediately after the stop-only request is durably fsynced. It neither waits
+for nor acquires the active controller's lifetime guard. `status --json` is
+observational: its `phase` shows `pause_requested` / `cancel_requested` until the
+controller applies the request. Corrupt, unknown or contradictory request/result
+bytes produce `invalid_control` status and block admission; raw bytes/reasons are
+never printed. Requests and digest-bound results remain available for inspection.
+A dormant run applies its queued request on the next explicit `resume`, without
+OAuth for cancellation. The controller checks requests every 20ms while awaiting
+an edge and synchronously before phases, model calls, provisioning and commands.
+
+Pause closes admission and destroys the VM to interrupt commands (the VM edge has
+no in-flight abort). The controller snapshot consists solely of its held admitted
+overlay, messages, pending action, manifests, journals and evidence: it never reads
+files back from the guest. Known usage is settled; unknown holds remain reserved
+and prevent new spending. Resume provisions a fresh VM, restores the exact held
+overlay/conversation, re-admits any interrupted action on that guest and returns
+to the interrupted phase from lifecycle history. An open checkpoint must still
+be explicitly approved; approval is reusable only with unchanged digest bindings.
+An interrupted command may rerun on the fresh guest; its old output is not evidence.
+
+Pause in a no-compute state is refused with `nothing_to_pause`. Cancel is permitted
+in non-terminal states except `blocked_cleanup` (`cleanup_required`). Cancellation
+reconciles existing intent and hand-off observations before applying `UserCancelled`,
+destroys VMs, and calls the per-run broker `endRun('cancelled')` independently of
+guest cleanup success. A submitted PR cannot be recalled: cancelled status preserves
+its URL and the contributor withdrawal action from `PrTracker.requestWithdrawal`.
+No upstream API write or artifact erasure is introduced. Failed destruction or
+revocation retains `blocked_cleanup` rather than claiming a successful cancellation.
+
+Public credential-free API: `requestControl(store, { kind, reason }, now)` accepts
+an observational `RunStore.open(root, id, { readOnly: true, observe: true })` even
+while its controller holds the guard; it returns the immutable request identity,
+run identity, timestamp and digest. `readControlRequests(store)` reports strict
+pending/refused/invalid evidence without repair. `acknowledgeControl` is reserved
+for the controller owner after lifecycle persistence. Concurrent requests have
+unique immutable files; cancel wins when both kinds are pending at admission.
+Atomic staging files are not requests and remain local after a writer crash.
+The filesystem threat model includes torn/corrupt bytes and legitimate concurrency;
+deliberate same-OS-user symlink/lock tampering remains outside scope.
+
 This private package supplies a repository script, not an installed binary. From
 `packages/zero-trust`, build first with `npm run build`, then run
 `node scripts/zt-run.mjs --help`. `--root` is the **run-store directory**:

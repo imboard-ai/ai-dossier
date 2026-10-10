@@ -7,7 +7,12 @@ import {
 import type { BudgetLedger } from '../budget';
 import type { BudgetRate } from '../budget-types';
 import { CanonicalError, type SourceManifest, sha256, validateManifest } from '../canonical/export';
-import { type ModelAdapter, ModelError, type ModelMessage } from '../model/adapter';
+import {
+  type ModelAdapter,
+  ModelError,
+  type ModelMessage,
+  type ModelResult,
+} from '../model/adapter';
 import { BudgetExhaustedError, meteredComplete } from '../model/metered';
 import { assertNoSecrets, assertSecretFree, REDACTED, redactedExcerpt } from '../redaction';
 import { BrokerError, type VmAdapter, type VmHandle } from '../vm/adapter';
@@ -107,6 +112,9 @@ async function bounded<T>(
 }
 
 export interface AgentLoopContext {
+  readonly assertAdmission?: () => void;
+  readonly continuation?: AgentContinuation;
+  readonly saveContinuation?: (snapshot: AgentContinuation) => void;
   readonly adapter: VmAdapter;
   /** Exact live handle returned by provisionWorkspace, never a provisioning VM. */
   readonly vm: VmHandle;
@@ -130,6 +138,19 @@ export interface AgentLoopContext {
   readonly activeTime?: ActiveTimeBudget;
   /** Separate bounded cleanup allowance after a worker deadline. */
   readonly cleanupTimeoutMs?: number;
+}
+/** Data-only controller snapshot. Pending tool actions are re-admitted on a fresh
+ * guest; they never carry publication authority or VM-origin file contents. */
+export interface AgentContinuation {
+  readonly v: 1;
+  readonly phase: AgentPhase;
+  readonly baseDigest: string;
+  readonly planDigest: string | null;
+  readonly turn: number;
+  readonly rejected: number;
+  readonly writes: readonly { path: string; content: string }[];
+  readonly messages: ModelMessage[];
+  readonly pending: ModelResult | null;
 }
 
 export type AgentStop =
@@ -260,9 +281,7 @@ async function loop(
     release = leaseProvisionedVm(ctx.adapter, ctx.vm);
     tracking.ownsWorkspace = true;
     const overlay = workspaceOverlay(ctx);
-    const messages: ModelMessage[] = [
-      { role: 'user', content: untrustedFrame('issue', ctx.issue) },
-    ];
+    let messages: ModelMessage[] = [{ role: 'user', content: untrustedFrame('issue', ctx.issue) }];
     if (input) {
       const plan = admitModelAction({ kind: 'submit_plan', text: input.plan.text }, ctx.binding);
       if (plan.kind !== 'submit_plan' || input.plan.digest !== sha256(plan.text))
@@ -275,22 +294,76 @@ async function loop(
     // Secret-bearing issue/repair data never goes to the provider.
     assertSecretFree(messages);
     let rejected = 0;
-    for (let turn = 1; turn <= maxTurns; turn++) {
+    let firstTurn = 1;
+    let pending: ModelResult | null = null;
+    if (ctx.continuation) {
+      const held = structuredClone(ctx.continuation);
+      assertSecretFree(held);
+      if (
+        Object.keys(held).sort().join(',') !==
+          'baseDigest,messages,pending,phase,planDigest,rejected,turn,v,writes' ||
+        held.v !== 1 ||
+        held.phase !== phase ||
+        held.baseDigest !== overlay.base.digest ||
+        held.planDigest !== (input?.plan.digest ?? null) ||
+        !Number.isSafeInteger(held.turn) ||
+        held.turn < 1 ||
+        held.turn > maxTurns + 1 ||
+        !Number.isSafeInteger(held.rejected) ||
+        held.rejected < 0 ||
+        held.rejected >= 5 ||
+        !Array.isArray(held.writes) ||
+        !Array.isArray(held.messages) ||
+        held.messages.length > maxTurns * 2 + 3
+      )
+        throw new Error('invalid_continuation');
+      for (const write of held.writes) overlay.write(write.path, write.content);
+      // Message structure is validated again by the model adapter. It is untrusted
+      // conversation data, never a system prompt or an authority binding.
+      if (held.messages.some((m) => !['user', 'assistant', 'tool'].includes(m.role)))
+        throw new Error('invalid_continuation');
+      messages = held.messages;
+      firstTurn = held.turn;
+      rejected = held.rejected;
+      pending = held.pending;
+    }
+    const save = (turn: number, result: ModelResult | null) =>
+      ctx.saveContinuation?.({
+        v: 1,
+        phase,
+        baseDigest: overlay.base.digest,
+        planDigest: input?.plan.digest ?? null,
+        turn,
+        rejected,
+        writes: overlay
+          .writtenEntries()
+          .map((e) => ({ path: e.path, content: Buffer.from(e.bytes, 'base64').toString('utf8') })),
+        messages: structuredClone(messages),
+        pending: result === null ? null : structuredClone(result),
+      });
+    for (let turn = firstTurn; turn <= maxTurns; turn++) {
+      ctx.assertAdmission?.();
+      save(turn, pending);
       tracking.turn = turn;
       tracking.stage = 'model';
       const time = remaining();
       if (time <= 0) return { kind: 'budget_exhausted', reason: 'active_time' };
       assertProvisionedVm(ctx.adapter, ctx.vm);
       activeModelDeadline = time <= MODEL_TIMEOUT_MS;
-      const produced = await meteredComplete(ctx.model, ctx.ledger, ctx.sessionId, ctx.rates, {
-        system: AGENT_SYSTEM,
-        messages,
-        tools: agentTools(phase),
-        maxOutputTokens: MODEL_OUTPUT_TOKENS,
-        timeoutMs: Math.min(MODEL_TIMEOUT_MS, time),
-      });
+      const produced =
+        pending ??
+        (await meteredComplete(ctx.model, ctx.ledger, ctx.sessionId, ctx.rates, {
+          system: AGENT_SYSTEM,
+          messages,
+          tools: agentTools(phase),
+          maxOutputTokens: MODEL_OUTPUT_TOKENS,
+          timeoutMs: Math.min(MODEL_TIMEOUT_MS, time),
+        }));
       // Snapshot the adapter-owned result before the asynchronous transcript sink.
       const result = JSON.parse(JSON.stringify(produced)) as typeof produced;
+      pending = null;
+      save(turn, result);
+      ctx.assertAdmission?.();
       await record(turn, 'model', result);
       assertProvisionedVm(ctx.adapter, ctx.vm);
       if (remaining() <= 0) return { kind: 'budget_exhausted', reason: 'active_time' };
@@ -311,6 +384,7 @@ async function loop(
           throw new AuthorityError('credential_material');
         }
         const admitted = admitModelAction(proposal, ctx.binding);
+        ctx.assertAdmission?.();
         if (
           admitted.kind === 'request_publication' ||
           (phase === 'planning' &&
@@ -438,6 +512,7 @@ async function loop(
           content: untrustedFrame('action_result', reply),
         });
       }
+      save(turn + 1, null);
     }
     return { kind: 'turns_exhausted' };
   } catch (error) {

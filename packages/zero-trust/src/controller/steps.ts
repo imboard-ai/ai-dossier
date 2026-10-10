@@ -42,6 +42,7 @@ import { isTestPath, reviewCandidate } from '../review/integrity';
 import { isRunContinuation, prerequisiteWaitOrigin, ReasonCode } from '../state';
 import type { ProxyTarget, VmAdapter } from '../vm/adapter';
 import {
+  type AgentContinuation,
   type AgentLoopContext,
   type AgentPlan,
   runImplementation,
@@ -350,6 +351,15 @@ export function createSteps(
     baseManifest,
     now: services.now,
     persist: (entry) => artifacts(c).put('transcript', entry),
+    assertAdmission: c.assertAdmission,
+    continuation: artifacts(c).get<AgentContinuation>(
+      phase === 'planning' ? 'planning_continuation' : 'implementation_continuation'
+    ),
+    saveContinuation: (held) =>
+      artifacts(c).put(
+        phase === 'planning' ? 'planning_continuation' : 'implementation_continuation',
+        held
+      ),
   });
   const summary = (e: WorkspaceEvidence) => {
     const r = e.records.find((r) => r.captureReport);
@@ -485,9 +495,12 @@ export function createSteps(
     },
     async plan(c) {
       const w = workspace(c);
+      const held = artifacts(c).get<AgentContinuation>('planning_continuation');
+      const overlay = new WorkspaceOverlay(source(c).manifest);
+      for (const write of held?.writes ?? []) overlay.write(write.path, write.content);
       const vm = await provisionWorkspace({
         ...w,
-        manifest: source(c).manifest,
+        manifest: overlay.manifest(),
         plan: buildCommandPlan(profile(c).manager, services.endpoints),
       });
       try {
@@ -521,9 +534,14 @@ export function createSteps(
         : undefined;
       const base = source(c);
       const w = workspace(c);
+      const held = artifacts(c).get<AgentContinuation>('implementation_continuation');
+      const overlay = new WorkspaceOverlay(old?.manifest ?? base.manifest);
+      if (held && held.baseDigest === overlay.base.digest)
+        for (const write of held.writes) overlay.write(write.path, write.content);
+      else if (held) artifacts(c).put('implementation_continuation', null);
       const vm = await provisionWorkspace({
         ...w,
-        manifest: old?.manifest ?? base.manifest,
+        manifest: overlay.manifest(),
         plan: buildCommandPlan(profile(c).manager, services.endpoints),
       });
       try {

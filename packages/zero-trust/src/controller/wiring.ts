@@ -500,6 +500,7 @@ export function createController(
       id: adapter.id,
       cacheIdentity: adapter.cacheIdentity,
       complete: async (request) => {
+        controller.assertAdmission();
         const context = activeContext;
         if (!context || context.signal.aborted) throw new ModelError('model_aborted');
         const result = await adapter.complete({
@@ -606,16 +607,34 @@ export function createController(
   };
   const adapter = (c: PhaseContext): VmAdapter => {
     const raw = localVm(c);
+    const guard = async <T>(work: () => Promise<T>): Promise<T> => {
+      c.assertAdmission();
+      let aborted!: () => void;
+      const stop = new Promise<never>((_resolve, reject) => {
+        aborted = () => reject(new ControllerError('admission_closed'));
+        c.signal.addEventListener('abort', aborted, { once: true });
+      });
+      try {
+        const result = await Promise.race([work(), stop]);
+        c.assertAdmission();
+        return result;
+      } finally {
+        c.signal.removeEventListener('abort', aborted);
+      }
+    };
     const a: VmAdapter = {
       create: async (spec) => {
         return c.createVm({ scope: spec.scope, phase: spec.phase, proxyTarget: spec.proxyTarget });
       },
-      exec: raw.exec.bind(raw),
-      putFile: raw.putFile.bind(raw),
-      getFile: raw.getFile.bind(raw),
-      endProvisioning: raw.endProvisioning.bind(raw),
+      exec: (...args) => guard(() => raw.exec(...args)),
+      putFile: (...args) => guard(() => raw.putFile(...args)),
+      getFile: (...args) => guard(() => raw.getFile(...args)),
+      endProvisioning: (...args) => guard(() => raw.endProvisioning(...args)),
       listByRun: raw.listByRun.bind(raw),
       destroy: async (handle) => {
+        // On an external stop the core owns destruction and accounting. Joining
+        // its completion precedes the final pause/cancel snapshot.
+        if (c.signal.aborted) return;
         const hold = c.ledger.reserve(c.sessionId, estimate('teardown'), 'teardown');
         const at = now().getTime();
         try {
@@ -690,6 +709,7 @@ export function createController(
       fork,
       vault,
       intents: () => {
+        controller.assertAdmission();
         if (!intents) throw new Error('intents_not_ready');
         return intents.snapshot();
       },
@@ -878,6 +898,7 @@ export function createController(
             ...shipping,
             bindings: { ...shipping.bindings, expectedRemoteSha: pusher.expectedRemoteSha(intent) },
           })(intent);
+          controller.assertAdmission();
           receipt = authorization.receipt;
           artifacts(c).put('receipt', receipt);
           return authorization;
@@ -895,7 +916,7 @@ export function createController(
   };
   const shippingAdmission = async (c: PhaseContext) => {
     if (!shipping || !pusher || !receipt) throw new Error('shipping_unavailable');
-    return makeHandoffAdmission({
+    const admission = makeHandoffAdmission({
       ...shipping,
       receipt,
       trustedControllerKey: await signer.getPublicKey(),
@@ -903,6 +924,25 @@ export function createController(
       checkForkReadiness: () => checkFork(c),
       remoteBranchSha: pusher.handoffReadBack(shippingIntent(shipping.bindings).target),
     });
+    // A pending control file is a stop fence even before its lifecycle snapshot
+    // can be committed. Recheck after every awaited admission fact and at the
+    // final synchronous publication boundary.
+    return Object.fromEntries(
+      Object.entries(admission).map(([key, fn]) => [
+        key,
+        (...args: unknown[]) => {
+          controller.assertAdmission();
+          const result = (fn as (...a: unknown[]) => unknown)(...args);
+          if (result instanceof Promise)
+            return result.then((value) => {
+              controller.assertAdmission();
+              return value;
+            });
+          controller.assertAdmission();
+          return result;
+        },
+      ])
+    ) as unknown as HandoffAdmission;
   };
   const openTracker = async (c: PhaseContext) => {
     if (tracker) return tracker;
@@ -1177,6 +1217,78 @@ export function createController(
       },
     ],
     recovery: {
+      endRun: async (c) => {
+        // Dormant cancellation must not perform OAuth to revoke an old lease.
+        if (!broker && artifacts(c).get('fork')) {
+          broker = new ForkCredentialBroker({
+            store: journal(c, 'tokens'),
+            http,
+            app: appCredentials(),
+            fork: artifacts(c).require<ForkReady>('fork'),
+            vault,
+            intents: () => {
+              throw new Error('admission_closed');
+            },
+            now: () => now().getTime(),
+          });
+        }
+        await broker?.endRun('cancelled');
+      },
+      reconcileControl: async (c, kind) => {
+        if (!intents && artifacts(c).get('shipping')) {
+          const held = artifacts(c).require<ShippingAuthorizeDeps>('shipping');
+          // Recovery uses read-back only. The authorize path remains closed.
+          pusher ??= new EdgeForkPusher(
+            {
+              broker: broker as ForkCredentialBroker,
+              read,
+              fork: held.fork,
+              ledger: journal(c, 'push-ledger'),
+              trustedControllerKey: await signer.getPublicKey(),
+              nonces: new ReceiptNonceStore(c.store.storeDirectory('nonces')),
+              authorize: async () => {
+                throw new Error('admission_closed');
+              },
+              now: () => now().getTime(),
+            },
+            overrides.gitRemoteUrl?.fork
+          );
+          intents = new IntentDriver(
+            journal(c, 'intents'),
+            pusher,
+            { run: c.store.run, contributionId: c.store.contributionId },
+            () => now().toISOString()
+          );
+        }
+        await intents?.resume();
+        const driver = openHandoff(c, contactAdmission(c));
+        const observed = await driver.resume();
+        if (observed?.kind === 'observed' && observed.operation === 'pr_create')
+          artifacts(c).put('publication', {
+            url: observed.url,
+            ci: observed.ci,
+            headSha: observed.headSha,
+          });
+        const run = driver.snapshot().run;
+        if (isRunContinuation(c.store.run, run)) {
+          c.store.persistRun(run);
+          for (const d of [intents, handoff, tracker])
+            if (d && isRunContinuation(d.snapshot().run, run)) d.observeRun(run);
+        }
+        if (
+          kind === 'cancel' &&
+          artifacts(c).get('publication') &&
+          ['submitted', 'awaiting_review', 'accepted'].includes(run.state)
+        ) {
+          const t = await openTracker({ ...c, run });
+          await t.requestWithdrawal({
+            reason: 'user_instruction',
+            explanation: 'The contributor cancelled this run.',
+          });
+          artifacts(c).put('withdrawal', t.status().nextPermittedAction);
+        }
+        return run;
+      },
       openStore: (r, id) => {
         const store = RunStore.open(r, id);
         if (!sameConfig(store.config, config)) {
