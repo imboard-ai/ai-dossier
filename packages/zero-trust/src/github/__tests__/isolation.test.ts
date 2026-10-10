@@ -4,7 +4,7 @@
  * may reach it through any chain of static or dynamic imports. */
 import fs from 'node:fs';
 import * as path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { importGraph } from '../../__tests__/import-graph';
 
 const SRC = path.resolve(__dirname, '../..');
@@ -20,6 +20,8 @@ const CREDENTIAL = [
   'contributor.ts',
   'push.ts',
 ].map((name) => path.join(GITHUB, name));
+// The unexported composition root constructs credentials; only scripts may import it.
+CREDENTIAL.push(path.join(SRC, 'controller', 'wiring.ts'));
 const isCredential = (file: string) => CREDENTIAL.includes(file);
 
 const { sources, resolve, reaches } = importGraph(SRC);
@@ -48,5 +50,24 @@ describe('credential broker isolation', () => {
     expect(resolve(path.join(SRC, 'x.ts'), '@ai-dossier/zero-trust')).toBe(
       path.join(SRC, 'index.ts')
     );
+    const wiring = path.join(SRC, 'controller', 'wiring.ts');
+    expect(resolve(path.join(SRC, 'x.ts'), './controller/wiring')).toBe(wiring);
+    expect(reaches(wiring)).toContain(broker);
+    // A prospective source import reaches the root itself, which is credential-bearing.
+    expect([wiring, ...reaches(wiring)].filter(isCredential).length).toBeGreaterThan(1);
+    const entry = path.join(SRC, 'isolation-negative.ts');
+    const original = fs.readFileSync;
+    // Run the actual scanner on a virtual source module; never edit the live tree.
+    const spy = vi
+      .spyOn(fs, 'readFileSync')
+      .mockImplementation(((file: fs.PathOrFileDescriptor, ...args: unknown[]) =>
+        file === entry
+          ? "import type { ControllerOverrides } from './controller/wiring';"
+          : Reflect.apply(original, fs, [file, ...args])) as typeof fs.readFileSync);
+    try {
+      expect(reaches(entry).filter(isCredential)).toContain(wiring);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

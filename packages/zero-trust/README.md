@@ -10,6 +10,86 @@ plus ecosystem detection, runtime profiles, command plans and package-proxy poli
 (see the gate 2 section below).
 Publication remains gated on S1 feasibility.
 
+## Controller composition (#1108)
+
+Scripts import `createController(config, overrides?)` directly from
+`src/controller/wiring.ts` (or its compiled `dist/controller/wiring.js`). This
+credential-bearing root is deliberately **not exported by the package index**.
+No other production source module may import it, including through type imports.
+`controller/steps.ts` is the credential-free glue between the real producers and
+the core `RunController` outcome unions.
+
+The root validates closed config, creates the durable RunStore and BudgetLedger,
+preflights local QEMU before allocation, reads the private proxy endpoints file,
+and builds phase model adapters. Policy decisions and agent calls go through the
+producers' `meteredComplete` paths. Each VM allocation goes through the core's
+reserved allocation lease; evidence-runner teardown is separately reserved and
+settled from observed local elapsed time. Include a pinned zero-price
+`local-qemu` / `millisecond` rate in `modelProfile.rates` for this unbilled local
+provider. An interrupted charge remains unknown, never replaced with an estimate.
+
+`proxyEndpointsFile` is an owned private regular JSON file (0600), with exactly:
+
+```json
+{
+  "endpoints": {
+    "npmRegistry": "http://npm-proxy:4873/",
+    "pypiIndex": "http://pypi-proxy:5000/index/"
+  },
+  "target": { "host": "10.0.0.2", "port": 4873 }
+}
+```
+
+Use the relay URLs required by the baked execution profile. The physical target
+is the controller-selected mirror; repository or model text cannot change it.
+GitHub App secrets are read only when constructing the credential session from
+the environment names in config; the Ed25519 signer uses `signerKeyFile`.
+
+`authorApproval` is optional in the foundational stored-config schema for older
+read-only runs, but **required by createController**. It is a closed record:
+`{ userId, login, name, email, source: 'default' | 'override', approvedAt }`.
+It participates in RunStore's config digest. The root consumes that identity
+verbatim and never defaults, infers, or asks a model for authorship. Missing
+approval refuses with `author_approval_missing`; a different authenticated numeric
+account or login refuses with `author_approval_mismatch`, before candidate creation,
+on resume, and at shipping admission. Canonical author time uses its approved UTC
+second. #1109 owns showing/computing defaults, explicit confirmation, and verified
+email overrides; `source: 'override'` here records that trusted start-side consent.
+An explicit required DCO/sign-off policy uses the same approved name/email in the
+canonical `Signed-off-by` trailer. A required real-name policy with only the login
+approved is a hand-off, never inferred real-name consent.
+
+The real OAuth/PKCE flow uses `ContributorAuthorization` and `listenLoopback`.
+While `start` or `resume` awaits the browser callback, the returned controller's
+read-only `authorizationUrl` lets the script show the contributor's authorization
+page. Recovery revokes old credential leases and may require authorization again.
+Fork and App-installation prerequisites remain explicit contributor waits.
+`checkForkReadiness({ ...input, readOnly: true }, deps)` validates a held binding
+in handoff/tracking states without creating lifecycle transitions; unavailable
+prerequisites return unknown. Normal prerequisite checks retain their original
+explicit wait/resume behavior.
+
+The journey connects policy discovery/classification/typed assessment,
+eligibility, gate, contributor-confirmed engagement and invitation freshness,
+canonical source acquisition, ecosystem/profile/command selection, baseline,
+model planning/implementation, regression and scope review, independent verifier
+and real boundary probe, drift handling, fork readiness, `makeAuthorize` receipt
+issuance and CAS push, `makeHandoffAdmission` compare links, and `PrTracker`.
+Permission requests first enter `awaiting_contributor`: only observing the actual
+contributor comment enters `awaiting_maintainer`. Repeated resume never fabricates
+an upstream write or emits another engagement link. PR observation persists its
+URL and honestly pending/unknown CI; local verification does not mean upstream CI
+passed. Journals, source/approval/candidate bindings and digest-named immutable
+phase artifacts are reopened and checked on resume. The broker's cleanup-failure
+hook fences the run with `CleanupFailed`; the incident kill hook revokes the grant
+and destroys run VMs. Every run-owned journal is released before RunStore pins close.
+
+Test overrides are **edges only**: `vm`, `fetch`, credential-free `read`, phase
+`models`, `gitRemoteUrl` (Vitest-only local bare upstream/fork), `now`, and `signer`.
+There is no phase, policy, verifier, budget, or author override. The offline E2E
+uses real producers/drivers with the npm fixture, a FakeVmAdapter, scripted model,
+fake GitHub transport, real loopback consent, and local bare Git repositories.
+
 ## Credential-free shipping context (#1105)
 
 `controller/shipping.ts` exports the trusted composition APIs below. It has no

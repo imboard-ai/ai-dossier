@@ -7,12 +7,12 @@ handoff: consume explicit persisted authorApproval, never infer identity in the 
 and refuse a missing approval or authenticated numeric-account mismatch.
 
 ## Acceptance Criteria
-- [ ] End-to-end test with edge fakes only reaches awaiting_contributor, then submitted with persisted PR URL and honestly pending/awaiting-approval/unknown CI; fork SHA equals independently verified candidate SHA.
-- [ ] Permission-required policy produces one engagement link and awaiting_maintainer; repeated resume produces no second link.
-- [ ] An AI ban blocks before VM creation.
-- [ ] Three verification failures exhaust the two repairs and fail without a fork push.
-- [ ] A boundary breach blocks with no receipt and untouched fork ref.
-- [ ] Credential isolation admits only the unexported wiring root and detects another source module importing it.
+- [x] End-to-end test with edge fakes only reaches awaiting_contributor, then submitted with persisted PR URL and honestly pending/awaiting-approval/unknown CI; fork SHA equals independently verified candidate SHA.
+- [x] Permission-required policy produces one engagement link and awaiting_maintainer; repeated resume produces no second link.
+- [x] An AI ban blocks before VM creation.
+- [x] Three verification failures exhaust the two repairs and fail without a fork push.
+- [x] A boundary breach blocks with no receipt and untouched fork ref.
+- [x] Credential isolation admits only the unexported wiring root and detects another source module importing it.
 
 ## Predicted Files
 - `packages/zero-trust/src/controller/wiring.ts` — credential-bearing composition root, excluded from package exports.
@@ -110,3 +110,43 @@ only to tests to simulate a production-complete path.
 
 ## Base Branch
 `main`. The issue branch includes the confirmed #1105 predecessor merge.
+
+## Implementation phase evidence
+
+The root and credential-free glue connect the real producers, broker, pusher,
+handoff and tracker. The root consumes persisted approval and rechecks authenticated
+numeric identity; it contains no identity-default or test-only author seam.
+Permission requests preserve the actual contributor-comment journey. Phase VM
+adapters use each current allocation lease; recovery reopens journals without
+reinitializing consumed nonces. Immutable digest-named phase artifacts are validated
+on reads. Scope discovery compares whole suites, not a targeted regression report
+against the baseline suite. DCO trailers use the same approved identity.
+
+Verification observed during implementation:
+
+- Full zero-trust coverage: **4,526 passed**, 14 opt-in live VM tests skipped;
+  97 passing test files and 2 opt-in files skipped.
+- Coverage: **95.48% statements / 92.69% branches / 97.74% functions /
+  97.24% lines**; unchanged 90/85/90/90 thresholds enforced over the complete package.
+- **13 edge-only composition E2Es**, including all six issue controls, real
+  loopback consent, persisted PR/CI observations, account mismatch on resume,
+  prerequisite waits, DCO/real-name handling and legitimate mid-model cancellation.
+- Focused artifact/approval/config/isolation suites passed, including actual-byte
+  corruption, large source artifacts, config digest tampering and the actual import
+  scanner run against a virtual unauthorized source import.
+- Strict package build and strict no-emit typecheck including every changed/new test
+  and its production/test dependencies passed. `make build-all` passed.
+- Repository auto-fix and warning-as-error read-only lint passed; 408 repository
+  script tests passed across 21 files.
+- `ci_parity=skipped`: this repository has no `scripts/ci-parity.sh`; the gates above
+  were run directly. `repro=n/a`: this is the composition feature.
+- The first full coverage attempt had one cleanup-racer process flake; isolated
+  replay and the complete one-worker coverage retry passed. No failing test was
+  ignored, no coverage threshold changed, and no infrastructure implementation was
+  changed to hide that flake.
+- A strengthened model-request assertion found the real repair-state mapping:
+  `repair_required` returns to `implementing`. The fixed composition uses the prior
+  canonical candidate and its verified failure commands/verdict for repairs; the
+  targeted assertion and final full coverage run both pass.
+
+This is implementation evidence, not an independent review or shipping verdict.
