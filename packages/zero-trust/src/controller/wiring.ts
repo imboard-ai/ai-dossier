@@ -49,6 +49,7 @@ import {
 import { preflightHost } from '../vm/host';
 import { LocalQemuAdapter } from '../vm/local-qemu';
 import { AuthorApprovalError, requireAuthorApproval } from './author-approval';
+import { validateCheckpointReview } from './checkpoints';
 import { type RunConfig, runConfigInput, validateRunConfig } from './config';
 import {
   type ControllerDependencies,
@@ -897,6 +898,10 @@ export function createController(
       },
       recoverCredentials: async (c) =>
         recoverWithDiagnostic(c, async () => {
+          for (const point of ['plan', 'patch'] as const) {
+            const checkpoint = c.store.checkpoint(point);
+            if (checkpoint?.status === 'open') validateCheckpointReview(c.store, checkpoint);
+          }
           if (!TERMINAL_STATES.includes(c.run.state) && c.run.state !== 'blocked_cleanup') {
             if (prerequisiteWaitOrigin(c.run) && !artifacts(c).get('fork')) return;
             await identity(c);

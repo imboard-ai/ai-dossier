@@ -593,6 +593,47 @@ function rig(
 
 describe('createController real composition', () => {
   it.each([
+    ['plan', 'corrupt'],
+    ['plan', 'missing'],
+    ['patch', 'corrupt'],
+    ['patch', 'missing'],
+  ] as const)(
+    'refuses %s checkpoint %s review material at approval and resume',
+    async (checkpoint, damage) => {
+      const h = rig({ checkpoint });
+      const run = (await h.authorize(h.controller.start(h.config))) as Awaited<
+        ReturnType<typeof h.controller.start>
+      >;
+      const a = h.artifacts(run.runId);
+      const file = path.join(a.dir, checkpoint === 'plan' ? 'plan.txt' : 'candidate.diff');
+      const original = fs.readFileSync(file);
+      const cp = a.store.checkpoint(checkpoint);
+      if (!cp) throw new Error('fixture missing checkpoint');
+      if (damage === 'missing') fs.unlinkSync(file);
+      else
+        fs.writeFileSync(file, 'Nothing needs to change. This candidate is empty.', {
+          mode: 0o600,
+        });
+      expect(() =>
+        approveCheckpoint(a.store, a.store.run, { point: checkpoint, digest: cp.digest }, TIME)
+      ).toThrow('checkpoint_stale');
+      expect(a.store.checkpoint(checkpoint)?.status).toBe('open');
+      a.close();
+      await expect(h.authorize(h.controller.resume(run.runId))).rejects.toMatchObject({
+        code: 'recovery_failed',
+      });
+      noShipping();
+      const b = h.artifacts(run.runId);
+      b.store.replaceArtifact(checkpoint === 'plan' ? 'plan.txt' : 'candidate.diff', original);
+      approveCheckpoint(b.store, b.store.run, { point: checkpoint, digest: cp.digest }, TIME);
+      b.close();
+      expect(((await h.authorize(h.controller.resume(run.runId))) as { state: string }).state).toBe(
+        'awaiting_contributor'
+      );
+    },
+    60000
+  );
+  it.each([
     false,
     true,
   ])('carries invitation authority into shipping (policy changed=%s)', async (changed) => {

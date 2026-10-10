@@ -92,6 +92,11 @@ apply on replay, invitations are revalidated before leaving permission waits, an
 the cumulative admitted touched paths survive repair and drift checks, including
 byte-identical writes. Plan/patch checkpoints publish the held plan text and a
 deterministic held-source-to-candidate diff in the documented artifact paths.
+Composition plan/patch checkpoint bindings also retain `reviewDigest`, the SHA-256
+of the advertised review bytes. Resume and approval reject missing, linked or
+contradictory review files as stale; restoring the exact held-derived bytes permits
+approval without rerunning the model. Foundational checkpoints without that
+optional field preserve their existing contract.
 Producer failures retain a secret-free `diagnostic` step artifact with run, phase,
 operation, closed reason and explicit retry guidance; `ControllerError.diagnostic`
 exposes its safe phase/reason. An unavailable identity read remains recoverable;

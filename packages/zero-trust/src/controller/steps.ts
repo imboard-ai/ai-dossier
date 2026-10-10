@@ -495,7 +495,14 @@ export function createSteps(
         if (result.kind !== 'plan') return { kind: 'hand_off' };
         artifacts(c).put('plan', result);
         c.store.replaceArtifact('plan.txt', Buffer.from(result.text));
-        return { kind: 'planned', bindings: { ...bindings(c), planDigest: result.digest } };
+        return {
+          kind: 'planned',
+          bindings: {
+            ...bindings(c),
+            planDigest: result.digest,
+            reviewDigest: sha256(Buffer.from(result.text)),
+          },
+        };
       } finally {
         await releaseWorkspace(w.adapter, vm, w.lifecycle);
       }
@@ -572,10 +579,15 @@ export function createSteps(
           authority: produced.authority,
           meta: result.meta,
         });
-        c.store.replaceArtifact('candidate.diff', reviewDiff(base.manifest, manifest));
+        const diff = reviewDiff(base.manifest, manifest);
+        c.store.replaceArtifact('candidate.diff', diff);
         return {
           kind: 'candidate',
-          bindings: { ...bindings(c), candidateSha: produced.record.candidateSha },
+          bindings: {
+            ...bindings(c),
+            candidateSha: produced.record.candidateSha,
+            reviewDigest: sha256(diff),
+          },
         };
       } finally {
         await releaseWorkspace(w.adapter, vm, w.lifecycle);

@@ -802,8 +802,9 @@ export class RunController {
   }
   private async shipping(): Promise<boolean> {
     const record = this.latestVerification();
+    const { reviewDigest: _patchReview, ...candidateBindings } = this.latestCandidate().bindings;
     const bindings = {
-      ...this.latestCandidate().bindings,
+      ...candidateBindings,
       verificationDigest: record.recordDigest,
     };
     if (!(await this.checkpoint('verification', bindings))) return false;
