@@ -2,9 +2,9 @@
 
 ## Problem
 Connect the real controller phases from supplied issue to verified fork push and
-contributor-submitted PR. Exploration found an unresolved contributor-authorship
-contract at the composition boundary. This document preserves the investigation;
-it is not an implementation-complete plan or acceptance claim.
+contributor-submitted PR. Owner comment 6094631068 resolves the prior authorship
+handoff: consume explicit persisted authorApproval, never infer identity in the root,
+and refuse a missing approval or authenticated numeric-account mismatch.
 
 ## Acceptance Criteria
 - [ ] End-to-end test with edge fakes only reaches awaiting_contributor, then submitted with persisted PR URL and honestly pending/awaiting-approval/unknown CI; fork SHA equals independently verified candidate SHA.
@@ -20,9 +20,14 @@ it is not an implementation-complete plan or acceptance claim.
 - `packages/zero-trust/src/controller/__tests__/e2e-fakes.test.ts` — real producers/drivers and local Git with edge fakes.
 - `packages/zero-trust/src/github/__tests__/isolation.test.ts` — wiring boundary and negative self-check.
 - `packages/zero-trust/README.md` — composition contract.
+- `packages/zero-trust/src/controller/config.ts` — closed author approval schema.
+- `packages/zero-trust/src/controller/config.test.ts` — approval validation controls.
+- `packages/zero-trust/src/controller/author-approval.ts` — authenticated approval binding.
+- `packages/zero-trust/src/controller/author-approval.test.ts` — missing/mismatch refusal.
 
 ## Approach
-1. Resolve the contributor-approved commit-author input described below.
+1. Validate and digest-bind persisted authorApproval; recheck authenticated account
+   before candidate construction, resume and shipping. CLI confirmation belongs to #1109.
 2. Compose real gate/freshness, source/profile/evidence, model, scope, verifier,
    drift and shipping implementations under the existing RunController fence.
 3. Construct credential drivers only in wiring; retain durable run-owned source,
@@ -61,6 +66,11 @@ strict builds and supplemental test typechecks; warning-as-error repository lint
 and repository CI-parity checks. No implementation or test success is claimed.
 
 ## Open Questions
+Resolved by owner comment 6094631068 (2026-10-10). The historical investigation
+below is retained for provenance; it is no longer an open decision. Implement
+authorApproval { userId, login, name, email, source, approvedAt } in trusted config;
+consume only that approval and refuse missing/mismatched account authority.
+
 ### Contributor-approved canonical author (owner preference, not runtime fact)
 PRD §5.9 requires authenticated contributor-approved name/email recorded once
 before canonical construction (`docs/features/zero-trust-full-cycle/prd.md:259`).
