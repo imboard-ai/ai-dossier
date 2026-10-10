@@ -696,6 +696,35 @@ export function createController(
       }
     );
   };
+  const openBroker = (c: PhaseContext, fork: ForkReady) =>
+    new ForkCredentialBroker({
+      assertAdmission: controller.assertAdmission.bind(controller),
+      store: journal(c, 'tokens'),
+      http,
+      app: appCredentials(),
+      fork,
+      vault,
+      intents: () => {
+        controller.assertAdmission();
+        if (!intents) throw new Error('intents_not_ready');
+        return intents.snapshot();
+      },
+      now: () => now().getTime(),
+      onCleanupBlocked: () => {
+        const current = c.store.run;
+        if (!TERMINAL_STATES.includes(current.state) && current.state !== 'blocked_cleanup')
+          c.store.persistRun(transitionRun(current, ReasonCode.CleanupFailed, now().toISOString()));
+      },
+    });
+  const cleanupCredentials = async (c: PhaseContext) => {
+    const fork = artifacts(c).get<ForkReady>('fork');
+    if (!fork) return;
+    const retained = new TokenJournal(journal(c, 'tokens')).state;
+    if (![...retained.tokens.values()].some((token) => OUTSTANDING.includes(token.status))) return;
+    broker ??= openBroker(c, fork);
+    const result = await broker.recover();
+    if (result.report) throw new Error('cleanup_incomplete');
+  };
   const credentials = async (c: PhaseContext) => {
     controller.assertAdmission();
     if (broker && contributor) return;
@@ -715,25 +744,7 @@ export function createController(
     controller.assertAdmission();
     if (stored && stored.repositoryId !== fork.repositoryId) throw new Error('fork_replaced');
     artifacts(c).put('fork', fork);
-    broker = new ForkCredentialBroker({
-      assertAdmission: controller.assertAdmission.bind(controller),
-      store: journal(c, 'tokens'),
-      http,
-      app: appCredentials(),
-      fork,
-      vault,
-      intents: () => {
-        controller.assertAdmission();
-        if (!intents) throw new Error('intents_not_ready');
-        return intents.snapshot();
-      },
-      now: () => now().getTime(),
-      onCleanupBlocked: () => {
-        const current = c.store.run;
-        if (!TERMINAL_STATES.includes(current.state) && current.state !== 'blocked_cleanup')
-          c.store.persistRun(transitionRun(current, ReasonCode.CleanupFailed, now().toISOString()));
-      },
-    });
+    broker ??= openBroker(c, fork);
     contributor = new ContributorAuthorization({
       app: appCredentials(),
       http,
@@ -1481,6 +1492,7 @@ export function createController(
         localVm(c);
         await cleanup();
       },
+      cleanupCredentials,
       recoverCredentials: async (c) =>
         recoverWithDiagnostic(c, async () => {
           for (const point of ['plan', 'patch'] as const) {

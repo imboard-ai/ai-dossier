@@ -1,4 +1,5 @@
 /** Gate-4 regressions kept separate from the upstream revision composition suite. */
+import { fork } from 'node:child_process';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { CLIENT_ID, OWNER } from '../../github/__tests__/github-fake';
@@ -10,6 +11,67 @@ import { compositionHooks, noShipping } from './composition-hooks';
 
 compositionHooks();
 describe('gate 4 composed cleanup regressions', () => {
+  it('SIGKILL after submitted persistence reports lost authority before observation-only resume, without OAuth or paid work', async () => {
+    const h = rig({ persistent: true });
+    const child = fork(
+      path.join(__dirname, 'publication-crash-child.ts'),
+      [h.config.executionProfile.stateDir],
+      {
+        execArgv: ['--import', 'tsx'],
+        env: { ...process.env, VITEST: '1' },
+        stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+      }
+    );
+    let errors = '';
+    child.stderr?.on('data', (bytes) => {
+      errors += bytes.toString();
+    });
+    const died = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) =>
+      child.once('exit', (code, signal) => resolve({ code, signal }))
+    );
+    let id: string;
+    try {
+      id = await new Promise<string>((resolve, reject) => {
+        const deadline = setTimeout(
+          () => reject(new Error(`publication crash deadline: ${errors}`)),
+          30000
+        );
+        child.once('message', (message) => {
+          clearTimeout(deadline);
+          resolve((message as { runId: string }).runId);
+        });
+        child.once('exit', () => {
+          clearTimeout(deadline);
+          reject(new Error(`publication child exited before message: ${errors}`));
+        });
+      });
+    } finally {
+      child.kill('SIGKILL');
+    }
+    expect((await died).signal).toBe('SIGKILL');
+    h.submit(id);
+    const before = h.artifacts(id);
+    expect(before.store.run.state).toBe('submitted');
+    const publication = before.get('publication');
+    before.close();
+    await expect(h.controller.resume(id)).rejects.toThrow();
+    expect(h.controller.snapshot().state).toBe('blocked_cleanup');
+    expect(h.fake.oauthCalls).toEqual([]);
+    expect(h.modelCalls()).toBe(0);
+    const a = h.artifacts(id);
+    expect(a.store.run.state).toBe('blocked_cleanup');
+    expect(a.get('publication')).toEqual(publication);
+    const journal = new Journal(a.store.storeDirectory('tokens'));
+    expect(journal.read()).toContainEqual(
+      expect.objectContaining({ type: 'admissions_disabled', reason: 'cleanup_blocked' })
+    );
+    expect(journal.read()).toContainEqual(
+      expect.objectContaining({ type: 'token_minted', id: expect.any(String) })
+    );
+    journal.close();
+    a.close();
+    noShipping();
+  }, 60000);
   function request(h: ReturnType<typeof rig>, kind: 'pause' | 'cancel') {
     const store = RunStore.open(
       path.join(h.config.executionProfile.stateDir, 'runs'),

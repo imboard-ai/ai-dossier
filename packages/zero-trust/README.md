@@ -114,6 +114,12 @@ refusal, contributor refresh refusal, mid-push credential expiry, and a real
 SIGKILL/reopen with an in-flight model hold. It uses shared immutable test keys;
 run-owned credentials, journals, repositories and receipt authority stay separate.
 The broader gate-4 verdict, including upstream scenarios, belongs to #1114.
+On reopen, `RecoveryHooks.cleanupCredentials(context)` reconciles retained
+credential obligations without OAuth or paid work before observation-only or
+contributor-action fast returns. A crash after publication but before release
+cannot leave an ordinary tracking state with silently abandoned authority:
+lost values retain their token IDs and `blocked_cleanup`, while publication
+facts remain recorded.
 
 `approveBudgetCeiling(root, runId, approval, now)` is an explicit trusted local
 user command exported from the package (`controller/budget-extension`). It is

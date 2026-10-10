@@ -167,6 +167,8 @@ export interface RecoveryHooks {
   reconcileCleanup?(vmId: string, context: PhaseContext): Promise<string | null>;
   reconcileVms(context: PhaseContext, cleanup: () => Promise<void>): Promise<void>;
   recoverCredentials(context: PhaseContext): Promise<void>;
+  /** Reconcile old credential obligations without identity acquisition or OAuth. */
+  cleanupCredentials?(context: PhaseContext): Promise<void>;
   resumeIntents(context: PhaseContext): Promise<undefined | RunRecord>;
   /** Replay/reconcile existing effects only; fresh invitation checks belong to PhaseSteps. */
   resumeHandoff(context: PhaseContext): Promise<undefined | RunRecord>;
@@ -442,6 +444,10 @@ export class RunController {
       // A wrapper cannot bypass actual listByRun/teardown reconciliation.
       await this.attemptRecovery(() => this.cleanup(), failures);
       const beforeTracker = await this.reconcileTracker(failures);
+      await this.attemptRecovery(
+        () => this.deps.recovery.cleanupCredentials?.(this.context()) ?? Promise.resolve(),
+        failures
+      );
       this.observeControl();
       this.observeIncident();
       if (this.control) return this.applyControl();
@@ -588,7 +594,6 @@ export class RunController {
       .then(work)
       .finally(async () => {
         clearInterval(watcher);
-        const beforeRelease = this.store?.run;
         try {
           await this.deps.release?.();
         } finally {
@@ -597,8 +602,7 @@ export class RunController {
           try {
             if (this.store) {
               const final = this.store.run;
-              if (beforeRelease && final.history.length !== beforeRelease.history.length)
-                this.notify(final);
+              if (!this.last || !sameRunRecord(this.last, final)) this.notify(final);
               else this.last = final;
             }
           } finally {
