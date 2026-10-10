@@ -18,12 +18,12 @@ import {
 } from '../github/contributor';
 import { checkForkReadiness, type ForkReady, type ReadinessOutcome } from '../github/fork';
 import { type ForkBranch, readForkBranch } from '../github/fork-ref';
-import { handoffMarker } from '../github/handoff';
+import { bodyDigest, handoffMarker, prTitle } from '../github/handoff';
 import { type HandoffAdmission, HandoffDriver } from '../github/handoff-driver';
 import { ForkPusher, type ForkPusherOptions } from '../github/push';
 import { anonymousReader, type GitHubRead } from '../github/reconcile';
 import { OUTSTANDING, TokenJournal, TokenVault } from '../github/token-journal';
-import { PrTracker, trackFromHandoff } from '../github/track';
+import { PrTracker, TrackError, trackFromHandoff } from '../github/track';
 import { IntentDriver } from '../intents';
 import { Journal } from '../journal';
 import { StoreLockedError } from '../lock';
@@ -38,11 +38,13 @@ import { canonicalJson } from '../receipt/schema';
 import { assertSecretFree } from '../redaction';
 import {
   isRunContinuation,
+  isTrackerPhase,
   prerequisiteWaitOrigin,
   ReasonCode,
   type RunRecord,
   sameRunRecord,
   TERMINAL_STATES,
+  TRACKING_STATES,
   transitionRun,
 } from '../state';
 import {
@@ -62,6 +64,7 @@ import {
   ControllerError,
   type PhaseContext,
   RunController,
+  type TrackerActionResult,
 } from './controller';
 import { ProvisioningFailedError } from './evidence-runner';
 import { readOutcomeBudget } from './outcome-records';
@@ -139,6 +142,12 @@ export function fenceIncident(root: string, reason: string): void {
     for (const fd of children) fs.closeSync(fd);
     fs.closeSync(parent);
   }
+}
+const ACTION_CANCELLED =
+  'The local pending action was cancelled. No upstream change was made. Open the PR to inspect its state; resume explicitly to observe it.';
+/** A contributor-action refusal the CLI reports by its fixed code. */
+function actionRefused(code: 'action_unavailable' | 'action_pending'): Error {
+  return Object.assign(new Error(code), { code });
 }
 function configuredApp(config: RunConfig): AppCredentials {
   return new AppCredentials({
@@ -1268,24 +1277,38 @@ export function createController(
   const controller: RunController = new RunController({
     trackerAction: async (c, request) => {
       const t = await openTracker(c);
-      const result =
-        request.kind === 'edit'
-          ? await t.requestEdit(request)
-          : request.kind === 'withdraw'
-            ? await t.requestWithdrawal(request)
-            : await t.cancelAction();
+      let result: Awaited<ReturnType<PrTracker['cancelAction']>>;
+      try {
+        result =
+          request.kind === 'edit'
+            ? await t.requestEdit(request)
+            : request.kind === 'withdraw'
+              ? await t.requestWithdrawal(request)
+              : await t.cancelAction();
+      } catch (error) {
+        // The tracker refused this action in the run's current state (no pending action,
+        // an edit outside a revision, a withdrawal during one): a closed CLI code.
+        if (error instanceof TrackError) throw actionRefused('action_unavailable');
+        throw error;
+      }
       await syncTracker(c, t);
       const status = t.status();
-      if (request.kind !== 'cancel-action' && result.kind !== 'action')
-        throw new Error('action_not_issued');
-      const action =
-        status.action ??
-        ({
-          kind: 'cancel-action',
-          link: status.pr,
-          instructions:
-            'The local pending action was cancelled. No upstream change was made. Open the PR to inspect its state; resume explicitly to observe it.',
-        } as const);
+      let action: TrackerActionResult;
+      if (request.kind === 'cancel-action')
+        action = { kind: 'cancel-action', link: status.pr, instructions: ACTION_CANCELLED };
+      else {
+        if (result.kind !== 'action' || !status.action) throw new Error('action_not_issued');
+        // A re-request returns the pending action. A different request must not be answered
+        // with another action's link: the contributor cancels the pending one first.
+        if (
+          status.action.kind !== request.kind ||
+          (request.kind === 'edit' &&
+            (status.action.title !== prTitle(request.title) ||
+              status.action.bodyDigest !== bodyDigest(request.body)))
+        )
+          throw actionRefused('action_pending');
+        action = status.action;
+      }
       artifacts(c).put('contributor_action', action);
       return action;
     },
@@ -1354,10 +1377,7 @@ export function createController(
         return run;
       },
       prepareCancellation: async (c) => {
-        if (
-          artifacts(c).get('publication') &&
-          ['submitted', 'awaiting_review', 'accepted'].includes(c.store.run.state)
-        ) {
+        if (artifacts(c).get('publication') && TRACKING_STATES.includes(c.store.run.state)) {
           const t = await openTracker(c);
           await t.requestWithdrawal({
             reason: 'user_instruction',
@@ -1396,7 +1416,7 @@ export function createController(
           }
           if (!TERMINAL_STATES.includes(c.run.state) && c.run.state !== 'blocked_cleanup') {
             // Explicit observation and link issuance need no paid computation or OAuth.
-            if (['submitted', 'awaiting_review', 'accepted'].includes(c.run.state)) return;
+            if (TRACKING_STATES.includes(c.run.state)) return;
             if (prerequisiteWaitOrigin(c.run) && !artifacts(c).get('fork')) return;
             await identity(c);
             await recoverShipping(c);
@@ -1417,8 +1437,7 @@ export function createController(
       resumeTracker: async (c) => {
         if (!artifacts(c).get('publication')) return undefined;
         if (
-          !['submitted', 'awaiting_review', 'accepted'].includes(c.store.run.state) &&
-          !c.store.run.history.some((e) => e.reasonCode === ReasonCode.RevisionRequested) &&
+          !isTrackerPhase(c.store.run) &&
           !fs.existsSync(path.join(c.store.storeDirectory('track'), 'events.jsonl'))
         )
           return undefined;
@@ -1443,6 +1462,8 @@ export function createController(
                   branch: state.pr.binding.branch,
                 })) === result.candidateSha;
             } catch {
+              // Fail closed: an unreadable fork branch is still an unconfirmed push; status
+              // keeps the tracker's pending-revision text recorded just above.
               revisionObservationWaiting = true;
             }
           } else

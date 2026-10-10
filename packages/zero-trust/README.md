@@ -71,9 +71,9 @@ environment references, never literal configuration values.
 |---|---|---|
 | `start` | `--config <file.json>` | `--confirm-author`, `--author-name <name>`, `--author-email <email>` |
 | `resume` | `--run <id>` | `--revise` (explicit verified revision, new retained-spend session) |
-| `pr-edit` | `--run <id> --title <text> --body-file <file>` | revision-only contributor edit link |
-| `withdraw` | `--run <id> --reason <maintainer_request\|user_instruction> --explanation <text>` | contributor close link |
-| `cancel-action` | `--run <id>` | cancel a pending local action; upstream stays unchanged |
+| `pr-edit` | `--run <id> --title <text> --body-file <file>` | |
+| `withdraw` | `--run <id> --reason <maintainer_request\|user_instruction> --explanation <text>` | |
+| `cancel-action` | `--run <id>` | |
 | `status` | `--run <id>` | `--json` |
 | `pause` | `--run <id> --reason <text>` | |
 | `cancel` | `--run <id> --reason <text>` | |
@@ -85,6 +85,16 @@ environment references, never literal configuration values.
 | `adoption` | `--run <id> --note <text>` | |
 | `sweep` | | `--apply` |
 | `export` | `--run <id> --out <file>` | |
+
+`pr-edit` (only during a live revision) and `withdraw` (outside a revision) print a
+contributor link and instructions; the contributor performs the change on GitHub and
+a later `resume` records it only after reading it back. `cancel-action` drops a
+pending local action and leaves upstream unchanged. `--title` is at most 256
+characters, `--explanation` at most 2000, and the body file at most 65536 bytes. A
+re-request returns the same pending action; a different request while one is pending
+is refused with `action_pending` (run `cancel-action` first), and an action the run's
+state does not admit with `action_unavailable`. `resume --revise` on a run with no
+published pull request is refused with `revision_unavailable`.
 
 Every command also requires `--root <dir>`. Unknown, repeated, missing and
 cross-command flags, positional arguments and malformed identifiers are refused.
@@ -381,6 +391,15 @@ nonce/intents/handoff stores, with fake GitHub adapters and no live network.
 `new RunController(deps)` supplies `start(config)`, `resume(runId, { revise?, action? })`,
 `prAction(runId, TrackerActionRequest): Promise<TrackerActionResult>`,
 `snapshot(): RunRecord`, and `incidentStop(reason): Promise<RunRecord>`.
+`prAction` needs the optional `trackerAction(context, request)` dependency, which
+executes `{ kind: 'edit', title, body }`, `{ kind: 'withdraw', reason, explanation }`
+or `{ kind: 'cancel-action' }` and returns `TrackerActionResult { kind: 'edit' |
+'withdraw' | 'reopen' | 'cancel-action', link, instructions, title?, bodyFile? }`;
+without it `prAction` refuses `invalid_outcome`, and a stop request that preempts the
+call refuses `admission_closed`. `resume(runId, { revise: true })` refuses
+`revision_unavailable` unless the run is tracking a published PR or already inside a
+revision. The optional `RecoveryHooks.revisionWaiting(context)` reports an
+unconfirmed revision push; resume then only observes and admits no new work.
 Dependencies contain the controller-owned storage `root`, `PhaseSteps`,
 `RecoveryHooks`, all `ObservingDriver`s, the VM adapter's `create`/`destroy`/
 `listByRun`, `estimateVm(spec, purpose)`, `observeVm(hold, vm)` and a trusted
@@ -2273,9 +2292,11 @@ new work. Status active time and remaining budget refer to the selected session.
 repair model, charged to that new session. Its fixed boolean question requires
 confident agreement on actionable work confined to the original issue/approved
 plan. Unclear, unrelated or authority-changing feedback hands off before a new VM
-is provisioned; the verdict and feedback remain inspectable. Feedback cannot alter
+is provisioned; the verdict and feedback remain inspectable, and `zt-run status`
+says the revision handed off because its feedback was not admitted. Feedback cannot alter
 identities, targets, network policy, budget or checkpoints. Oversized/truncated
-feedback is unreadable, never silently clipped. `retainRevisionFeedback` on
+maintainer feedback is unreadable, never silently clipped; an oversized remark from
+anyone else is skipped like any non-maintainer remark. `retainRevisionFeedback` on
 `TrackDeps` is the write-ahead persistence seam used by the composition root.
 
 The fresh implementation VM starts from the last verified controller-held overlay,
@@ -2359,9 +2380,9 @@ other drivers' `observeRun`; a restart may hand it an older copy of the run.
   (`freshness_unavailable`, naming the probe). The returned feedback is untrusted
   input for the isolated revision. After independent verification brings the run to
   `shipping`, `shipRevision({ candidateSha, push })` rechecks freshness, blocks on a
-   head that is neither the last verified SHA nor the candidate
-   (`push_blocked` for observed fork divergence; `unexpected_head_sha` for other
-   unexpected PR heads), journals the candidate, and pushes through the caller's
+  head that is neither the last verified SHA nor the candidate
+  (`push_blocked` for observed fork divergence; `unexpected_head_sha` for other
+  unexpected PR heads), journals the candidate, and pushes through the caller's
   `IntentDriver.execute` (`ForkPusher`: a fresh receipt, CAS from the last verified
   SHA). The revision is confirmed only when the PR head equals the candidate
   (`revised`, back to `submitted`); until then it is `revision_pending`, and
@@ -2374,7 +2395,10 @@ other drivers' `observeRun`; a restart may hand it an older copy of the run.
   digest covers exactly the file, and return the PR link and instructions. An edit
   must keep the PR's marker, may carry no hidden comment or invisible character, and
   is recorded only when a read shows the same title and body; it stays pending across
-  a confirmed revision. A withdrawal comment carries its own `pr_close` marker; the
+  a confirmed revision. If the PR is closed during a revision, a pending edit is
+  cancelled (its prepared file and journal evidence are retained) before the reopen
+  action is issued. An edit re-requested while one is pending, and every new edit,
+  first rechecks freshness and blocks on a stale policy, issue or permission. A withdrawal comment carries its own `pr_close` marker; the
   run records `declined` only after it observes the PR closed, deletes nothing, and
   sends no follow-up. `cancelAction()` drops a pending action without touching GitHub.
 

@@ -3,7 +3,13 @@ import type { BudgetState } from '../budget-types';
 import { prerequisiteAction } from '../github/fork';
 import { type HandoffState, handoffStatus } from '../github/handoff-driver';
 import { assertSecretFree } from '../redaction';
-import { type RunRecord, type RunState, restoreRun, sameRunRecord } from '../state';
+import {
+  type RunRecord,
+  type RunState,
+  restoreRun,
+  sameRunRecord,
+  sessionStartedAt,
+} from '../state';
 import { InvalidStatusError, renderJson, type StatusRecord } from '../status';
 import type { AuthorApproval } from './config';
 import { contributionIdOf } from './ids';
@@ -62,12 +68,10 @@ export function assembleStatus(parts: StatusParts): StatusRecord {
   if (!Number.isFinite(now) || now < Date.parse(run.updatedAt)) throw new InvalidStatusError();
   let activeTimeMs: number;
   try {
+    // Active time counts only the selected session; durable publication-wait time is
+    // subtracted from it and may never exceed it.
     const sessionIndex = parts.budget.sessions.findIndex((s) => s.id === parts.sessionId);
-    const revisions = run.history.filter((e) => e.reasonCode === 'revision_requested');
-    const since =
-      sessionIndex > 0
-        ? Date.parse(revisions[sessionIndex - 1]?.timestamp ?? '')
-        : Date.parse(run.createdAt);
+    const since = Date.parse(sessionStartedAt(run, Math.max(0, sessionIndex)) ?? '');
     if (!Number.isFinite(since)) throw new InvalidStatusError();
     activeTimeMs = lifecycleTimes(run, now, since).activeMs;
     const waiting = parts.publicationWaitMs ?? 0;

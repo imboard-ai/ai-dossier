@@ -242,6 +242,34 @@ test('cancelled CLI status retains publication URL and contributor withdrawal in
   assert.match(status.nextPermittedAction, /prepared contributor comment/);
 });
 
+test('status explains a revision paused because its feedback was not admitted', async () => {
+  const h = rig();
+  const store = h.seed();
+  for (const reason of [
+    ReasonCode.GatePassed,
+    ReasonCode.PlanApproved,
+    ReasonCode.CandidateReady,
+    ReasonCode.VerificationPassed,
+    ReasonCode.PublicationObserved,
+    ReasonCode.RevisionRequested,
+    ReasonCode.UserPaused,
+  ])
+    store.persistRun(transitionRun(store.run, reason, new Date().toISOString()));
+  const journal = new Journal(path.join(store.storeDirectory('control'), 'steps'));
+  const artifacts = new StepArtifacts(journal, store.runId);
+  artifacts.put('feedback_decision', {
+    sessionId: store.budgetSessionId(1),
+    admitted: false,
+    verdict: '{}',
+  });
+  journal.close();
+  store.close();
+  const commands = await createCommands({ root: h.root, createController });
+  const status = commands.status(store.runId);
+  assert.equal(status.state, 'paused_user');
+  assert.match(status.nextPermittedAction, /feedback was judged out of scope or ambiguous/);
+});
+
 test('start overrides file-supplied approval only with fresh OAuth consent; status opens the readOnly store API', async () => {
   const h = rig();
   const calls = [];

@@ -832,6 +832,11 @@ describe('createController real composition', () => {
     const a = h.artifacts(id);
     expect(a.get('candidate')).toBeDefined();
     expect(a.get('verification')).toBeDefined();
+    if (revisionStop === 'issue' || revisionStop === 'ban') {
+      // The stale issue or policy itself blocked the push, with its probe evidence retained.
+      expect(a.get<{ blockedReason: string }>('tracking').blockedReason).toBe('admission_policy');
+      expect(a.get<{ fresh: boolean }>('revision_freshness').fresh).toBe(false);
+    }
     if (revisionStop === 'merged')
       expect(a.get<{ blockedReason: string }>('tracking').blockedReason).toBe(
         'merged_during_revision'
@@ -1072,6 +1077,31 @@ describe('createController real composition', () => {
     const oauth = h.fake.oauthCalls.length;
     expect((await h.controller.prAction(id, { kind: 'cancel-action' })).kind).toBe('cancel-action');
     expect(h.fake.oauthCalls).toHaveLength(oauth);
+  }, 30000);
+  it('a contributor command is never answered with a different pending action', async () => {
+    const h = rig({ revisionPending: true });
+    const id = await published(h);
+    h.feedback();
+    await h.authorize(h.controller.resume(id, { revise: true }));
+    const body = `Updated fix.\n\n${findHandoffMarkers(String(h.pr()?.body))[0]}`;
+    const edit = { kind: 'edit', title: 'Updated fix', body } as const;
+    const first = (await h.authorize(h.controller.prAction(id, edit))) as { bodyFile: string };
+    // The same request re-issues the same pending link.
+    expect(await h.authorize(h.controller.prAction(id, edit))).toMatchObject({
+      kind: 'edit',
+      bodyFile: first.bodyFile,
+    });
+    await expect(
+      h.authorize(h.controller.prAction(id, { ...edit, title: 'Another fix' }))
+    ).rejects.toMatchObject({ code: 'action_pending' });
+    await expect(
+      h.controller.prAction(id, {
+        kind: 'withdraw',
+        reason: 'user_instruction',
+        explanation: 'Stop.',
+      })
+    ).rejects.toMatchObject({ code: 'action_unavailable' });
+    expect(fs.readFileSync(first.bodyFile, 'utf8')).toBe(body);
   }, 30000);
   it('revoked policy refuses an edit handoff and retains current refusal evidence', async () => {
     const h = rig({ revisionPending: true });

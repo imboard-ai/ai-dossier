@@ -221,6 +221,21 @@ test('contributor commands reject unknown withdrawal reasons and untrusted links
   assert.equal(result.code, 2);
   assert.deepEqual(result.stdout, []);
 });
+test('help documents the syntax of every command named in usage', async () => {
+  const lines = [];
+  assert.equal(await main(['--help'], { out: (line) => lines.push(line), err: () => {} }), 0);
+  const help = lines.join('\n').split('\n').slice(1);
+  const commands = /<([a-z|-]+)>/u.exec(USAGE)[1].split('|');
+  for (const command of commands)
+    assert.ok(
+      help.some((line) => line === command || line.startsWith(`${command} `)),
+      `help is missing ${command}`
+    );
+  assert.match(
+    lines.join('\n'),
+    /withdraw --run <id> --reason <maintainer_request\|user_instruction>/u
+  );
+});
 test('status human and JSON carry identical parsed facts, including recorded author', async () => {
   const human = await invoke(['status', '--root', 'runs', '--run', run], { status: () => status });
   const json = await invoke(['status', '--root', 'runs', '--run', run, '--json'], {

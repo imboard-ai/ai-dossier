@@ -68,7 +68,7 @@ import {
 import { assessRevisionFeedback } from './feedback';
 import { OutputCollector } from './output-collector';
 import type { ShippingAuthorizeDeps } from './shipping';
-import { loadVerification } from './verification-record';
+import { loadVerification, type VerificationRecord } from './verification-record';
 import { verificationPlan, verifyCandidate } from './verifier';
 import { WorkspaceOverlay } from './workspace-overlay';
 
@@ -297,6 +297,16 @@ export function createSteps(
     return { manifest: validateManifest(held.manifest), pack: Buffer.from(held.pack, 'base64') };
   };
   const gate = (c: PhaseContext) => artifacts(c).require<GateRecord>('gate');
+  /** Rebases already spent in the current budget session. `rebase_session` is the record;
+   * the session-less `rebases` count is kept and read only for first-session runs that
+   * predate it. */
+  const rebasesForSession = (c: PhaseContext): number => {
+    const held = artifacts(c).get<{ sessionId: string; count: number }>('rebase_session');
+    if (held?.sessionId === c.sessionId) return held.count;
+    return c.sessionId === c.store.budgetSessionId(1)
+      ? (artifacts(c).get<number>('rebases') ?? 0)
+      : 0;
+  };
   const candidate = (c: PhaseContext): Candidate => {
     const held = artifacts(c).require<Candidate>('candidate');
     const author = c.store.config.authorApproval;
@@ -615,12 +625,17 @@ export function createSteps(
           candidate: old ?? null,
           verification: basisVerification,
         });
-      const previousVerification = old
-        ? loadVerification(c.store.storeDirectory('artifacts'), old.record.candidateSha, {
-            runId: c.run.runId,
-            expectedDigest: basisVerification as string,
-          })
-        : undefined;
+      // A retained basis holds its candidate and verification together; a torn or corrupt
+      // record carrying one without the other is refused, never loaded as unverified.
+      let previousVerification: VerificationRecord | undefined;
+      if (old) {
+        if (typeof basisVerification !== 'string') throw new Error('implementation_basis_invalid');
+        previousVerification = loadVerification(
+          c.store.storeDirectory('artifacts'),
+          old.record.candidateSha,
+          { runId: c.run.runId, expectedDigest: basisVerification }
+        );
+      }
       const base = source(c);
       const w = workspace(c);
       let attemptMetadata = artifacts(c).get<{
@@ -801,13 +816,7 @@ export function createSteps(
           overlay,
           approval: held.record,
           basePack: base.pack,
-          rebases:
-            artifacts(c).get<{ sessionId: string; count: number }>('rebase_session')?.sessionId ===
-            c.sessionId
-              ? artifacts(c).require<{ count: number }>('rebase_session').count
-              : c.sessionId === c.store.budgetSessionId(1)
-                ? (artifacts(c).get<number>('rebases') ?? 0)
-                : 0,
+          rebases: rebasesForSession(c),
           pushIntentJournaled: artifacts(c).get<boolean>('push_intended') ?? false,
         }
       );

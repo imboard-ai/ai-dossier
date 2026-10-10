@@ -692,6 +692,22 @@ describe('maintainer feedback', () => {
     ]);
   });
 
+  it('an oversized stranger remark is skipped; oversized maintainer feedback is untrusted', async () => {
+    const huge = '😀'.repeat(40_000);
+    const up = new Upstream();
+    up.reviews = [review(1)];
+    up.reviewComments = [{ ...remark(10, undefined, maintainer('stranger', 'NONE')), body: huge }];
+    const stranger = await tracker(up).t.beginRevision();
+    expect(stranger.kind === 'revising' && stranger.feedback.map((f) => f.id)).toEqual([
+      'review:1',
+    ]);
+    const held = new Upstream();
+    held.reviewComments = [{ ...remark(11), body: huge }];
+    const { t } = tracker(held);
+    expect(await t.beginRevision()).toMatchObject({ kind: 'unknown', detail: 'feedback' });
+    expect(t.snapshot().run.state).toBe('awaiting_review');
+  });
+
   it('a remark pointing outside the tracked PR makes the listing untrusted', async () => {
     const up = new Upstream();
     up.reviewComments = [{ ...remark(1), html_url: 'https://evil.example/pull/5#x' }];

@@ -27,6 +27,11 @@ import {
   stopStoredRun,
 } from '../dist/controller/wiring.js';
 import { assertDirectoryAncestors, privateDir, readPrivate } from '../dist/durable-fs.js';
+import { MAX_BODY_LENGTH } from '../dist/github/handoff.js';
+
+const FEEDBACK_NOT_ADMITTED =
+  'This revision handed off: the maintainer feedback was judged out of scope or ambiguous, so nothing was implemented or pushed (the typed verdict is retained). Address the feedback yourself on the pull request, or cancel the run.';
+
 import { parseJournalEvents } from '../dist/journal.js';
 import { lockDescriptor, StoreLockedError } from '../dist/lock.js';
 import { aggregate, contributionOutcome, recordAdoption } from '../dist/metrics/outcomes.js';
@@ -159,6 +164,7 @@ export async function createCommands({ root, createController, onAuthorizationUr
             tracking: artifacts.get('tracking'),
             publication: artifacts.get('publication'),
             withdrawal: artifacts.get('withdrawal'),
+            feedbackDecision: artifacts.get('feedback_decision'),
           };
         });
         let handoff;
@@ -197,6 +203,12 @@ export async function createCommands({ root, createController, onAuthorizationUr
             state: run.state,
             ...checkpointStatus(store.checkpoint(point), store.currentCheckpointBindings(point)),
           };
+        else if (
+          run.state === 'paused_user' &&
+          retained.feedbackDecision?.sessionId === sessionId &&
+          retained.feedbackDecision?.admitted === false
+        )
+          tracker = { state: run.state, nextPermittedAction: FEEDBACK_NOT_ADMITTED };
         const statusNow = new Date();
         const result = assembleStatus({
           run,
@@ -307,7 +319,7 @@ export async function createCommands({ root, createController, onAuthorizationUr
       let action = request;
       if (request.kind === 'edit') {
         const bytes = readPrivate(request.bodyFile, (stat) => {
-          if (stat.size > 65536) refuse('invalid_input');
+          if (stat.size > MAX_BODY_LENGTH) refuse('invalid_input');
         });
         const body = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
         assertSecretFree(body);

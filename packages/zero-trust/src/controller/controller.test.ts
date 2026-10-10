@@ -670,6 +670,16 @@ describe('RunController', () => {
     await expect(h.controller.resume(run.runId)).rejects.toMatchObject({ code: 'invalid_outcome' });
     expect(h.steps.calls).toEqual(['gate']);
   });
+  it('refuses --revise before publication without touching the run', async () => {
+    const h = rig();
+    h.steps.scripts.gate = [{ kind: 'request_permission' }];
+    const run = await h.controller.start(h.config);
+    await expect(h.controller.resume(run.runId, { revise: true })).rejects.toMatchObject({
+      code: 'revision_unavailable',
+    });
+    expect(h.controller.snapshot().state).toBe(run.state);
+    expect(h.steps.calls).toEqual(['gate']);
+  });
   it('persists and fans out a multi-transition recovered snapshot individually', async () => {
     const h = rig();
     h.steps.scripts.gate = [{ kind: 'request_permission' }];

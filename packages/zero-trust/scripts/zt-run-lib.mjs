@@ -2,6 +2,8 @@
  * message table. Provider exception messages and unknown codes are never emitted. */
 import fs from 'node:fs';
 import { runConfigInput, validateRunConfig } from '../dist/controller/config.js';
+import { MAX_PR_TITLE_LENGTH } from '../dist/github/handoff.js';
+import { MAX_WITHDRAWAL_EXPLANATION, WITHDRAWAL_REASONS } from '../dist/github/track.js';
 import { renderMetricsHuman, renderMetricsJson } from '../dist/metrics/outcomes.js';
 import { assertSecretFree } from '../dist/redaction.js';
 import { renderHuman, renderJson } from '../dist/status.js';
@@ -30,7 +32,7 @@ const COMMANDS = Object.freeze({
 const BOOLEAN = new Set(['confirm-author', 'revise', 'json', 'apply']);
 export const USAGE =
   'Usage: zt-run <start|resume|pr-edit|withdraw|cancel-action|status|pause|cancel|approve|reject|authorize|kill-all|metrics|adoption|sweep|export> --root <dir> [command options]';
-const HELP = `${USAGE}\nstart --config <file.json> [--confirm-author] [--author-name <name>] [--author-email <email>]\nresume --run <id> [--revise]\nstatus --run <id> [--json]\npause --run <id> --reason <text>\ncancel --run <id> --reason <text>\napprove --run <id> --checkpoint <plan|patch|verification> --digest <sha256>\nreject --run <id> --checkpoint <plan|patch|verification> --digest <sha256> --reason <text>\nauthorize --run <id>\nkill-all --reason <text>\nmetrics [--json]\nadoption --run <id> --note <text>\nsweep [--apply]\nexport --run <id> --out <file>`;
+const HELP = `${USAGE}\nstart --config <file.json> [--confirm-author] [--author-name <name>] [--author-email <email>]\nresume --run <id> [--revise]\npr-edit --run <id> --title <text> --body-file <file>\nwithdraw --run <id> --reason <${WITHDRAWAL_REASONS.join('|')}> --explanation <text>\ncancel-action --run <id>\nstatus --run <id> [--json]\npause --run <id> --reason <text>\ncancel --run <id> --reason <text>\napprove --run <id> --checkpoint <plan|patch|verification> --digest <sha256>\nreject --run <id> --checkpoint <plan|patch|verification> --digest <sha256> --reason <text>\nauthorize --run <id>\nkill-all --reason <text>\nmetrics [--json]\nadoption --run <id> --note <text>\nsweep [--apply]\nexport --run <id> --out <file>`;
 const ERROR_CODES = new Set([
   'invalid_input',
   'invalid_control',
@@ -61,6 +63,8 @@ const ERROR_CODES = new Set([
   'author_email_unverified',
   'author_identity_unavailable',
   'revision_unavailable',
+  'action_unavailable',
+  'action_pending',
   'root_mismatch',
   'store_locked',
   'invalid_store',
@@ -147,11 +151,11 @@ function parse(argv) {
   if (opts.note && (!opts.note.trim() || opts.note.length > 2000)) refuse('invalid_input');
   if (
     command === 'withdraw' &&
-    (!['maintainer_request', 'user_instruction'].includes(opts.reason) ||
-      opts.explanation.length > 2000)
+    (!WITHDRAWAL_REASONS.includes(opts.reason) ||
+      opts.explanation.length > MAX_WITHDRAWAL_EXPLANATION)
   )
     refuse('invalid_input');
-  if (opts.title && opts.title.length > 256) refuse('invalid_input');
+  if (opts.title && opts.title.length > MAX_PR_TITLE_LENGTH) refuse('invalid_input');
   return { command, opts };
 }
 function readConfig(file) {

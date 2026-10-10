@@ -23,6 +23,7 @@ import {
   restoreRun,
   sameRunRecord,
   TERMINAL_STATES,
+  TRACKING_STATES,
   transitionRun,
 } from '../state';
 import { type ForkRef, ForkRefError, forkTarget, isCommitSha, readForkBranch } from './fork-ref';
@@ -243,7 +244,6 @@ function feedbackItem(
   )
     return null;
   const body = (raw.body as string | null) ?? '';
-  if (body.length > MAX_FEEDBACK_BODY) return null;
   if (
     raw.user.type === 'Bot' ||
     !(MAINTAINER_ASSOCIATIONS as readonly unknown[]).includes(raw.author_association) ||
@@ -251,6 +251,9 @@ function feedbackItem(
     (kind === 'review' && raw.state !== 'CHANGES_REQUESTED' && !body.trim())
   )
     return undefined;
+  // Checked after the author filter: an oversized remark from anyone else must not make
+  // the whole listing unreadable, while truncated maintainer feedback is never used.
+  if (body.length > MAX_FEEDBACK_BODY) return null;
   return Object.freeze({
     id: `${kind}:${raw.id}`,
     author,
@@ -853,8 +856,6 @@ function actionOf(state: TrackState, value: unknown, directory: string | null): 
   return Object.freeze({ kind, ...base, ...text, reason: raw.reason as WithdrawalReason });
 }
 
-const TRACKING: readonly RunState[] = ['submitted', 'awaiting_review', 'accepted'];
-
 function reduce(state: TrackState | undefined, raw: unknown, directory: string | null): TrackState {
   if (!isRecord(raw) || raw.v !== 1) fail('event');
   if (raw.type === 'track') {
@@ -865,7 +866,7 @@ function reduce(state: TrackState | undefined, raw: unknown, directory: string |
     // The run, never a caller, names the target: its issue's repository and contributor.
     const issue = upstreamIssueBinding(run.upstreamIssue).upstream;
     if (
-      !TRACKING.includes(run.state) ||
+      !TRACKING_STATES.includes(run.state) ||
       !sameLogin(issue.owner, pr.binding.upstream.owner) ||
       !sameLogin(issue.repo, pr.binding.upstream.repo) ||
       !sameLogin(pr.binding.headOwner, run.contributor)
@@ -1325,7 +1326,7 @@ export class PrTracker {
     const revision = this.state.revision;
     if (revision) return this.duringRevision(track, revision);
     const state = this.state.run.state;
-    if (!TRACKING.includes(state)) return { kind: 'tracking', status: this.status() };
+    if (!TRACKING_STATES.includes(state)) return { kind: 'tracking', status: this.status() };
     const outcome = upstreamOutcome(track);
     if (outcome === 'merged' || outcome === 'declined') {
       const reason =
@@ -1415,7 +1416,8 @@ export class PrTracker {
       if (this.state.action) throw new TrackError('action_pending', this.state.action.kind);
       const read = await this.observe();
       const outcome = this.apply(read);
-      if (outcome.kind !== 'tracking' || !TRACKING.includes(this.state.run.state)) return outcome;
+      if (outcome.kind !== 'tracking' || !TRACKING_STATES.includes(this.state.run.state))
+        return outcome;
       if (read.kind !== 'observed' || !read.feedback)
         return { kind: 'unknown', detail: 'feedback', status: this.status() };
       const feedback = actionableFeedback(this.state, read.feedback);
