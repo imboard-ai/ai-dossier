@@ -19,6 +19,9 @@ Task-oriented guides for accomplishing specific goals with Dossier.
 - [Adopter playbooks](adopter-playbooks.md) - How organizations can adopt Dossier
 - [Dossier Guide](dossier-guide.md) - Deep dive into concepts, schema, security, and best practices
 
+### Contributing upstream
+- [Zero-trust contributions](zero-trust-contributions.md) - Propose a verified fix to someone else's open-source project from an isolated VM; you submit every comment and pull request yourself
+
 ### Observability
 - [Execution tracing](tracing.md) - Record agent runs to a queryable registry; self-host your own trace DB
 
