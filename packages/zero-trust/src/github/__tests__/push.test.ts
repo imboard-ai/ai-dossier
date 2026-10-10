@@ -415,7 +415,9 @@ describe('verified CAS push to the fork (#1066)', () => {
         p.includes('/git/ref/') && r.fork.refReads() > 1 ? { status: 503, body: null } : undefined
       );
     const lease = new AbortController();
-    vi.spyOn(TrustedGit.prototype, 'execAsync').mockImplementation(async () => {
+    const real = TrustedGit.prototype.execAsync;
+    vi.spyOn(TrustedGit.prototype, 'execAsync').mockImplementation(async function (args, options) {
+      if (args[0] !== 'push') return real.call(this, args, options);
       lease.abort();
       return { status: null, stdout: Buffer.alloc(0) };
     });

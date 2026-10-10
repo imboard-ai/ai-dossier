@@ -82,6 +82,15 @@ closing lease timers and journals. This does not permanently close admission as
 credential-revocation failure keeps the cleanup fence and fails the operation.
 Terminal completion/cancellation continues to use `endRun()`.
 
+CI additionally runs the lifecycle suite in isolation on Node 20 and 22 with a
+60-second wall-clock deadline, logging `wall_seconds` and the Node version.
+That timing pass uses Linux tmpfs for temporary journals and bare repositories;
+it retains real filesystem persistence across the crash child's SIGKILL. The
+ordinary full-package coverage pass still runs separately with unchanged thresholds.
+The fork-delay fixture starts at gating with the fork absent and performs initial
+shipping after restoration. A separate fixture proves disappearance of an already
+bound fork at shipping blocks without waiting or rebinding (PRD §5.9).
+
 The lifecycle suite covers all five cancellation points, cleanup fencing and
 `CleanupCompleted → blocked`, refused model reservation before another call,
 verification exhaustion without a pass, approved ceiling continuation,

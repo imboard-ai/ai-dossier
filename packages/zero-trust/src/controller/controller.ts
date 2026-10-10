@@ -437,13 +437,19 @@ export class RunController {
       .then(work)
       .finally(async () => {
         clearInterval(watcher);
+        const beforeRelease = this.store?.run;
         try {
           await this.deps.release?.();
         } finally {
           // Release can persist a cleanup block even when revocation rejects.
           // Publish that final durable state before the store pins are closed.
           try {
-            if (this.store && this.last !== this.store.run) this.notify(this.store.run);
+            if (this.store) {
+              const final = this.store.run;
+              if (beforeRelease && final.history.length !== beforeRelease.history.length)
+                this.notify(final);
+              else this.last = final;
+            }
           } finally {
             this.journal?.close();
             this.store?.close();
