@@ -3,7 +3,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { publishPrivate, readPrivate, syncDirectory } from '../durable-fs';
-import { lockDescriptor } from '../lock';
+import { acquirePrivateGuard } from '../lock';
 import { assertSecretFree } from '../redaction';
 import { isRecord, type RunRecord, TERMINAL_STATES } from '../state';
 import { strictUtf8 } from '../strict-utf8';
@@ -96,26 +96,8 @@ function directory(store: RunStore, create: boolean, work: (dir: string) => void
  * Readers never lock: rename exposes one fully fsynced single-link inode. */
 function publish(store: RunStore, file: string, bytes: Buffer): void {
   store.withStoreDirectory('control', (parent) => {
-    const fd = fs.openSync(
-      path.join(parent, '.requests.guard'),
-      fs.constants.O_CREAT |
-        fs.constants.O_RDWR |
-        fs.constants.O_NOFOLLOW |
-        fs.constants.O_NONBLOCK,
-      0o600
-    );
+    const fd = acquirePrivateGuard(path.join(parent, '.requests.guard'), true, 1000);
     try {
-      const stat = fs.fstatSync(fd);
-      if (
-        !stat.isFile() ||
-        stat.nlink !== 1 ||
-        stat.uid !== process.getuid?.() ||
-        (stat.mode & 0o777) !== 0o600
-      )
-        throw new ControlError('invalid_control');
-      lockDescriptor(fd, 1000);
-      fs.fsyncSync(fd);
-      syncDirectory(parent);
       // Under this separate kernel guard, reuse only byte-identical evidence;
       // no legitimate publisher can replace another publisher's immutable row.
       publishPrivate(file, bytes);

@@ -4,7 +4,7 @@ import path from 'node:path';
 import { types } from 'node:util';
 import { assertDirectoryAncestors, privateDir, replacePrivate, syncDirectory } from '../durable-fs';
 import { Journal } from '../journal';
-import { lockDescriptor, StoreLockedError } from '../lock';
+import { acquirePrivateGuard, StoreLockedError } from '../lock';
 import { isRecoveryEvent, isTailRecovery } from '../recovery';
 import { assertSecretFree, SecretRedactionError } from '../redaction';
 import {
@@ -326,36 +326,7 @@ function confirmSnapshot(
 }
 /** Permanent flock inode; Linux kernel releases it on controller death, never age. */
 function acquire(directory: string, create = true): number {
-  if (process.platform !== 'linux') throw new StoreLockedError();
-  const file = path.join(directory, '.controller.guard');
-  let fd: number | undefined;
-  try {
-    fd = fs.openSync(
-      file,
-      (create ? fs.constants.O_CREAT : 0) |
-        fs.constants.O_RDWR |
-        fs.constants.O_NOFOLLOW |
-        fs.constants.O_NONBLOCK,
-      0o600
-    );
-    const stat = fs.fstatSync(fd);
-    if (
-      !stat.isFile() ||
-      stat.nlink !== 1 ||
-      stat.uid !== process.getuid?.() ||
-      (stat.mode & 0o777) !== 0o600
-    )
-      throw new StoreLockedError();
-    lockDescriptor(fd, 0);
-    const named = fs.lstatSync(file);
-    if (named.dev !== stat.dev || named.ino !== stat.ino) throw new StoreLockedError();
-    fs.fsyncSync(fd);
-    syncDirectory(directory);
-    return fd;
-  } catch {
-    if (fd !== undefined) fs.closeSync(fd);
-    throw new StoreLockedError();
-  }
+  return acquirePrivateGuard(path.join(directory, '.controller.guard'), create, 0);
 }
 
 /** Controller-owned local storage, outside every worker filesystem. */

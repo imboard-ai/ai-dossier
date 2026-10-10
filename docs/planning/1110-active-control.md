@@ -98,3 +98,16 @@ relaxed. Tests read at the exact request/result visibility boundary and kill
 real child writers immediately after rename, then verify complete evidence and
 guard release. The composed cancellation fixture also observes admission at
 that exact visibility boundary and records credential revocation/no push.
+
+## Final full review and shared guard reuse
+The complete final seven-role pass at ba2315e ran 336–416 seconds per role.
+Security, Supportability, Maintainability, Documentation, Convention and
+Conformance were clean; conformance independently executed the source fixtures
+and marked all six ACs met. Multiple independent probes raced 3–12 real
+publishers with lock-free readers and killed writers both before and after rename
+without corrupt observations. One actionable DRY finding remained: duplicate
+private permanent-inode acquisition. It is repaired by moving the existing
+RunStore acquisition into `lock.ts:acquirePrivateGuard`, with explicit creation
+and wait parameters and unchanged validation/lifetime rules. Controller and
+publisher still use different guard paths. The final scoped review rechecks
+DRY, security and blind conformance on that shared-helper head.
