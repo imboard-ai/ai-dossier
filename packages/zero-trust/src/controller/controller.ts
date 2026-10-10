@@ -776,6 +776,7 @@ export class RunController {
         bindings: {
           candidateSha: edit.candidate.record.candidateSha,
           policyDigest: edit.policyDigest,
+          reviewDigest: edit.reviewDigest,
           budgetSessionId: this.sessionId(),
         },
       });

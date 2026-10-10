@@ -11,6 +11,7 @@ import {
 import { createCandidate, reconstructCandidate } from '../canonical/reconstruct';
 import { TrustedGit } from '../canonical/trusted-git';
 import { Journal } from '../journal';
+import { assertModelKeyEnv, readModelKey } from '../model/transport';
 import { assertSecretFree } from '../redaction';
 import { isRecord, type RunRecord, sameRunRecord } from '../state';
 import { strictUtf8 } from '../strict-utf8';
@@ -18,7 +19,13 @@ import { requireAuthorApproval } from './author-approval';
 import { type RunConfig, runConfigInput, validateRunConfig } from './config';
 import { readControlRequests } from './control';
 import type { RunStore } from './run-store';
-import { type Candidate, reviewDiff, StepArtifacts } from './steps';
+import {
+  type Candidate,
+  candidateMessage,
+  implementationPhaseKey,
+  reviewDiff,
+  StepArtifacts,
+} from './steps';
 import { WorkspaceOverlay } from './workspace-overlay';
 
 export class UserEditError extends Error {
@@ -97,6 +104,7 @@ export function validateUserPatch(bytes: Buffer): readonly string[] {
 
 export interface SourceEdit {
   readonly policyDigest: string;
+  readonly reviewDigest: string;
   readonly patchDigest: string;
   readonly files: readonly string[];
   readonly candidate: Candidate;
@@ -108,9 +116,12 @@ export function latestSourceEdit(store: RunStore): SourceEdit | undefined {
   const value = change.value;
   if (
     !isRecord(value) ||
-    Object.keys(value).sort().join(',') !== 'candidate,files,patchDigest,policyDigest,superseded' ||
+    Object.keys(value).sort().join(',') !==
+      'candidate,files,patchDigest,policyDigest,reviewDigest,superseded' ||
     typeof value.policyDigest !== 'string' ||
     !/^[a-f0-9]{64}$/u.test(value.policyDigest) ||
+    typeof value.reviewDigest !== 'string' ||
+    !/^[a-f0-9]{64}$/u.test(value.reviewDigest) ||
     typeof value.patchDigest !== 'string' ||
     !/^[a-f0-9]{64}$/u.test(value.patchDigest) ||
     !Array.isArray(value.files) ||
@@ -161,13 +172,21 @@ export function applyUserPatch(
     if (previous) {
       reconstructCandidate(previous.manifest, previous.record, previous.authority, pack);
       overlay.replaceSource(previous.manifest, previous.touched);
-    } else {
+    }
+    const attempt = artifacts.get<{ phaseKey: number }>('implementation_attempt');
+    if (
+      origin === 'implementing' &&
+      (!previous || attempt?.phaseKey === implementationPhaseKey(run))
+    ) {
       const continuation = artifacts.get<{
         baseDigest: string;
         writes: { path: string; content: string }[];
       }>('implementation_continuation');
       if (continuation) {
-        if (continuation.baseDigest !== base.digest || !Array.isArray(continuation.writes))
+        if (
+          continuation.baseDigest !== (previous?.manifest.digest ?? base.digest) ||
+          !Array.isArray(continuation.writes)
+        )
           throw new UserEditError('invalid_user_edit');
         for (const write of continuation.writes) overlay.write(write.path, write.content);
       }
@@ -192,15 +211,27 @@ export function applyUserPatch(
     const approval = store.config.authorApproval;
     if (!approval) throw new UserEditError('invalid_user_edit');
     const digest = sha256(bytes);
+    const author =
+      previous?.authority.author ??
+      requireAuthorApproval(store.config, { login: approval.login, userId: approval.userId });
+    const gate = artifacts.require<{
+      baseSha: string;
+      policyDigest: string;
+      signoffRequired?: boolean;
+    }>('gate');
     const produced = createCandidate(
       manifest,
       {
         baseSha: previous?.record.baseSha ?? artifacts.require<{ baseSha: string }>('gate').baseSha,
-        author:
-          previous?.authority.author ??
-          requireAuthorApproval(store.config, { login: approval.login, userId: approval.userId }),
+        author,
         committerTimestamp: now.toISOString().replace(/\.\d{3}Z$/u, 'Z'),
-        message: `${previous?.record.message ?? 'fix: contributor candidate'}\nUser edit ${sourceEditCount(store) + 1}: ${digest}\n`,
+        message: candidateMessage(
+          store.config.upstream.issue,
+          artifacts.get<number>('attempt') ?? 1,
+          author,
+          gate.signoffRequired === true,
+          { count: sourceEditCount(store) + 1, digest }
+        ),
       },
       pack
     );
@@ -227,7 +258,8 @@ export function applyUserPatch(
     // A crash after this conservative fence never admits old evidence. Records remain immutable.
     for (const sha of superseded)
       store.replaceArtifact(`superseded-${sha}`, Buffer.from(run.runId));
-    store.replaceArtifact('candidate.diff', reviewDiff(base, manifest));
+    const diff = reviewDiff(base, manifest);
+    store.replaceArtifact('candidate.diff', diff);
     paused(store, run);
     store.recordUserChange(
       'source',
@@ -237,6 +269,7 @@ export function applyUserPatch(
         candidate,
         superseded,
         policyDigest: artifacts.require<{ policyDigest: string }>('gate').policyDigest,
+        reviewDigest: sha256(diff),
       },
       now.toISOString()
     );
@@ -259,7 +292,12 @@ export function changeModelProfile(
   });
   for (const phase of Object.values(config.modelProfile.phases)) {
     if (phase.adapter !== 'openai-compatible') throw new UserEditError('model_unavailable');
-    if (!process.env[phase.apiKeyEnv]?.trim()) throw new UserEditError('model_key_missing');
+    try {
+      assertModelKeyEnv(phase.apiKeyEnv);
+      readModelKey(phase.apiKeyEnv);
+    } catch {
+      throw new UserEditError('model_key_missing');
+    }
   }
   store.recordUserChange('model', config.modelProfile, now.toISOString());
 }

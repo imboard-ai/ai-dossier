@@ -23,6 +23,41 @@ const entry = (name: string, bytes: Buffer, mode: SourceEntry['mode'] = '100644'
 });
 
 describe('WorkspaceOverlay controller-held source', () => {
+  it('retains deleted paths across repair, serialization, unrelated drift and recreation', () => {
+    const base = createManifest([
+      entry('deleted.js', Buffer.from('old')),
+      entry('kept.js', Buffer.from('old')),
+    ]);
+    const overlay = new WorkspaceOverlay(base);
+    overlay.replaceSource(createManifest(base.entries.filter((e) => e.path !== 'deleted.js')), [
+      'deleted.js',
+    ]);
+    const repair = new WorkspaceOverlay(overlay.manifest());
+    repair.write('kept.js', 'repair');
+    overlay.applyRepair(repair);
+    const reopened = new WorkspaceOverlay(base);
+    reopened.replaceSource(overlay.manifest(), overlay.touchedPaths());
+    const advanced = createManifest([...base.entries, entry('new.js', Buffer.from('upstream'))]);
+    const rebased = reopened.onBase(advanced);
+    expect(rebased.touchedPaths()).toEqual(['deleted.js', 'kept.js']);
+    expect(rebased.manifest().entries.map((e) => e.path)).toEqual(['kept.js', 'new.js']);
+    const recreate = new WorkspaceOverlay(reopened.manifest());
+    recreate.write('deleted.js', 'recreated');
+    reopened.applyRepair(recreate);
+    expect(
+      reopened
+        .onBase(advanced)
+        .manifest()
+        .entries.find((e) => e.path === 'deleted.js')?.bytes
+    ).toBe(Buffer.from('recreated').toString('base64'));
+  });
+  it('refuses incomplete replacement deltas without mutating the overlay', () => {
+    const base = createManifest([entry('deleted.js', Buffer.from('old'))]);
+    const overlay = new WorkspaceOverlay(base);
+    expect(() => overlay.replaceSource(createManifest([]), [])).toThrow('tree_mismatch');
+    expect(overlay.manifest()).toEqual(base);
+    expect(overlay.touchedPaths()).toEqual([]);
+  });
   it('keeps binary base blobs, empty directories, executable bits and only exact admitted writes', () => {
     const entries = [
       entry('empty', Buffer.alloc(0), '040000'),

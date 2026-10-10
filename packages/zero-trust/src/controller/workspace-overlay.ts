@@ -15,8 +15,8 @@ import {
 import { isTestPath } from '../review/integrity';
 import { assertWorkspacePath } from '../vm/broker';
 
-/** Exact controller-held baseline plus admitted writes. VM reads never enter this map.
- * No deletion or mode-changing action exists in the MVP. */
+/** Controller-held baseline and delta; VM reads never enter this map. Model actions
+ * only write files; trusted contributor exports also admit deletion/exec-bit changes. */
 export class WorkspaceOverlay {
   readonly base: SourceManifest;
   private entries: Map<string, SourceEntry>;
@@ -30,11 +30,24 @@ export class WorkspaceOverlay {
     for (const file of touched) {
       assertWorkspacePath(file);
       if (entries.get(file)?.mode === '040000') throw new CanonicalError('path_collision');
+    }
+    const touchedSet = new Set(touched);
+    const baseline = new Map(
+      this.base.entries.filter((e) => e.mode !== '040000').map((e) => [e.path, e])
+    );
+    for (const file of new Set([...baseline.keys(), ...entries.keys()])) {
+      const old = baseline.get(file);
+      const next = entries.get(file);
+      if (next?.mode === '040000') continue;
+      if ((old?.sha256 !== next?.sha256 || old?.mode !== next?.mode) && !touchedSet.has(file))
+        throw new CanonicalError('tree_mismatch');
+    }
+    this.entries = entries;
+    for (const file of touched) {
       this.written.add(file);
       if (!entries.has(file)) this.removed.add(file);
       else this.removed.delete(file);
     }
-    this.entries = entries;
   }
   touchedPaths(): readonly string[] {
     return Object.freeze([...this.written].sort(comparePaths));
@@ -65,6 +78,7 @@ export class WorkspaceOverlay {
     const manifest = createManifest([...next.values()]);
     this.entries = new Map(manifest.entries.map((entry) => [entry.path, entry]));
     this.written.add(name);
+    this.removed.delete(name);
   }
 
   executable(file: string): boolean {
@@ -75,8 +89,8 @@ export class WorkspaceOverlay {
     return Object.freeze([...this.written].filter(isTestPath).sort(comparePaths));
   }
 
-  /** Immutable admitted delta, including writes byte-identical to the baseline.
-   * Drift must check every touched path, not just the final diff. */
+  /** Surviving writes, including byte-identical writes. Use touchedPaths() for the
+   * complete delta (including deletions) and conservative drift conflict checks. */
   writtenEntries(): readonly SourceEntry[] {
     return Object.freeze(
       [...this.written]
@@ -127,7 +141,10 @@ export class WorkspaceOverlay {
     }
     const manifest = createManifest([...next.values()]);
     this.entries = new Map(manifest.entries.map((entry) => [entry.path, entry]));
-    for (const entry of writes) this.written.add(entry.path);
+    for (const entry of writes) {
+      this.written.add(entry.path);
+      this.removed.delete(entry.path);
+    }
   }
 
   /** Compose a repair workspace into the cumulative contribution delta. The repair
@@ -137,6 +154,8 @@ export class WorkspaceOverlay {
     const next = this.snapshot();
     next.applyEntries(repair.writtenEntries());
     this.entries = next.entries;
+    this.removed.clear();
+    for (const file of next.removed) this.removed.add(file);
     for (const file of next.written) this.written.add(file);
   }
 

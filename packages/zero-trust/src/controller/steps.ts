@@ -5,6 +5,7 @@ import path from 'node:path';
 import type { AcquiredSource } from '../canonical/acquire';
 import { acquireSource, resolveBase } from '../canonical/acquire';
 import { type SourceManifest, sha256, validateManifest } from '../canonical/export';
+import type { ContributorApproval } from '../canonical/reconstruct';
 import {
   type CandidateAuthority,
   type CandidateRecord,
@@ -39,6 +40,7 @@ import { policyRegions } from '../policy/regions';
 import { canonicalJson } from '../receipt/schema';
 import { assertSecretFree } from '../redaction';
 import { isTestPath, reviewCandidate } from '../review/integrity';
+import type { RunRecord } from '../state';
 import { isRunContinuation, prerequisiteWaitOrigin, ReasonCode } from '../state';
 import type { ProxyTarget, VmAdapter } from '../vm/adapter';
 import {
@@ -81,6 +83,23 @@ export interface GateRecord {
   readonly title: string;
   readonly body: string;
   readonly invitation?: InvitationEvidence;
+}
+export function implementationPhaseKey(run: RunRecord): number {
+  return run.history.filter(
+    (e) =>
+      ![ReasonCode.UserPaused, ReasonCode.ResumeImplementing, ReasonCode.ResumeRevising].includes(
+        e.reasonCode
+      )
+  ).length;
+}
+export function candidateMessage(
+  issue: number,
+  attempt: number,
+  author: ContributorApproval,
+  signoffRequired: boolean,
+  edit?: { count: number; digest: string }
+): string {
+  return `fix: issue ${issue} (attempt ${attempt})\n${edit ? `\nUser edit ${edit.count}: ${edit.digest}\n` : ''}${signoffRequired ? `\nSigned-off-by: ${author.name} <${author.email}>\n` : ''}`;
 }
 export interface Candidate {
   readonly touched: readonly string[];
@@ -534,13 +553,25 @@ export function createSteps(
     },
     async implement(c) {
       const author = await approval(c);
+      const phaseKey = implementationPhaseKey(c.run);
       const edit = latestSourceEdit(c.store);
-      if (edit && artifacts(c).get<number>('applied_user_edit') !== sourceEditCount(c.store)) {
+      const completion = artifacts(c).get<{ phaseKey: number; editCount: number }>(
+        'user_edit_implementation'
+      );
+      if (
+        edit &&
+        (artifacts(c).get<number>('applied_user_edit') !== sourceEditCount(c.store) ||
+          (completion?.phaseKey === phaseKey && completion.editCount === sourceEditCount(c.store)))
+      ) {
         const held = candidate(c);
         artifacts(c).put('candidate', held);
-        artifacts(c).put('applied_user_edit', sourceEditCount(c.store));
         const diff = reviewDiff(source(c).manifest, held.manifest);
         c.store.replaceArtifact('candidate.diff', diff);
+        artifacts(c).put('user_edit_implementation', {
+          phaseKey,
+          editCount: sourceEditCount(c.store),
+        });
+        artifacts(c).put('applied_user_edit', sourceEditCount(c.store));
         return {
           kind: 'candidate',
           bindings: {
@@ -550,14 +581,6 @@ export function createSteps(
           },
         };
       }
-      const phaseKey = c.run.history.filter(
-        (e) =>
-          ![
-            ReasonCode.UserPaused,
-            ReasonCode.ResumeImplementing,
-            ReasonCode.ResumeRevising,
-          ].includes(e.reasonCode)
-      ).length;
       if (artifacts(c).get<number>('implementation_finished') === phaseKey) {
         const completed = candidate(c);
         const diff = reviewDiff(source(c).manifest, completed.manifest);
@@ -650,13 +673,18 @@ export function createSteps(
             baseSha: gate(c).baseSha,
             author,
             committerTimestamp: attemptMetadata.timestamp,
-            message: `fix: issue ${c.store.config.upstream.issue} (attempt ${attempt})\n${gate(c).signoffRequired ? `\nSigned-off-by: ${author.name} <${author.email}>\n` : ''}`,
+            message: candidateMessage(
+              c.store.config.upstream.issue,
+              attempt,
+              author,
+              gate(c).signoffRequired
+            ),
           },
           base.pack
         );
         artifacts(c).put('attempt', attempt);
         artifacts(c).put('candidate', {
-          touched: cumulative.writtenEntries().map((e) => e.path),
+          touched: cumulative.touchedPaths(),
           manifest,
           record: produced.record,
           authority: produced.authority,

@@ -19,7 +19,7 @@ import {
   validateUserPatch,
 } from './edits';
 import { RunStore } from './run-store';
-import { StepArtifacts } from './steps';
+import { implementationPhaseKey, StepArtifacts } from './steps';
 import { loadVerification } from './verification-record';
 
 const dirs: string[] = [];
@@ -142,6 +142,86 @@ afterEach(() => {
 });
 
 describe('trusted paused user mutations', () => {
+  it('unsafe patches observe zero artifact/overlay publication against a nonempty candidate, including reopen', () => {
+    const h = rig();
+    applyUserPatch(h.store, h.store.run, patch(), now);
+    const before = h.store.userChanges;
+    const diffFile = path.join(h.store.storeDirectory('artifacts'), 'candidate.diff');
+    const diff = fs.readFileSync(diffFile);
+    const rename = vi.spyOn(fs, 'renameSync');
+    for (const bytes of [
+      patch('../escape'),
+      patch('.git/config'),
+      Buffer.from('diff --git a/file b/file\nnew mode 120000\n'),
+      Buffer.from('diff --git a/file b/file\nGIT binary patch\nliteral 4\ndata\n'),
+    ]) {
+      expect(() => applyUserPatch(h.store, h.store.run, bytes, now)).toThrow('invalid_patch');
+      expect(h.store.userChanges).toEqual(before);
+      expect(fs.readFileSync(diffFile)).toEqual(diff);
+    }
+    expect(rename).not.toHaveBeenCalled();
+    // Recording assertion is sensitive to an injected forbidden publication.
+    rename.mockImplementationOnce(() => {});
+    fs.renameSync('injected-forbidden-source-write', 'injected-forbidden-destination');
+    expect(() => expect(rename).not.toHaveBeenCalled()).toThrow();
+    rename.mockRestore();
+    const id = h.store.runId;
+    h.store.close();
+    const reopened = RunStore.open(h.root, id);
+    stores.push(reopened);
+    expect(reopened.userChanges).toEqual(before);
+    expect(fs.readFileSync(diffFile)).toEqual(diff);
+  });
+  it('includes admitted paused-repair writes before applying a contributor patch', () => {
+    const h = rig();
+    const previous = applyUserPatch(h.store, h.store.run, patch(), now);
+    const j = new Journal(path.join(h.store.storeDirectory('control'), 'steps'));
+    const artifacts = new StepArtifacts(j, h.store.runId);
+    artifacts.put('candidate', previous);
+    artifacts.put('applied_user_edit', 1);
+    artifacts.put('implementation_attempt', { phaseKey: implementationPhaseKey(h.store.run) });
+    artifacts.put('implementation_continuation', {
+      baseDigest: previous.manifest.digest,
+      writes: [
+        { path: 'file', content: 'repair\n' },
+        { path: 'other', content: 'admitted repair\n' },
+      ],
+    });
+    j.close();
+    const candidate = applyUserPatch(
+      h.store,
+      h.store.run,
+      patch('file', 'repair', 'contributor'),
+      now
+    );
+    expect(
+      Buffer.from(
+        candidate.manifest.entries.find((e) => e.path === 'file')?.bytes ?? '',
+        'base64'
+      ).toString()
+    ).toBe('contributor\n');
+    expect(
+      Buffer.from(
+        candidate.manifest.entries.find((e) => e.path === 'other')?.bytes ?? '',
+        'base64'
+      ).toString()
+    ).toBe('admitted repair\n');
+    expect(candidate.touched).toEqual(['file', 'other']);
+  });
+  it.each([
+    ' key',
+    'key ',
+    'key\nvalue',
+    '',
+  ])('refuses unusable model key bytes before changing a paused run (%j)', (key) => {
+    const h = rig();
+    vi.stubEnv('EDIT_MODEL_KEY', key);
+    expect(() => changeModelProfile(h.store, h.store.run, h.config.modelProfile, now)).toThrow(
+      'model_key_missing'
+    );
+    expect(h.store.config.modelProfile).toEqual(h.config.modelProfile);
+    expect(h.store.run.state).toBe('paused_user');
+  });
   it('applies a text patch through hardened Git and reopens the exact candidate and disclosure', () => {
     const h = rig();
     const candidate = applyUserPatch(h.store, h.store.run, patch(), now);
@@ -230,8 +310,13 @@ describe('trusted paused user mutations', () => {
     const h = rig();
     vi.stubEnv('EDIT_MODEL_KEY', 'fixture-key');
     const before = fs.readFileSync(h.ledgerPath);
-    const next = structuredClone(h.config.modelProfile);
-    next.phases.implementing = { ...next.phases.implementing, model: 'next' };
+    const next = {
+      ...h.config.modelProfile,
+      phases: {
+        ...h.config.modelProfile.phases,
+        implementing: { ...h.config.modelProfile.phases.implementing, model: 'next' },
+      },
+    };
     changeModelProfile(h.store, h.store.run, next, now);
     expect(fs.readFileSync(h.ledgerPath)).toEqual(before);
     expect(h.store.config.modelProfile).toEqual(next);
@@ -246,15 +331,21 @@ describe('trusted paused user mutations', () => {
   });
   it('refuses missing rates, missing keys, unknown adapter and identity changes', () => {
     const h = rig();
-    const next = structuredClone(h.config.modelProfile);
-    next.rates = [];
+    const next = { ...h.config.modelProfile, rates: [] };
     expect(() => changeModelProfile(h.store, h.store.run, next, now)).toThrow('missing_rate');
     expect(() => changeModelProfile(h.store, h.store.run, h.config.modelProfile, now)).toThrow(
       'model_key_missing'
     );
-    next.rates = h.config.modelProfile.rates;
-    next.phases.planning = { ...next.phases.planning, adapter: 'missing' };
-    expect(() => changeModelProfile(h.store, h.store.run, next, now)).toThrow('model_unavailable');
+    const unavailable = {
+      ...h.config.modelProfile,
+      phases: {
+        ...h.config.modelProfile.phases,
+        planning: { ...h.config.modelProfile.phases.planning, adapter: 'missing' },
+      },
+    };
+    expect(() => changeModelProfile(h.store, h.store.run, unavailable, now)).toThrow(
+      'model_unavailable'
+    );
     for (const identity of [
       { contributor: 'bob' },
       { issueUrl: 'https://github.com/owner/repo/issues/2' },
