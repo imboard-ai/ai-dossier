@@ -5,6 +5,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { assertSecretFree, SecretRedactionError } from '../redaction';
 import { type ConfigErrorCode, RunConfigError, validateRunConfig } from './config';
+import { RunStore } from './run-store';
 
 const dirs: string[] = [];
 function configFixture() {
@@ -74,6 +75,67 @@ afterEach(() => {
 });
 
 describe('validateRunConfig', () => {
+  const approval = {
+    userId: 12,
+    login: 'contributor',
+    name: 'Approved Name',
+    email: '12+contributor@users.noreply.github.com',
+    source: 'default',
+    approvedAt: '2026-10-10T00:00:00.000Z',
+  };
+  it('persists approval under the config digest and refuses changed approval bytes on resume', () => {
+    const h = configFixture();
+    const config = validateRunConfig({ ...h.raw, authorApproval: approval });
+    const store = RunStore.create(path.join(h.root, 'runs'), config, '2026-10-10T00:00:00.000Z');
+    const directory = store.directory;
+    const id = store.runId;
+    const file = path.join(directory, 'config.json');
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as { authorApproval: { name: string } };
+    expect(raw.authorApproval).toEqual(approval);
+    raw.authorApproval.name = 'Changed Name';
+    fs.writeFileSync(file, JSON.stringify(raw), { mode: 0o600 });
+    expect(() => store.validateEvidence()).toThrow('invalid_store');
+    store.close();
+    expect(() => RunStore.open(path.join(h.root, 'runs'), id)).toThrow('invalid_store');
+  });
+  it('validates the closed approval schema without constructing identity or confirming an override', () => {
+    const { raw } = configFixture();
+    const config = validateRunConfig({ ...raw, authorApproval: approval });
+    expect(config.authorApproval).toEqual(approval);
+    expect(Object.isFrozen(config.authorApproval)).toBe(true);
+    expect(
+      validateRunConfig({
+        ...raw,
+        authorApproval: {
+          ...approval,
+          source: 'override',
+          email: 'approved@example.org',
+          approvedAt: '2026-10-10T00:00:00Z',
+        },
+      }).authorApproval?.email
+    ).toBe('approved@example.org');
+  });
+  it.each([
+    null,
+    {},
+    { ...approval, extra: true },
+    { ...approval, userId: 0 },
+    { ...approval, login: 'other' },
+    { ...approval, name: 'Injected\nName' },
+    { ...approval, name: '<Name>' },
+    { ...approval, name: 'x'.repeat(257) },
+    { ...approval, email: 'other@example.org' },
+    { ...approval, email: 'invalid' },
+    { ...approval, email: 'x'.repeat(257) },
+    { ...approval, source: 'model' },
+    { ...approval, approvedAt: '2026-02-30T00:00:00Z' },
+    { ...approval, approvedAt: 'not-a-time' },
+    { ...approval, approvedAt: '2026-10-10T00:00:00+00:00' },
+  ])('refuses malformed author approval %j', (authorApproval) => {
+    expect(() => validateRunConfig({ ...configFixture().raw, authorApproval })).toThrow(
+      RunConfigError
+    );
+  });
   it('accepts complete configuration and derives safe defaults without retaining references', () => {
     const { raw, config } = configFixture();
     const value = config();

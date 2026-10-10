@@ -15,6 +15,7 @@ export type ConfigErrorCode =
   | 'unknown_key'
   | 'invalid_issue_url'
   | 'invalid_contributor'
+  | 'invalid_author_approval'
   | 'unsupported_environment'
   | 'invalid_model_profile'
   | 'invalid_env_name'
@@ -43,6 +44,7 @@ export interface RunConfig {
   readonly issueUrl: string;
   readonly upstream: { readonly owner: string; readonly repo: string; readonly issue: number };
   readonly contributor: string;
+  readonly authorApproval?: AuthorApproval;
   readonly executionProfile: {
     readonly provider: 'local-qemu';
     readonly profileDir: string;
@@ -77,6 +79,45 @@ export interface RunConfig {
   };
   readonly retentionDays: number;
   readonly resumeRunId?: string;
+}
+
+export interface AuthorApproval {
+  readonly userId: number;
+  readonly login: string;
+  readonly name: string;
+  readonly email: string;
+  readonly source: 'default' | 'override';
+  readonly approvedAt: string;
+}
+
+function authorApproval(raw: unknown, contributor: string): AuthorApproval {
+  const a = object(
+    raw,
+    ['userId', 'login', 'name', 'email', 'source', 'approvedAt'],
+    'invalid_author_approval'
+  );
+  const code = 'invalid_author_approval';
+  const userId = positive(a.userId, code);
+  const login = text(a.login, code);
+  const name = text(a.name, code);
+  const email = text(a.email, code);
+  const approvedAt = text(a.approvedAt, code);
+  if (
+    !isGitHubLogin(login) ||
+    login.toLowerCase() !== contributor.toLowerCase() ||
+    Buffer.byteLength(name) > 256 ||
+    /[<>]/u.test(name) ||
+    Buffer.byteLength(email) > 256 ||
+    !/^[^<>\s@]+@[^<>\s@]+$/u.test(email) ||
+    (a.source !== 'default' && a.source !== 'override') ||
+    (a.source === 'default' && email !== `${userId}+${login}@users.noreply.github.com`) ||
+    !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{3})?Z$/u.test(approvedAt) ||
+    !Number.isFinite(Date.parse(approvedAt)) ||
+    Date.parse(approvedAt) < 0 ||
+    new Date(approvedAt).toISOString() !== approvedAt.replace(/(?<!\d{3})Z$/u, '.000Z')
+  )
+    fail(code);
+  return Object.freeze({ userId, login, name, email, source: a.source, approvedAt });
 }
 
 function fail(code: ConfigErrorCode): never {
@@ -177,6 +218,7 @@ export function validateStoredRunConfig(raw: unknown): RunConfig {
     [
       'issueUrl',
       'contributor',
+      'authorApproval',
       'executionProfile',
       'modelProfile',
       'budget',
@@ -298,6 +340,9 @@ export function validateStoredRunConfig(raw: unknown): RunConfig {
     issueUrl,
     upstream: { ...binding.upstream, issue: binding.issue },
     contributor,
+    ...(r.authorApproval === undefined
+      ? {}
+      : { authorApproval: authorApproval(r.authorApproval, contributor) }),
     executionProfile: {
       provider: 'local-qemu',
       profileDir: path.resolve(text(e.profileDir, 'unsupported_environment')),

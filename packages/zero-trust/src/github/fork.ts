@@ -271,6 +271,8 @@ export interface ForkReady extends ForkRepository {
 }
 
 export interface ReadinessInput {
+  /** Validate a held binding without making lifecycle transitions. */
+  readonly readOnly?: boolean;
   readonly run: RunRecord;
   /** Recorded upstream id; owner and repository come from the run's own issue URL. */
   readonly upstreamId: number;
@@ -472,18 +474,20 @@ function blockedAction(
   };
 }
 
-/** One explicit check of every prerequisite. Moves the run into, within, or out of the
+/** One explicit check of every prerequisite. In default mode moves the run into, within, or out of the
  * durable wait; the caller persists the returned run. Never schedules anything. Throws
  * `ForkError`: `admission_state` outside gating, shipping or a fork/installation wait (a
  * pending link hand-off included); `invalid_binding` / `invalid_app` on a bad issue URL,
- * upstream id or App slug. */
+ * upstream id or App slug. `readOnly: true` bypasses the lifecycle-state restriction,
+ * preserves the run, maps missing prerequisites to `unknown`, and reports positive
+ * invalidity as `blocked` without applying a transition. */
 export async function checkForkReadiness(
   input: ReadinessInput,
   deps: ReadinessDeps
 ): Promise<ReadinessOutcome> {
   const { run, appSlug } = input;
   const origin = prerequisiteWaitOrigin(run);
-  if (origin === null && run.state !== 'gating' && run.state !== 'shipping')
+  if (!input.readOnly && origin === null && run.state !== 'gating' && run.state !== 'shipping')
     throw new ForkError('admission_state');
   if (!isAppSlug(appSlug)) throw new ForkError('invalid_app');
   const upstream = upstreamOf(run, input.upstreamId);
@@ -498,6 +502,7 @@ export async function checkForkReadiness(
     fork?: ForkRepository,
     suspendedId?: number
   ): ReadinessOutcome => {
+    if (input.readOnly) return unknown();
     // The same wait observed again records nothing new.
     const next = origin !== null && run.reasonCode === code ? run : move(code);
     return {
@@ -509,11 +514,13 @@ export async function checkForkReadiness(
   };
   const blocked = (block: Block): ReadinessOutcome => ({
     kind: 'blocked',
-    run: move(
-      block.reason === 'installation_too_broad'
-        ? ReasonCode.InstallationTooBroad
-        : ReasonCode.PolicyBlocked
-    ),
+    run: input.readOnly
+      ? run
+      : move(
+          block.reason === 'installation_too_broad'
+            ? ReasonCode.InstallationTooBroad
+            : ReasonCode.PolicyBlocked
+        ),
     reason: block.reason,
     ...('detail' in block ? { detail: block.detail } : {}),
     ...blockedAction(block, upstream, run.contributor, appSlug),
@@ -565,7 +572,7 @@ export async function checkForkReadiness(
       return {
         kind: 'ready',
         run:
-          origin === null
+          input.readOnly || origin === null
             ? run
             : move(origin === 'gating' ? ReasonCode.ResumeGating : ReasonCode.ResumeShipping),
         fork: Object.freeze({ ...fork, installationId: installation.installationId }),

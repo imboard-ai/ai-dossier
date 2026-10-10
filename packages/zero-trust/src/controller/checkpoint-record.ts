@@ -5,6 +5,7 @@ import { isRecord, isTimestamp, ReasonCode, type RunRecord } from '../state';
 export type CheckpointPoint = 'plan' | 'patch' | 'verification';
 export type CheckpointPhase = 'planning' | 'verifying' | 'shipping';
 export interface CheckpointBindings {
+  readonly reviewDigest?: string;
   readonly planDigest?: string;
   readonly candidateSha?: string;
   readonly verificationDigest?: string;
@@ -81,9 +82,12 @@ export function checkpointBindings(
           'verificationDigest',
           'policyDigest',
           'budgetSessionId',
+          'reviewDigest',
         ].includes(key)
     ) ||
     !digest(value.policyDigest) ||
+    (value.reviewDigest !== undefined &&
+      (point === 'verification' || !digest(value.reviewDigest))) ||
     typeof value.budgetSessionId !== 'string' ||
     !value.budgetSessionId.startsWith(`${runId}-s`) ||
     !/^[1-9][0-9]*$/u.test(value.budgetSessionId.slice(runId.length + 2)) ||
@@ -107,6 +111,7 @@ export function checkpointBindings(
     ...(point === 'verification' ? { verificationDigest: value.verificationDigest as string } : {}),
     policyDigest: value.policyDigest,
     budgetSessionId: value.budgetSessionId,
+    ...(value.reviewDigest !== undefined ? { reviewDigest: value.reviewDigest as string } : {}),
   });
 }
 export function sameCheckpointBindings(a: CheckpointBindings, b: CheckpointBindings): boolean {

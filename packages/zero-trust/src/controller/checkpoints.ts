@@ -1,3 +1,6 @@
+import { createHash } from 'node:crypto';
+import path from 'node:path';
+import { readPrivate } from '../durable-fs';
 import { assertSecretFree } from '../redaction';
 import {
   isRecord,
@@ -23,6 +26,22 @@ import {
 import type { RunStore } from './run-store';
 
 export * from './checkpoint-record';
+
+/** Composition checkpoints bind the actual human-review bytes as well as authority.
+ * Legacy foundational checkpoints have no reviewDigest and retain their contract. */
+export function validateCheckpointReview(store: RunStore, record: CheckpointRecord): void {
+  if (!record.bindings.reviewDigest) return;
+  try {
+    const name = record.point === 'plan' ? 'plan.txt' : 'candidate.diff';
+    const bytes = store.withStoreDirectory('artifacts', (directory) =>
+      readPrivate(path.join(directory, name))
+    );
+    if (createHash('sha256').update(bytes).digest('hex') !== record.bindings.reviewDigest)
+      checkpointFail('checkpoint_stale');
+  } catch {
+    checkpointFail('checkpoint_stale');
+  }
+}
 
 /** Only persisted user config is consulted by pauseAtCheckpoint. */
 export function checkpointDue(
@@ -119,6 +138,7 @@ export function approveCheckpoint(
   now: Date | string
 ): RunRecord {
   const { record, at } = openCheckpoint(store, run, answer, now);
+  validateCheckpointReview(store, record);
   const reason = checkpointResumeReason(record.point);
   store.resolveCheckpoint(
     restoreCheckpoint({ ...record, status: 'approved', resolvedAt: at }),

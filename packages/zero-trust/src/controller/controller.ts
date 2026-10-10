@@ -20,6 +20,7 @@ import {
 } from '../state';
 import type { VmAdapter, VmHandle, VmSpec } from '../vm/adapter';
 import { type TeardownOutcome, teardownVm } from '../vm/teardown';
+import { AuthorApprovalError } from './author-approval';
 import {
   type CheckpointBindings,
   type CheckpointPoint,
@@ -40,7 +41,16 @@ export type PhaseStop =
   | { readonly kind: 'cancelled' };
 export type GateOutcome =
   | PhaseStop
-  | { readonly kind: 'proceed' | 'request_permission' | 'terminate' | 'ineligible' };
+  | {
+      readonly kind:
+        | 'proceed'
+        | 'request_permission'
+        | 'contributor_handoff'
+        | 'fork_missing'
+        | 'installation_missing'
+        | 'terminate'
+        | 'ineligible';
+    };
 export type AcquireOutcome = PhaseStop | { readonly kind: 'acquired' };
 export type PlanOutcome =
   | PhaseStop
@@ -138,6 +148,8 @@ export interface RecoveryHooks {
   killAll(context: PhaseContext): Promise<void>;
 }
 export interface ControllerDependencies {
+  /** Release run-owned journals/credential leases before the RunStore pins close. */
+  readonly release?: () => Promise<void>;
   readonly root: string;
   readonly steps: PhaseSteps;
   readonly recovery: RecoveryHooks;
@@ -161,7 +173,15 @@ export class ControllerError extends Error {
       | 'step_failed'
       | 'admission_closed'
       | 'driver_failed'
-      | 'recovery_failed'
+      | 'recovery_failed',
+    readonly diagnostic?: {
+      readonly phase: keyof PhaseSteps | 'recovery';
+      readonly code:
+        | 'producer_unavailable'
+        | 'contributor_authorization_unavailable'
+        | 'invalid_step_artifact'
+        | 'missing_step_artifact';
+    }
   ) {
     super(`Run controller refused (${code})`);
     this.name = 'ControllerError';
@@ -170,7 +190,15 @@ export class ControllerError extends Error {
 type PhaseName = keyof PhaseSteps;
 type Outcome = Awaited<ReturnType<PhaseSteps[PhaseName]>>;
 const KINDS: Record<PhaseName, readonly string[]> = {
-  gate: ['proceed', 'request_permission', 'terminate', 'ineligible'],
+  gate: [
+    'proceed',
+    'request_permission',
+    'contributor_handoff',
+    'fork_missing',
+    'installation_missing',
+    'terminate',
+    'ineligible',
+  ],
   acquire: ['acquired'],
   plan: ['planned'],
   implement: ['candidate'],
@@ -370,9 +398,10 @@ export class RunController {
     // Fence synchronous observer/hook re-entry before invoking any injected code.
     const task = Promise.resolve()
       .then(work)
-      .finally(() => {
+      .finally(async () => {
         try {
           this.last = this.store?.run ?? this.last;
+          await this.deps.release?.();
         } finally {
           this.journal?.close();
           this.store?.close();
@@ -475,7 +504,10 @@ export class RunController {
   private async recover<T>(work: () => Promise<T>): Promise<T> {
     try {
       return await work();
-    } catch {
+    } catch (error) {
+      if (error instanceof AuthorApprovalError) throw error;
+      if (error instanceof ControllerError && error.code === 'recovery_failed' && error.diagnostic)
+        throw error;
       throw new ControllerError('recovery_failed');
     }
   }
@@ -619,6 +651,7 @@ export class RunController {
         throw new ControllerError('invalid_outcome');
     } catch (error) {
       if (error instanceof ControllerError) throw error;
+      if (error instanceof AuthorApprovalError) throw error;
       throw new ControllerError('step_failed');
     } finally {
       this.phaseLease = undefined;
@@ -769,8 +802,9 @@ export class RunController {
   }
   private async shipping(): Promise<boolean> {
     const record = this.latestVerification();
+    const { reviewDigest: _patchReview, ...candidateBindings } = this.latestCandidate().bindings;
     const bindings = {
-      ...this.latestCandidate().bindings,
+      ...candidateBindings,
       verificationDigest: record.recordDigest,
     };
     if (!(await this.checkpoint('verification', bindings))) return false;
@@ -820,7 +854,17 @@ export class RunController {
     return vm;
   }
   private async cleanup(): Promise<void> {
-    const vms = await this.recover(() => this.deps.vm.listByRun(this.held.runId));
+    let vms: Awaited<ReturnType<VmAdapter['listByRun']>>;
+    try {
+      vms = await this.recover(() => this.deps.vm.listByRun(this.held.runId));
+    } catch (error) {
+      const run = this.held.run;
+      if (run.state !== 'blocked_cleanup' && !TERMINAL_STATES.includes(run.state))
+        this.persistObserved(
+          transitionRun(run, ReasonCode.CleanupFailed, this.deps.now().toISOString())
+        );
+      throw error;
+    }
     const failures: unknown[] = [];
     let cleanupRun = this.held.run;
     const limits = this.held.config.limits;
