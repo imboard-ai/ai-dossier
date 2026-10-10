@@ -222,7 +222,8 @@ function feedbackItem(
     (raw.body !== null && typeof raw.body !== 'string')
   )
     return null;
-  const body = ((raw.body as string | null) ?? '').slice(0, MAX_FEEDBACK_BODY);
+  const body = (raw.body as string | null) ?? '';
+  if (body.length > MAX_FEEDBACK_BODY) return null;
   if (
     raw.user.type === 'Bot' ||
     !(MAINTAINER_ASSOCIATIONS as readonly unknown[]).includes(raw.author_association) ||
@@ -476,6 +477,8 @@ export type RevisionAdmission = Pick<
 
 /** What a `PrTracker` reads and writes with; all controller-owned. */
 export interface TrackDeps {
+  /** Write-ahead controller artifact, before revision_started becomes durable. */
+  readonly retainRevisionFeedback?: (feedback: readonly FeedbackItem[]) => void;
   readonly read: GitHubRead;
   /** Controller-held numeric authority: upstream from RunStore, fork from a validated
    * retained signed receipt. Never populate from fresh GitHub responses. Absent means
@@ -1387,6 +1390,7 @@ export class PrTracker {
       if (!feedback.length) return { kind: 'nothing_to_revise', status: this.status() };
       const stale = await this.fresh();
       if (stale) return this.block(stale);
+      this.deps.retainRevisionFeedback?.(feedback);
       this.persist({
         v: 1,
         type: 'revision_started',

@@ -17,7 +17,11 @@ const WAIT = {
   paused_user: 'paused',
 } as const;
 /** Shared status/metrics policy: each elapsed interval belongs to its preceding state. */
-export function lifecycleTimes(input: RunRecord, now: number) {
+export function lifecycleTimes(
+  input: RunRecord,
+  now: number,
+  activeSince = Number.NEGATIVE_INFINITY
+) {
   const run = restoreRun(input);
   if (!Number.isFinite(now) || now < Date.parse(run.updatedAt))
     throw new Error('Invalid lifecycle time');
@@ -28,7 +32,7 @@ export function lifecycleTimes(input: RunRecord, now: number) {
   for (const entry of [...run.history, { to: run.state, timestamp: new Date(now).toISOString() }]) {
     const stop = Date.parse(entry.timestamp);
     const elapsed = stop - start;
-    if (ACTIVE.includes(state)) activeMs += elapsed;
+    if (ACTIVE.includes(state)) activeMs += Math.max(0, stop - Math.max(start, activeSince));
     else if (Object.hasOwn(WAIT, state)) waitMs[WAIT[state as keyof typeof WAIT]] += elapsed;
     state = entry.to;
     start = stop;

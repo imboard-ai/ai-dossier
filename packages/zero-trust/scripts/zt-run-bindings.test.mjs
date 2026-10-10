@@ -291,9 +291,11 @@ test('pure resume refuses changed authenticated account before constructing a co
   store.close();
   h.setUser(13);
   await assert.rejects(commands.resume(runId), { code: 'author_approval_mismatch' });
-  await assert.rejects(commands.resume(runId, { revise: true }), { code: 'revision_unavailable' });
+  await assert.rejects(commands.resume(runId, { revise: true }), {
+    code: 'author_approval_mismatch',
+  });
   assert.equal(commands.status(runId).state, 'gating');
-  assert.deepEqual(h.counts(), { revoked: 2, userReads: 2 });
+  assert.deepEqual(h.counts(), { revoked: 3, userReads: 3 });
   await Promise.all(h.callbacks);
 });
 

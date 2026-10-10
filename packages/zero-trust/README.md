@@ -70,7 +70,10 @@ environment references, never literal configuration values.
 | Command | Required command-specific arguments | Optional arguments |
 |---|---|---|
 | `start` | `--config <file.json>` | `--confirm-author`, `--author-name <name>`, `--author-email <email>` |
-| `resume` | `--run <id>` | `--revise` (currently refused as `revision_unavailable`) |
+| `resume` | `--run <id>` | `--revise` (explicit verified revision, new retained-spend session) |
+| `pr-edit` | `--run <id> --title <text> --body-file <file>` | revision-only contributor edit link |
+| `withdraw` | `--run <id> --reason <maintainer_request\|user_instruction> --explanation <text>` | contributor close link |
+| `cancel-action` | `--run <id>` | cancel a pending local action; upstream stays unchanged |
 | `status` | `--run <id>` | `--json` |
 | `pause` | `--run <id> --reason <text>` | |
 | `cancel` | `--run <id> --reason <text>` | |
@@ -2245,6 +2248,46 @@ run prepares the exact content, issues a link, waits durably in
   is scheduled: no reminders, and no compute until an explicit resume.
 
 ### PR tracking and revisions
+
+The composed `createController` now supports `resume(runId, { revise?: boolean,
+action?: TrackerActionRequest })`. Ordinary resume in `submitted`, `awaiting_review`
+or `accepted` performs one explicit observation, with no model call, VM allocation,
+OAuth request or new budget session. `resume --revise` explicitly admits a revision
+through current policy/issue/permission, authenticated contributor and fork checks.
+It allocates `<runId>-s<n+1>` once per durable `revision_requested`, retaining all
+historical sessions and spend, including across interrupted session allocation.
+No new feedback means no new session or implementation. An edited feedback item is
+new work. Status active time and remaining budget refer to the selected session.
+
+`assessRevisionFeedback` uses the merged #1119 typed decision function with the run's
+repair model, charged to that new session. Its fixed boolean question requires
+confident agreement on actionable work confined to the original issue/approved
+plan. Unclear, unrelated or authority-changing feedback hands off before a new VM
+is provisioned; the verdict and feedback remain inspectable. Feedback cannot alter
+identities, targets, network policy, budget or checkpoints. Oversized/truncated
+feedback is unreadable, never silently clipped. `retainRevisionFeedback` on
+`TrackDeps` is the write-ahead persistence seam used by the composition root.
+
+The fresh implementation VM starts from the last verified controller-held overlay.
+Review, independent verification and upstream drift checks run again; shipping uses
+a fresh v2 receipt and CAS from the last verified fork head, updating the same PR.
+`revision_pending` remains in `shipping`; explicit resume reuses that exact candidate,
+session and push intent until the PR head confirms it. A closed PR returns a reopen
+link; a mid-revision merge or changed policy blocks and retains evidence. Every
+tracker call publishes its exact `snapshot().run` to all other drivers' `observeRun`.
+
+CLI `pr-edit`, `withdraw` and `cancel-action` print a contributor link and instructions.
+Edit requires a live revision and a body preserving the existing PR marker; prepared
+title/body edits and close actions are confirmed only on a later read. Cancel-action
+only removes the local pending action. All three run under the same lifetime store
+lock and stop fences as resume; none writes upstream. Example (from this package):
+
+```bash
+node scripts/zt-run.mjs resume --root state/runs --run ztc-0123456789abcdef-run-1 --revise
+node scripts/zt-run.mjs pr-edit --root state/runs --run ztc-0123456789abcdef-run-1 --title 'Clarify fix' --body-file revised-description.md
+node scripts/zt-run.mjs withdraw --root state/runs --run ztc-0123456789abcdef-run-1 --reason user_instruction --explanation 'Superseded by another fix.'
+node scripts/zt-run.mjs cancel-action --root state/runs --run ztc-0123456789abcdef-run-1
+```
 
 `PrTracker` (`src/github/track.ts`, #1068) takes over once the PR is observed
 (`trackFromHandoff(record, fork)`), in its own controller-owned journal. It reads

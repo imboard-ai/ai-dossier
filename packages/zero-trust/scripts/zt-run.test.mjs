@@ -168,6 +168,59 @@ test('all valid command dispatches preserve exact arguments and defaults', async
     if (command === 'approve') assert.deepEqual(calls[0], [run, { point: 'plan', digest }]);
   }
 });
+test('contributor commands preserve inputs and print only contributor-confirmed links', async () => {
+  for (const [command, args, expected] of [
+    [
+      'pr-edit',
+      ['--title', 'Fix', '--body-file', 'body.md'],
+      { kind: 'edit', title: 'Fix', bodyFile: 'body.md' },
+    ],
+    [
+      'withdraw',
+      ['--reason', 'maintainer_request', '--explanation', 'Superseded'],
+      { kind: 'withdraw', reason: 'maintainer_request', explanation: 'Superseded' },
+    ],
+    ['cancel-action', [], { kind: 'cancel-action' }],
+  ]) {
+    const calls = [];
+    const r = await invoke([command, '--root', 'runs', '--run', run, ...args], {
+      prAction: (...a) => {
+        calls.push(a);
+        return {
+          link: 'https://github.com/owner/repo/pull/1',
+          instructions: 'Open the link from your own account, then resume to confirm.',
+        };
+      },
+    });
+    assert.equal(r.code, 0);
+    assert.deepEqual(calls, [[run, expected]]);
+    assert.ok(r.stdout[0].startsWith('contributor_link:'));
+    assert.ok(r.stdout[1].includes('confirm'));
+    const invalid = await invoke([command, '--root', 'runs', '--run', run, ...args, '--unknown']);
+    assert.equal(invalid.code, 3);
+    assert.equal(invalid.factories.length, 0);
+  }
+});
+test('contributor commands reject unknown withdrawal reasons and untrusted links', async () => {
+  const invalid = await invoke([
+    'withdraw',
+    '--root',
+    'runs',
+    '--run',
+    run,
+    '--reason',
+    'other',
+    '--explanation',
+    'Text',
+  ]);
+  assert.equal(invalid.code, 3);
+  assert.equal(invalid.factories.length, 0);
+  const result = await invoke(['cancel-action', '--root', 'runs', '--run', run], {
+    prAction: () => ({ link: 'https://evil.example/pull/1', instructions: 'Text' }),
+  });
+  assert.equal(result.code, 2);
+  assert.deepEqual(result.stdout, []);
+});
 test('status human and JSON carry identical parsed facts, including recorded author', async () => {
   const human = await invoke(['status', '--root', 'runs', '--run', run], { status: () => status });
   const json = await invoke(['status', '--root', 'runs', '--run', run, '--json'], {

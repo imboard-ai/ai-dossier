@@ -127,6 +127,10 @@ search for first.
 
 | Symptom (grep this) | What went wrong | Fix | PR |
 |---|---|---|---|
+| A typed feedback disagreement becomes `invalid_step_artifact`, or a real CAS refusal becomes `driver_failed` after its block is durable | StepArtifacts intentionally stores safe-integer numeric values, but a typed verdict can contain fractional confidence. IntentDriver also latches observations after a durable block, even when the caller is passing the identical blocked history back. | Retain the exact verdict as secret-scanned JSON text, and allow only an already-journaled identical blocked intent history to satisfy synchronization. Never swallow a missing/different history or a persistence failure. Keep real bare-fork CAS and uncertain-decision E2E cases. | #1111 |
+
+| Symptom (grep this) | What went wrong | Fix | PR |
+|---|---|---|---|
 | RunStore crash after journal append refuses every resume / snapshot rollback | Exact equality alone cannot distinguish interrupted publication from a reverted committed snapshot. | Journal an explicit snapshot confirmation after atomic publication; recover only the exact pending continuation under the lifetime guard, and refuse rollback of confirmed evidence. Test append/rename/fsync interruption and process-death recovery. | #1090 |
 | Valid controller config selects the wrong accelerator / stale handoff gives the old action | Coercing an array to a string validates one value but returns another; comparing handoff ID/state misses a later return to the same wait state. | Validate primitive accelerator literals and exact replayed handoff history/contribution; use source-compiled process fixtures rather than warm dist. | #1090 |
 

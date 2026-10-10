@@ -84,7 +84,12 @@ export type DriftOutcome =
 export type ShipOutcome =
   | PhaseStop
   | {
-      readonly kind: 'submitted' | 'contributor_handoff' | 'fork_missing' | 'installation_missing';
+      readonly kind:
+        | 'submitted'
+        | 'contributor_handoff'
+        | 'fork_missing'
+        | 'installation_missing'
+        | 'waiting';
     };
 export type ResumeHandoffOutcome =
   | PhaseStop
@@ -111,6 +116,8 @@ export type ControllerTrackOutcome =
     };
 
 export interface PhaseContext {
+  readonly revise: boolean;
+  readonly observeRun: (run: RunRecord) => Promise<void>;
   readonly store: RunStore;
   readonly run: RunRecord;
   readonly ledger: BudgetLedger;
@@ -162,6 +169,7 @@ export interface RecoveryHooks {
   prepareCancellation?(context: PhaseContext): Promise<void>;
 }
 export interface ControllerDependencies {
+  readonly trackerAction?: (context: PhaseContext, request: TrackerActionRequest) => Promise<void>;
   /** Stop-only external fence. It can revoke admission, never grant authority. */
   readonly incidentRequested?: () => boolean;
   /** Release run-owned journals/credential leases before the RunStore pins close. */
@@ -179,6 +187,14 @@ export interface ControllerDependencies {
   ) => Promise<BudgetObservation | null>;
   readonly now: () => Date;
 }
+export type TrackerActionRequest =
+  | { readonly kind: 'edit'; readonly title: string; readonly body: string }
+  | {
+      readonly kind: 'withdraw';
+      readonly reason: 'maintainer_request' | 'user_instruction';
+      readonly explanation: string;
+    }
+  | { readonly kind: 'cancel-action' };
 export class ControllerError extends Error {
   constructor(
     readonly code:
@@ -221,7 +237,7 @@ const KINDS: Record<PhaseName, readonly string[]> = {
   review: ['approved'],
   verify: ['verified'],
   drift: ['unchanged', 'advanced'],
-  ship: ['submitted', 'contributor_handoff', 'fork_missing', 'installation_missing'],
+  ship: ['submitted', 'contributor_handoff', 'fork_missing', 'installation_missing', 'waiting'],
   resumeHandoff: [
     'waiting',
     'invited',
@@ -312,6 +328,7 @@ export class RunController {
   private controlCleanup?: Promise<void>;
   private controlReconciled?: Promise<void>;
   private controlReconciledKind?: 'pause' | 'cancel';
+  private revise = false;
   constructor(private readonly deps: ControllerDependencies) {}
   snapshot(): RunRecord {
     if (!this.last) throw new ControllerError('not_running');
@@ -335,8 +352,33 @@ export class RunController {
       return this.loop(false);
     });
   }
-  resume(runId: string): Promise<RunRecord> {
+  resume(
+    runId: string,
+    options: { readonly revise?: boolean; readonly action?: TrackerActionRequest } = {}
+  ): Promise<RunRecord> {
+    const revise = options.revise === true;
+    const action = options.action ? structuredClone(options.action) : undefined;
+    if (action) {
+      assertSecretFree(action);
+      const keys =
+        action.kind === 'edit'
+          ? ['kind', 'title', 'body']
+          : action.kind === 'withdraw'
+            ? ['kind', 'reason', 'explanation']
+            : ['kind'];
+      if (
+        !['edit', 'withdraw', 'cancel-action'].includes(action.kind) ||
+        Object.keys(action).sort().join(',') !== keys.sort().join(',') ||
+        (action.kind === 'edit' &&
+          (typeof action.title !== 'string' || typeof action.body !== 'string')) ||
+        (action.kind === 'withdraw' &&
+          (!['maintainer_request', 'user_instruction'].includes(action.reason) ||
+            typeof action.explanation !== 'string'))
+      )
+        throw new ControllerError('invalid_outcome');
+    }
     return this.launch(async () => {
+      this.revise = revise;
       this.store = this.deps.recovery.openStore(this.deps.root, runId);
       this.recovering = true;
       this.ledger = this.deps.recovery.openBudget(this.store);
@@ -386,7 +428,14 @@ export class RunController {
         await this.recovered(
           await this.recover(() => this.deps.recovery.resumeTracker(this.context()))
         );
+      this.ensureRevisionSession();
       this.recovering = false;
+      if (action) {
+        this.assertAdmission();
+        if (!this.deps.trackerAction) throw new ControllerError('invalid_outcome');
+        await this.deps.trackerAction(this.context(), action);
+        return this.store.run;
+      }
       this.needsAcquisition = true;
       if (
         this.store.run.state === 'paused_user' &&
@@ -427,6 +476,7 @@ export class RunController {
     this.controlCleanup = undefined;
     this.controlReconciled = undefined;
     this.controlReconciledKind = undefined;
+    this.revise = false;
     const watcher = setInterval(() => {
       this.observeIncident();
       this.observeControl();
@@ -606,9 +656,27 @@ export class RunController {
   private sessionId(): string {
     const sessions = this.budget.snapshot().sessions;
     const session = sessions.at(-1);
-    if (!session || session.id !== this.held.budgetSessionId(1))
+    if (!session || sessions.some((s, i) => s.id !== this.held.budgetSessionId(i + 1)))
       throw new ControllerError('invalid_journal');
     return session.id;
+  }
+  /** The tracker transition is durable before allocation. A crash at either boundary
+   * recovers the same numbered session, never resets any historical spend. */
+  private ensureRevisionSession(): void {
+    const count =
+      this.held.run.history.filter((e) => e.reasonCode === ReasonCode.RevisionRequested).length + 1;
+    const sessions = this.budget.snapshot().sessions;
+    if (sessions.length > count || sessions.length < count - 1)
+      throw new ControllerError('invalid_journal');
+    if (sessions.length === count) return;
+    const budget = this.held.config.budget;
+    this.budget.startSession({
+      id: this.held.budgetSessionId(count),
+      ceiling: { currency: budget.currency, minor: budget.ceilingMinor },
+      cleanupAllowance: budget.cleanupAllowanceMinor,
+      tokenLimit: budget.tokenLimit,
+      timeLimitMs: budget.activeMinutes * 60_000,
+    });
   }
   private context(lease?: symbol, allocations?: Set<Promise<VmHandle>>): PhaseContext {
     const operation = this.operation;
@@ -617,6 +685,12 @@ export class RunController {
     const sessionId = this.sessionId();
     const signal = this.abort.signal;
     return {
+      revise: this.revise,
+      observeRun: async (run) => {
+        this.assertAdmission();
+        await this.recovered(run);
+        this.ensureRevisionSession();
+      },
       store: this.held,
       run: this.held.run,
       ledger: this.budget,
@@ -729,7 +803,10 @@ export class RunController {
         Object.hasOwn(KINDS, event.phase) &&
         Object.keys(event).length === 6
       )
-        this.cached.set(event.key, this.validatedOutcome(event.phase as PhaseName, event.outcome));
+        this.cached.set(
+          event.key,
+          this.validatedOutcome(event.phase as PhaseName, event.outcome, true)
+        );
       else if (
         event.type === 'cleanup' &&
         ['pending', 'destroyed', 'blocked_cleanup'].includes(String(event.kind)) &&
@@ -768,7 +845,7 @@ export class RunController {
     );
     return `${history.length}:${phase}`;
   }
-  private validatedOutcome(phase: PhaseName, input: unknown): Outcome {
+  private validatedOutcome(phase: PhaseName, input: unknown, historical = false): Outcome {
     try {
       const result = outcome(phase, input);
       if (result.kind === 'planned' || result.kind === 'candidate' || result.kind === 'advanced') {
@@ -777,7 +854,11 @@ export class RunController {
           result.kind === 'planned' ? 'plan' : 'patch',
           this.held.runId
         );
-        if (bindings.budgetSessionId !== this.sessionId())
+        if (
+          historical
+            ? !this.budget.snapshot().sessions.some((s) => s.id === bindings.budgetSessionId)
+            : bindings.budgetSessionId !== this.sessionId()
+        )
           throw new ControllerError('invalid_outcome');
       } else if (result.kind === 'verified') {
         if (
@@ -805,7 +886,7 @@ export class RunController {
       return stopped(this.held.run.state) ? { kind: 'waiting' } : { kind: 'hand_off' };
     const key = this.key(phase);
     const cached = this.cached.get(key);
-    if (cached && !reacquire) return cached;
+    if (cached && !reacquire && !['track', 'ship'].includes(phase)) return cached;
     const status = assembleStatus({
       run: this.held.run,
       now: this.deps.now(),
@@ -813,8 +894,9 @@ export class RunController {
       sessionId: this.sessionId(),
     });
     if (
-      status.activeTimeMs >= this.held.config.budget.activeMinutes * 60_000 ||
-      isBudgetSessionExhausted(this.budget.snapshot(), this.sessionId()) ||
+      (phase !== 'track' &&
+        status.activeTimeMs >= this.held.config.budget.activeMinutes * 60_000) ||
+      (phase !== 'track' && isBudgetSessionExhausted(this.budget.snapshot(), this.sessionId())) ||
       this.budget
         .snapshot()
         .reservations.some((hold) => hold.status === 'reserved' && this.oldHolds.has(hold.id))
@@ -889,8 +971,16 @@ export class RunController {
       await this.persist(run);
     } else {
       const reason = REASONS[result.kind];
-      if (reason)
+      if (
+        reason &&
+        !(
+          ['revision', 'submitted', 'merged', 'declined', 'awaiting_review', 'blocked'].includes(
+            result.kind
+          ) && this.held.run.reasonCode === reason
+        )
+      )
         await this.persist(transitionRun(this.held.run, reason, this.deps.now().toISOString()));
+      if (result.kind === 'revision') this.ensureRevisionSession();
     }
     return !stopped(this.held.run.state);
   }

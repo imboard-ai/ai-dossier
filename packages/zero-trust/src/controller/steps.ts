@@ -25,6 +25,7 @@ import {
 import type { ForkReady } from '../github/fork';
 import type { HandoffOutcome } from '../github/handoff-driver';
 import type { GitHubRead } from '../github/reconcile';
+import type { FeedbackItem } from '../github/track';
 import type { Journal } from '../journal';
 import type { ModelAdapter } from '../model/adapter';
 import { classifyPolicy, type PolicyAssessment, policyDigest } from '../policy/classify';
@@ -64,6 +65,7 @@ import {
   releaseWorkspace,
   type WorkspaceEvidence,
 } from './evidence-runner';
+import { assessRevisionFeedback } from './feedback';
 import { OutputCollector } from './output-collector';
 import type { ShippingAuthorizeDeps } from './shipping';
 import { loadVerification } from './verification-record';
@@ -117,12 +119,14 @@ export function policyReader(read: GitHubRead): GitHubRead {
 export function gateFreshness(
   read: GitHubRead,
   config: PhaseContext['store']['config'],
-  g: GateRecord
+  g: GateRecord,
+  ownPr?: { readonly number: number }
 ) {
   return createFreshnessProbe({
     read,
     upstream: config.upstream,
     contributor: config.contributor,
+    ...(ownPr ? { ownPr } : {}),
     gated: {
       policy: g.policy,
       policyDigest: g.policyDigest,
@@ -184,7 +188,7 @@ export interface StepServices {
     deps: Omit<ShippingAuthorizeDeps, 'signer'>,
     meta: Candidate['meta'],
     policy: PolicyAssessment
-  ) => Promise<'contributor_handoff' | 'submitted' | 'blocked' | 'hand_off'>;
+  ) => Promise<'contributor_handoff' | 'submitted' | 'blocked' | 'hand_off' | 'waiting'>;
   readonly track: (context: PhaseContext) => Promise<ControllerTrackOutcome>;
 }
 
@@ -327,7 +331,13 @@ export function createSteps(
     policyDigest: gate(c).policyDigest,
     budgetSessionId: c.sessionId,
   });
-  const fresh = (c: PhaseContext) => gateFreshness(services.read, c.store.config, gate(c));
+  const fresh = (c: PhaseContext) =>
+    gateFreshness(
+      services.read,
+      c.store.config,
+      gate(c),
+      artifacts(c).get<{ number: number }>('tracked_pr')
+    );
   const agentContext = (
     c: PhaseContext,
     w: ReturnType<typeof workspace>,
@@ -522,6 +532,34 @@ export function createSteps(
     },
     async implement(c) {
       const author = await approval(c);
+      if (c.run.state === 'revising') {
+        const assessed = artifacts(c).get<{ sessionId: string; admitted: boolean }>(
+          'feedback_decision'
+        );
+        if (assessed?.sessionId !== c.sessionId) {
+          const result = await assessRevisionFeedback(
+            artifacts(c).require<FeedbackItem[]>('feedback'),
+            gate(c),
+            artifacts(c).require<AgentPlan>('plan').text,
+            {
+              provider: createLlmDecisionProvider({ adapter: services.model('repair', c) }),
+              budget: {
+                ledger: c.ledger,
+                sessionId: c.sessionId,
+                rates: c.store.config.modelProfile.rates,
+              },
+              signal: c.signal,
+            }
+          );
+          artifacts(c).put('feedback_decision', {
+            sessionId: c.sessionId,
+            admitted: result.admitted,
+            verdict: JSON.stringify(result.verdict),
+          });
+          c.assertAdmission();
+          if (!result.admitted) return { kind: 'hand_off' };
+        } else if (!assessed.admitted) return { kind: 'hand_off' };
+      }
       const phaseKey = c.run.history.filter(
         (e) =>
           ![
@@ -791,7 +829,7 @@ export function createSteps(
               defaultBranch: gate(c).eligibility.facts.defaultBranch,
               policyDigest: gate(c).policyDigest,
               verificationDigest: verification.recordDigest,
-              expectedRemoteSha: null,
+              expectedRemoteSha: artifacts(c).get<string>('revision_base_sha') ?? null,
             },
             profile: { digest, binding: verification.profile },
             commandPlan: verificationPlan(profile(c), services.endpoints, targets),

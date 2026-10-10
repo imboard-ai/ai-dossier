@@ -12,6 +12,9 @@ const COMMANDS = Object.freeze({
     optional: ['confirm-author', 'author-name', 'author-email'],
   },
   resume: { required: ['root', 'run'], optional: ['revise'] },
+  'pr-edit': { required: ['root', 'run', 'title', 'body-file'], optional: [] },
+  withdraw: { required: ['root', 'run', 'reason', 'explanation'], optional: [] },
+  'cancel-action': { required: ['root', 'run'], optional: [] },
   status: { required: ['root', 'run'], optional: ['json'] },
   pause: { required: ['root', 'run', 'reason'], optional: [] },
   cancel: { required: ['root', 'run', 'reason'], optional: [] },
@@ -26,7 +29,7 @@ const COMMANDS = Object.freeze({
 });
 const BOOLEAN = new Set(['confirm-author', 'revise', 'json', 'apply']);
 export const USAGE =
-  'Usage: zt-run <start|resume|status|pause|cancel|approve|reject|authorize|kill-all|metrics|adoption|sweep|export> --root <dir> [command options]';
+  'Usage: zt-run <start|resume|pr-edit|withdraw|cancel-action|status|pause|cancel|approve|reject|authorize|kill-all|metrics|adoption|sweep|export> --root <dir> [command options]';
 const HELP = `${USAGE}\nstart --config <file.json> [--confirm-author] [--author-name <name>] [--author-email <email>]\nresume --run <id> [--revise]\nstatus --run <id> [--json]\npause --run <id> --reason <text>\ncancel --run <id> --reason <text>\napprove --run <id> --checkpoint <plan|patch|verification> --digest <sha256>\nreject --run <id> --checkpoint <plan|patch|verification> --digest <sha256> --reason <text>\nauthorize --run <id>\nkill-all --reason <text>\nmetrics [--json]\nadoption --run <id> --note <text>\nsweep [--apply]\nexport --run <id> --out <file>`;
 const ERROR_CODES = new Set([
   'invalid_input',
@@ -142,6 +145,13 @@ function parse(argv) {
   if (opts.digest && !/^[a-f0-9]{64}$/u.test(opts.digest)) refuse('invalid_input');
   if (opts.reason && (!opts.reason.trim() || opts.reason.length > 500)) refuse('invalid_input');
   if (opts.note && (!opts.note.trim() || opts.note.length > 2000)) refuse('invalid_input');
+  if (
+    command === 'withdraw' &&
+    (!['maintainer_request', 'user_instruction'].includes(opts.reason) ||
+      opts.explanation.length > 2000)
+  )
+    refuse('invalid_input');
+  if (opts.title && opts.title.length > 256) refuse('invalid_input');
   return { command, opts };
 }
 function readConfig(file) {
@@ -229,6 +239,36 @@ export async function main(argv, { createController, out, err, confirmAuthor } =
       case 'resume':
         status = await controller.resume(opts.run, { revise: Boolean(opts.revise) });
         break;
+      case 'pr-edit':
+      case 'withdraw':
+      case 'cancel-action': {
+        const result = await controller.prAction(
+          opts.run,
+          command === 'pr-edit'
+            ? { kind: 'edit', title: opts.title, bodyFile: opts['body-file'] }
+            : command === 'withdraw'
+              ? { kind: 'withdraw', reason: opts.reason, explanation: opts.explanation }
+              : { kind: 'cancel-action' }
+        );
+        assertSecretFree(result);
+        if (typeof result?.link !== 'string' || typeof result?.instructions !== 'string')
+          refuse('operation_failed');
+        const link = new URL(result.link);
+        if (
+          link.origin !== 'https://github.com' ||
+          !/^\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9][0-9]*$/u.test(link.pathname) ||
+          link.search ||
+          link.hash ||
+          link.username ||
+          link.password
+        )
+          refuse('operation_failed');
+        out(`contributor_link: ${JSON.stringify(link.href)}`);
+        out(`instructions: ${JSON.stringify(result.instructions)}`);
+        if (result.title) out(`prepared_title: ${JSON.stringify(result.title)}`);
+        if (result.bodyFile) out(`prepared_body_file: ${JSON.stringify(result.bodyFile)}`);
+        return 0;
+      }
       case 'status':
         status = await controller.status(opts.run);
         break;

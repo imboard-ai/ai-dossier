@@ -171,7 +171,18 @@ export async function createCommands({ root, createController, onAuthorizationUr
         let tracker;
         if (
           retained.tracking &&
-          ['submitted', 'awaiting_review', 'accepted', 'merged', 'declined'].includes(run.state) &&
+          [
+            'submitted',
+            'awaiting_review',
+            'accepted',
+            'merged',
+            'declined',
+            'revising',
+            'verifying',
+            'shipping',
+            'paused_user',
+            'blocked',
+          ].includes(run.state) &&
           run.history.some((e) => e.reasonCode === 'publication_observed')
         ) {
           readOutcomeTrack(store, run);
@@ -258,7 +269,6 @@ export async function createCommands({ root, createController, onAuthorizationUr
       }
     },
     async resume(runId, { revise } = {}) {
-      if (revise) refuse('revision_unavailable');
       if (incidentRequested(root)) {
         const held = RunStore.open(root, runId, { cleanup: true });
         held.close();
@@ -268,16 +278,45 @@ export async function createCommands({ root, createController, onAuthorizationUr
       const config = configFor(runId, true);
       if (!config.authorApproval) refuse('author_approval_missing');
       const control = withStore(runId, true, readControlRequests, true);
-      if (!control.invalid && !control.pending.length)
+      const state = withStore(runId, true, (store) => store.run.state);
+      if (
+        !control.invalid &&
+        !control.pending.length &&
+        !['submitted', 'awaiting_review', 'accepted'].includes(state)
+      )
         await prepareAuthor(
           config,
           { userId: config.authorApproval.userId },
           { onAuthorizationUrl }
         );
-      const run = await createController(config, { onAuthorizationUrl }).resume(runId);
+      const run = await createController(config, { onAuthorizationUrl }).resume(runId, {
+        revise: Boolean(revise),
+      });
       return status(run.runId);
     },
     status,
+    async prAction(runId, request) {
+      if (incidentRequested(root)) refuse('incident_active');
+      const config = configFor(runId, true);
+      let action = request;
+      if (request.kind === 'edit') {
+        const bytes = readPrivate(request.bodyFile, (stat) => {
+          if (stat.size > 65536) refuse('invalid_input');
+        });
+        const body = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+        assertSecretFree(body);
+        action = { kind: 'edit', title: request.title, body };
+      }
+      await createController(config, { onAuthorizationUrl }).resume(runId, { action });
+      return withStore(runId, true, (store) => {
+        const filePath = path.join(store.storeDirectory('control'), 'steps', 'events.jsonl');
+        const bytes = readPrivate(filePath);
+        return new StepArtifacts(
+          { filePath, read: () => parseJournalEvents(bytes) },
+          runId
+        ).require('contributor_action');
+      });
+    },
     pause(runId, reason) {
       return withStore(
         runId,

@@ -41,6 +41,7 @@ import {
   prerequisiteWaitOrigin,
   ReasonCode,
   type RunRecord,
+  sameRunRecord,
   TERMINAL_STATES,
   transitionRun,
 } from '../state';
@@ -965,12 +966,34 @@ export function createController(
     if (!record) throw new Error('tracked_pr_missing');
     const { pr } = trackFromHandoff(record, artifacts(c).require<ForkReady>('fork'));
     if (!pr || !record.headSha) throw new Error('tracked_pr_missing');
-    const admission = shipping ? await shippingAdmission(c) : contactAdmission(c);
+    artifacts(c).put('tracked_pr', { number: pr.number });
+    const admission = {
+      policyFresh: async () => {
+        c.assertAdmission();
+        const probe = await gateFreshness(read, config, artifacts(c).require<GateRecord>('gate'), {
+          number: pr.number,
+        }).check();
+        artifacts(c).put('revision_freshness', probe);
+        c.assertAdmission();
+        return probe.fresh;
+      },
+      contributorVerified: async () => {
+        await identity(c);
+        c.assertAdmission();
+        return true;
+      },
+      forkBindingVerified: async () => {
+        const result = await checkFork(c);
+        c.assertAdmission();
+        return result.kind === 'ready';
+      },
+    };
     tracker = new PrTracker(
       journal(c, 'track'),
       {
         read,
         admission,
+        retainRevisionFeedback: (feedback) => artifacts(c).put('feedback', feedback),
         bodyDirectory: c.store.storeDirectory('bodies'),
         now: () => now().toISOString(),
         retainedIdentity: {
@@ -981,6 +1004,29 @@ export function createController(
       { run: c.store.run, contributionId: c.store.contributionId, pr, headSha: record.headSha }
     );
     return tracker;
+  };
+  /** Tracker owns observation transitions. Publish its exact history, then notify
+   * all other drivers before another capability can run. */
+  const syncTracker = async (c: PhaseContext, t: PrTracker) => {
+    artifacts(c).put('tracking', t.status());
+    await c.observeRun(t.snapshot().run);
+    for (const driver of [intents, handoff]) if (driver) observeDriver(driver, t.snapshot().run);
+  };
+  const observeDriver = (driver: IntentDriver | HandoffDriver | PrTracker, run: RunRecord) => {
+    try {
+      driver.observeRun(run);
+    } catch (error) {
+      // IntentDriver latches all calls after its durable block, including a no-op
+      // observation of the identical blocked history. Its own committed transition
+      // is already synchronized; any missing or different history still refuses.
+      if (
+        driver === intents &&
+        intents.snapshot().blockedReason &&
+        sameRunRecord(intents.snapshot().run, run)
+      )
+        return;
+      throw error;
+    }
   };
   const steps = createSteps(
     {
@@ -1036,7 +1082,8 @@ export function createController(
               return intents.execute(intent);
             },
           });
-          artifacts(c).put('tracking', t.status());
+          await syncTracker(c, t);
+          if (result.kind === 'revision_pending' || result.kind === 'action') return 'waiting';
           return result.kind === 'revised'
             ? 'submitted'
             : result.kind === 'blocked'
@@ -1100,12 +1147,18 @@ export function createController(
             : 'contributor_handoff';
       },
       track: async (c) => {
-        await identity(c);
         const t = await openTracker(c);
         let result = await t.resume();
-        if (result.kind === 'tracking' && (result.status.feedback ?? 0) > 0)
+        await syncTracker(c, t);
+        if (c.revise && result.kind === 'tracking' && (result.status.feedback ?? 0) > 0) {
+          const baseSha = t.snapshot().verifiedSha;
           result = await t.beginRevision();
-        artifacts(c).put('tracking', t.status());
+          if (result.kind === 'revising') {
+            artifacts(c).put('revision_base_sha', baseSha);
+            artifacts(c).put('push_intended', false);
+          }
+          await syncTracker(c, t);
+        }
         if (result.kind === 'merged' || result.kind === 'declined' || result.kind === 'blocked')
           return { kind: result.kind };
         if (result.kind === 'revising') {
@@ -1211,6 +1264,23 @@ export function createController(
     receipt = artifacts(c).get<SignedReceipt>('receipt');
   };
   const controller: RunController = new RunController({
+    trackerAction: async (c, request) => {
+      const t = await openTracker(c);
+      if (request.kind === 'edit') await t.requestEdit(request);
+      else if (request.kind === 'withdraw') await t.requestWithdrawal(request);
+      else await t.cancelAction();
+      await syncTracker(c, t);
+      const status = t.status();
+      artifacts(c).put(
+        'contributor_action',
+        status.action ?? {
+          kind: 'cancel-action',
+          link: status.pr,
+          instructions:
+            'The local pending action was cancelled. No upstream change was made. Open the PR to inspect its state; resume explicitly to observe it.',
+        }
+      );
+    },
     incidentRequested: () => incidentRequested(root),
     root,
     steps,
@@ -1222,7 +1292,7 @@ export function createController(
       {
         observeRun: (run: RunRecord) => {
           for (const driver of [intents, handoff, tracker]) {
-            if (driver && isRunContinuation(driver.snapshot().run, run)) driver.observeRun(run);
+            if (driver && isRunContinuation(driver.snapshot().run, run)) observeDriver(driver, run);
           }
         },
       },
@@ -1307,6 +1377,8 @@ export function createController(
             if (checkpoint?.status === 'open') validateCheckpointReview(c.store, checkpoint);
           }
           if (!TERMINAL_STATES.includes(c.run.state) && c.run.state !== 'blocked_cleanup') {
+            // Explicit observation and link issuance need no paid computation or OAuth.
+            if (['submitted', 'awaiting_review', 'accepted'].includes(c.run.state)) return;
             if (prerequisiteWaitOrigin(c.run) && !artifacts(c).get('fork')) return;
             await identity(c);
             await recoverShipping(c);
@@ -1324,7 +1396,14 @@ export function createController(
         );
         return driver.snapshot().run;
       },
-      resumeTracker: async (c) => (await openTracker(c)).snapshot().run,
+      resumeTracker: async (c) => {
+        const t = await openTracker(c);
+        if (t.snapshot().revision) {
+          artifacts(c).put('revision_base_sha', t.snapshot().verifiedSha);
+          if (!t.snapshot().revision?.candidateSha) artifacts(c).put('push_intended', false);
+        }
+        return t.snapshot().run;
+      },
       killAll: async (c) => {
         await stopResources(localVm(c), c.run.runId, async () => {
           await broker?.killAll();
