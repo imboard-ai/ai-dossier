@@ -365,7 +365,7 @@ describe('verified CAS push to the fork (#1066)', () => {
     expect(r.fork.refReads()).toBe(1);
   });
 
-  it('an aborted lease kills the push and leaves the attempt to reconciliation', async () => {
+  it('an already-aborted lease kills the push and leaves the attempt to reconciliation', async () => {
     const r = await rig();
     r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
     r.wrap = (inner) => async (intent, target, operation, cancel) =>
@@ -378,6 +378,39 @@ describe('verified CAS push to the fork (#1066)', () => {
     // The remote still holds the expected value: the one retry is admitted.
     await r.driver.resume();
     expect(r.driver.snapshot().intents.get(idempotencyKey(pushOf(SHA1)))?.retryReady).toBe(true);
+  });
+
+  it.each([
+    'unavailable',
+    'divergent',
+  ] as const)('an expired/stopped push with %s remote is never voided', async (failure) => {
+    const r = await rig();
+    r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
+    if (failure === 'unavailable')
+      r.fork.overrides.push((p) =>
+        p.includes('/git/ref/') && r.fork.refReads() > 1 ? { status: 503, body: null } : undefined
+      );
+    const lease = new AbortController();
+    vi.spyOn(TrustedGit.prototype, 'execAsync').mockImplementation(async () => {
+      lease.abort();
+      return { status: null, stdout: Buffer.alloc(0) };
+    });
+    r.wrap = (inner) => async (intent, target, operation, cancel) =>
+      inner(
+        intent,
+        target,
+        (credential) => {
+          if (failure === 'divergent') r.fork.outOfBand();
+          return operation(credential, lease.signal);
+        },
+        cancel
+      );
+    const error = await r.driver.execute(pushOf(SHA1)).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(
+      failure === 'unavailable' ? MutationUncertainError : WriteBlockedError
+    );
+    expect(r.driver.snapshot().intents.get(idempotencyKey(pushOf(SHA1)))?.voided ?? 0).toBe(0);
+    if (failure === 'divergent') expect(r.driver.snapshot().blockedReason).toBe('remote_diverged');
   });
 
   it('transient failures before the write never spend the retry budget or block', async () => {

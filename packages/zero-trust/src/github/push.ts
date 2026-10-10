@@ -179,6 +179,7 @@ export function replayPushes(events: readonly unknown[], repositoryId: number): 
 interface PushOutcome {
   readonly git: 'pushed' | 'rejected' | 'failed' | 'killed';
   readonly remote: string | null | undefined;
+  readonly stoppedAfterStart?: boolean;
 }
 
 export class ForkPusher implements WriteAdapter {
@@ -299,6 +300,20 @@ export class ForkPusher implements WriteAdapter {
     if (outcome.remote === sha) return this.verified(intent, at, sha);
     if (outcome.remote !== undefined && outcome.remote !== expected)
       throw diverged(expected, outcome.remote);
+    if (outcome.git === 'killed' && outcome.stoppedAfterStart && !this.options.signal?.aborted) {
+      // withForkPush joined the stopped Git operation and confirmed revocation.
+      // Only a fresh, identity-bound observation that nothing landed permits a
+      // void. An unavailable read, a changed ref, or cancellation remains closed.
+      let observed: string | null;
+      try {
+        observed = await this.readRef(at);
+      } catch {
+        throw new ForkPushError('push_uncertain', outcome.git);
+      }
+      if (observed === sha) return this.verified(intent, at, sha);
+      if (observed !== expected) throw diverged(expected, observed);
+      throw new MutationVoidedError('push:stopped_remote_absent');
+    }
     // Unknown, or still at the expected value (nothing landed): reconciliation decides.
     throw new ForkPushError('push_uncertain', outcome.git);
   }
@@ -371,6 +386,7 @@ export class ForkPusher implements WriteAdapter {
     const sha = candidate.record.candidateSha;
     const ref = `refs/heads/${at.branch}`;
     const git = new TrustedGit();
+    const started = !signal.aborted;
     try {
       git.run(['index-pack', '--stdin', '--strict'], candidate.pack);
       if (git.run(['cat-file', '-t', sha]).toString().trim() !== 'commit')
@@ -393,7 +409,11 @@ export class ForkPusher implements WriteAdapter {
       const listed = signal.aborted
         ? undefined
         : await git.execAsync(['ls-remote', url, ref], options);
-      return { git: pushOutcome(push, ref), remote: listed && lsRemote(listed, ref) };
+      return {
+        git: pushOutcome(push, ref),
+        remote: listed && lsRemote(listed, ref),
+        stoppedAfterStart: started && signal.aborted,
+      };
     } finally {
       git.close();
     }

@@ -14,6 +14,74 @@ Publication remains gated on S1 feasibility.
 
 ### Active pause and cancellation (#1110)
 
+#### Lifecycle gate evidence (#1113)
+
+`src/__tests__/gate4-lifecycle.test.ts` exercises the real composition with local
+bare Git repositories and injected GitHub, model and VM edges. Test titles name
+the actor, expected outcome and S1–S5 ownership. A shared final audit checks
+receipt-v2/nonce/candidate correspondence, unique publication and push identities,
+loaded supervisor verification evidence, guest destruction or recorded cleanup
+IDs, absence of direct upstream mutations, and absence of usable access **and
+refresh** credentials. Negative controls insert a forbidden upstream mutation or
+unreceipted push observation and remove supervisor command observations: the
+same audit rejects all three. Passed command records match actual argv, exit
+status, report suite count and candidate files, not merely the presence of a VM.
+
+When a composed controller returns to a durable wait or pause, its release path
+now sweeps held credentials through `ForkCredentialBroker.recover()` **before**
+closing lease timers and journals. This does not permanently close admission as
+`endRun()` would. Explicit resume obtains fresh contributor authorization; a
+credential-revocation failure keeps the cleanup fence and fails the operation.
+Terminal completion/cancellation continues to use `endRun()`.
+
+The lifecycle suite covers all five cancellation points, cleanup fencing and
+`CleanupCompleted → blocked`, refused model reservation before another call,
+verification exhaustion without a pass, approved ceiling continuation,
+pause/checkpoint resume, fork waiting with no compute, broad App installation
+refusal, contributor refresh refusal, mid-push credential expiry, and a real
+SIGKILL/reopen with an in-flight model hold. It uses shared immutable test keys;
+run-owned credentials, journals, repositories and receipt authority stay separate.
+The broader gate-4 verdict, including upstream scenarios, belongs to #1114.
+
+`approveBudgetCeiling(root, runId, approval, now)` is an explicit trusted local
+user command exported from the package (`controller/budget-extension`). It is
+allowed only in `paused_user` under the RunStore lifetime guard. `approval` is a
+closed record `{ actor: 'user', approvalId, previousMinor, ceilingMinor }`.
+The previous ceiling is a CAS precondition, the new money ceiling must strictly
+increase, and approval IDs cannot repeat. `BudgetLedger.extendCeiling` appends
+the approval with its timestamp/currency to `ceilingExtensions`; it never changes
+original sessions, reservations, cleanup allowance, token limit or time limit.
+`effectiveBudgetSession` supplies the approved money ceiling to admission,
+exhaustion and status assembly. Reopen preserves the complete chain; corruption,
+stale/replayed approval and competing CAS losers refuse without resetting history.
+Unknown holds continue to fence work even after a money extension.
+
+Composition invokes the real `ContributorAuthorization.refresh()` when its held
+user access token reaches native expiry. A `reauthorize` response persists
+`authorization_required: { nextPermittedAction: 'authorize' }`, pauses the active
+phase and never opens automatic OAuth or ships with stale authority. The
+controller's `nextPermittedAction` getter reports `authorize`; `authorize(runId)`
+with the existing authorization-URL UI callback clears the fence only after
+explicit contributor authorization. Resume alone cannot clear it.
+
+A bare-Git server hook proves the 15-minute operation timer revokes a token while
+the actual Git subprocess is in flight. A killed operation is voidable only after
+the broker joins it and confirms revocation, and a fresh identity-bound remote
+read proves the expected ref remained unchanged. A landed candidate is recorded
+as verified; an unavailable read stays uncertain, divergence blocks, and user
+cancellation never admits a retry. A voided retry requires a fresh receipt/nonce
+and keeps the candidate identity and bounded void allowance.
+
+The crash fixture SIGKILLs a separate process running the real controller only
+after its physical model edge announces the reserved in-flight call. Physical VM
+and GitHub state persists across processes; no ledger holds are synthesized.
+Reopen retains the unknown reservation, funds actual guest teardown, and fences
+fresh work. Lost credential values remain a `blocked_cleanup` obligation rather
+than invented revocation. OAuth access expiry **does not** kill a refresh chain:
+the fixture genuinely elapses both independently recorded provider lifetimes,
+and audits access liveness, `refreshAlive` and refresh-token liveness. Production
+broker recovery does not automatically settle native expiry to hide secret loss.
+
 `node scripts/zt-run.mjs pause|cancel --root <stateDir>/runs --run <id> --reason <text>`
 returns immediately after the stop-only request is durably fsynced. It neither waits
 for nor acquires the active controller's lifetime guard. `status --json` is

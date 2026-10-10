@@ -732,18 +732,45 @@ export function createController(
     });
     await broker.recover();
   };
+  class AuthorizationRequired extends Error {}
+  let authorizationRequired = false;
+  const requireAuthorization = (c: PhaseContext): never => {
+    authorizationRequired = true;
+    artifacts(c).put('authorization_required', { nextPermittedAction: 'authorize' });
+    artifacts(c).put('diagnostic', {
+      runId: c.run.runId,
+      phase: 'authorization',
+      operation: 'contributor_refresh',
+      code: 'reauthorize',
+      next: 'authorize',
+    });
+    throw new AuthorizationRequired();
+  };
   const identity = async (c: PhaseContext) => {
     controller.assertAdmission();
     c.store.validateEvidence();
+    if (artifacts(c).get('authorization_required')) requireAuthorization(c);
     if (!c.store.config.authorApproval) throw new AuthorApprovalError('author_approval_missing');
     await credentials(c);
     controller.assertAdmission();
     c.signal.throwIfAborted();
     if (!contributor) throw new Error('authorization_unavailable');
+    const parent = broker
+      ?.status()
+      .tokens.find((token) => token.kind === 'user' && token.status === 'live');
+    if (parent?.expiresAt && Date.parse(parent.expiresAt) <= now().getTime()) {
+      const refreshed = await contributor.refresh();
+      controller.assertAdmission();
+      if (refreshed.kind === 'reauthorize') requireAuthorization(c);
+      if (refreshed.kind !== 'refreshed') throw new Error('contributor_authorization_unavailable');
+    }
     let bound = await contributor.bindLogin(c.store.run, c.store.config.authorApproval?.userId);
     controller.assertAdmission();
     c.signal.throwIfAborted();
     if (bound.kind === 'reauthorize') {
+      // A once-bound identity losing its authority requires an explicit user
+      // authorize command, never automatic interactive renewal inside shipping.
+      if (parent) requireAuthorization(c);
       const receiver = await listenLoopback({
         isExpected: (state) => contributor?.matchesPending(state) ?? false,
       });
@@ -1154,10 +1181,14 @@ export function createController(
       code,
     });
   };
-  const recoverWithDiagnostic = async <T>(c: PhaseContext, work: () => Promise<T>): Promise<T> => {
+  const recoverWithDiagnostic = async (
+    c: PhaseContext,
+    work: () => Promise<void>
+  ): Promise<void> => {
     try {
       return await work();
     } catch (error) {
+      if (error instanceof AuthorizationRequired) return;
       return diagnose(c, 'recovery', error);
     }
   };
@@ -1165,8 +1196,10 @@ export function createController(
     const invoke = steps[phase].bind(steps);
     const wrapped = async (c: PhaseContext) => {
       try {
+        if (artifacts(c).get('authorization_required')) requireAuthorization(c);
         return await invoke(c);
       } catch (error) {
+        if (error instanceof AuthorizationRequired) return { kind: 'hand_off' };
         if (error instanceof PrerequisiteError)
           return { kind: phase === 'gate' ? error.kind : 'hand_off' };
         if (
@@ -1335,6 +1368,13 @@ export function createController(
       try {
         if (activeStore && TERMINAL_STATES.includes(activeStore.run.state))
           await broker?.endRun(activeStore.run.state === 'cancelled' ? 'cancelled' : 'completed');
+        else if (broker) {
+          // A dormant controller has no operation that needs a credential. Sweep
+          // held values before stopping lease timers, without closing resumable
+          // admission permanently as endRun would do.
+          const recovered = await broker.recover();
+          if (!recovered.admitted && recovered.report) throw new Error('cleanup_incomplete');
+        }
       } finally {
         broker?.close();
         for (const j of journals.values()) j.close();
@@ -1365,11 +1405,22 @@ export function createController(
       if (!approval) throw new AuthorApprovalError('author_approval_missing');
       await prepareAuthor(store.config, { userId: approval.userId }, overrides);
       store.validateEvidence();
+      const j = new Journal(path.join(store.storeDirectory('control'), 'steps'));
+      try {
+        const held = new StepArtifacts(j, runId);
+        held.put('authorization_required', null);
+        authorizationRequired = false;
+      } finally {
+        j.close();
+      }
     } finally {
       store.close();
     }
   };
   Object.defineProperty(controller, 'authorize', { value: authorize });
+  Object.defineProperty(controller, 'nextPermittedAction', {
+    get: () => (authorizationRequired ? 'authorize' : null),
+  });
   Object.defineProperty(controller, 'start', {
     value: (next: RunConfig) => {
       if (
@@ -1384,6 +1435,7 @@ export function createController(
     get: () => authUrl,
   }) as RunController & {
     readonly authorizationUrl: string | null;
+    readonly nextPermittedAction: 'authorize' | null;
     authorize(runId: string): Promise<void>;
   };
 }

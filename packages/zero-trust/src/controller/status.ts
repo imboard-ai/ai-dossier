@@ -1,4 +1,4 @@
-import { budgetTotals } from '../budget';
+import { budgetTotals, effectiveBudgetSession } from '../budget';
 import type { BudgetState } from '../budget-types';
 import { prerequisiteAction } from '../github/fork';
 import { type HandoffState, handoffStatus } from '../github/handoff-driver';
@@ -65,9 +65,12 @@ export function assembleStatus(parts: StatusParts): StatusRecord {
   } catch {
     throw new InvalidStatusError();
   }
-  const session = parts.budget.sessions.find((s) => s.id === parts.sessionId);
-  if (!session || parts.budget.contributionId !== contributionIdOf(run.runId))
+  if (
+    !parts.budget.sessions.some((s) => s.id === parts.sessionId) ||
+    parts.budget.contributionId !== contributionIdOf(run.runId)
+  )
     throw new InvalidStatusError();
+  const session = effectiveBudgetSession(parts.budget, parts.sessionId);
   const totals = budgetTotals(parts.budget, parts.sessionId);
   const spend = totals.spent + totals.reserved;
   if (!Number.isSafeInteger(spend)) throw new InvalidStatusError();
