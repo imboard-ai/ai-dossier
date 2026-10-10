@@ -11,7 +11,8 @@ const COMMANDS = Object.freeze({
     required: ['config', 'root'],
     optional: ['confirm-author', 'author-name', 'author-email'],
   },
-  resume: { required: ['root', 'run'], optional: ['revise'] },
+  resume: { required: ['root', 'run'], optional: ['revise', 'model-profile', 'checkpoints'] },
+  edit: { required: ['root', 'run', 'patch'], optional: [] },
   status: { required: ['root', 'run'], optional: ['json'] },
   pause: { required: ['root', 'run', 'reason'], optional: [] },
   cancel: { required: ['root', 'run', 'reason'], optional: [] },
@@ -26,9 +27,16 @@ const COMMANDS = Object.freeze({
 });
 const BOOLEAN = new Set(['confirm-author', 'revise', 'json', 'apply']);
 export const USAGE =
-  'Usage: zt-run <start|resume|status|pause|cancel|approve|reject|authorize|kill-all|metrics|adoption|sweep|export> --root <dir> [command options]';
-const HELP = `${USAGE}\nstart --config <file.json> [--confirm-author] [--author-name <name>] [--author-email <email>]\nresume --run <id> [--revise]\nstatus --run <id> [--json]\npause --run <id> --reason <text>\ncancel --run <id> --reason <text>\napprove --run <id> --checkpoint <plan|patch|verification> --digest <sha256>\nreject --run <id> --checkpoint <plan|patch|verification> --digest <sha256> --reason <text>\nauthorize --run <id>\nkill-all --reason <text>\nmetrics [--json]\nadoption --run <id> --note <text>\nsweep [--apply]\nexport --run <id> --out <file>`;
+  'Usage: zt-run <start|resume|edit|status|pause|cancel|approve|reject|authorize|kill-all|metrics|adoption|sweep|export> --root <dir> [command options]';
+const HELP = `${USAGE}\nstart --config <file.json> [--confirm-author] [--author-name <name>] [--author-email <email>]\nresume --run <id> [--revise] [--model-profile <file.json>] [--checkpoints plan,patch|none]\nedit --run <id> --patch <file.diff>\nstatus --run <id> [--json]\npause --run <id> --reason <text>\ncancel --run <id> --reason <text>\napprove --run <id> --checkpoint <plan|patch|verification> --digest <sha256>\nreject --run <id> --checkpoint <plan|patch|verification> --digest <sha256> --reason <text>\nauthorize --run <id>\nkill-all --reason <text>\nmetrics [--json]\nadoption --run <id> --note <text>\nsweep [--apply]\nexport --run <id> --out <file>`;
 const ERROR_CODES = new Set([
+  'invalid_patch',
+  'edit_not_paused',
+  'edit_after_verification',
+  'identity_change_requires_new_run',
+  'model_key_missing',
+  'model_unavailable',
+  'invalid_user_edit',
   'invalid_input',
   'invalid_control',
   'nothing_to_pause',
@@ -164,6 +172,20 @@ function readConfig(file) {
     if (fd !== undefined) fs.closeSync(fd);
   }
 }
+function readInput(file, limit = 1024 * 1024) {
+  let fd;
+  try {
+    fd = fs.openSync(
+      file,
+      fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK
+    );
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size > limit) refuse('invalid_input');
+    return fs.readFileSync(fd);
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
 const exitFor = (status) =>
   ['blocked', 'failed', 'unsupported', 'cancelled', 'blocked_cleanup'].includes(status.state)
     ? 2
@@ -227,7 +249,22 @@ export async function main(argv, { createController, out, err, confirmAuthor } =
         break;
       }
       case 'resume':
-        status = await controller.resume(opts.run, { revise: Boolean(opts.revise) });
+        status = await controller.resume(opts.run, {
+          revise: Boolean(opts.revise),
+          ...(opts['model-profile']
+            ? {
+                modelProfile: JSON.parse(
+                  new TextDecoder('utf-8', { fatal: true }).decode(readInput(opts['model-profile']))
+                ),
+              }
+            : {}),
+          ...(opts.checkpoints
+            ? { checkpoints: opts.checkpoints === 'none' ? [] : opts.checkpoints.split(',') }
+            : {}),
+        });
+        break;
+      case 'edit':
+        status = await controller.edit(opts.run, readInput(opts.patch, 10 * 1024 * 1024));
         break;
       case 'status':
         status = await controller.status(opts.run);

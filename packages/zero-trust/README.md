@@ -1,5 +1,53 @@
 # @ai-dossier/zero-trust
 
+## Trusted mid-run changes
+
+The contributor can edit a paused candidate with
+`node scripts/zt-run.mjs edit --root <runs-directory> --run <id> --patch <file.diff>`
+from the package directory.
+The controller API is `applyUserPatch(store, run, patchBytes, now)` in
+`controller/edits`. It accepts a strict UTF-8 text Git diff while `paused_user`
+was interrupted from `implementing` or `verifying`. It materializes only held
+source into a fresh controller-owned repository, runs hardened Git `apply --check`
+and `apply`, and exports a canonical candidate. Binary patches, symlinks, unsafe
+paths (including `.git` aliases), ambiguous quoted paths and non-regular modes
+are refused. Regular-file executable-bit changes and workspace-local renames and
+deletions are supported. Refused patches do not replace the held overlay.
+
+Every accepted edit journals its patch digest, touched files, timestamp and a new
+canonical candidate. Existing immutable verification records are marked
+superseded and cannot authorize shipping. Resume from implementing emits
+`ResumeImplementing` then `CandidateReady`; resume from verifying emits
+`ResumeVerifying`. Both require a fresh review and verification. Patch checkpoint
+approvals are replaced with a new candidate-bound checkpoint. The PR disclosure
+includes **“Includes contributor edits”**.
+
+**Editing while paused from shipping is refused with `edit_after_verification`.**
+There is no user-edit `shipping → verifying` edge. Cancel and start a new run, or
+edit during a later revision's implementing/verifying phase.
+
+`node scripts/zt-run.mjs resume --root <runs-directory> --run <id> --model-profile <file.json>`
+changes the profile before resuming. The file contains the `modelProfile` object
+(`phases` and `rates`), not a complete run configuration. The trusted API is
+`changeModelProfile(store, run, newProfile, now?)`. Configuration validation,
+complete model rates, supported adapter and nonempty environment key are required.
+The profile and digest are appended to `store.userChanges`; original configuration
+and every budget session/reservation stay byte-for-byte intact. Source and existing
+verification remain valid. Subsequent calls use the new adapter and its rates under
+the same admission rules and budget session.
+
+`--checkpoints plan,patch,verification` (or `--checkpoints none`) updates checkpoints before
+resume through `changeCheckpoints(store, run, checkpoints, now?)`. It requires
+`paused_user`, validates the closed checkpoint vocabulary and resets old checkpoint
+records; repository/model output never selects checkpoints. Original identity,
+contributor, issue, upstream and fork cannot change in place; `changeIdentity`
+refuses with `identity_change_requires_new_run`. Create a new run for new targets.
+
+All mutations hold the controller's exclusive run-store guard. Corrupt or partial
+mutation evidence refuses reopening. A crash after supersession but before a source
+edit is committed conservatively keeps old verification fenced for inspection;
+it never restores old shipping authority.
+
 Private, provider-independent foundation for [PRD-ZTFC-001](../../docs/features/zero-trust-full-cycle/prd.md)
 §5.1, §5.5 and §5.6 (gate 2), §5.7, §5.8 and §5.9. Controller-side model calls; the only
 GitHub calls are the controller-only broker/push modules and credential-free reads in
@@ -70,7 +118,8 @@ environment references, never literal configuration values.
 | Command | Required command-specific arguments | Optional arguments |
 |---|---|---|
 | `start` | `--config <file.json>` | `--confirm-author`, `--author-name <name>`, `--author-email <email>` |
-| `resume` | `--run <id>` | `--revise` (currently refused as `revision_unavailable`) |
+| `resume` | `--run <id>` | `--model-profile <file.json>`, `--checkpoints plan,patch,verification\|none`, `--revise` (currently refused as `revision_unavailable`) |
+| `edit` | `--run <id> --patch <file.diff>` | Trusted source edit while paused from implementing/verifying |
 | `status` | `--run <id>` | `--json` |
 | `pause` | `--run <id> --reason <text>` | |
 | `cancel` | `--run <id> --reason <text>` | |
@@ -625,8 +674,12 @@ The upstream includes `owner`, `repo`, `defaultBranch`; unreadable/malformed fac
 never admit shipping and errors are not echoed.
 
 `WorkspaceOverlay.manifest()` returns a validated immutable source snapshot without
-filesystem or VM reads. `WorkspaceOverlay.writtenEntries()` exposes a frozen, byte-sorted admitted delta,
-including byte-identical writes. `rebaseCandidate({ overlay, oldBaseManifest,
+filesystem or VM reads. `WorkspaceOverlay.writtenEntries()` exposes frozen, byte-sorted surviving writes,
+including byte-identical writes. `touchedPaths()` includes deleted paths and must
+be used for complete conflict checks. `replaceSource(manifest, touched)` accepts
+controller-exported source with deletion/exec-bit changes and refuses incomplete
+deltas. These contributor operations are separate from the model's write-only
+action vocabulary. `rebaseCandidate({ overlay, oldBaseManifest,
 newBase: { pack, manifest }, approval })` validates both manifests and binds the
 new manifest to the pack's `approval.baseSha`. `approval` is `CommitInputs` with
 the unchanged contributor-approved author/message, new parent and new recorded
@@ -995,7 +1048,10 @@ and, on rejection, `rejectionReason`. Records live in the private, lifetime-guar
 RunStore control journal; `store.checkpoint(point)` reads the restored record.
 The record is fsynced **before** `UserPaused`; reopening between these steps finds
 the record and the pre-pause run. Retrying the pause reuses that exact record.
-Each point pauses once per run; approval does not cause a second pause.
+An unchanged checkpoint record pauses once; approval does not repeat that pause.
+Accepted contributor source edits invalidate patch/verification approvals, and
+checkpoint configuration changes reset records. Resume can require approval of
+a newly issued candidate-bound digest.
 
 `approveCheckpoint(store, run, { point, digest }, now)` requires the exact open
 record and resumes only its interrupted phase (`ResumePlanning`, `ResumeVerifying`
