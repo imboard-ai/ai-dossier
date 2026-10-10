@@ -148,6 +148,8 @@ export interface RecoveryHooks {
   killAll(context: PhaseContext): Promise<void>;
 }
 export interface ControllerDependencies {
+  /** Stop-only external fence. It can revoke admission, never grant authority. */
+  readonly incidentRequested?: () => boolean;
   /** Release run-owned journals/credential leases before the RunStore pins close. */
   readonly release?: () => Promise<void>;
   readonly root: string;
@@ -395,10 +397,12 @@ export class RunController {
     this.oldHolds.clear();
     this.unfundedCleanup.clear();
     this.cached.clear();
+    const watcher = setInterval(() => this.observeIncident(), 20);
     // Fence synchronous observer/hook re-entry before invoking any injected code.
     const task = Promise.resolve()
       .then(work)
       .finally(async () => {
+        clearInterval(watcher);
         try {
           this.last = this.store?.run ?? this.last;
           await this.deps.release?.();
@@ -413,6 +417,12 @@ export class RunController {
       });
     this.running = task;
     return task;
+  }
+  private observeIncident(): void {
+    if (!this.running || !this.journal || this.incident || !this.deps.incidentRequested?.()) return;
+    // incidentStop aborts synchronously before its first await. The launch joins
+    // its independent cleanup obligation; observing it here must not await itself.
+    void this.incidentStop('Incident root fence').catch(() => {});
   }
   private get held(): RunStore {
     if (!this.store) throw new ControllerError('not_running');
@@ -613,6 +623,7 @@ export class RunController {
     }
   }
   private async step(phase: PhaseName, reacquire = false): Promise<Outcome> {
+    this.observeIncident();
     if (this.incident || this.abort.signal.aborted) throw new ControllerError('admission_closed');
     if (this.unfundedCleanup.size)
       return stopped(this.held.run.state) ? { kind: 'waiting' } : { kind: 'hand_off' };
@@ -639,6 +650,7 @@ export class RunController {
     this.phaseLease = lease;
     try {
       const proposed = await this.deps.steps[phase](this.context(lease, allocations));
+      this.observeIncident();
       this.phaseLease = undefined;
       const pending = await Promise.allSettled(allocations);
       result = this.validatedOutcome(phase, proposed);
@@ -832,6 +844,7 @@ export class RunController {
     sessionId: string,
     signal: AbortSignal
   ): Promise<VmHandle> {
+    this.observeIncident();
     if (
       this.incident ||
       this.recovering ||

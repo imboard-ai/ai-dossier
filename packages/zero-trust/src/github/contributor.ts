@@ -12,6 +12,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import http from 'node:http';
 import { inspect } from 'node:util';
+import { validateAuthorApproval } from '../controller/config';
 import { assertSecretFree } from '../redaction';
 import { isRecord, ReasonCode, type RunRecord, transitionRun } from '../state';
 import {
@@ -231,22 +232,7 @@ export class ContributorAuthorization {
     const pending = this.#pending;
     this.#pending = undefined;
     return this.serial(async () => {
-      if (!pending) throw new ContributorAuthError('no_pending_authorization');
-      if (this.now() >= pending.expiresAt) throw new ContributorAuthError('authorization_expired');
-      if (!isRecord(callback)) throw new ContributorAuthError('invalid_callback');
-      if (typeof callback.state !== 'string' || !sameSecret(callback.state, pending.state))
-        throw new ContributorAuthError('state_mismatch');
-      if (callback.error !== undefined) throw new ContributorAuthError('authorization_denied');
-      if (typeof callback.code !== 'string' || !/^[A-Za-z0-9_-]{1,512}$/u.test(callback.code))
-        throw new ContributorAuthError('invalid_callback');
-      const pair = await this.exchange({
-        grant_type: 'authorization_code',
-        code: callback.code,
-        redirect_uri: pending.redirectUri,
-        code_verifier: pending.verifier,
-      });
-      if (pair === 'misconfigured') throw new ContributorAuthError('app_misconfigured');
-      if (typeof pair === 'string') throw new ContributorAuthError('exchange_failed');
+      const pair = await this.exchangeCallback(pending, callback);
       try {
         const response = await this.options.http({
           method: 'GET',
@@ -266,6 +252,16 @@ export class ContributorAuthorization {
           overrides.name ??
           (profile === null || profile === undefined || profile === '' ? who.login : profile);
         const noreply = `${who.userId}+${who.login}@users.noreply.github.com`;
+        // Resume/authorize verifies the held account only. Current profile text
+        // cannot revoke or replace the contributor's already recorded consent.
+        if (overrides.userId !== undefined)
+          return Object.freeze({
+            ...who,
+            name: who.login,
+            email: noreply,
+            source: 'default' as const,
+            approvedAt: new Date(this.now()).toISOString(),
+          });
         const email = overrides.email ?? noreply;
         if (email !== noreply) {
           let verified = false;
@@ -303,20 +299,11 @@ export class ContributorAuthorization {
           approvedAt: new Date(this.now()).toISOString(),
         };
         assertSecretFree(approval);
-        // GitHub profile text is data, never a trusted canonical git identity.
-        if (
-          typeof name !== 'string' ||
-          !name ||
-          name.trim() !== name ||
-          Buffer.byteLength(name) > 256 ||
-          // biome-ignore lint/suspicious/noControlCharactersInRegex: Untrusted profile names must not contain git/header control characters.
-          /[<>\r\n\x00-\x1f\x7f]/u.test(name) ||
-          typeof email !== 'string' ||
-          Buffer.byteLength(email) > 256 ||
-          !/^[^<>\s@]+@[^<>\s@]+$/u.test(email)
-        )
+        try {
+          return validateAuthorApproval(approval, this.options.contributor);
+        } catch {
           throw new ContributorAuthError('invalid_author_approval');
-        return Object.freeze({ ...approval, name });
+        }
       } finally {
         // biome-ignore lint/correctness/noUnsafeFinally: A possibly live orphan token takes precedence over identity success or refusal.
         if (!(await this.discard(pair.access))) throw new ContributorAuthError('revoke_failed');
@@ -366,23 +353,7 @@ export class ContributorAuthorization {
       // A pre-start instance has no durable token owner. Refuse before exchanging
       // a code rather than discovering the absent broker after GitHub issued a token.
       if (!this.options.broker) throw new ContributorAuthError('invalid_options');
-      if (!pending) throw new ContributorAuthError('no_pending_authorization');
-      if (this.now() >= pending.expiresAt) throw new ContributorAuthError('authorization_expired');
-      if (!isRecord(callback)) throw new ContributorAuthError('invalid_callback');
-      const { code, state, error } = callback;
-      if (typeof state !== 'string' || !sameSecret(state, pending.state))
-        throw new ContributorAuthError('state_mismatch');
-      if (error !== undefined) throw new ContributorAuthError('authorization_denied');
-      if (typeof code !== 'string' || !/^[A-Za-z0-9_-]{1,512}$/u.test(code))
-        throw new ContributorAuthError('invalid_callback');
-      const pair = await this.exchange({
-        grant_type: 'authorization_code',
-        code,
-        redirect_uri: pending.redirectUri,
-        code_verifier: pending.verifier,
-      });
-      if (pair === 'misconfigured') throw new ContributorAuthError('app_misconfigured');
-      if (typeof pair === 'string') throw new ContributorAuthError('exchange_failed');
+      const pair = await this.exchangeCallback(pending, callback);
 
       let who: Identity;
       try {
@@ -540,6 +511,29 @@ export class ContributorAuthorization {
     );
   }
 
+  private async exchangeCallback(
+    pending: Pending | undefined,
+    callback: CallbackParams
+  ): Promise<IssuedPair> {
+    if (!pending) throw new ContributorAuthError('no_pending_authorization');
+    if (this.now() >= pending.expiresAt) throw new ContributorAuthError('authorization_expired');
+    if (!isRecord(callback)) throw new ContributorAuthError('invalid_callback');
+    const { code, state, error } = callback;
+    if (typeof state !== 'string' || !sameSecret(state, pending.state))
+      throw new ContributorAuthError('state_mismatch');
+    if (error !== undefined) throw new ContributorAuthError('authorization_denied');
+    if (typeof code !== 'string' || !/^[A-Za-z0-9_-]{1,512}$/u.test(code))
+      throw new ContributorAuthError('invalid_callback');
+    const pair = await this.exchange({
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: pending.redirectUri,
+      code_verifier: pending.verifier,
+    });
+    if (pair === 'misconfigured') throw new ContributorAuthError('app_misconfigured');
+    if (typeof pair === 'string') throw new ContributorAuthError('exchange_failed');
+    return pair;
+  }
   private async exchange(grant: Readonly<Record<string, string>>): Promise<Exchange> {
     let response: GitHubResponse;
     try {
@@ -560,13 +554,20 @@ export class ContributorAuthorization {
       return 'unavailable';
     const refresh = body?.refresh_token;
     const expiresIn = body?.expires_in;
-    if (typeof refresh !== 'string' || !REFRESH_FORMAT.test(refresh) || !isPositiveId(expiresIn)) {
+    const expiresAt = typeof expiresIn === 'number' ? this.now() + expiresIn * 1000 : NaN;
+    if (
+      typeof refresh !== 'string' ||
+      !REFRESH_FORMAT.test(refresh) ||
+      !isPositiveId(expiresIn) ||
+      !Number.isSafeInteger(expiresAt) ||
+      !Number.isFinite(new Date(expiresAt).getTime())
+    ) {
       // A live token without an expiring refresh chain (expiring user tokens disabled):
       // never kept, never handed out.
-      await this.discard(access);
+      if (!(await this.discard(access))) throw new ContributorAuthError('revoke_failed');
       return 'misconfigured';
     }
-    return { access, refresh, expiresAt: new Date(this.now() + expiresIn * 1000).toISOString() };
+    return { access, refresh, expiresAt: new Date(expiresAt).toISOString() };
   }
 
   /** Status facts only: never a token, code or state. */

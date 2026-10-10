@@ -274,7 +274,7 @@ describe('production command credential/resource edges', () => {
     } finally {
       stopped.close();
     }
-    expect(h.vm.calls.filter((call) => call.op === 'destroy')).toHaveLength(2);
+    expect(h.vm.calls.filter((call) => call.op === 'destroy')).toHaveLength(3);
   });
   it('blocks cleanup for value-lost credentials, including terminal runs, without inventing credentials', async () => {
     for (const terminal of [false, true]) {

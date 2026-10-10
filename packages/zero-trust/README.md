@@ -41,6 +41,11 @@ unsupported, cancelled, cleanup blocked or operation unavailable; **3** invalid
 input (fixed error code plus usage); **4** writer lock held by another controller.
 Provider exception text is never printed. Human status quotes each value; JSON
 status carries identical facts, including the recorded `authorApproval`.
+Overlapping starts for the same trusted configuration hold a kernel guard keyed
+by its digest (excluding newly confirmed author data); the second exits 4 while
+the first run is executing. Different configurations can start independently.
+The guard releases at the first durable stop. Resume targets the existing run ID
+and retains its per-run writer guard.
 
 Start performs real GitHub App OAuth/PKCE through a loopback callback, prints
 `authorization_url`, then reads `/user`. Its author default is profile `name`
@@ -62,7 +67,15 @@ Maintenance retains the guarded read-only API; adoption and checkpoint decisions
 take the writer lock. Approve/reject resolve only the selected checkpoint and
 print status; execution continues only on explicit resume. `kill-all` joins every
 run's incident cleanup without executing phases, including dormant runs, and
-reports `blocked_cleanup` when revocation/destruction cannot be confirmed.
+reports `blocked_cleanup` when revocation/destruction cannot be confirmed. It
+installs a persistent root `.incident` fence and the VM admission kill switch
+before enumerating runs. Active owners observe the fence, abort work and join
+cleanup; dormant cleanup waits up to 30 seconds for the writer to acknowledge.
+Unacknowledged or accounting-uncertain cleanup remains a refusal. A successful
+cleanup retry closes an enumeration-only cleanup block; unresolved reservations
+or unfunded obligations retain it. An incident-fenced root cannot start new work;
+use a new root after resolving the incident. Signing readiness is not required
+for incident cleanup.
 Metrics are local evidence-derived aggregates; adoption is a voluntary local note.
 Sweep is dry-run unless `--apply` and prints counts only. Export uses the real
 sanitized portable exporter and refuses an existing output file.
@@ -93,6 +106,17 @@ edges?)` remain in wiring, outside the public index. `onAuthorizationUrl` is a
 production UI callback for immediate loopback URL display, not phase injection.
 The composed controller also exposes `authorize(runId)` for explicit account
 authorization without phase execution.
+
+`RunStore.open` has three modes: default writable execution/recovery (writer lock
+and signer readiness), `{ readOnly: true }` guarded non-repairing maintenance,
+and `{ readOnly: true, observe: true }` lock-free observation. Observation never
+authorizes writes and requires a final `store.validateEvidence()` before returning
+facts, then `store.close()`. Incomplete publication or evidence changed during
+the read refuses; supported interrupted publication is recovered only by the
+writable resume path. `{ cleanup: true }` is a locked incident-cleanup writer:
+it validates stored config/evidence but skips signing readiness. Execution uses
+the default writer, never cleanup mode. `LocalQemuAdapter.engageKillSwitch(reason)`
+closes VM admission without bypassing controller-accounted teardown.
 
 ## Controller composition (#1108)
 
@@ -1713,8 +1737,9 @@ live network, and production must never set that option.
 
 ## Artifact retention and portable export (#1104)
 
-These offline controller APIs are exported from the package index. No CLI or
-upstream write is added. The caller must close live controllers before sweeping;
+These offline controller APIs are exported from the package index. The `zt-run sweep`
+and `zt-run export` commands expose them without upstream writes.
+The caller must close live controllers before sweeping;
 `RunStore.open` holds the same permanent lifetime flock used for execution.
 `RunStore.open(root, runId, { readOnly: true })` is the maintenance open used by
 sweep: it validates the complete confirmed control journal without running tail

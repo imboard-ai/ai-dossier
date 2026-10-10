@@ -919,13 +919,7 @@ export class LocalQemuAdapter implements VmAdapter {
     reason: string,
     options: KillAllOptions = {}
   ): Promise<{ destroyed: string[]; failed: VmCleanupError[]; blockedRuns: string[] }> {
-    assertNoSecrets(reason);
-    privateDir(this.options.stateDir);
-    replacePrivate(
-      path.join(this.options.stateDir, KILL_SWITCH_FILE),
-      Buffer.from(JSON.stringify({ reason, at: this.now().toISOString() }))
-    );
-    this.journal({ type: 'vm_kill_switch', reason });
+    this.engageKillSwitch(reason);
     const destroyed: string[] = [];
     const failed: VmCleanupError[] = [];
     const blockedRuns: string[] = [];
@@ -960,6 +954,16 @@ export class LocalQemuAdapter implements VmAdapter {
       else this.orphanStopped(vmId, destroyed);
     }
     return { destroyed, failed, blockedRuns };
+  }
+  /** Close admission without bypassing controller-accounted per-run teardown. */
+  engageKillSwitch(reason: string): void {
+    assertNoSecrets(reason);
+    privateDir(this.options.stateDir);
+    replacePrivate(
+      path.join(this.options.stateDir, KILL_SWITCH_FILE),
+      Buffer.from(JSON.stringify({ reason, at: this.now().toISOString() }))
+    );
+    this.journal({ type: 'vm_kill_switch', reason });
   }
 
   /** An orphan QEMU (no directory, so no run) was stopped. */

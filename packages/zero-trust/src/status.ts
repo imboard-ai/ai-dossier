@@ -1,3 +1,4 @@
+import { validateAuthorApproval } from './controller/config';
 import { assertNoSecrets } from './redaction';
 import {
   isNonemptyString,
@@ -108,22 +109,11 @@ function safeStatus(input: StatusRecord): StatusRecord {
       approvedAt: a.approvedAt,
     };
     for (const fact of Object.values(held)) if (typeof fact === 'string') assertNoSecrets(fact);
-    if (
-      !Number.isSafeInteger(held.userId) ||
-      held.userId <= 0 ||
-      typeof held.login !== 'string' ||
-      !/^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$/u.test(held.login) ||
-      typeof held.name !== 'string' ||
-      !held.name.trim() ||
-      held.name.length > 256 ||
-      typeof held.email !== 'string' ||
-      !/^[^<>\s@]+@[^<>\s@]+$/u.test(held.email) ||
-      !['default', 'override'].includes(held.source) ||
-      typeof held.approvedAt !== 'string' ||
-      !Number.isFinite(Date.parse(held.approvedAt))
-    )
+    try {
+      authorApproval = validateAuthorApproval(held, value.contributor);
+    } catch {
       throw new InvalidStatusError();
-    authorApproval = held;
+    }
   }
   if (estimatedSpend.currency !== budgetRemaining.currency) throw new InvalidStatusError();
   return {

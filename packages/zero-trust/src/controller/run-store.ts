@@ -573,7 +573,11 @@ export class RunStore {
   static open(
     root: string,
     runId: string,
-    options: { readonly readOnly?: boolean; readonly observe?: boolean } = {}
+    options: {
+      readonly readOnly?: boolean;
+      readonly observe?: boolean;
+      readonly cleanup?: boolean;
+    } = {}
   ): RunStore {
     const contributionId = contributionIdOf(runId);
     if (!contributionId) fail('invalid_run_id');
@@ -601,7 +605,7 @@ export class RunStore {
       if (!options.observe) guard = acquire(pinned, !options.readOnly);
       const bytes = boundedRead(path.join(pinned, 'config.json'));
       const config = readStoredConfig(pinned, undefined, bytes);
-      if (!options.readOnly) validateRunConfig(runConfigInput(config));
+      if (!options.readOnly && !options.cleanup) validateRunConfig(runConfigInput(config));
       const raw = jsonRecord(boundedRead(path.join(pinned, 'run.json')));
       assertSecretFree(raw);
       const run = restoreRun(raw);

@@ -1,11 +1,13 @@
 /** Controller-only credential composition root. Deliberately absent from index.ts.
  * Scripts import this file; no other production src module may reach it. */
+
+import fs from 'node:fs';
 import path from 'node:path';
 import { Ed25519Signer, type Signer } from '@ai-dossier/core';
 import { BudgetLedger } from '../budget';
 import type { BudgetEstimate, BudgetObservation } from '../budget-types';
 import { resolveBase } from '../canonical/acquire';
-import { readPrivate } from '../durable-fs';
+import { privateDir, readPrivate, replacePrivate } from '../durable-fs';
 import { AppCredentials, fetchGitHubHttp, fetchOAuthHttp } from '../github/app-auth';
 import { ForkCredentialBroker } from '../github/broker';
 import {
@@ -24,6 +26,7 @@ import { OUTSTANDING, TokenJournal, TokenVault } from '../github/token-journal';
 import { PrTracker, trackFromHandoff } from '../github/track';
 import { IntentDriver } from '../intents';
 import { Journal } from '../journal';
+import { StoreLockedError } from '../lock';
 import { type ModelAdapter, ModelError } from '../model/adapter';
 import { OpenAICompatibleAdapter } from '../model/openai-compatible';
 import { assessIssue } from '../policy/eligibility';
@@ -49,6 +52,7 @@ import {
 } from '../vm/adapter';
 import { preflightHost } from '../vm/host';
 import { LocalQemuAdapter } from '../vm/local-qemu';
+import { teardownVm } from '../vm/teardown';
 import { AuthorApprovalError, requireAuthorApproval } from './author-approval';
 import { validateCheckpointReview } from './checkpoints';
 import { type RunConfig, runConfigInput, validateRunConfig } from './config';
@@ -59,6 +63,7 @@ import {
   RunController,
 } from './controller';
 import { ProvisioningFailedError } from './evidence-runner';
+import { readOutcomeBudget } from './outcome-records';
 import { RunStore } from './run-store';
 import {
   makeAuthorize,
@@ -83,6 +88,40 @@ export interface ControllerOverrides {
   readonly onAuthorizationUrl?: (url: string) => void;
 }
 
+export function incidentRequested(root: string): boolean {
+  try {
+    fs.lstatSync(path.join(root, '.incident'));
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ENOENT';
+  }
+}
+/** Durable root-wide stop-only authority, installed before run enumeration. */
+export function fenceIncident(root: string, reason: string): void {
+  assertSecretFree(reason);
+  if (path.basename(path.resolve(root)) !== 'runs') throw new Error('root_mismatch');
+  privateDir(root);
+  replacePrivate(path.join(root, '.incident'), Buffer.from('incident'));
+  new LocalQemuAdapter({
+    stateDir: path.join(path.dirname(root), 'vms'),
+    profileDir: '.',
+    verifyImage: false,
+  }).engageKillSwitch(reason);
+}
+function configuredApp(config: RunConfig): AppCredentials {
+  return new AppCredentials({
+    appId: String(config.githubApp.appId),
+    clientId: config.githubApp.clientId,
+    privateKey: process.env[config.githubApp.privateKeyEnv] ?? '',
+    clientSecret: process.env[config.githubApp.clientSecretEnv] ?? '',
+  });
+}
+function sameConfig(left: RunConfig, right: RunConfig): boolean {
+  const { resumeRunId: _left, ...a } = runConfigInput(left);
+  const { resumeRunId: _right, ...b } = runConfigInput(right);
+  return canonicalJson(a, 1024 * 1024) === canonicalJson(b, 1024 * 1024);
+}
+
 /** Pre-start OAuth identity acquisition: no fabricated fork, run, or durable token. */
 export async function prepareAuthor(
   input: RunConfig,
@@ -92,12 +131,7 @@ export async function prepareAuthor(
   const config = validateRunConfig(runConfigInput(input));
   const fetcher = edges.fetch ?? fetch;
   const auth = new ContributorAuthorization({
-    app: new AppCredentials({
-      appId: String(config.githubApp.appId),
-      clientId: config.githubApp.clientId,
-      privateKey: process.env[config.githubApp.privateKeyEnv] ?? '',
-      clientSecret: process.env[config.githubApp.clientSecretEnv] ?? '',
-    }),
+    app: configuredApp(config),
     http: fetchGitHubHttp(undefined, fetcher),
     oauth: fetchOAuthHttp(undefined, fetcher),
     contributor: config.contributor,
@@ -132,7 +166,18 @@ export async function stopStoredRun(
   assertSecretFree(reason);
   if (typeof reason !== 'string' || !reason.trim() || reason.length > 500)
     throw new ControllerError('invalid_outcome');
-  const store = RunStore.open(root, runId);
+  let acquired: RunStore | undefined;
+  const deadline = Date.now() + 30000;
+  while (!acquired) {
+    try {
+      acquired = RunStore.open(root, runId, { cleanup: true });
+    } catch (error) {
+      if (!(error instanceof StoreLockedError)) throw error;
+      if (!incidentRequested(root) || Date.now() >= deadline) throw new Error('cleanup_incomplete');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+  const store = acquired;
   const opened: Journal[] = [];
   let broker: ForkCredentialBroker | undefined;
   const journal = (name: Parameters<RunStore['storeDirectory']>[0], child?: string) => {
@@ -201,7 +246,12 @@ export async function stopStoredRun(
         }
         const at = now().getTime();
         try {
-          await vm.destroy(handle);
+          const result = await teardownVm(vm, handle, store.run, {
+            now,
+            reconcileStopped: true,
+            retryDelayMs: 0,
+          });
+          if (result.kind !== 'destroyed') throw new Error('cleanup_incomplete');
         } catch (error) {
           if (hold) ledger?.settle(hold.id, null);
           throw error;
@@ -236,12 +286,7 @@ export async function stopStoredRun(
           store: tokens,
           fork,
           http: fetchGitHubHttp(undefined, edges.fetch ?? fetch),
-          app: new AppCredentials({
-            appId: String(config.githubApp.appId),
-            clientId: config.githubApp.clientId,
-            privateKey: process.env[config.githubApp.privateKeyEnv] ?? '',
-            clientSecret: process.env[config.githubApp.clientSecretEnv] ?? '',
-          }),
+          app: configuredApp(config),
           intents: () => {
             throw new Error('admission_closed');
           },
@@ -254,6 +299,24 @@ export async function stopStoredRun(
       failed = true;
     }
     failed ||= unfunded;
+    const unresolved = control
+      .read()
+      .some(
+        (event) =>
+          event &&
+          typeof event === 'object' &&
+          'type' in event &&
+          event.type === 'cleanup' &&
+          'funded' in event &&
+          event.funded === false
+      );
+    if (
+      !failed &&
+      store.run.state === 'blocked_cleanup' &&
+      !unresolved &&
+      !readOutcomeBudget(store).reservations.some((r) => r.status === 'reserved')
+    )
+      store.persistRun(transitionRun(store.run, ReasonCode.CleanupCompleted, now().toISOString()));
     if (!TERMINAL_STATES.includes(store.run.state) && store.run.state !== 'blocked_cleanup')
       store.persistRun(
         transitionRun(
@@ -541,12 +604,7 @@ export function createController(
     return a;
   };
   const appCredentials = () => {
-    app ??= new AppCredentials({
-      appId: String(config.githubApp.appId),
-      clientId: config.githubApp.clientId,
-      privateKey: process.env[config.githubApp.privateKeyEnv] ?? '',
-      clientSecret: process.env[config.githubApp.clientSecretEnv] ?? '',
-    });
+    app ??= configuredApp(config);
     return app;
   };
   const http = fetchGitHubHttp(undefined, fetcher);
@@ -1062,6 +1120,7 @@ export function createController(
     receipt = artifacts(c).get<SignedReceipt>('receipt');
   };
   const controller = new RunController({
+    incidentRequested: () => incidentRequested(root),
     root,
     steps,
     vm,
@@ -1080,11 +1139,7 @@ export function createController(
     recovery: {
       openStore: (r, id) => {
         const store = RunStore.open(r, id);
-        const { resumeRunId: _storedResume, ...storedInput } = runConfigInput(store.config);
-        const { resumeRunId: _requestedResume, ...requestedInput } = runConfigInput(config);
-        if (
-          canonicalJson(storedInput, 1024 * 1024) !== canonicalJson(requestedInput, 1024 * 1024)
-        ) {
+        if (!sameConfig(store.config, config)) {
           store.close();
           throw new Error('resume_identity_mismatch');
         }
@@ -1164,10 +1219,7 @@ export function createController(
   const authorize = async (runId: string) => {
     const store = RunStore.open(root, runId);
     try {
-      const { resumeRunId: _storedResume, ...storedInput } = runConfigInput(store.config);
-      const { resumeRunId: _requestedResume, ...requestedInput } = runConfigInput(config);
-      if (canonicalJson(storedInput, 1024 * 1024) !== canonicalJson(requestedInput, 1024 * 1024))
-        throw new Error('resume_identity_mismatch');
+      if (!sameConfig(store.config, config)) throw new Error('resume_identity_mismatch');
       const approval = store.config.authorApproval;
       if (!approval) throw new AuthorApprovalError('author_approval_missing');
       await prepareAuthor(store.config, { userId: approval.userId }, overrides);

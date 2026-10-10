@@ -217,6 +217,17 @@ test('start displays author and records explicit/interactive consent; absent or 
 test('invalid, unsupported and secret configs fail before factories with fixed errors and no store directory', async () => {
   const h = rig();
   for (const [raw, code, error] of [
+    [{ ...h.raw, executionProfile: null }, 3, 'invalid_config'],
+    [
+      { ...h.raw, executionProfile: { ...h.raw.executionProfile, provider: undefined } },
+      3,
+      'invalid_config',
+    ],
+    [
+      { ...h.raw, executionProfile: { ...h.raw.executionProfile, stateDir: undefined } },
+      3,
+      'invalid_config',
+    ],
     [{ ...h.raw, invalid: true }, 3, 'unknown_key'],
     [
       { ...h.raw, executionProfile: { ...h.raw.executionProfile, provider: 'unsupported' } },

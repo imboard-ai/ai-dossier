@@ -1,5 +1,7 @@
 /** Production command bindings. Root is the run-store root itself, never stateDir.
  * No provider text or credential is emitted here; the parser owns fixed rendering. */
+
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -16,9 +18,15 @@ import {
 import { RunStore } from '../dist/controller/run-store.js';
 import { assembleStatus } from '../dist/controller/status.js';
 import { StepArtifacts } from '../dist/controller/steps.js';
-import { prepareAuthor, stopStoredRun } from '../dist/controller/wiring.js';
-import { assertDirectoryAncestors, readPrivate } from '../dist/durable-fs.js';
+import {
+  fenceIncident,
+  incidentRequested,
+  prepareAuthor,
+  stopStoredRun,
+} from '../dist/controller/wiring.js';
+import { assertDirectoryAncestors, privateDir, readPrivate } from '../dist/durable-fs.js';
 import { parseJournalEvents } from '../dist/journal.js';
+import { lockDescriptor, StoreLockedError } from '../dist/lock.js';
 import { aggregate, contributionOutcome, recordAdoption } from '../dist/metrics/outcomes.js';
 import { canonicalJson } from '../dist/receipt/schema.js';
 import { assertSecretFree } from '../dist/redaction.js';
@@ -36,6 +44,41 @@ export async function createCommands({ root, createController, onAuthorizationUr
     const { authorApproval: _approval, ...input } = runConfigInput(config);
     return canonicalJson(input, 1024 * 1024);
   };
+  // New run IDs are random. Bind overlapping starts by the trusted config digest,
+  // independently of fresh OAuth/approval timestamps, while keeping different
+  // configurations runnable under the same root. Kernel ownership never expires.
+  const acquireStart = (config) => {
+    const directory = path.join(config.executionProfile.stateDir, '.start-guards');
+    privateDir(directory);
+    const name = createHash('sha256').update(authorKey(config)).digest('hex');
+    const file = path.join(directory, name);
+    let fd;
+    try {
+      fd = fs.openSync(
+        file,
+        fs.constants.O_CREAT |
+          fs.constants.O_RDWR |
+          fs.constants.O_NOFOLLOW |
+          fs.constants.O_NONBLOCK,
+        0o600
+      );
+      const stat = fs.fstatSync(fd);
+      if (
+        !stat.isFile() ||
+        stat.nlink !== 1 ||
+        stat.uid !== process.getuid?.() ||
+        (stat.mode & 0o777) !== 0o600
+      )
+        throw new StoreLockedError();
+      lockDescriptor(fd, 0);
+      const named = fs.lstatSync(file);
+      if (named.ino !== stat.ino || named.dev !== stat.dev) throw new StoreLockedError();
+      return fd;
+    } catch (error) {
+      if (fd !== undefined) fs.closeSync(fd);
+      throw error;
+    }
+  };
   const checkRoot = (config) => {
     if (
       path.basename(root) !== 'runs' ||
@@ -51,20 +94,40 @@ export async function createCommands({ root, createController, onAuthorizationUr
       store.close();
     }
   };
-  const configFor = (runId) =>
-    withStore(runId, true, (store) => {
+  const configFor = (runId, recover = false) =>
+    withStore(runId, !recover, (store) => {
       checkRoot(store.config);
       return store.config;
     });
-  const ids = () => {
+  const ids = (incident = false) => {
     assertDirectoryAncestors(root);
-    const entries = fs.readdirSync(root, { withFileTypes: true });
-    if (
-      entries.length > 10000 ||
-      entries.some((e) => !e.isDirectory() || !/^ztc-[a-f0-9]{16}$/u.test(e.name))
-    )
-      refuse('invalid_store');
-    return entries.map((e) => `${e.name}-run-1`).sort();
+    const entries = [];
+    const directory = fs.opendirSync(root);
+    let capped = false;
+    try {
+      for (let entry = directory.readSync(); entry; entry = directory.readSync()) {
+        if (entries.length >= 10000) {
+          capped = true;
+          break;
+        }
+        entries.push(entry);
+      }
+    } finally {
+      directory.closeSync();
+    }
+    const invalid =
+      capped ||
+      entries.some(
+        (e) => e.name !== '.incident' && (!e.isDirectory() || !/^ztc-[a-f0-9]{16}$/u.test(e.name))
+      );
+    if (!incident && invalid) refuse('invalid_store');
+    return {
+      invalid,
+      values: entries
+        .filter((e) => e.isDirectory() && /^ztc-[a-f0-9]{16}$/u.test(e.name))
+        .map((e) => `${e.name}-run-1`)
+        .sort(),
+    };
   };
   const status = (runId) =>
     withStore(
@@ -151,6 +214,7 @@ export async function createCommands({ root, createController, onAuthorizationUr
   return {
     async prepareAuthor(config, { name, email } = {}) {
       checkRoot(config);
+      if (incidentRequested(root)) refuse('incident_active');
       if (config.resumeRunId) refuse('invalid_resume_run_id');
       const approval = await prepareAuthor(config, { name, email }, { onAuthorizationUrl });
       // A config-supplied approval cannot masquerade as fresh authenticated consent.
@@ -159,18 +223,28 @@ export async function createCommands({ root, createController, onAuthorizationUr
     },
     async start(config) {
       checkRoot(config);
+      if (incidentRequested(root)) refuse('incident_active');
       if (config.resumeRunId) refuse('invalid_resume_run_id');
       const key = authorKey(config);
       const approval = pendingAuthors.get(key);
       if (!approval) refuse('author_approval_missing');
       pendingAuthors.delete(key);
       const approved = { ...config, authorApproval: approval };
-      const run = await createController(approved, { onAuthorizationUrl }).start(approved);
-      return status(run.runId);
+      const guard = acquireStart(approved);
+      try {
+        const run = await createController(approved, { onAuthorizationUrl }).start(approved);
+        return status(run.runId);
+      } finally {
+        fs.closeSync(guard);
+      }
     },
     async resume(runId, { revise } = {}) {
       if (revise) refuse('revision_unavailable');
-      const config = configFor(runId);
+      if (incidentRequested(root)) {
+        await stopStoredRun(root, runId, 'Incident root fence');
+        return status(runId);
+      }
+      const config = configFor(runId, true);
       if (!config.authorApproval) refuse('author_approval_missing');
       await prepareAuthor(config, { userId: config.authorApproval.userId }, { onAuthorizationUrl });
       const run = await createController(config, { onAuthorizationUrl }).resume(runId);
@@ -197,7 +271,10 @@ export async function createCommands({ root, createController, onAuthorizationUr
         refuse('invalid_input');
       const results = [];
       const failures = [];
-      for (const runId of ids()) {
+      fenceIncident(root, reason);
+      const selected = ids(true);
+      if (selected.invalid) failures.push(Object.assign(new Error(), { code: 'invalid_store' }));
+      for (const runId of selected.values) {
         try {
           await stopStoredRun(root, runId, reason);
           results.push(status(runId));
@@ -210,7 +287,7 @@ export async function createCommands({ root, createController, onAuthorizationUr
       return results;
     },
     metrics() {
-      return aggregate(ids().map((runId) => withStore(runId, true, contributionOutcome)));
+      return aggregate(ids().values.map((runId) => withStore(runId, true, contributionOutcome)));
     },
     adoption(runId, note) {
       withStore(runId, false, (store) => recordAdoption(store, note, new Date()));

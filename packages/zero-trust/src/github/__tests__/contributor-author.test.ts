@@ -16,7 +16,14 @@ const app = new AppCredentials({
 });
 
 function rig(
-  options: { profile?: unknown; emails?: unknown; emailsStatus?: number; revoke?: number } = {}
+  options: {
+    profile?: unknown;
+    emails?: unknown;
+    emailsStatus?: number;
+    revoke?: number;
+    expiresIn?: number;
+    refreshToken?: string;
+  } = {}
 ) {
   const paths: string[] = [];
   let exchanges = 0;
@@ -45,7 +52,11 @@ function rig(
       exchanges++;
       return {
         status: 200,
-        json: { access_token: access, refresh_token: refresh, expires_in: 3600 },
+        json: {
+          access_token: access,
+          refresh_token: options.refreshToken ?? refresh,
+          expires_in: options.expiresIn ?? 3600,
+        },
       };
     },
     now: () => Date.parse('2026-10-10T00:00:00.000Z'),
@@ -56,6 +67,29 @@ function rig(
 }
 
 describe('pre-run author OAuth boundary', () => {
+  it('account-only resume ignores changed profile name and revokes without email or replacement-author authority', async () => {
+    const h = rig({ profile: { id: 12, login: 'contributor', name: '<Changed Profile>' } });
+    expect(await h.auth.completeAuthor(h.callback, { userId: 12 })).toMatchObject({
+      userId: 12,
+      login: 'contributor',
+    });
+    expect(h.paths).toEqual(['GET /user', 'DELETE /applications/fixture/token']);
+  });
+  it.each([
+    { expiresIn: Number.MAX_SAFE_INTEGER },
+    { refreshToken: 'invalid' },
+  ])('every recognized token owns revocation before expiry/chain validation %j', async (options) => {
+    const h = rig(options);
+    await expect(h.auth.completeAuthor(h.callback)).rejects.toMatchObject({
+      code: 'app_misconfigured',
+    });
+    expect(h.paths).toEqual(['DELETE /applications/fixture/token']);
+    const refused = rig({ ...options, revoke: 503 });
+    await expect(refused.auth.completeAuthor(refused.callback)).rejects.toMatchObject({
+      code: 'revoke_failed',
+    });
+    expect(refused.paths).toEqual(['DELETE /applications/fixture/token']);
+  });
   it('derives profile/noreply defaults from authenticated /user and revokes before returning', async () => {
     const h = rig();
     const approval = await h.auth.completeAuthor(h.callback);

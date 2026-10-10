@@ -70,6 +70,7 @@ const ERROR_CODES = new Set([
   'driver_failed',
   'recovery_failed',
   'operation_failed',
+  'incident_active',
   'authorization_denied',
   'authorization_expired',
   'exchange_failed',
