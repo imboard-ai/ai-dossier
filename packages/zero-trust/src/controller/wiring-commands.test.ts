@@ -13,7 +13,7 @@ import { validateRunConfig } from './config';
 import { readOutcomeBudget } from './outcome-records';
 import { RunStore } from './run-store';
 import { StepArtifacts } from './steps';
-import { createController, prepareAuthor, stopStoredRun } from './wiring';
+import { createController, fenceIncident, prepareAuthor, stopStoredRun } from './wiring';
 
 const directories: string[] = [];
 afterEach(() => {
@@ -162,6 +162,84 @@ function rig() {
 }
 
 describe('production command credential/resource edges', () => {
+  it('refuses symlinked ancestors before any incident publication or permission changes', () => {
+    const h = rig();
+    const outside = path.join(h.dir, 'outside');
+    fs.mkdirSync(outside);
+    const runs = path.join(outside, 'runs');
+    fs.mkdirSync(runs, { mode: 0o755 });
+    fs.chmodSync(runs, 0o755);
+    const link = path.join(h.dir, 'store-link');
+    fs.symlinkSync(outside, link);
+    expect(() => fenceIncident(path.join(link, 'runs'), 'Incident')).toThrow();
+    expect(fs.readdirSync(runs)).toEqual([]);
+    expect(fs.statSync(runs).mode & 0o777).toBe(0o755);
+    expect(fs.existsSync(path.join(outside, 'vms'))).toBe(false);
+  });
+  it('pins incident publication against a legitimate directory swap after traversal', () => {
+    const h = rig();
+    fs.mkdirSync(h.root, { mode: 0o700 });
+    const outside = path.join(h.dir, 'outside');
+    fs.mkdirSync(outside);
+    const moved = path.join(h.dir, 'held-runs');
+    const original = fs.openSync;
+    let swapped = false;
+    vi.spyOn(fs, 'openSync').mockImplementation((file, flags, mode) => {
+      if (!swapped && String(file).includes('/.zt-write-')) {
+        swapped = true;
+        fs.renameSync(h.root, moved);
+        fs.symlinkSync(outside, h.root);
+      }
+      return original(file, flags, mode);
+    });
+    fenceIncident(h.root, 'Incident');
+    expect(swapped).toBe(true);
+    expect(fs.readdirSync(outside)).toEqual([]);
+    expect(fs.readFileSync(path.join(moved, '.incident'), 'utf8')).toBe('incident');
+  });
+  it('observes an incident arriving in recovery before any fresh credential/OAuth admission', async () => {
+    const h = rig();
+    const approval = {
+      userId: 12,
+      login: 'contributor',
+      name: 'Held Name',
+      email: '12+contributor@users.noreply.github.com',
+      source: 'default' as const,
+      approvedAt: '2026-10-10T00:00:00.000Z',
+    };
+    const config = { ...h.config, authorApproval: approval };
+    const store = h.seed(config);
+    const runId = store.runId;
+    const directory = path.join(store.storeDirectory('control'), 'controller');
+    store.close();
+    new Journal(directory).close();
+    let reads = 0;
+    let enumerated = 0;
+    vi.spyOn(h.vm, 'listByRun').mockImplementation(async () => {
+      if (++enumerated === 1)
+        fs.writeFileSync(path.join(h.root, '.incident'), 'incident', { mode: 0o600 });
+      return [];
+    });
+    const controller = createController(config, {
+      vm: h.vm,
+      fetch: async () => {
+        reads++;
+        throw new Error('forbidden credential call');
+      },
+      onAuthorizationUrl: () => {
+        reads++;
+        throw new Error('forbidden new OAuth');
+      },
+    });
+    expect((await controller.resume(runId)).state).toBe('cancelled');
+    expect(reads).toBe(0);
+    const stopped = RunStore.open(h.root, runId, { readOnly: true });
+    try {
+      expect(stopped.run.state).toBe('cancelled');
+    } finally {
+      stopped.close();
+    }
+  });
   it('opens a real loopback receiver and emits the actual URL before completing authenticated consent', async () => {
     const h = rig();
     const approval = await prepareAuthor(h.config, {}, h);

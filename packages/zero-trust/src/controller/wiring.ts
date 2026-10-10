@@ -7,7 +7,7 @@ import { Ed25519Signer, type Signer } from '@ai-dossier/core';
 import { BudgetLedger } from '../budget';
 import type { BudgetEstimate, BudgetObservation } from '../budget-types';
 import { resolveBase } from '../canonical/acquire';
-import { privateDir, readPrivate, replacePrivate } from '../durable-fs';
+import { assertDirectoryAncestors, readPrivate, replacePrivate } from '../durable-fs';
 import { AppCredentials, fetchGitHubHttp, fetchOAuthHttp } from '../github/app-auth';
 import { ForkCredentialBroker } from '../github/broker';
 import {
@@ -100,13 +100,44 @@ export function incidentRequested(root: string): boolean {
 export function fenceIncident(root: string, reason: string): void {
   assertSecretFree(reason);
   if (path.basename(path.resolve(root)) !== 'runs') throw new Error('root_mismatch');
-  privateDir(root);
-  replacePrivate(path.join(root, '.incident'), Buffer.from('incident'));
-  new LocalQemuAdapter({
-    stateDir: path.join(path.dirname(root), 'vms'),
-    profileDir: '.',
-    verifyImage: false,
-  }).engageKillSwitch(reason);
+  assertDirectoryAncestors(root);
+  const flags = fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW;
+  let parent = fs.openSync('/', flags);
+  const children: number[] = [];
+  try {
+    // Descriptor-relative traversal prevents ancestor swaps from redirecting a
+    // stop write after the non-mutating pathname preflight.
+    for (const name of path.resolve(root, '..').split(path.sep).filter(Boolean)) {
+      const next = fs.openSync(`/proc/self/fd/${parent}/${name}`, flags);
+      fs.closeSync(parent);
+      parent = next;
+    }
+    if (fs.fstatSync(parent).uid !== process.getuid?.()) throw new Error('invalid_store');
+    const child = (name: string) => {
+      const file = `/proc/self/fd/${parent}/${name}`;
+      try {
+        fs.mkdirSync(file, { mode: 0o700 });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      }
+      const fd = fs.openSync(file, flags);
+      children.push(fd);
+      if (fs.fstatSync(fd).uid !== process.getuid?.()) throw new Error('invalid_store');
+      fs.fchmodSync(fd, 0o700);
+      return fd;
+    };
+    const runFd = child('runs');
+    replacePrivate(`/proc/self/fd/${runFd}/.incident`, Buffer.from('incident'));
+    const vmFd = child('vms');
+    new LocalQemuAdapter({
+      stateDir: path.join(path.dirname(root), 'vms'),
+      profileDir: '.',
+      verifyImage: false,
+    }).engageKillSwitch(reason, vmFd);
+  } finally {
+    for (const fd of children) fs.closeSync(fd);
+    fs.closeSync(parent);
+  }
 }
 function configuredApp(config: RunConfig): AppCredentials {
   return new AppCredentials({
@@ -634,6 +665,7 @@ export function createController(
     );
   };
   const credentials = async (c: PhaseContext) => {
+    controller.assertAdmission();
     if (broker && contributor) return;
     const stored = artifacts(c).get<ForkReady>('fork');
     const result = stored ? undefined : await checkFork(c);
@@ -648,6 +680,7 @@ export function createController(
     const fork =
       stored ??
       (result as Extract<ReadinessOutcome, { kind: 'ready' | 'authorization_required' }>).fork;
+    controller.assertAdmission();
     if (stored && stored.repositoryId !== fork.repositoryId) throw new Error('fork_replaced');
     artifacts(c).put('fork', fork);
     broker = new ForkCredentialBroker({
@@ -679,12 +712,15 @@ export function createController(
     await broker.recover();
   };
   const identity = async (c: PhaseContext) => {
+    controller.assertAdmission();
     c.store.validateEvidence();
     if (!c.store.config.authorApproval) throw new AuthorApprovalError('author_approval_missing');
     await credentials(c);
+    controller.assertAdmission();
     c.signal.throwIfAborted();
     if (!contributor) throw new Error('authorization_unavailable');
     let bound = await contributor.bindLogin(c.store.run, c.store.config.authorApproval?.userId);
+    controller.assertAdmission();
     c.signal.throwIfAborted();
     if (bound.kind === 'reauthorize') {
       const receiver = await listenLoopback({
@@ -693,15 +729,19 @@ export function createController(
       const aborted = () => receiver.close();
       c.signal.addEventListener('abort', aborted, { once: true });
       try {
+        controller.assertAdmission();
         if (c.signal.aborted) receiver.close();
         c.signal.throwIfAborted();
         authUrl = contributor.begin(receiver.redirectUri).url;
         overrides.onAuthorizationUrl?.(authUrl);
+        const callback = await receiver.callback;
+        controller.assertAdmission();
         bound = await contributor.complete(
-          await receiver.callback,
+          callback,
           c.store.run,
           c.store.config.authorApproval?.userId
         );
+        controller.assertAdmission();
       } finally {
         authUrl = null;
         receiver.close();

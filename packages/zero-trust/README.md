@@ -116,7 +116,12 @@ the read refuses; supported interrupted publication is recovered only by the
 writable resume path. `{ cleanup: true }` is a locked incident-cleanup writer:
 it validates stored config/evidence but skips signing readiness. Execution uses
 the default writer, never cleanup mode. `LocalQemuAdapter.engageKillSwitch(reason)`
-closes VM admission without bypassing controller-accounted teardown.
+closes VM admission without bypassing controller-accounted teardown; its optional
+directory descriptor lets controller-owned publication retain a pinned private
+directory across pathname substitution. Root incident publication traverses
+directory descriptors without following symlinks before creating/changing files.
+`RunController.assertAdmission()` synchronously rechecks external stop authority
+at recovery/credential admission boundaries; the watcher also interrupts waits.
 
 ## Controller composition (#1108)
 

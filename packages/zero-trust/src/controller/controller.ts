@@ -361,12 +361,15 @@ export class RunController {
       );
       // A wrapper cannot bypass actual listByRun/teardown reconciliation.
       await this.attemptRecovery(() => this.cleanup(), failures);
-      await this.attemptRecovery(
-        () => this.deps.recovery.recoverCredentials(this.context()),
-        failures
-      );
+      this.observeIncident();
+      if (!this.incident)
+        await this.attemptRecovery(
+          () => this.deps.recovery.recoverCredentials(this.context()),
+          failures
+        );
       if (this.incident)
         await this.attemptRecovery(() => this.deps.recovery.killAll(this.context()), failures);
+      if (this.incident) return this.cancel();
       if (failures.length) throw failures[0];
       await this.recovered(
         await this.recover(() => this.deps.recovery.resumeIntents(this.context()))
@@ -423,6 +426,11 @@ export class RunController {
     // incidentStop aborts synchronously before its first await. The launch joins
     // its independent cleanup obligation; observing it here must not await itself.
     void this.incidentStop('Incident root fence').catch(() => {});
+  }
+  /** Recheck external stop authority synchronously at every admission boundary. */
+  assertAdmission(): void {
+    this.observeIncident();
+    if (this.incident || this.abort.signal.aborted) throw new ControllerError('admission_closed');
   }
   private get held(): RunStore {
     if (!this.store) throw new ControllerError('not_running');
@@ -513,7 +521,9 @@ export class RunController {
   }
   private async recover<T>(work: () => Promise<T>): Promise<T> {
     try {
-      return await work();
+      const result = await work();
+      this.observeIncident();
+      return result;
     } catch (error) {
       if (error instanceof AuthorApprovalError) throw error;
       if (error instanceof ControllerError && error.code === 'recovery_failed' && error.diagnostic)

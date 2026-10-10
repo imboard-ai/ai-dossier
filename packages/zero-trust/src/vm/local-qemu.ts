@@ -956,11 +956,19 @@ export class LocalQemuAdapter implements VmAdapter {
     return { destroyed, failed, blockedRuns };
   }
   /** Close admission without bypassing controller-accounted per-run teardown. */
-  engageKillSwitch(reason: string): void {
+  engageKillSwitch(reason: string, directoryFd?: number): void {
     assertNoSecrets(reason);
-    privateDir(this.options.stateDir);
+    const directory =
+      directoryFd === undefined
+        ? privateDir(this.options.stateDir)
+        : `/proc/self/fd/${directoryFd}`;
+    if (directoryFd !== undefined) {
+      const stat = fs.fstatSync(directoryFd);
+      if (!stat.isDirectory() || stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o700)
+        throw new Error('invalid_store');
+    }
     replacePrivate(
-      path.join(this.options.stateDir, KILL_SWITCH_FILE),
+      path.join(directory, KILL_SWITCH_FILE),
       Buffer.from(JSON.stringify({ reason, at: this.now().toISOString() }))
     );
     this.journal({ type: 'vm_kill_switch', reason });
