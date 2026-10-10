@@ -2,6 +2,7 @@ import { isRunContinuation, ReasonCode, type RunRecord } from '../state';
 
 /** Only these externally recorded steps may legitimately lag in tracker evidence. */
 const EXTERNAL_REASONS: readonly ReasonCode[] = Object.freeze([
+  ReasonCode.BaseAdvanced,
   ReasonCode.CandidateReady,
   ReasonCode.VerificationPassed,
   ReasonCode.RepairRequired,

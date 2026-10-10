@@ -167,6 +167,28 @@ export const TERMINAL_STATES: readonly RunState[] = Object.freeze(
   RUN_STATES.filter((state) => Object.keys(TRANSITIONS[state]).length === 0)
 );
 
+/** Post-publication states in which a PR tracker observes the upstream PR. */
+export const TRACKING_STATES: readonly RunState[] = Object.freeze([
+  'submitted',
+  'awaiting_review',
+  'accepted',
+]);
+/** Number of maintainer-requested revisions; budget session N+1 belongs to revision N. */
+export function revisionCount(run: RunRecord): number {
+  return run.history.filter((e) => e.reasonCode === ReasonCode.RevisionRequested).length;
+}
+/** A run the PR tracker owns: observing a published PR, or inside a requested revision. */
+export function isTrackerPhase(run: RunRecord): boolean {
+  return TRACKING_STATES.includes(run.state) || revisionCount(run) > 0;
+}
+/** Start of budget session `index` (0-based): run creation for the first session, the
+ * index-th `revision_requested` transition for each later one; undefined if absent. */
+export function sessionStartedAt(run: RunRecord, index: number): string | undefined {
+  if (index === 0) return run.createdAt;
+  return run.history.filter((e) => e.reasonCode === ReasonCode.RevisionRequested)[index - 1]
+    ?.timestamp;
+}
+
 export class IllegalTransitionError extends Error {
   constructor(
     readonly from: RunState,

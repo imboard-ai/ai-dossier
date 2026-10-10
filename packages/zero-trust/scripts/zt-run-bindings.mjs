@@ -18,6 +18,7 @@ import {
   latestSourceEdit,
   sourceEditCount,
 } from '../dist/controller/edits.js';
+import { publicationWaitTime } from '../dist/controller/lifecycle-times.js';
 import {
   readOutcomeBudget,
   readOutcomeHandoffs,
@@ -33,6 +34,11 @@ import {
   stopStoredRun,
 } from '../dist/controller/wiring.js';
 import { assertDirectoryAncestors, privateDir, readPrivate } from '../dist/durable-fs.js';
+import { MAX_BODY_LENGTH } from '../dist/github/handoff.js';
+
+const FEEDBACK_NOT_ADMITTED =
+  'This revision handed off: the maintainer feedback was judged out of scope or ambiguous, so nothing was implemented or pushed (the typed verdict is retained). Address the feedback yourself on the pull request, or cancel the run.';
+
 import { parseJournalEvents } from '../dist/journal.js';
 import { lockDescriptor, StoreLockedError } from '../dist/lock.js';
 import { aggregate, contributionOutcome, recordAdoption } from '../dist/metrics/outcomes.js';
@@ -169,6 +175,7 @@ export async function createCommands({ root, createController, onAuthorizationUr
             publication: artifacts.get('publication'),
             withdrawal: artifacts.get('withdrawal'),
             authorizationRequired: artifacts.get('authorization_required'),
+            feedbackDecision: artifacts.get('feedback_decision'),
           };
         });
         let handoff;
@@ -182,7 +189,18 @@ export async function createCommands({ root, createController, onAuthorizationUr
         let tracker;
         if (
           retained.tracking &&
-          ['submitted', 'awaiting_review', 'accepted', 'merged', 'declined'].includes(run.state) &&
+          [
+            'submitted',
+            'awaiting_review',
+            'accepted',
+            'merged',
+            'declined',
+            'revising',
+            'verifying',
+            'shipping',
+            'paused_user',
+            'blocked',
+          ].includes(run.state) &&
           run.history.some((e) => e.reasonCode === 'publication_observed')
         ) {
           readOutcomeTrack(store, run);
@@ -196,11 +214,32 @@ export async function createCommands({ root, createController, onAuthorizationUr
             state: run.state,
             ...checkpointStatus(store.checkpoint(point), store.currentCheckpointBindings(point)),
           };
+        else if (
+          run.state === 'paused_user' &&
+          retained.feedbackDecision?.sessionId === sessionId &&
+          retained.feedbackDecision?.admitted === false
+        )
+          tracker = { state: run.state, nextPermittedAction: FEEDBACK_NOT_ADMITTED };
+        const statusNow = new Date();
         const result = assembleStatus({
           run,
-          now: new Date(),
+          now: statusNow,
           budget,
           sessionId,
+          publicationWaitMs: store.withStoreDirectory('control', (dir) => {
+            const file = path.join(dir, 'controller', 'events.jsonl');
+            try {
+              return publicationWaitTime(
+                parseJournalEvents(readPrivate(file)),
+                sessionId,
+                statusNow.getTime(),
+                store.runId
+              );
+            } catch (error) {
+              if (error?.code === 'ENOENT') return 0;
+              throw error;
+            }
+          }),
           handoff,
           tracker,
           ...(retained.candidate?.record?.candidateSha
@@ -278,7 +317,6 @@ export async function createCommands({ root, createController, onAuthorizationUr
       return status(runId);
     },
     async resume(runId, { revise, modelProfile, checkpoints } = {}) {
-      if (revise) refuse('revision_unavailable');
       if (incidentRequested(root)) {
         const held = RunStore.open(root, runId, { cleanup: true });
         held.close();
@@ -293,17 +331,28 @@ export async function createCommands({ root, createController, onAuthorizationUr
         });
       const config = configFor(runId, true);
       if (!config.authorApproval) refuse('author_approval_missing');
-      const control = withStore(runId, true, readControlRequests, true);
-      if (!control.invalid && !control.pending.length)
-        await prepareAuthor(
-          config,
-          { userId: config.authorApproval.userId },
-          { onAuthorizationUrl }
-        );
-      const run = await createController(config, { onAuthorizationUrl }).resume(runId);
+      // Locked controller reconciliation decides whether identity is needed.
+      // Pending publication must reach read-back before any OAuth preflight.
+      const run = await createController(config, { onAuthorizationUrl }).resume(runId, {
+        revise: Boolean(revise),
+      });
       return status(run.runId);
     },
     status,
+    async prAction(runId, request) {
+      if (incidentRequested(root)) refuse('incident_active');
+      const config = configFor(runId, true);
+      let action = request;
+      if (request.kind === 'edit') {
+        const bytes = readPrivate(request.bodyFile, (stat) => {
+          if (stat.size > MAX_BODY_LENGTH) refuse('invalid_input');
+        });
+        const body = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+        assertSecretFree(body);
+        action = { kind: 'edit', title: request.title, body };
+      }
+      return createController(config, { onAuthorizationUrl }).prAction(runId, action);
+    },
     pause(runId, reason) {
       return withStore(
         runId,

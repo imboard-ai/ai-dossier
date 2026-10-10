@@ -29,6 +29,39 @@ import { FORK_ID, OWNER } from './github-fake';
 import { BRANCH, C1, C2, FORK, journal, Rig, SHA1, SHA2, temp } from './push-rig';
 
 const UP = Object.freeze({ owner: 'up', repo: 'proj' });
+it.each([2, -1])('truncated or invalid declared CI counts are unknown (%s)', async (count) => {
+  const read: GitHubRead = async (p) => ({
+    status: 200,
+    body: p.includes('/check-runs')
+      ? {
+          total_count: count,
+          check_runs: [{ head_sha: SHA1, status: 'completed', conclusion: 'success' }],
+        }
+      : p.includes('/actions/runs')
+        ? { total_count: 0, workflow_runs: [] }
+        : { total_count: 0, state: 'pending', statuses: [] },
+  });
+  expect(await observeCi(read, BINDING, SHA1)).toBe('unknown');
+});
+it('a negative or contradictory combined-status count cannot be green', async () => {
+  for (const status of [
+    { total_count: -1, state: 'failure', statuses: [] },
+    { total_count: 0, state: 'pending', statuses: [{ state: 'failure' }] },
+  ]) {
+    const read: GitHubRead = async (p) => ({
+      status: 200,
+      body: p.includes('/check-runs')
+        ? {
+            total_count: 1,
+            check_runs: [{ head_sha: SHA1, status: 'completed', conclusion: 'success' }],
+          }
+        : p.includes('/actions/runs')
+          ? { total_count: 0, workflow_runs: [] }
+          : status,
+    });
+    expect(await observeCi(read, BINDING, SHA1)).toBe('unknown');
+  }
+});
 const BINDING: PrBinding = Object.freeze({
   upstream: UP,
   base: 'main',
@@ -371,7 +404,7 @@ describe('PR observation and state mapping (AC1)', () => {
     });
     const moved = new Upstream();
     moved.branch = OTHER;
-    expect(await tracker(moved).t.resume()).toMatchObject({ reason: 'unexpected_head_sha' });
+    expect(await tracker(moved).t.resume()).toMatchObject({ reason: 'push_blocked' });
   });
 
   it('an unreadable GitHub records nothing and claims nothing', async () => {
@@ -659,6 +692,22 @@ describe('maintainer feedback', () => {
     ]);
   });
 
+  it('an oversized stranger remark is skipped; oversized maintainer feedback is untrusted', async () => {
+    const huge = '😀'.repeat(40_000);
+    const up = new Upstream();
+    up.reviews = [review(1)];
+    up.reviewComments = [{ ...remark(10, undefined, maintainer('stranger', 'NONE')), body: huge }];
+    const stranger = await tracker(up).t.beginRevision();
+    expect(stranger.kind === 'revising' && stranger.feedback.map((f) => f.id)).toEqual([
+      'review:1',
+    ]);
+    const held = new Upstream();
+    held.reviewComments = [{ ...remark(11), body: huge }];
+    const { t } = tracker(held);
+    expect(await t.beginRevision()).toMatchObject({ kind: 'unknown', detail: 'feedback' });
+    expect(t.snapshot().run.state).toBe('awaiting_review');
+  });
+
   it('a remark pointing outside the tracked PR makes the listing untrusted', async () => {
     const up = new Upstream();
     up.reviewComments = [{ ...remark(1), html_url: 'https://evil.example/pull/5#x' }];
@@ -808,7 +857,7 @@ describe('revisions (AC2, AC3, AC5)', () => {
     const push = vi.fn((i: IntentInput) => r.driver.execute(i));
     expect(await t.shipRevision({ candidateSha: SHA2, push })).toMatchObject({
       kind: 'blocked',
-      reason: 'unexpected_head_sha',
+      reason: 'push_blocked',
     });
     expect(push).not.toHaveBeenCalled();
     expect(r.fork.sha()).toBe(outOfBand);

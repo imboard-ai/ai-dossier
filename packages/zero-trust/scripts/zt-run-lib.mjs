@@ -2,6 +2,8 @@
  * message table. Provider exception messages and unknown codes are never emitted. */
 import fs from 'node:fs';
 import { runConfigInput, validateRunConfig } from '../dist/controller/config.js';
+import { MAX_PR_TITLE_LENGTH } from '../dist/github/handoff.js';
+import { MAX_WITHDRAWAL_EXPLANATION, WITHDRAWAL_REASONS } from '../dist/github/track.js';
 import { renderMetricsHuman, renderMetricsJson } from '../dist/metrics/outcomes.js';
 import { assertSecretFree } from '../dist/redaction.js';
 import { renderHuman, renderJson } from '../dist/status.js';
@@ -13,6 +15,9 @@ const COMMANDS = Object.freeze({
   },
   resume: { required: ['root', 'run'], optional: ['revise', 'model-profile', 'checkpoints'] },
   edit: { required: ['root', 'run', 'patch'], optional: [] },
+  'pr-edit': { required: ['root', 'run', 'title', 'body-file'], optional: [] },
+  withdraw: { required: ['root', 'run', 'reason', 'explanation'], optional: [] },
+  'cancel-action': { required: ['root', 'run'], optional: [] },
   status: { required: ['root', 'run'], optional: ['json'] },
   pause: { required: ['root', 'run', 'reason'], optional: [] },
   cancel: { required: ['root', 'run', 'reason'], optional: [] },
@@ -27,8 +32,8 @@ const COMMANDS = Object.freeze({
 });
 const BOOLEAN = new Set(['confirm-author', 'revise', 'json', 'apply']);
 export const USAGE =
-  'Usage: zt-run <start|resume|edit|status|pause|cancel|approve|reject|authorize|kill-all|metrics|adoption|sweep|export> --root <dir> [command options]';
-const HELP = `${USAGE}\nstart --config <file.json> [--confirm-author] [--author-name <name>] [--author-email <email>]\nresume --run <id> [--revise] [--model-profile <file.json>] [--checkpoints plan,patch|none]\nedit --run <id> --patch <file.diff>\nstatus --run <id> [--json]\npause --run <id> --reason <text>\ncancel --run <id> --reason <text>\napprove --run <id> --checkpoint <plan|patch|verification> --digest <sha256>\nreject --run <id> --checkpoint <plan|patch|verification> --digest <sha256> --reason <text>\nauthorize --run <id>\nkill-all --reason <text>\nmetrics [--json]\nadoption --run <id> --note <text>\nsweep [--apply]\nexport --run <id> --out <file>`;
+  'Usage: zt-run <start|resume|edit|pr-edit|withdraw|cancel-action|status|pause|cancel|approve|reject|authorize|kill-all|metrics|adoption|sweep|export> --root <dir> [command options]';
+const HELP = `${USAGE}\nstart --config <file.json> [--confirm-author] [--author-name <name>] [--author-email <email>]\nresume --run <id> [--revise] [--model-profile <file.json>] [--checkpoints plan,patch|none]\nedit --run <id> --patch <file.diff>\npr-edit --run <id> --title <text> --body-file <file>\nwithdraw --run <id> --reason <${WITHDRAWAL_REASONS.join('|')}> --explanation <text>\ncancel-action --run <id>\nstatus --run <id> [--json]\npause --run <id> --reason <text>\ncancel --run <id> --reason <text>\napprove --run <id> --checkpoint <plan|patch|verification> --digest <sha256>\nreject --run <id> --checkpoint <plan|patch|verification> --digest <sha256> --reason <text>\nauthorize --run <id>\nkill-all --reason <text>\nmetrics [--json]\nadoption --run <id> --note <text>\nsweep [--apply]\nexport --run <id> --out <file>`;
 const ERROR_CODES = new Set([
   'invalid_patch',
   'edit_not_paused',
@@ -66,6 +71,8 @@ const ERROR_CODES = new Set([
   'author_email_unverified',
   'author_identity_unavailable',
   'revision_unavailable',
+  'action_unavailable',
+  'action_pending',
   'root_mismatch',
   'store_locked',
   'invalid_store',
@@ -150,6 +157,13 @@ function parse(argv) {
   if (opts.digest && !/^[a-f0-9]{64}$/u.test(opts.digest)) refuse('invalid_input');
   if (opts.reason && (!opts.reason.trim() || opts.reason.length > 500)) refuse('invalid_input');
   if (opts.note && (!opts.note.trim() || opts.note.length > 2000)) refuse('invalid_input');
+  if (
+    command === 'withdraw' &&
+    (!WITHDRAWAL_REASONS.includes(opts.reason) ||
+      opts.explanation.length > MAX_WITHDRAWAL_EXPLANATION)
+  )
+    refuse('invalid_input');
+  if (opts.title && opts.title.length > MAX_PR_TITLE_LENGTH) refuse('invalid_input');
   return { command, opts };
 }
 function readConfig(file) {
@@ -266,6 +280,36 @@ export async function main(argv, { createController, out, err, confirmAuthor } =
       case 'edit':
         status = await controller.edit(opts.run, readInput(opts.patch, 10 * 1024 * 1024));
         break;
+      case 'pr-edit':
+      case 'withdraw':
+      case 'cancel-action': {
+        const result = await controller.prAction(
+          opts.run,
+          command === 'pr-edit'
+            ? { kind: 'edit', title: opts.title, bodyFile: opts['body-file'] }
+            : command === 'withdraw'
+              ? { kind: 'withdraw', reason: opts.reason, explanation: opts.explanation }
+              : { kind: 'cancel-action' }
+        );
+        assertSecretFree(result);
+        if (typeof result?.link !== 'string' || typeof result?.instructions !== 'string')
+          refuse('operation_failed');
+        const link = new URL(result.link);
+        if (
+          link.origin !== 'https://github.com' ||
+          !/^\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/[1-9][0-9]*$/u.test(link.pathname) ||
+          link.search ||
+          link.hash ||
+          link.username ||
+          link.password
+        )
+          refuse('operation_failed');
+        out(`contributor_link: ${JSON.stringify(link.href)}`);
+        out(`instructions: ${JSON.stringify(result.instructions)}`);
+        if (result.title) out(`prepared_title: ${JSON.stringify(result.title)}`);
+        if (result.bodyFile) out(`prepared_body_file: ${JSON.stringify(result.bodyFile)}`);
+        return 0;
+      }
       case 'status':
         status = await controller.status(opts.run);
         break;
