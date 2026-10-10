@@ -16,7 +16,7 @@ export const DEFAULT_STATE_ACTIONS: Readonly<Record<RunState, string>> = Object.
   verifying: 'Independently verify the immutable candidate.',
   shipping:
     'Publish only the independently verified candidate through the bound shipping operations.',
-  paused_user: 'Resume explicitly from the selected checkpoint.',
+  paused_user: 'Resume explicitly on a fresh VM; approve an open checkpoint first.',
   awaiting_contributor: 'Complete the contributor hand-off, then resume explicitly.',
   submitted: 'Resume explicitly to observe upstream review and CI.',
   awaiting_review: 'Resume explicitly to observe maintainer feedback.',

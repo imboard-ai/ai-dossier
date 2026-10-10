@@ -69,6 +69,8 @@ export interface HandoffDeps {
   /** Controller-owned directory for copy-paste body files. */
   readonly bodyDirectory: string;
   readonly now: () => string;
+  /** Stop-only host fence immediately before issuing a contributor capability. */
+  readonly assertAdmission?: () => void;
 }
 
 /** Only a moved head is terminal; an ambiguous match waits for a person (see resume). */
@@ -595,6 +597,7 @@ export class HandoffDriver {
       });
       if (existing.kind === 'unknown') throw new HandoffError('reconciliation_unavailable');
       if (existing.kind !== 'absent') throw new HandoffError('existing_submission');
+      this.deps.assertAdmission?.();
       return this.issue(intent, binding, issueCommentLink(intent, binding, request.body));
     });
   }

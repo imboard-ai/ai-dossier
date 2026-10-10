@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash, generateKeyPairSync } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -10,6 +10,7 @@ import { BudgetLedger } from '../dist/budget.js';
 import { ScriptedRecovery } from '../dist/controller/__tests__/fake-steps.js';
 import { pauseAtCheckpoint } from '../dist/controller/checkpoints.js';
 import { validateRunConfig } from '../dist/controller/config.js';
+import { acknowledgeControl, readControlRequests } from '../dist/controller/control.js';
 import { RunController } from '../dist/controller/controller.js';
 import { RunStore } from '../dist/controller/run-store.js';
 import { StepArtifacts } from '../dist/controller/steps.js';
@@ -165,6 +166,81 @@ function rig() {
     counts: () => ({ revoked, userReads }),
   };
 }
+
+test('second-process pause/cancel are durable under the active guard and observational status reports pending and damaged requests', async () => {
+  const h = rig();
+  const store = h.seed();
+  try {
+    const commands = await createCommands({
+      root: h.root,
+      createController: () => assert.fail('request/status cannot construct execution'),
+    });
+    for (const kind of ['pause', 'cancel']) {
+      const child = spawnSync(
+        process.execPath,
+        [
+          new URL('./zt-run.mjs', import.meta.url).pathname,
+          kind,
+          '--root',
+          h.root,
+          '--run',
+          store.runId,
+          '--reason',
+          'User control',
+        ],
+        { encoding: 'utf8' }
+      );
+      assert.equal(child.status, 0, child.stderr);
+      assert.match(child.stdout, new RegExp(`${kind}_requested:`));
+    }
+    const rows = readControlRequests(store).pending;
+    assert.equal(rows.length, 2);
+    assert.equal(commands.status(store.runId).phase, 'cancel_requested');
+    for (const row of rows) acknowledgeControl(store, row, 'applied');
+    assert.equal(commands.status(store.runId).phase, 'gating');
+    fs.writeFileSync(
+      path.join(store.storeDirectory('control'), 'requests', `${rows[0].id}.json`),
+      '{'
+    );
+    const status = commands.status(store.runId);
+    assert.equal(status.phase, 'invalid_control');
+    assert.match(status.nextPermittedAction, /corrupt or unknown/);
+    assert.deepEqual(h.counts(), { revoked: 0, userReads: 0 });
+  } finally {
+    store.close();
+  }
+});
+
+test('cancelled CLI status retains publication URL and contributor withdrawal instructions', async () => {
+  const h = rig();
+  const store = h.seed();
+  for (const reason of [
+    ReasonCode.GatePassed,
+    ReasonCode.PlanApproved,
+    ReasonCode.CandidateReady,
+    ReasonCode.VerificationPassed,
+    ReasonCode.PublicationObserved,
+    ReasonCode.UserCancelled,
+  ])
+    store.persistRun(transitionRun(store.run, reason, new Date().toISOString()));
+  const journal = new Journal(path.join(store.storeDirectory('control'), 'steps'));
+  const artifacts = new StepArtifacts(journal, store.runId);
+  artifacts.put('publication', {
+    url: 'https://github.com/owner/repo/pull/2',
+    headSha: 'a'.repeat(40),
+  });
+  artifacts.put(
+    'withdrawal',
+    'Post the prepared contributor comment, then close the pull request.'
+  );
+  journal.close();
+  store.close();
+  const commands = await createCommands({ root: h.root, createController });
+  const status = commands.status(store.runId);
+  assert.equal(status.state, 'cancelled');
+  assert.match(status.nextPermittedAction, /https:\/\/github.com\/owner\/repo\/pull\/2/);
+  assert.match(status.nextPermittedAction, /prepared contributor comment/);
+});
 
 test('start overrides file-supplied approval only with fresh OAuth consent; status opens the readOnly store API', async () => {
   const h = rig();

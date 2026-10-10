@@ -14,6 +14,7 @@ import { ReasonCode, transitionRun } from '../state';
 import { ScriptedRecovery, ScriptedSteps } from './__tests__/fake-steps';
 import { approveCheckpoint } from './checkpoints';
 import { validateRunConfig } from './config';
+import { requestControl } from './control';
 import { ControllerError, type PhaseContext, RunController } from './controller';
 import { RunStore } from './run-store';
 import {
@@ -214,6 +215,74 @@ function open(h: ReturnType<typeof rig>, runId: string) {
 }
 
 describe('RunController', () => {
+  it('cancellation reconciles pending publication before stale-guest destruction and notifies every recovered transition', async () => {
+    const h = rig();
+    h.steps.scripts.ship = [{ kind: 'contributor_handoff' }];
+    const run = await h.controller.start(h.config);
+    const sequence: string[] = [];
+    Object.assign(h.recovery, {
+      reconcileControl: async (c: PhaseContext) => {
+        sequence.push('publication');
+        return transitionRun(c.store.run, ReasonCode.PublicationObserved, TIME);
+      },
+      prepareCancellation: async (c: PhaseContext) => {
+        sequence.push(`withdraw-${c.store.run.state}`);
+      },
+      endRun: async () => {
+        sequence.push('revoke');
+      },
+    });
+    const stale = await h.vm.create({
+      runId: run.runId,
+      limits: h.config.limits,
+      scope: 'container',
+      phase: 'verification',
+    });
+    const destroy = h.vm.destroy.bind(h.vm);
+    vi.spyOn(h.vm, 'destroy').mockImplementation(async (handle) => {
+      sequence.push('destroy');
+      return destroy(handle);
+    });
+    const store = open(h, run.runId);
+    requestControl(store, { kind: 'cancel', reason: 'User cancellation' }, new Date(TIME));
+    store.close();
+    const cancelled = await h.controller.resume(run.runId);
+    expect(cancelled.state).toBe('cancelled');
+    expect(sequence.indexOf('publication')).toBeLessThan(sequence.indexOf('destroy'));
+    expect(sequence).toContain('withdraw-submitted');
+    expect(sequence).toContain('revoke');
+    expect(h.vm.destroy).toHaveBeenCalledWith(expect.objectContaining({ vmId: stale.vmId }));
+    for (const seen of h.seen) expect(seen.slice(-2)).toEqual(['submitted', 'cancelled']);
+  });
+  it.each([
+    null,
+    'guest-absent-accounted',
+  ])('queued cancellation reconciles unfunded cleanup crash-prefix evidence (%s)', async (evidence) => {
+    const h = rig();
+    h.steps.scripts.gate = [{ kind: 'hand_off' }];
+    const run = await h.controller.start(h.config);
+    const reconcileCleanup = vi.fn(async () => evidence);
+    const endRun = vi.fn(async () => {});
+    Object.assign(h.recovery, { reconcileCleanup, endRun });
+    const store = open(h, run.runId);
+    const journal = new Journal(path.join(store.storeDirectory('control'), 'controller'));
+    journal.append({
+      v: 1,
+      type: 'cleanup',
+      runId: run.runId,
+      vmId: 'interrupted-guest',
+      kind: 'pending',
+      funded: false,
+    });
+    journal.close();
+    requestControl(store, { kind: 'cancel', reason: 'User cancellation' }, new Date(TIME));
+    store.close();
+    expect((await h.controller.resume(run.runId)).state).toBe(
+      evidence === null ? 'blocked_cleanup' : 'cancelled'
+    );
+    expect(reconcileCleanup).toHaveBeenCalledWith('interrupted-guest', expect.anything());
+    expect(endRun).toHaveBeenCalled();
+  });
   it('runs direct proceed to submitted, persists and fans out every transition', async () => {
     const h = rig();
     const run = await h.controller.start(h.config);

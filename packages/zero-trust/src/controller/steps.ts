@@ -42,6 +42,7 @@ import { isTestPath, reviewCandidate } from '../review/integrity';
 import { isRunContinuation, prerequisiteWaitOrigin, ReasonCode } from '../state';
 import type { ProxyTarget, VmAdapter } from '../vm/adapter';
 import {
+  type AgentContinuation,
   type AgentLoopContext,
   type AgentPlan,
   runImplementation,
@@ -350,6 +351,15 @@ export function createSteps(
     baseManifest,
     now: services.now,
     persist: (entry) => artifacts(c).put('transcript', entry),
+    assertAdmission: c.assertAdmission,
+    continuation: artifacts(c).get<AgentContinuation>(
+      phase === 'planning' ? 'planning_continuation' : 'implementation_continuation'
+    ),
+    saveContinuation: (held) =>
+      artifacts(c).put(
+        phase === 'planning' ? 'planning_continuation' : 'implementation_continuation',
+        held
+      ),
   });
   const summary = (e: WorkspaceEvidence) => {
     const r = e.records.find((r) => r.captureReport);
@@ -485,9 +495,12 @@ export function createSteps(
     },
     async plan(c) {
       const w = workspace(c);
+      const held = artifacts(c).get<AgentContinuation>('planning_continuation');
+      const overlay = new WorkspaceOverlay(source(c).manifest);
+      for (const write of held?.writes ?? []) overlay.write(write.path, write.content);
       const vm = await provisionWorkspace({
         ...w,
-        manifest: source(c).manifest,
+        manifest: overlay.manifest(),
         plan: buildCommandPlan(profile(c).manager, services.endpoints),
       });
       try {
@@ -509,8 +522,31 @@ export function createSteps(
     },
     async implement(c) {
       const author = await approval(c);
+      const phaseKey = c.run.history.filter(
+        (e) =>
+          ![
+            ReasonCode.UserPaused,
+            ReasonCode.ResumeImplementing,
+            ReasonCode.ResumeRevising,
+          ].includes(e.reasonCode)
+      ).length;
+      if (artifacts(c).get<number>('implementation_finished') === phaseKey) {
+        const completed = candidate(c);
+        const diff = reviewDiff(source(c).manifest, completed.manifest);
+        return {
+          kind: 'candidate',
+          bindings: {
+            ...bindings(c),
+            candidateSha: completed.record.candidateSha,
+            reviewDigest: sha256(diff),
+          },
+        };
+      }
+      const entered = [...c.run.history]
+        .reverse()
+        .find((e) => e.to === 'implementing' && e.reasonCode !== ReasonCode.ResumeImplementing);
       const old =
-        c.run.state === 'revising' || c.run.reasonCode === ReasonCode.RepairRequired
+        c.run.state === 'revising' || entered?.reasonCode === ReasonCode.RepairRequired
           ? candidate(c)
           : undefined;
       const previousVerification = old
@@ -521,9 +557,31 @@ export function createSteps(
         : undefined;
       const base = source(c);
       const w = workspace(c);
+      let attemptMetadata = artifacts(c).get<{
+        phaseKey: number;
+        attempt: number;
+        timestamp: string;
+      }>('implementation_attempt');
+      if (attemptMetadata?.phaseKey !== phaseKey) {
+        artifacts(c).put('implementation_continuation', null);
+        attemptMetadata = {
+          phaseKey,
+          attempt: (artifacts(c).get<number>('attempt') ?? 0) + 1,
+          timestamp: services
+            .now()
+            .toISOString()
+            .replace(/\.\d{3}Z$/u, 'Z'),
+        };
+        artifacts(c).put('implementation_attempt', attemptMetadata);
+      }
+      const held = artifacts(c).get<AgentContinuation>('implementation_continuation');
+      const overlay = new WorkspaceOverlay(old?.manifest ?? base.manifest);
+      if (held && held.baseDigest === overlay.base.digest)
+        for (const write of held.writes) overlay.write(write.path, write.content);
+      else if (held) artifacts(c).put('implementation_continuation', null);
       const vm = await provisionWorkspace({
         ...w,
-        manifest: old?.manifest ?? base.manifest,
+        manifest: overlay.manifest(),
         plan: buildCommandPlan(profile(c).manager, services.endpoints),
       });
       try {
@@ -557,16 +615,13 @@ export function createSteps(
           : new WorkspaceOverlay(base.manifest);
         cumulative.applyRepair(result.overlay);
         const manifest = result.overlay.manifest();
-        const attempt = (artifacts(c).get<number>('attempt') ?? 0) + 1;
+        const attempt = attemptMetadata.attempt;
         const produced = createCandidate(
           manifest,
           {
             baseSha: gate(c).baseSha,
             author,
-            committerTimestamp: services
-              .now()
-              .toISOString()
-              .replace(/\.\d{3}Z$/u, 'Z'),
+            committerTimestamp: attemptMetadata.timestamp,
             message: `fix: issue ${c.store.config.upstream.issue} (attempt ${attempt})\n${gate(c).signoffRequired ? `\nSigned-off-by: ${author.name} <${author.email}>\n` : ''}`,
           },
           base.pack
@@ -581,6 +636,7 @@ export function createSteps(
         });
         const diff = reviewDiff(base.manifest, manifest);
         c.store.replaceArtifact('candidate.diff', diff);
+        artifacts(c).put('implementation_finished', phaseKey);
         return {
           kind: 'candidate',
           bindings: {

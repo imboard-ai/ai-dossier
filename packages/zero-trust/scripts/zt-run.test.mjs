@@ -113,6 +113,8 @@ async function invoke(argv, controller = {}, extra = {}) {
   return { code, stdout, stderr, factories };
 }
 const valid = {
+  pause: ['--run', run, '--reason', 'Hold'],
+  cancel: ['--run', run, '--reason', 'Stop'],
   resume: ['--run', run],
   status: ['--run', run],
   approve: ['--run', run, '--checkpoint', 'plan', '--digest', digest],
@@ -147,13 +149,15 @@ test('all valid command dispatches preserve exact arguments and defaults', async
     const controller = {
       [method]: (...a) => {
         calls.push(a);
-        return command === 'kill-all'
-          ? [status]
-          : command === 'metrics'
-            ? aggregate([])
-            : command === 'sweep'
-              ? { applied: false, contributions: 0, files: 0 }
-              : status;
+        return ['pause', 'cancel'].includes(command)
+          ? { kind: command, runId: run, id: '00000000-0000-0000-0000-000000000000' }
+          : command === 'kill-all'
+            ? [status]
+            : command === 'metrics'
+              ? aggregate([])
+              : command === 'sweep'
+                ? { applied: false, contributions: 0, files: 0 }
+                : status;
       },
     };
     const r = await invoke([command, '--root', 'runs', ...args], controller);
@@ -300,6 +304,8 @@ test('built entry help/status smoke is offline, reads a locked store and prints 
     });
     assert.equal(help.status, 0, help.stderr);
     assert.match(help.stdout, /Usage: zt-run/u);
+    assert.match(help.stdout, /pause --run <id> --reason <text>/u);
+    assert.match(help.stdout, /cancel --run <id> --reason <text>/u);
     const result = spawnSync(
       process.execPath,
       ['scripts/zt-run.mjs', 'status', '--root', h.root, '--run', store.runId, '--json'],

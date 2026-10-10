@@ -36,6 +36,40 @@ export function lockDescriptor(fd: number, timeoutMs: number): void {
   if (result.error || result.status !== 0) throw new StoreLockedError();
 }
 
+/** Shared private permanent-inode acquisition. Caller owns the returned fd;
+ * each protocol selects its own guard path, creation policy and wait bound. */
+export function acquirePrivateGuard(file: string, create: boolean, timeoutMs: number): number {
+  if (process.platform !== 'linux') throw new StoreLockedError();
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(
+      file,
+      (create ? fs.constants.O_CREAT : 0) |
+        fs.constants.O_RDWR |
+        fs.constants.O_NOFOLLOW |
+        fs.constants.O_NONBLOCK,
+      0o600
+    );
+    const stat = fs.fstatSync(fd);
+    if (
+      !stat.isFile() ||
+      stat.nlink !== 1 ||
+      stat.uid !== process.getuid?.() ||
+      (stat.mode & 0o777) !== 0o600
+    )
+      throw new StoreLockedError();
+    lockDescriptor(fd, timeoutMs);
+    const named = fs.lstatSync(file);
+    if (named.dev !== stat.dev || named.ino !== stat.ino) throw new StoreLockedError();
+    fs.fsyncSync(fd);
+    syncDirectory(path.dirname(file));
+    return fd;
+  } catch {
+    if (fd !== undefined) fs.closeSync(fd);
+    throw new StoreLockedError();
+  }
+}
+
 /** Linux-local identity includes the boot ID: start ticks alone repeat after reboot. */
 export function processStartToken(pid: number): string | null {
   if (process.platform !== 'linux') throw new StoreLockedError();

@@ -25,6 +25,7 @@ import {
   USER_ID,
 } from '../../github/__tests__/github-fake';
 import { Fork } from '../../github/__tests__/push-rig';
+import { ForkCredentialBroker } from '../../github/broker';
 import { Journal } from '../../journal';
 import {
   type ModelAdapter,
@@ -39,6 +40,8 @@ import { ReceiptNonceStore } from '../../receipt/nonces';
 import { ReasonCode, transitionRun } from '../../state';
 import { approveCheckpoint } from '../checkpoints';
 import { validateRunConfig } from '../config';
+import { readControlRequests, requestControl } from '../control';
+import { readOutcomeBudget } from '../outcome-records';
 import { RunStore } from '../run-store';
 import { StepArtifacts } from '../steps';
 import { loadVerification } from '../verification-record';
@@ -95,6 +98,9 @@ function rig(
     corruptPolicy?: boolean;
     restrictPolicy?: boolean;
     delayFork?: boolean;
+    activeControl?: 'write' | 'exec' | 'model' | 'mint' | 'engagement';
+    onlyRepair?: boolean;
+    teardownFails?: boolean;
   } = {}
 ) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zt-composition-'));
@@ -345,6 +351,11 @@ function rig(
     if (p.startsWith('/repos/upstream/fixture/pulls?'))
       return { status: 200, body: submitted ? [submitted] : [] };
     if (p === '/repos/upstream/fixture/pulls/8') return { status: 200, body: submitted };
+    if (p.includes('/issues/7/comments?') && options.activeControl === 'engagement' && !blocked) {
+      blocked = true;
+      controlReached();
+      await controlReleased;
+    }
     if (p.includes('/issues/7/comments?'))
       return { status: 200, body: [comment, invitation].filter(Boolean) };
     if (p.endsWith('/issues/comments/10')) return { status: 200, body: invitation };
@@ -356,6 +367,11 @@ function rig(
   };
   const fetcher: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
+    if (options.activeControl === 'mint' && url.pathname.endsWith('/access_tokens') && !blocked) {
+      blocked = true;
+      controlReached();
+      await controlReleased;
+    }
     if (options.userUnavailable && url.pathname === '/user')
       return new Response('{}', { status: 503 });
     const response =
@@ -372,6 +388,7 @@ function rig(
     });
   };
   let seq = 0;
+  let modelRequests = 0;
   let implementTurn = 0;
   let planCalls = 0;
   const repairEvidence: string[] = [];
@@ -383,6 +400,7 @@ function rig(
   const model: ModelAdapter = {
     id: 'fixture',
     async complete(request: ModelRequest): Promise<ModelResult> {
+      modelRequests++;
       for (const message of request.messages)
         if (message.role === 'user' && message.content.includes('repair_evidence')) {
           const frame = JSON.parse(message.content) as { label: string; data: string };
@@ -420,6 +438,26 @@ function rig(
           text: 'Add a regression for milliseconds, then correct the conversion.',
         };
       } else {
+        if (options.activeControl === 'model' && implementTurn === 1 && !blocked) {
+          blocked = true;
+          interruptedVm = (await vm.listByRun(controller.snapshot().runId)).at(-1)?.vmId ?? '';
+          controlReached();
+          await controlReleased;
+        }
+        if (options.activeControl === 'exec' && implementTurn === 2) {
+          implementTurn++;
+          return {
+            kind: 'tool_calls',
+            calls: [
+              {
+                id: `call-${seq++}`,
+                name,
+                arguments: { kind: 'worker_exec', profile: 'node', argv: ['npm', 'test'] },
+              },
+            ],
+            usage: { inputTokens: 10, outputTokens: 10 },
+          };
+        }
         const writes = CANDIDATE.entries.filter((e) =>
           ['test/regression.test.js', 'src/duration.js'].includes(e.path)
         );
@@ -466,12 +504,59 @@ function rig(
     return fixtureScript(request, guest);
   });
   vm.acceptAbuse = options.breach ?? false;
+  let controlReached!: () => void;
+  const controlReady = new Promise<void>((resolve) => {
+    controlReached = resolve;
+  });
+  let interruptedVm = '';
+  let blocked = false;
+  let releaseControl!: () => void;
+  const controlReleased = new Promise<void>((resolve) => {
+    releaseControl = resolve;
+  });
+  const originalPut = vm.putFile.bind(vm);
+  const originalExec = vm.exec.bind(vm);
+  const originalDestroy = vm.destroy.bind(vm);
+  vi.spyOn(vm, 'putFile').mockImplementation(async (...args) => {
+    if (
+      options.activeControl === 'write' &&
+      args[1] === 'test/regression.test.js' &&
+      !blocked &&
+      (!options.onlyRepair || repairEvidence.length > 0)
+    ) {
+      blocked = true;
+      interruptedVm = args[0].vmId;
+      controlReached();
+      return new Promise<void>(() => {});
+    }
+    return originalPut(...args);
+  });
+  vi.spyOn(vm, 'exec').mockImplementation(async (...args) => {
+    if (
+      options.activeControl === 'exec' &&
+      args[1].argv.join(' ') === 'npm test' &&
+      !blocked &&
+      implementTurn === 3
+    ) {
+      blocked = true;
+      interruptedVm = args[0].vmId;
+      controlReached();
+      return new Promise<never>(() => {});
+    }
+    return originalExec(...args);
+  });
+  vi.spyOn(vm, 'destroy').mockImplementation(async (handle) => {
+    if (options.teardownFails && handle.vmId === interruptedVm)
+      throw new Error('fixture cleanup failure');
+    return originalDestroy(handle);
+  });
+  let clock = Date.parse(TIME);
   const controller = createController(config, {
     vm,
     read,
     fetch: fetcher,
     models: { planning: model, implementing: model, repair: model },
-    now: () => new Date(TIME),
+    now: () => new Date(clock),
     gitRemoteUrl: { upstream: `file://${upstream.dir}`, fork: `file://${fork.dir}` },
   });
   const authorize = async (task: Promise<unknown>) => {
@@ -524,6 +609,13 @@ function rig(
     repairEvidence,
     forkReached,
     releaseFork,
+    controlReady,
+    releaseControl,
+    advanceClock: () => {
+      clock += 60000;
+    },
+    modelCalls: () => modelRequests,
+    interruptedVm: () => interruptedVm,
     identityUnavailable() {
       options.userUnavailable = true;
     },
@@ -592,6 +684,239 @@ function rig(
 }
 
 describe('createController real composition', () => {
+  function request(h: ReturnType<typeof rig>, kind: 'pause' | 'cancel') {
+    const id = h.controller.snapshot().runId;
+    const store = RunStore.open(path.join(h.config.executionProfile.stateDir, 'runs'), id, {
+      readOnly: true,
+      observe: true,
+    });
+    try {
+      return requestControl(store, { kind, reason: 'User control' }, new Date(TIME));
+    } finally {
+      store.close();
+    }
+  }
+  it.each([
+    'write',
+    'exec',
+    'model',
+  ] as const)('pauses blocked %s and resumes exact held candidate on a fresh VM', async (activeControl) => {
+    const uninterrupted = rig();
+    const normal = (await uninterrupted.authorize(
+      uninterrupted.controller.start(uninterrupted.config)
+    )) as { runId: string };
+    const expected = uninterrupted.artifacts(normal.runId);
+    const sha = expected.get<{ record: { candidateSha: string } }>('candidate').record.candidateSha;
+    expected.close();
+    const h = rig({ activeControl });
+    const running = h.authorize(h.controller.start(h.config));
+    await h.controlReady;
+    const calls = vi.mocked(h.vm.exec).mock.calls.length;
+    const modelCalls = h.modelCalls();
+    const row = request(h, 'pause');
+    if (activeControl === 'model') h.releaseControl();
+    const run = (await running) as { state: string; runId: string };
+    expect(run.state).toBe('paused_user');
+    expect(vi.mocked(h.vm.exec).mock.calls.length).toBe(calls);
+    expect(h.modelCalls()).toBe(modelCalls);
+    expect(h.vm.destroy).toHaveBeenCalledWith(expect.objectContaining({ vmId: h.interruptedVm() }));
+    const a = h.artifacts(run.runId);
+    expect(readControlRequests(a.store).pending).toHaveLength(0);
+    expect(readOutcomeBudget(a.store).reservations.length).toBeGreaterThan(0);
+    expect(
+      fs.existsSync(path.join(a.store.storeDirectory('control'), 'requests', `${row.id}.json`))
+    ).toBe(true);
+    a.close();
+    h.advanceClock();
+    const resumed = (await h.authorize(h.controller.resume(run.runId))) as { state: string };
+    expect(resumed.state).toBe('awaiting_contributor');
+    const b = h.artifacts(run.runId);
+    expect(b.get<{ record: { candidateSha: string } }>('candidate').record.candidateSha).toBe(sha);
+    b.close();
+    expect(
+      vi
+        .mocked(h.vm.exec)
+        .mock.calls.slice(calls)
+        .some((c) => c[0].vmId !== h.interruptedVm())
+    ).toBe(true);
+  }, 60000);
+  it('cancel before shipping revokes the broker without a push', async () => {
+    const ended = vi.spyOn(ForkCredentialBroker.prototype, 'endRun');
+    const h = rig({ activeControl: 'write' });
+    const running = h.authorize(h.controller.start(h.config));
+    await h.controlReady;
+    const visible: number[] = [];
+    const rename = fs.renameSync;
+    vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      rename(from, to);
+      if (String(to).includes('/requests/') && String(to).endsWith('.json')) {
+        visible.push(fs.lstatSync(to).nlink);
+        try {
+          h.controller.assertAdmission();
+        } catch {
+          /* Stop-only admission must close here. */
+        }
+      }
+    });
+    request(h, 'cancel');
+    expect(((await running) as { state: string }).state).toBe('cancelled');
+    expect(ended).toHaveBeenCalledWith('cancelled');
+    expect(visible).toEqual([1]);
+    noShipping();
+  }, 60000);
+  it.each([
+    'pause',
+    'cancel',
+  ] as const)('%s during token mint never hands credentials to a push', async (kind) => {
+    const h = rig({ activeControl: 'mint' });
+    const take = vi.spyOn(ForkCredentialBroker.prototype, 'take');
+    const revoke = vi.spyOn(ForkCredentialBroker.prototype, 'revoke');
+    const running = h.authorize(h.controller.start(h.config));
+    await h.controlReady;
+    request(h, kind);
+    h.releaseControl();
+    expect(((await running) as { state: string }).state).toBe(
+      kind === 'pause' ? 'paused_user' : 'cancelled'
+    );
+    expect(take).not.toHaveBeenCalled();
+    expect(pushCalls()).toHaveLength(0);
+    expect(revoke).toHaveBeenCalled();
+  }, 60000);
+  it.each([
+    'pause',
+    'cancel',
+  ] as const)('%s during engagement reconciliation issues no new contributor capability', async (kind) => {
+    const h = rig({ policy: 'permission', activeControl: 'engagement' });
+    const running = h.authorize(h.controller.start(h.config));
+    await h.controlReady;
+    request(h, kind);
+    h.releaseControl();
+    const run = (await running) as { runId: string; state: string };
+    expect(run.state).toBe(kind === 'pause' ? 'paused_user' : 'cancelled');
+    const a = h.artifacts(run.runId);
+    const journal = new Journal(a.store.storeDirectory('handoff'));
+    expect(
+      journal.read().filter((e) => (e as { type: string }).type === 'link_issued')
+    ).toHaveLength(0);
+    expect(fs.readdirSync(a.store.storeDirectory('bodies'))).toHaveLength(0);
+    journal.close();
+    a.close();
+    noShipping();
+  }, 60000);
+  it('pause/resume during verification repair retains its failed-candidate basis and repair evidence', async () => {
+    const h = rig({ activeControl: 'write', onlyRepair: true, failVerification: true });
+    const running = h.authorize(h.controller.start(h.config));
+    await h.controlReady;
+    const candidate = h.controller.snapshot().runId;
+    request(h, 'pause');
+    expect(((await running) as { state: string }).state).toBe('paused_user');
+    const a = h.artifacts(candidate);
+    const held = a.get<{ baseDigest: string; turn: number }>('implementation_continuation');
+    expect(held.baseDigest).toBe(
+      a.get<{ manifest: { digest: string } }>('candidate').manifest.digest
+    );
+    a.close();
+    h.advanceClock();
+    expect(((await h.authorize(h.controller.resume(candidate))) as { state: string }).state).toBe(
+      'failed'
+    );
+    expect(h.repairEvidence.length).toBeGreaterThan(1);
+    noShipping();
+  }, 60000);
+  it('a legitimate cancel arriving during pause destruction wins and revokes once work is quiesced', async () => {
+    const h = rig({ activeControl: 'write' });
+    const ended = vi.spyOn(ForkCredentialBroker.prototype, 'endRun');
+    const destroy = vi.mocked(h.vm.destroy).getMockImplementation();
+    if (!destroy) throw new Error('fixture missing destruction edge');
+    let arrived!: () => void;
+    let release!: () => void;
+    const reached = new Promise<void>((resolve) => {
+      arrived = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.mocked(h.vm.destroy).mockImplementation(async (handle) => {
+      if (handle.vmId === h.interruptedVm()) {
+        arrived();
+        await released;
+      }
+      return destroy(handle);
+    });
+    const running = h.authorize(h.controller.start(h.config));
+    await h.controlReady;
+    request(h, 'pause');
+    await reached;
+    request(h, 'cancel');
+    release();
+    expect(((await running) as { state: string }).state).toBe('cancelled');
+    expect(ended).toHaveBeenCalledWith('cancelled');
+    noShipping();
+  }, 60000);
+  it.each([
+    'pause',
+    'cancel',
+  ] as const)('%s teardown failure retains blocked_cleanup and cancellation still revokes', async (kind) => {
+    const ended = vi.spyOn(ForkCredentialBroker.prototype, 'endRun');
+    const h = rig({ activeControl: 'write', teardownFails: true });
+    const running = h.authorize(h.controller.start(h.config));
+    await h.controlReady;
+    request(h, kind);
+    expect(((await running) as { state: string }).state).toBe('blocked_cleanup');
+    if (kind === 'cancel') expect(ended).toHaveBeenCalledWith('cancelled');
+    noShipping();
+  }, 60000);
+  it('cancel reconciles a submitted PR behind a pending contributor link before cancellation', async () => {
+    const h = rig();
+    const run = (await h.authorize(h.controller.start(h.config))) as { runId: string };
+    h.submit(run.runId);
+    const store = RunStore.open(path.join(h.config.executionProfile.stateDir, 'runs'), run.runId, {
+      readOnly: true,
+      observe: true,
+    });
+    requestControl(store, { kind: 'cancel', reason: 'Withdraw my run' }, new Date(TIME));
+    store.close();
+    const cancelled = await h.controller.resume(run.runId);
+    expect(cancelled.state).toBe('cancelled');
+    const a = h.artifacts(run.runId);
+    expect(a.get<{ url: string }>('publication').url).toBe(
+      'https://github.com/upstream/fixture/pull/8'
+    );
+    expect(a.get<string>('withdrawal')).toContain('then close the pull request');
+    a.close();
+  }, 60000);
+  it.each([
+    'torn-request',
+    'array-result',
+  ] as const)('corrupt control bytes (%s) block the active controller with inspectable evidence', async (damage) => {
+    const h = rig({ activeControl: 'write' });
+    const running = h.authorize(h.controller.start(h.config));
+    await h.controlReady;
+    const row = request(h, 'pause');
+    const id = h.controller.snapshot().runId;
+    const store = RunStore.open(path.join(h.config.executionProfile.stateDir, 'runs'), id, {
+      readOnly: true,
+      observe: true,
+    });
+    if (damage === 'array-result')
+      fs.writeFileSync(
+        path.join(store.storeDirectory('control'), 'requests', `${row.id}.result`),
+        JSON.stringify({ v: 1, digest: row.digest, result: ['applied'] }),
+        { mode: 0o600 }
+      );
+    else
+      fs.writeFileSync(
+        path.join(store.storeDirectory('control'), 'requests', `${row.id}.json`),
+        '{"torn":',
+        { mode: 0o600 }
+      );
+    store.close();
+    expect(((await running) as { state: string }).state).toBe('blocked');
+    const a = h.artifacts(id);
+    expect(readControlRequests(a.store).invalid).toBe(true);
+    a.close();
+    noShipping();
+  }, 60000);
   it.each([
     ['plan', 'corrupt'],
     ['plan', 'missing'],
