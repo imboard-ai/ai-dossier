@@ -2,7 +2,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { createPrivateOnce, readPrivate, syncDirectory } from '../durable-fs';
+import { publishPrivate, readPrivate, syncDirectory } from '../durable-fs';
+import { lockDescriptor } from '../lock';
 import { assertSecretFree } from '../redaction';
 import { isRecord, type RunRecord, TERMINAL_STATES } from '../state';
 import { strictUtf8 } from '../strict-utf8';
@@ -91,6 +92,38 @@ function directory(store: RunStore, create: boolean, work: (dir: string) => void
     work(dir);
   });
 }
+/** A short publisher-only guard, independent of the controller lifetime guard.
+ * Readers never lock: rename exposes one fully fsynced single-link inode. */
+function publish(store: RunStore, file: string, bytes: Buffer): void {
+  store.withStoreDirectory('control', (parent) => {
+    const fd = fs.openSync(
+      path.join(parent, '.requests.guard'),
+      fs.constants.O_CREAT |
+        fs.constants.O_RDWR |
+        fs.constants.O_NOFOLLOW |
+        fs.constants.O_NONBLOCK,
+      0o600
+    );
+    try {
+      const stat = fs.fstatSync(fd);
+      if (
+        !stat.isFile() ||
+        stat.nlink !== 1 ||
+        stat.uid !== process.getuid?.() ||
+        (stat.mode & 0o777) !== 0o600
+      )
+        throw new ControlError('invalid_control');
+      lockDescriptor(fd, 1000);
+      fs.fsyncSync(fd);
+      syncDirectory(parent);
+      // Under this separate kernel guard, reuse only byte-identical evidence;
+      // no legitimate publisher can replace another publisher's immutable row.
+      publishPrivate(file, bytes);
+    } finally {
+      fs.closeSync(fd);
+    }
+  });
+}
 /** Returns only after file contents and directory entry are fsynced. */
 export function requestControl(
   store: RunStore,
@@ -119,7 +152,7 @@ export function requestControl(
   };
   const row = { ...body, digest: digest(body) };
   directory(store, true, (dir) =>
-    createPrivateOnce(path.join(dir, `${row.id}.json`), Buffer.from(JSON.stringify(row)))
+    publish(store, path.join(dir, `${row.id}.json`), Buffer.from(JSON.stringify(row)))
   );
   return row;
 }
@@ -200,7 +233,8 @@ export function acknowledgeControl(
   directory(store, false, (dir) => {
     const held = request(read(path.join(dir, `${row.id}.json`)), store.runId, row.id);
     if (held.digest !== row.digest) throw new ControlError('invalid_control');
-    createPrivateOnce(
+    publish(
+      store,
       path.join(dir, `${row.id}.result`),
       Buffer.from(JSON.stringify({ v: 1, digest: row.digest, result }))
     );

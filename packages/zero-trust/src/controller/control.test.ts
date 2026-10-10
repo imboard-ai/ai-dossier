@@ -1,8 +1,10 @@
+import { spawnSync } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { compiledFixture } from '../__tests__/compiled-fixture';
 import { createRun, ReasonCode, transitionRun } from '../state';
 import { validateRunConfig } from './config';
 import { acknowledgeControl, controlRefusal, readControlRequests, requestControl } from './control';
@@ -76,6 +78,61 @@ afterEach(() => {
   for (const d of dirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
 });
 describe('durable stop-only control', () => {
+  it('request and result visibility expose only one complete link to concurrent readers', () => {
+    const store = rig();
+    const observations: { links: number; invalid: boolean }[] = [];
+    const rename = fs.renameSync;
+    vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      rename(from, to);
+      if (/\.(?:json|result)$/u.test(String(to))) {
+        const seen = readControlRequests(store);
+        observations.push({ links: fs.lstatSync(to).nlink, invalid: seen.invalid });
+      }
+    });
+    const row = requestControl(store, { kind: 'cancel', reason: 'Stop work' }, new Date(TIME));
+    acknowledgeControl(store, row, 'applied');
+    expect(observations).toEqual([
+      { links: 1, invalid: false },
+      { links: 1, invalid: false },
+    ]);
+    expect(readControlRequests(store).pending).toHaveLength(0);
+  });
+  it.each([
+    'request',
+    'result',
+  ] as const)('a real writer death at %s rename leaves readable complete evidence and releases only its publisher guard', (stage) => {
+    const store = rig();
+    const root = path.dirname(store.directory);
+    const fixture = compiledFixture(path.dirname(root), 'controller/control');
+    const row =
+      stage === 'result'
+        ? requestControl(store, { kind: 'cancel', reason: 'Stop work' }, new Date(TIME))
+        : null;
+    if (stage === 'result') store.close();
+    const child = spawnSync(
+      process.execPath,
+      [
+        '-e',
+        `
+      const fs = require('node:fs');
+      const { RunStore } = require(${JSON.stringify(path.join(path.dirname(fixture), 'run-store.js'))});
+      const { requestControl, acknowledgeControl } = require(${JSON.stringify(fixture)});
+      const store = RunStore.open(${JSON.stringify(root)}, ${JSON.stringify(store.runId)}, ${stage === 'request' ? '{ readOnly: true, observe: true }' : '{}'});
+      const rename = fs.renameSync;
+      fs.renameSync = (from, to) => { rename(from, to); if (String(to).endsWith(${JSON.stringify(stage === 'request' ? '.json' : '.result')})) process.kill(process.pid, 'SIGKILL'); };
+      ${stage === 'request' ? `requestControl(store, { kind: 'cancel', reason: 'Stop work' }, new Date(${JSON.stringify(TIME)}));` : `acknowledgeControl(store, ${JSON.stringify(row)}, 'applied');`}
+    `,
+      ],
+      { encoding: 'utf8', timeout: 30000 }
+    );
+    expect(child.signal, child.stderr).toBe('SIGKILL');
+    const reader = stage === 'result' ? RunStore.open(root, store.runId) : store;
+    if (reader !== store) stores.push(reader);
+    const state = readControlRequests(reader);
+    expect(state.invalid).toBe(false);
+    expect(state.pending).toHaveLength(stage === 'request' ? 1 : 0);
+    if (stage === 'request') acknowledgeControl(reader, state.pending[0], 'applied');
+  }, 60000);
   it('publishes complete fsynced requests from independent observational stores while the owner holds its guard', () => {
     const store = rig();
     expect(readControlRequests(store)).toEqual({ pending: [], refused: [], invalid: false });

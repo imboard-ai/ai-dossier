@@ -745,9 +745,23 @@ describe('createController real composition', () => {
     const h = rig({ activeControl: 'write' });
     const running = h.authorize(h.controller.start(h.config));
     await h.controlReady;
+    const visible: number[] = [];
+    const rename = fs.renameSync;
+    vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      rename(from, to);
+      if (String(to).includes('/requests/') && String(to).endsWith('.json')) {
+        visible.push(fs.lstatSync(to).nlink);
+        try {
+          h.controller.assertAdmission();
+        } catch {
+          /* Stop-only admission must close here. */
+        }
+      }
+    });
     request(h, 'cancel');
     expect(((await running) as { state: string }).state).toBe('cancelled');
     expect(ended).toHaveBeenCalledWith('cancelled');
+    expect(visible).toEqual([1]);
     noShipping();
   }, 60000);
   it.each([

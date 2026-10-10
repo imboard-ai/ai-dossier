@@ -52,6 +52,10 @@ pending/refused/invalid evidence without repair. `acknowledgeControl` is reserve
 for the controller owner after lifecycle persistence. Concurrent requests have
 unique immutable files; cancel wins when both kinds are pending at admission.
 Atomic staging files are not requests and remain local after a writer crash.
+Publishers briefly take a separate control-channel kernel guard, never the run
+guard; observers remain lock-free. Atomic rename exposes only one complete,
+fsynced file link, including the post-rename writer-death prefix. Published rows
+are immutable and only byte-identical retries may reuse them.
 The filesystem threat model includes torn/corrupt bytes and legitimate concurrency;
 deliberate same-OS-user symlink/lock tampering remains outside scope.
 

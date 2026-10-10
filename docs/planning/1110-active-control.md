@@ -82,3 +82,19 @@ Focused repaired-edge gate: 13 composition E2Es pass, including deferred write,
 exec, model, token mint, engagement read, repair and cancellation races. Core/CLI
 gate: 97 tests pass, including unresolved/resolved real durable cleanup prefixes.
 Final package coverage and complete independent review redo are required before ship.
+
+## Full-tier redo and publication-boundary repair
+The complete seven-role redo ran 321–495 seconds per role on acd5118 with real
+offline source tests/probes. Conformance marked all six ACs met; DRY,
+maintainability and documentation were clean. Security, Supportability and
+Convention independently reproduced one shared legitimate-publication defect:
+the hard-link staging prefix had nlink=2 and was rejected by the strict private
+reader. One unique finding is retained; two duplicates are dismissed.
+
+The scoped repair replaces hard-link publication with the existing single-link
+atomic rename helper under a short publisher-only kernel guard independent of
+the controller lifetime guard. No generic credential/private-file check is
+relaxed. Tests read at the exact request/result visibility boundary and kill
+real child writers immediately after rename, then verify complete evidence and
+guard release. The composed cancellation fixture also observes admission at
+that exact visibility boundary and records credential revocation/no push.
