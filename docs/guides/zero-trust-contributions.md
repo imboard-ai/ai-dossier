@@ -3,8 +3,8 @@
 This guide is for people who use the zero-trust contribution engine (`@ai-dossier/zero-trust`)
 to propose a fix for a bug in someone else's open-source project. It covers setup, the run from
 start to submitted pull request, every place the run stops and hands control back to you, the
-controls you have, costs, retention, and the security model. You should not need to read the
-code to use it.
+controls you have, costs, retention, and the security model. Apart from one constant named in
+[setup step 2](#one-time-setup), you should not need to read the code to use it.
 
 Three kinds of reader will find their own sections:
 
@@ -45,7 +45,8 @@ What it does not do:
   maintainer owns the merge. The run reports `merged` only when it has observed the merge on
   GitHub.
 - **It never writes to the upstream project itself.** Every upstream comment and every pull
-  request create, edit, reopen or close is your one-click action on content the run prepared.
+  request create, edit, reopen or close is an action you take yourself on GitHub, on content the
+  run prepared: usually one click on a prefilled page, or pasting a prepared comment.
   The run's credentials can only push to your fork. This is a deliberate owner decision: a person
   reviews and owns every public submission made under their name
   ([GitHub credentials decision record](../features/zero-trust-full-cycle/decisions/github-credentials.md)).
@@ -68,11 +69,12 @@ Described generically; any machine that matches works.
 | Requirement | Why | Notes |
 |---|---|---|
 | A Linux x86_64 machine | Untrusted code runs in a local QEMU VM | Other operating systems and architectures are refused (`unsupported_environment`). There is no container-only fallback. |
-| KVM (`/dev/kvm`) | Speed | Without KVM the same image runs under TCG emulation. It works but is much slower. Set `accelerator` accordingly. |
-| QEMU and the image tools | Run and bake the VM | Checked at start; missing tools refuse the run. |
+| KVM (`/dev/kvm` readable and writable by your user) | Speed | Without KVM the same image runs under TCG emulation. It works but is much slower. Set `accelerator` accordingly. |
+| `qemu-system-x86_64`, `qemu-img`, and `genisoimage` (or `mkisofs` or `xorrisofs`) on `PATH` | Run and bake the VM | Checked at start; missing tools refuse the run. |
+| Git at `/usr/bin/git`, and `prlimit` and `flock` in `/usr/bin` (util-linux) | Trusted Git operations and local locks | The controller calls these by absolute path. |
 | Node.js 20 or later | Runs the controller scripts | |
 | Docker | Runs the package proxy on the controller machine | Only the proxy uses Docker. Repository code never runs in Docker on your machine. |
-| `flock` (util-linux) and `/proc` | Local store and budget locks | Standard on Linux. Don't share one state directory between separate container PID namespaces. |
+| `/proc` | Local store and budget locks | Standard on Linux. Don't share one state directory between separate container PID namespaces. |
 | A baked VM profile | The disposable VM image the work runs in | Built once with `zt-vm.mjs bake` (below). |
 | A GitHub App installed on **your fork only** | Short-lived, fork-only push tokens | Installed with "Only select repositories" and only the fork selected. Never install it on the upstream. |
 | Your fork of the upstream repository | Where the verified commit is pushed | Create it by hand on GitHub. The run waits if it is missing. |
@@ -86,7 +88,7 @@ repository scripts, not an installed binary, so build first:
 
 ```sh
 npm install
-npm run build --workspace=@ai-dossier/zero-trust
+make build-zero-trust   # builds @ai-dossier/core first, then this package
 cd packages/zero-trust
 ```
 
@@ -95,7 +97,7 @@ cd packages/zero-trust
 
    ```sh
    node scripts/zt-vm.mjs bake --profile-dir <profile-dir> --cache-dir <cache-dir> --accel auto
-   node scripts/zt-vm.mjs smoke --profile-dir <profile-dir> --state-dir <state-dir>
+   node scripts/zt-vm.mjs smoke --profile-dir <profile-dir> --state-dir <smoke-state-dir>
    ```
 
 2. **Start the package proxy.** Dependencies are installed only through a controller-side mirror
@@ -115,13 +117,14 @@ cd packages/zero-trust
        "npmRegistry": "<worker-relay-url>/",
        "pypiIndex": "<worker-relay-url>/index/"
      },
-     "target": { "host": "<mirror-host-from-zt-proxy-up>", "port": 4873 }
+     "target": { "host": "<mirror-ipv4-from-zt-proxy-up>", "port": 4873 }
    }
    ```
 
    `<worker-relay-url>` is the guest-side relay address from the `WORKER_RELAY` constant in
    `src/vm/qemu-args.ts`, not the mirror's address. `target` is the mirror for your project's
-   ecosystem as `zt-proxy up` printed it (`npm` or `pypi`, with its port). Stop the proxy with
+   ecosystem as `zt-proxy up` printed it (`npm` or `pypi`, with its port). `target.host` must be
+   the IPv4 address it printed; host names are refused. The file is at most 16 KiB. Stop the proxy with
    `node scripts/zt-proxy.mjs down --state-dir <proxy-state-dir>`. Details:
    [package-proxy decision record](../features/zero-trust-full-cycle/decisions/package-proxy.md).
 
@@ -130,8 +133,11 @@ cd packages/zero-trust
      installation that grants more than this is refused (`installation_too_broad`).
    - **Expire user authorization tokens** enabled. An App without expiring user tokens is refused
      (`app_misconfigured`).
-   - Callback URL: a loopback URL with the path `/callback`. The run listens on a random loopback
-     port during authorization, which GitHub accepts for loopback callbacks.
+   - Callback URL: the IPv4 loopback address with the path `/callback` and no port (the
+     `redirect_uri` in the `authorization_url` the run prints shows the exact form). The run
+     listens on a random loopback port during authorization, which GitHub accepts for loopback
+     callbacks. Because GitHub redirects your browser to that loopback address, open
+     `authorization_url` in a browser on the same machine as `zt-run`, or forward that port to it.
    - No webhook is needed.
 
    Note the App ID, client ID and slug. Generate a private key and a client secret, and keep both
@@ -264,7 +270,7 @@ A complete example (replace every `<…>`):
 | `profileDir` | The baked profile directory from `zt-vm.mjs bake`. |
 | `stateDir` | The controller's private state directory. The run store is `<stateDir>/runs`, and that is the `--root` you pass to every `zt-run` command. |
 | `accelerator` | `"auto"`, `"kvm"` or `"tcg"`. `kvm` without `/dev/kvm` is refused. |
-| `proxyEndpointsFile` | The private (`0600`) endpoints file from [setup step 2](#one-time-setup). A malformed file refuses with `invalid_proxy_file`. |
+| `proxyEndpointsFile` | The private (`0600`) endpoints file from [setup step 2](#one-time-setup). It is read after authorization and author confirmation; a malformed file stops `start` there with `error: operation_failed`. |
 
 ### `modelProfile`
 
@@ -279,8 +285,9 @@ revision feedback use `implementing` when it is absent). Each phase has:
 | `apiKeyEnv` | Name of the environment variable that holds the key. |
 
 `rates` is the price list the budget uses. Every model named in `phases` needs one rate, even a
-free one, and the local VM needs a zero-priced `local-qemu` rate with unit `millisecond`. A
-missing rate refuses startup (`missing_rate`). Each rate has:
+free one; a missing model rate refuses the config (`missing_rate`). The local VM also needs a
+`local-qemu` rate with unit `millisecond` and price exactly `0`. That one is not checked at start:
+without it the run fails with `missing_rate` at its first VM allocation. Each rate has:
 
 | Field | Meaning |
 |---|---|
@@ -301,7 +308,7 @@ estimates stay conservative.
 |---|---|
 | `currency` | Accounting currency, three upper-case letters. |
 | `ceilingMinor` | Spending ceiling for one session, in minor units. Positive integer. |
-| `cleanupAllowanceMinor` | Part of the ceiling reserved for VM teardown, never spent on work. At most `ceilingMinor`. |
+| `cleanupAllowanceMinor` | Part of the ceiling reserved for VM teardown, never spent on work. Positive integer, at most `ceilingMinor`. |
 | `tokenLimit` | Cumulative token limit for the session, even for zero-priced models. |
 | `activeMinutes` | Active-time limit for the session. At most `limits.activeMinutes`. |
 
@@ -343,13 +350,17 @@ node scripts/zt-run.mjs start --config run-config.json --root <state-dir>/runs
    authorize the App as your contributor account. The URL contains no token.
 2. It prints `author_identity: {…}`: the name and email that will author the commit. The default
    is your GitHub profile name (or login) and your `<id>+<login>@users.noreply.github.com`
-   address. Type `yes` to confirm. In a non-interactive shell pass `--confirm-author` instead,
-   having checked the identity first. Use `--author-name` and `--author-email` to override; an
-   email override must be your noreply address or a verified email on the same account. The
-   identity is recorded once and never changes on resume.
+   address. Type `yes` at the prompt to confirm. The prompt appears only when both standard input
+   and standard output are a terminal; otherwise (for example when piping into `tee`) you must
+   pass `--confirm-author`, and the identity is then printed and accepted at once, so set it
+   explicitly with `--author-name` and `--author-email` if it matters. An email override must be
+   your noreply address or a verified email of the same account; with the App permissions from
+   setup step 3 the run cannot read your email list, so in practice only the noreply address is
+   accepted. The identity is recorded once and never changes on resume.
 3. The run then works until it reaches a durable stop and prints its status.
 
-A second `start` with the same configuration while the first is still running exits with code 4.
+A second `start` with the same configuration while the first is still running exits with code 4,
+after its own authorization and author confirmation (the guard is checked when the run is created).
 
 ### Step 2: policy and permission
 
@@ -374,19 +385,20 @@ answer stricter. Any disagreement, failure or uncertainty becomes a hand-off, ne
 Inside a fresh VM (no credentials, no network except the package proxy during dependency
 installation), the run records the upstream base, runs the project's checks on it, reproduces the
 bug, and has the model plan and implement a minimal fix. If you selected the `plan` checkpoint, it
-pauses with the plan in `artifacts/plan.txt` for your approval first. If the bug cannot be
-reproduced, it hands off before patching.
+pauses with the plan in `artifacts/plan.txt` for your approval before implementing. If the bug
+cannot be reproduced, it hands off before patching.
 
 ### Step 4: independent verification
 
-A fresh VM rebuilds the candidate commit from controller-held source and runs dependency setup and
-the relevant checks offline. A regression test must fail on the base and pass on the candidate. A
+If you selected the `patch` checkpoint, the run pauses before verification starts, for your
+approval of `artifacts/candidate.diff`. A fresh VM then rebuilds the candidate commit from
+controller-held source, runs frozen dependency setup through the package proxy, and runs the
+relevant checks with no network. A regression test must fail on the base and pass on the candidate. A
 timeout, unreadable report or zero test suites is inconclusive, never a pass. At most two localized
 repair attempts follow a failure. A separate scope and test-integrity review flags unrelated
 changes, deleted or disabled tests, reduced assertions and build or test configuration changes,
-and hands off on anything it cannot justify. If you selected `patch` or `verification`
-checkpoints, the run pauses for your approval of `artifacts/candidate.diff` or
-`artifacts/verification/<candidateSha>.json`.
+and hands off on anything it cannot justify. If you selected the `verification` checkpoint, the run
+pauses before shipping, for your approval of `artifacts/verification/<candidateSha>.json`.
 
 ### Step 5: shipping and the pull request hand-off
 
@@ -416,7 +428,8 @@ authorApproval: {"userId":<id>,"login":"<your-github-login>","name":"<name>","em
 
 Every value is JSON-quoted so text from GitHub or the repository cannot fake a line. `--json`
 prints the same facts as one JSON object. Money is in minor units of the budget currency;
-`estimatedSpend` includes reservations not yet settled.
+`estimatedSpend` includes reservations not yet settled. `estimatedSpend`, `budgetRemaining` and
+`activeTimeMs` cover the current budget session; each revision starts a new one.
 
 Open the link. GitHub shows a compare page with the title and body prefilled. Review it, edit it
 if you want, and click **Create pull request** yourself. If the body was too long to prefill, the
@@ -447,30 +460,30 @@ permitted action. This table covers every run state.
 
 | State | What it means | What you do | Command |
 |---|---|---|---|
-| `gating` | Checking eligibility and contribution policy. Active. | Wait, or pause. | `status`, `pause` |
+| `gating` | Checking eligibility and contribution policy. Active, or dormant after a policy hand-off. | Wait, or pause. After a hand-off, deal with what the status names, then resume. | `status`, `pause`, `resume` |
 | `awaiting_maintainer` | Your engagement comment was observed; waiting for a maintainer's invitation or assignment. No compute, no reminders. | Wait for a maintainer to reply on the issue, then resume. A decline ends the run as `declined`; an ambiguous answer hands off with the comment URL. | `resume` |
 | `planning` | The model is planning the fix. Active. | Wait, or pause. | `status`, `pause` |
 | `implementing` | The model is implementing in the VM. Active. | Wait, or pause. | `status`, `pause` |
 | `verifying` | Independent verification of the candidate. Active. | Wait, or pause. | `status`, `pause` |
 | `shipping` | Rechecks, receipt and fork push of the verified commit. Active. | Wait, or pause. | `status`, `pause` |
-| `paused_user` | Stopped at a checkpoint you selected or by your `pause`. The VM is destroyed. | Review the named artifact and approve or reject its digest, or edit, change model or checkpoints, then resume. | `approve`, `reject`, `edit`, `resume` |
+| `paused_user` | Stopped at a checkpoint you selected, by your `pause`, or by a hand-off (bug not reproduced, review flag, revision feedback not admitted). The VM is destroyed. | Review the named artifact and approve or reject its digest, or edit, change model or checkpoints, then resume. | `approve`, `reject`, `edit`, `resume` |
 | `awaiting_contributor` | A hand-off you must complete on GitHub: post the engagement comment, submit the pull request, create the fork, or install the App. No compute. | Follow the link in `nextPermittedAction` (rows below), then resume. | `resume` |
-| `submitted` | Your pull request was observed. Initial completion. CI may be pending. | Resume when you want an update. | `resume` |
+| `submitted` | Your pull request was observed. Initial completion. CI may be pending. | Resume when you want an update; `resume --revise` after a maintainer requests changes. | `resume`, `resume --revise`, `withdraw` |
 | `awaiting_review` | The pull request is open and under review. | Resume to observe; `resume --revise` after a maintainer requests changes. | `resume`, `resume --revise`, `withdraw` |
 | `revising` | A verified revision of the same pull request is in progress. | Wait, or pause. | `status`, `pause` |
-| `accepted` | A maintainer approved the pull request; the merge has not been observed. | Resume to observe the merge. | `resume` |
+| `accepted` | A maintainer approved the pull request; the merge has not been observed. | Resume to observe the merge. | `resume`, `resume --revise`, `withdraw` |
 | `merged` | The run observed the upstream merge. Terminal. | Nothing. Export for your records. | `export` |
 | `declined` | Closed without merge, a maintainer declined, or your withdrawal was observed. Terminal. | Nothing. | `export` |
 | `blocked` | A rule or check stopped the run (for example a policy ban, wrong fork, or changed permission). Terminal; never retried with weaker rules. | Read `reasonCode` and the retained evidence. Start a new run if the cause is fixed. | `status`, `export` |
 | `unsupported` | The environment or project is not supported (OS, VM, ecosystem, dependencies). Terminal. | Use a supported setup in a new run. | `status` |
-| `failed` | Execution failed; work is kept privately, never pushed. Terminal. | Inspect the evidence before a new run. | `status`, `export` |
-| `cancelled` | You cancelled or rejected a checkpoint. Terminal. A pull request already submitted stays open. | Withdraw the pull request if you no longer want it. | `withdraw` |
-| `blocked_cleanup` | A VM or credential could not be confirmed destroyed or revoked after three attempts. New work and publication are refused. | Reconcile resources and credentials (see [Kill switch](#kill-switch-and-cleanup)). | `kill-all`, `status` |
+| `failed` | Execution failed. A candidate that failed is kept privately and never pushed. Terminal. | Inspect the evidence before a new run. | `status`, `export` |
+| `cancelled` | You cancelled, rejected a checkpoint, or ran `kill-all`. Terminal. A pull request already submitted stays open; the status shows its link and a prepared close comment. | Post that comment and close the pull request on GitHub if you no longer want it. | `status`, `export` |
+| `blocked_cleanup` | A VM or credential could not be confirmed destroyed or revoked after three attempts. New work and publication are refused. | Reconcile resources and credentials (see [Kill switch](#kill-switch-and-cleanup)). Once cleanup is confirmed the run moves to `blocked`. | `kill-all`, `status` |
 
-The hand-offs behind those states, with their reason codes. A hand-off can also stop a run in its
-current state (for example a bug that does not reproduce, or a policy that needs judgment). The
-status line then says what was not admitted, and `resume` checks again after you have dealt with
-it.
+The hand-offs behind those states, with their reason codes. Other hand-offs (a bug that does not
+reproduce, a review flag, a policy that needs judgment) leave the run in `gating` when they happen
+there, and move it to `paused_user` from any later phase. The status line then says what was not
+admitted, and `resume` checks again after you have dealt with it.
 
 | Situation | `reasonCode` | What you do | Then |
 |---|---|---|---|
@@ -484,7 +497,7 @@ it.
 | Checkpoint `patch` | `user_paused` | Read `artifacts/candidate.diff`. | `approve`, then `resume` |
 | Checkpoint `verification` | `user_paused` | Read `artifacts/verification/<candidateSha>.json`. | `approve`, then `resume` |
 | Stale checkpoint | `user_paused` | The content changed since the checkpoint opened (`checkpoint_stale`). The status shows the reject command only. | `reject` or `cancel` |
-| Revision feedback not admitted | `revision_requested` (run stays `revising`) | The maintainer feedback was unclear, unrelated to the issue, or tried to change targets or authority. Nothing was implemented and no VM started. Decide yourself: reply to the maintainer, or cancel. | Your call |
+| Revision feedback not admitted | `user_paused` (run moves to `paused_user`) | The maintainer feedback was unclear, unrelated to the issue, or tried to change targets or authority. Nothing was implemented and no VM started. Decide yourself: reply to the maintainer, or cancel. | Your call |
 | Reauthorization needed | unchanged | The App user token expired or was revoked, and the run printed a new `authorization_url`. | Open it, or run `authorize`, then `resume` |
 
 Artifact paths are relative to the run's directory in the run store (`<state-dir>/runs/<contribution-id>/`).
@@ -496,11 +509,11 @@ Artifact paths are relative to the run's directory in the run store (`<state-dir
 | Checkpoints | `checkpoints` in the config, or `resume --checkpoints plan,patch,verification` / `--checkpoints none` | Changing them requires `paused_user` and resets earlier checkpoint records. |
 | Approve | `approve --run <id> --checkpoint <plan\|patch\|verification> --digest <sha256>` | The digest must match the open checkpoint exactly. Approval does not continue the run; `resume` does. |
 | Reject | `reject --run <id> --checkpoint <point> --digest <sha256> --reason <text>` | **Rejecting cancels the run.** |
-| Pause | `pause --run <id> --reason <text>` | Returns as soon as the request is saved (`pause_requested: "<id>"`). The controller stops admitting work, destroys the VM and keeps the held source and conversation. Refused in a state with no compute (`nothing_to_pause`). |
+| Pause | `pause --run <id> --reason <text>` | Returns as soon as the request is saved (`pause_requested: "<id>"`). The controller stops admitting work, destroys the VM and keeps the held source and conversation. Refused in a state with no compute (`nothing_to_pause`). A request that reaches a dormant run is applied at the next `resume`; until then `status` shows `pause_requested`. |
 | Resume | `resume --run <id>` | Provisions a fresh VM and returns to the interrupted phase. An open checkpoint must be approved first. |
-| Cancel | `cancel --run <id> --reason <text>` | Allowed in any non-terminal state except `blocked_cleanup`. Destroys VMs and revokes credentials. A submitted pull request cannot be recalled: withdraw it. |
+| Cancel | `cancel --run <id> --reason <text>` | Allowed in any non-terminal state except `blocked_cleanup`. Destroys VMs and revokes credentials. In a waiting state (paused, awaiting you or a maintainer, submitted) the request is queued: run `resume` to apply it; until then `status` shows `cancel_requested`. A submitted pull request cannot be recalled; the cancelled status gives you a prepared close comment to post yourself. |
 | Edit | `edit --run <id> --patch <file.diff>` | Only while paused from `implementing` or `verifying`. A text Git diff (at most 10 MiB); binary patches, symlinks and unsafe paths are refused. Every accepted edit needs fresh review and verification, and the pull request says **"Includes contributor edits"**. Refused while paused from `shipping` (`edit_after_verification`). |
-| Model change | `resume --run <id> --model-profile <file.json>` | The file holds a `modelProfile` object only. Budget history stays; later calls use the new prices under the same session. |
+| Model change | `resume --run <id> --model-profile <file.json>` | Only while `paused_user`. The file (at most 1 MiB) holds a `modelProfile` object only. Budget history stays; later calls use the new prices under the same session. |
 | Revisions | `resume --run <id> --revise` | After maintainer feedback on a submitted pull request. Opens a new budget session under the same contribution, re-admits policy and permission, implements in a fresh VM, verifies, and pushes to the same branch. Refused without a pull request (`revision_unavailable`). |
 | Edit the pull request | `pr-edit --run <id> --title <text> --body-file <file>` | Only during a live revision. Title at most 256 characters; body file private (`0600`), at most 65,536 bytes, keeping the marker. Prints a link and instructions; you make the edit on GitHub; a later `resume` confirms it. |
 | Withdraw | `withdraw --run <id> --reason <maintainer_request\|user_instruction> --explanation <text>` | Not during a revision. Explanation at most 2,000 characters. Prints the pull request link and a prepared close comment; you post it and close the pull request; the run records `declined` when it observes the close. Nothing is deleted. |
@@ -517,18 +530,21 @@ Identity, contributor, issue, upstream and fork cannot change inside a run
 node scripts/zt-run.mjs kill-all --root <state-dir>/runs --reason "<why>"
 ```
 
-`kill-all` fences the whole run store, engages the VM kill switch, stops active runs, destroys
-their VMs, revokes their GitHub credentials (deleting the App grant first), and prints each run's
-status followed by `incident_stop: completed`. It exits 2 if any run is left in
+`kill-all` fences the whole run store, engages the VM kill switch, and cancels every non-terminal
+run in it, including paused, waiting and submitted ones: their pull requests stay open but are no
+longer tracked. It destroys their VMs, revokes their GitHub credentials (deleting your App
+authorization grant first), and prints each run's status followed by `incident_stop: completed`. It exits 2 if any run is left in
 `blocked_cleanup`. The fenced store cannot start new work: use a new `stateDir` once the incident
-is resolved. Publication already done stays recorded and can be withdrawn; nothing upstream is
-erased.
+is resolved. Publication already done stays recorded, and each cancelled status gives you a
+prepared close comment if you want to withdraw; nothing upstream is erased.
 
 If a run is in `blocked_cleanup`, its status lists what is still outstanding. Run `kill-all` again
-to retry; destroy leftover VMs with `node scripts/zt-vm.mjs reconcile --state-dir <dir> --destroy`;
+to retry; destroy leftover VMs with
+`node scripts/zt-vm.mjs reconcile --state-dir <state-dir>/vms --destroy`;
 and if the report says the App grant was not deleted, revoke the App's authorization yourself in
 your GitHub settings (Applications, Authorized GitHub Apps). Lift the VM kill switch with
-`node scripts/zt-vm.mjs release --state-dir <dir> --reason <text>` only after no VM remains. Never
+`node scripts/zt-vm.mjs release --state-dir <state-dir>/vms --reason <text>` only after no VM
+remains. Never
 delete files under `<stateDir>/.start-guards` while controllers may be running.
 
 ### Exit codes and errors
@@ -637,9 +653,9 @@ You received a pull request made with this tool. Here is what it contains and ho
   asks once and waits for an owner, member or collaborator; it never sends reminders.
 - **Your CI is yours.** A fork pull request waiting for workflow approval is reported to the
   contributor as awaiting approval, not as passing. The tool never changes your CI.
-- **To ask for changes**, review as usual. The contributor's next explicit resume reads feedback
-  from owners, members and collaborators, and implements it only when it is actionable and within
-  the original issue; anything else goes back to the contributor to decide. Revisions are pushed to
+- **To ask for changes**, review as usual. If the contributor chooses to revise, the tool reads
+  feedback from owners, members and collaborators, and implements it only when it is actionable and
+  within the original issue; anything else goes back to the contributor to decide. Revisions are pushed to
   the same branch and verified again.
 - **To ask for withdrawal**, say so in the pull request. The contributor gets a prepared close
   comment and closes the pull request themselves. Nothing in your repository is deleted, and there
@@ -652,7 +668,8 @@ output can all be hostile.
 
 - **Disposable local VM.** Repository code runs only inside a QEMU VM created for the run and
   destroyed at every stop. The VM has no host mounts, no credentials, and no network except, during
-  dependency installation, one forward to the package proxy. Verification runs fully offline.
+  dependency installation, one forward to the package proxy. Verification checks run with no
+  network.
   Details: [execution-profile decision record](../features/zero-trust-full-cycle/decisions/execution-profile.md).
 - **Constrained package proxy.** Dependencies come through a caching mirror that admits only
   package downloads, checked against lockfile hashes. Details:
@@ -661,11 +678,12 @@ output can all be hostile.
   proposals are untrusted data checked against a closed list of actions bound to your issue and
   fork. Details: [model-harness decision record](../features/zero-trust-full-cycle/decisions/model-harness.md).
 - **Fork-only, short-lived credentials.** The GitHub App token is narrowed to your fork with
-  contents write, used for one push, and revoked within 15 minutes. Upstream writes are your own
-  clicks. Details: [GitHub credentials decision record](../features/zero-trust-full-cycle/decisions/github-credentials.md).
+  contents write, usable for at most 15 minutes for one push, and revoked right after use.
+  Upstream writes are your own actions. Details: [GitHub credentials decision record](../features/zero-trust-full-cycle/decisions/github-credentials.md).
 - **Untrusted text is data.** Repository files, issue and pull request text, test output and model
-  output cannot change targets, identities, network policy, budgets or checkpoints. Secrets never
-  appear in status, errors, journals or exports.
+  output cannot change targets, identities, network policy, budgets or checkpoints. Status,
+  errors, journals and exports are scanned for secrets, and output that looks like one is refused
+  instead of written.
 - **Fail closed.** Anything unknown, unreadable, truncated or ambiguous becomes a hand-off or a
   block. There is no weaker fallback and no silent retry.
 
@@ -688,7 +706,7 @@ output can all be hostile.
 
 ## Command summary
 
-Every command needs `--root <stateDir>/runs`. `node scripts/zt-run.mjs --help` prints this list.
+Every command needs `--root <stateDir>/runs`. This table summarizes `node scripts/zt-run.mjs --help`.
 
 | Command | Arguments |
 |---|---|

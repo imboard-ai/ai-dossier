@@ -1,93 +1,107 @@
-/** Cross-checks the user guide against the CLI and lifecycle it documents (#1116). */
+/** Cross-checks the user guide against the CLI and lifecycle it documents (#1116).
+ * Links inside docs/ are checked by the website build's link check in CI; this test
+ * checks the package README, which that build does not render. */
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'vitest';
+import { WITHDRAWAL_REASONS } from '../dist/github/track.js';
 import { RUN_STATES } from '../dist/state.js';
 import { DEFAULT_LIMITS } from '../dist/vm/adapter.js';
-import { main, USAGE } from './zt-run-lib.mjs';
+import { COMMANDS } from './zt-run-lib.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const pkg = path.resolve(here, '..');
 const repo = path.resolve(pkg, '../..');
-const guidePath = path.join(repo, 'docs/guides/zero-trust-contributions.md');
-const guide = fs.readFileSync(guidePath, 'utf8');
+const guide = fs.readFileSync(path.join(repo, 'docs/guides/zero-trust-contributions.md'), 'utf8');
+// Headings and table rows outside fenced code blocks only.
+const prose = guide.replace(/^```[\s\S]*?^```/gmu, '');
 
-/** First-column code spans of the table rows under a heading, up to the next heading. */
-function tableKeys(heading) {
-  const start = guide.indexOf(`\n${heading}\n`);
+/** Text under a heading, up to the next heading of level 2 or 3. */
+function section(heading) {
+  const start = prose.indexOf(`\n${heading}\n`);
   assert.notEqual(start, -1, `missing heading ${heading}`);
-  const rest = guide.slice(start + heading.length + 2);
-  const end = rest.search(/\n#{1,6} /u);
-  const section = end === -1 ? rest : rest.slice(0, end);
-  return [...section.matchAll(/^\| `([^`]+)` \|/gmu)].map((m) => m[1]);
+  const rest = prose.slice(start + heading.length + 2);
+  const end = rest.search(/\n#{2,3} /u);
+  return end === -1 ? rest : rest.slice(0, end);
 }
+/** Table rows under a heading, keyed by their first-column code span. */
+function tableRows(heading) {
+  return new Map([...section(heading).matchAll(/^\| `([^`]+)` \|.*$/gmu)].map((m) => [m[1], m[0]]));
+}
+const sorted = (values) => [...values].sort();
 
-test('the command summary lists exactly the zt-run subcommands', () => {
-  const commands = USAGE.match(/<([a-z|-]+)>/u)[1].split('|');
-  assert.deepEqual([...tableKeys('## Command summary')].sort(), [...commands].sort());
-});
-
-test('every flag in zt-run --help is in its command summary row', async () => {
-  const out = [];
-  assert.equal(await main(['--help'], { out: (line) => out.push(line), err: () => {} }), 0);
-  const rows = out.join('\n').split('\n').slice(1);
-  assert.ok(rows.length > 0);
-  for (const row of rows) {
-    const [command, ...rest] = row.split(' ');
-    const line = guide.split('\n').find((l) => l.startsWith(`| \`${command}\` |`));
-    assert.ok(line, `no summary row for ${command}`);
-    for (const flag of rest.join(' ').match(/--[a-z-]+/gu) ?? [])
-      assert.ok(line.includes(`\`${flag}`), `${command} row lacks ${flag}`);
+test('the command summary lists exactly the zt-run subcommands and their flags', () => {
+  const rows = tableRows('## Command summary');
+  assert.deepEqual(sorted(rows.keys()), sorted(Object.keys(COMMANDS)));
+  for (const [command, spec] of Object.entries(COMMANDS)) {
+    const flags = [...rows.get(command).matchAll(/`(--[a-z-]+)/gu)].map((m) => m[1]);
+    const expected = [...spec.required, ...spec.optional]
+      .filter((flag) => flag !== 'root')
+      .map((flag) => `--${flag}`);
+    assert.deepEqual(sorted(flags), sorted(expected), `${command} row flags`);
   }
+  for (const reason of WITHDRAWAL_REASONS) assert.match(rows.get('withdraw'), new RegExp(reason));
+  for (const command of ['approve', 'reject'])
+    assert.match(rows.get(command), /<plan\\\|patch\\\|verification>/u, `${command} checkpoints`);
+  assert.match(section('## Command summary'), /`--root <stateDir>\/runs`/u);
 });
 
 test('the state table covers exactly RUN_STATES', () => {
-  assert.deepEqual([...tableKeys('## States and hand-offs')].sort(), [...RUN_STATES].sort());
+  assert.deepEqual(sorted(tableRows('## States and hand-offs').keys()), sorted(RUN_STATES));
 });
 
-test('every closed run-config key and limit is documented', () => {
+/** Where each closed object in config.ts is documented, by its first argument
+ * (`raw` objects by their first key). An unmapped object fails the test. */
+const CONFIG_SECTIONS = {
+  snapshot: '### Top-level fields',
+  'raw:userId': '### Top-level fields',
+  'r.executionProfile': '### `executionProfile`',
+  'r.modelProfile': '### `modelProfile`',
+  'm.phases': '### `modelProfile`',
+  'raw:adapter': '### `modelProfile`',
+  rate: '### `modelProfile`',
+  'rate.fx': '### `modelProfile`',
+  'r.budget': '### `budget`',
+  'r.limits === undefined ? {} : r.limits': '### `limits`',
+  'r.githubApp': '### `githubApp`',
+};
+
+test('every closed run-config key is documented in its section', () => {
   const source = fs.readFileSync(path.join(pkg, 'src/controller/config.ts'), 'utf8');
-  const lists = [...source.matchAll(/object\(\s*[\w.]+,\s*\[([^\]]+)\]/gu)];
-  const keys = new Set(
-    lists.flatMap((m) => [...m[1].matchAll(/'([A-Za-z]+)'/gu)].map((k) => k[1]))
-  );
-  for (const key of Object.keys(DEFAULT_LIMITS)) keys.add(key);
-  // The cross-check must actually see the schema, not an empty parse.
-  for (const key of ['issueUrl', 'proxyEndpointsFile', 'apiKeyEnv', 'cleanupAllowanceMinor', 'fx'])
-    assert.ok(keys.has(key), `parser missed ${key}`);
-  for (const key of keys) assert.ok(guide.includes(`\`${key}\``), `guide lacks config key ${key}`);
+  const calls = [...source.matchAll(/\bobject\(\s*([^,]+?),\s*(\[[^\]]*\]|Object\.keys\(\w+\))/gu)];
+  // Every call except the helper's own definition must be parsed.
+  assert.equal(calls.length, source.match(/\bobject\(/gu).length - 1, 'unparsed object() call');
+  for (const [, arg, list] of calls) {
+    const keys = list.startsWith('[')
+      ? [...list.matchAll(/'([^'\s]+)'/gu)].map((m) => m[1])
+      : [...Object.keys(DEFAULT_LIMITS), 'activeMinutes'];
+    const where = CONFIG_SECTIONS[arg === 'raw' ? `raw:${keys[0]}` : arg];
+    assert.ok(where, `config.ts object ${arg} has no guide section`);
+    const text = section(where);
+    for (const key of keys) assert.ok(text.includes(`\`${key}\``), `${where} lacks ${key}`);
+  }
 });
 
-function slug(heading) {
-  return heading
-    .trim()
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N} _-]/gu, '')
-    .replace(/ /gu, '-');
-}
-function anchors(text) {
-  return new Set([...text.matchAll(/^#{1,6} (.+)$/gmu)].map((m) => slug(m[1])));
-}
+test('the limits table states the default limits', () => {
+  const rows = tableRows('### `limits`');
+  for (const [key, value] of Object.entries(DEFAULT_LIMITS))
+    assert.match(rows.get(key), new RegExp(`\\| ${value}\\b`, 'u'), `limits ${key}`);
+});
 
-test('relative links in the guide and its index entries resolve', () => {
-  const files = [guidePath, path.join(repo, 'docs/guides/README.md'), path.join(pkg, 'README.md')];
-  for (const file of files) {
-    const text = fs.readFileSync(file, 'utf8');
-    for (const [, target] of text.matchAll(/\]\(([^)\s]+)\)/gu)) {
-      if (/^[a-z]+:/u.test(target)) continue;
-      const [link, anchor] = target.split('#');
-      const resolved = link ? path.resolve(path.dirname(file), link) : file;
-      assert.ok(fs.existsSync(resolved), `${path.basename(file)}: broken link ${target}`);
-      if (anchor && resolved === guidePath)
-        assert.ok(anchors(guide).has(anchor), `broken anchor ${target}`);
-    }
+test('the package README links resolve and the guide is linked from both indexes', () => {
+  const readme = path.join(pkg, 'README.md');
+  const text = fs.readFileSync(readme, 'utf8');
+  let checked = 0;
+  for (const [, target] of text.matchAll(/\]\(([^)\s]+)\)/gu)) {
+    if (/^[a-z]+:|^#/u.test(target)) continue;
+    const resolved = path.resolve(path.dirname(readme), target.split('#')[0]);
+    assert.ok(fs.existsSync(resolved), `README: broken link ${target}`);
+    checked++;
   }
-  assert.match(
-    fs.readFileSync(path.join(pkg, 'README.md'), 'utf8'),
-    /zero-trust-contributions\.md/u
-  );
+  assert.ok(checked > 0, 'no README links checked');
+  assert.match(text, /\(\.\.\/\.\.\/docs\/guides\/zero-trust-contributions\.md\)/u);
   assert.match(
     fs.readFileSync(path.join(repo, 'docs/guides/README.md'), 'utf8'),
     /\(zero-trust-contributions\.md\)/u

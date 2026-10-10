@@ -8,7 +8,7 @@ import { renderMetricsHuman, renderMetricsJson } from '../dist/metrics/outcomes.
 import { assertSecretFree } from '../dist/redaction.js';
 import { renderHuman, renderJson } from '../dist/status.js';
 
-const COMMANDS = Object.freeze({
+export const COMMANDS = Object.freeze({
   start: {
     required: ['config', 'root'],
     optional: ['confirm-author', 'author-name', 'author-email'],
