@@ -111,3 +111,13 @@ RunStore acquisition into `lock.ts:acquirePrivateGuard`, with explicit creation
 and wait parameters and unchanged validation/lifetime rules. Controller and
 publisher still use different guard paths. The final scoped review rechecks
 DRY, security and blind conformance on that shared-helper head.
+
+The shared-helper follow-up found no DRY or conformance defect. Security identified
+one concrete accidental-corruption decoder gap: enum membership coerced a JSON
+array such as `["applied"]` to a string. Both request kind and result enums now
+require primitive strings before membership checks. Unit regressions exercise
+arrays, booleans, numbers and null with intact digests; the active composition
+fixture records no shipping after an array-valued result and reports a block.
+This is strict byte/schema validation within the owner-approved environmental
+threat model, not same-user tampering hardening. Final security/conformance rerun
+is against the pushed strict-decoder head.

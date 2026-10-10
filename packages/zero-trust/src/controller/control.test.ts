@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { generateKeyPairSync } from 'node:crypto';
+import { createHash, generateKeyPairSync } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -204,6 +204,34 @@ describe('durable stop-only control', () => {
     );
     expect(readControlRequests(store).invalid).toBe(false);
     expect(readControlRequests(store).pending).toHaveLength(1);
+  });
+  it.each([
+    ['applied'],
+    ['cancel'],
+    1,
+    true,
+    null,
+  ])('rejects non-string control enums without coercion (%j)', (value) => {
+    const store = rig();
+    const row = requestControl(store, { kind: 'pause', reason: 'Hold' }, new Date(TIME));
+    const dir = path.join(store.storeDirectory('control'), 'requests');
+    fs.writeFileSync(
+      path.join(dir, `${row.id}.result`),
+      JSON.stringify({ v: 1, digest: row.digest, result: value }),
+      { mode: 0o600 }
+    );
+    expect(readControlRequests(store).invalid).toBe(true);
+    fs.unlinkSync(path.join(dir, `${row.id}.result`));
+    const { digest: _digest, ...body } = row;
+    const changed = { ...body, kind: value };
+    fs.writeFileSync(
+      path.join(dir, `${row.id}.json`),
+      JSON.stringify({
+        ...changed,
+        digest: createHash('sha256').update(JSON.stringify(changed)).digest('hex'),
+      })
+    );
+    expect(readControlRequests(store).invalid).toBe(true);
   });
   it('rejects invalid request fields and never persists credential material', () => {
     const store = rig();

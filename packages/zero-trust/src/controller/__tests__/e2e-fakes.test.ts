@@ -885,7 +885,10 @@ describe('createController real composition', () => {
     expect(a.get<string>('withdrawal')).toContain('then close the pull request');
     a.close();
   }, 60000);
-  it('corrupt control bytes block the active controller with inspectable evidence', async () => {
+  it.each([
+    'torn-request',
+    'array-result',
+  ] as const)('corrupt control bytes (%s) block the active controller with inspectable evidence', async (damage) => {
     const h = rig({ activeControl: 'write' });
     const running = h.authorize(h.controller.start(h.config));
     await h.controlReady;
@@ -895,11 +898,18 @@ describe('createController real composition', () => {
       readOnly: true,
       observe: true,
     });
-    fs.writeFileSync(
-      path.join(store.storeDirectory('control'), 'requests', `${row.id}.json`),
-      '{"torn":',
-      { mode: 0o600 }
-    );
+    if (damage === 'array-result')
+      fs.writeFileSync(
+        path.join(store.storeDirectory('control'), 'requests', `${row.id}.result`),
+        JSON.stringify({ v: 1, digest: row.digest, result: ['applied'] }),
+        { mode: 0o600 }
+      );
+    else
+      fs.writeFileSync(
+        path.join(store.storeDirectory('control'), 'requests', `${row.id}.json`),
+        '{"torn":',
+        { mode: 0o600 }
+      );
     store.close();
     expect(((await running) as { state: string }).state).toBe('blocked');
     const a = h.artifacts(id);

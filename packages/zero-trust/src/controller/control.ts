@@ -57,7 +57,8 @@ function request(raw: unknown, runId: string, id: string): ControlRequest {
     raw.id !== id ||
     !ID.test(id) ||
     raw.runId !== runId ||
-    !['pause', 'cancel'].includes(String(raw.kind)) ||
+    typeof raw.kind !== 'string' ||
+    !['pause', 'cancel'].includes(raw.kind) ||
     typeof raw.reason !== 'string' ||
     !raw.reason.trim() ||
     raw.reason.length > 500 ||
@@ -190,9 +191,8 @@ export function readControlRequests(store: RunStore): ControlState {
             Object.keys(result).sort().join(',') !== 'digest,result,v' ||
             result.v !== 1 ||
             result.digest !== row.digest ||
-            !['applied', 'nothing_to_pause', 'cleanup_required', 'terminal'].includes(
-              String(result.result)
-            )
+            typeof result.result !== 'string' ||
+            !['applied', 'nothing_to_pause', 'cleanup_required', 'terminal'].includes(result.result)
           )
             throw new ControlError('invalid_control');
           if (result.result !== 'applied')
