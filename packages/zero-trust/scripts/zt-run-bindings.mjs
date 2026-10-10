@@ -11,6 +11,7 @@ import {
 } from '../dist/controller/checkpoints.js';
 import { runConfigInput } from '../dist/controller/config.js';
 import { readControlRequests, requestControl } from '../dist/controller/control.js';
+import { publicationWaitTime } from '../dist/controller/lifecycle-times.js';
 import {
   readOutcomeBudget,
   readOutcomeHandoffs,
@@ -196,11 +197,25 @@ export async function createCommands({ root, createController, onAuthorizationUr
             state: run.state,
             ...checkpointStatus(store.checkpoint(point), store.currentCheckpointBindings(point)),
           };
+        const statusNow = new Date();
         const result = assembleStatus({
           run,
-          now: new Date(),
+          now: statusNow,
           budget,
           sessionId,
+          publicationWaitMs: store.withStoreDirectory('control', (dir) => {
+            const file = path.join(dir, 'controller', 'events.jsonl');
+            try {
+              return publicationWaitTime(
+                parseJournalEvents(readPrivate(file)),
+                sessionId,
+                statusNow.getTime()
+              );
+            } catch (error) {
+              if (error?.code === 'ENOENT') return 0;
+              throw error;
+            }
+          }),
           handoff,
           tracker,
           ...(retained.candidate?.record?.candidateSha
@@ -307,15 +322,7 @@ export async function createCommands({ root, createController, onAuthorizationUr
         assertSecretFree(body);
         action = { kind: 'edit', title: request.title, body };
       }
-      await createController(config, { onAuthorizationUrl }).resume(runId, { action });
-      return withStore(runId, true, (store) => {
-        const filePath = path.join(store.storeDirectory('control'), 'steps', 'events.jsonl');
-        const bytes = readPrivate(filePath);
-        return new StepArtifacts(
-          { filePath, read: () => parseJournalEvents(bytes) },
-          runId
-        ).require('contributor_action');
-      });
+      return createController(config, { onAuthorizationUrl }).prAction(runId, action);
     },
     pause(runId, reason) {
       return withStore(

@@ -1,4 +1,4 @@
-import { type RunRecord, type RunState, restoreRun } from '../state';
+import { isRecord, type RunRecord, type RunState, restoreRun } from '../state';
 
 const ACTIVE: readonly RunState[] = [
   'gating',
@@ -40,4 +40,38 @@ export function lifecycleTimes(
   if (![activeMs, ...Object.values(waitMs)].every(Number.isSafeInteger))
     throw new Error('Invalid lifecycle time');
   return { activeMs, waitMs };
+}
+
+/** Read-only projection of durable publication waits for selected-session status. */
+export function publicationWaitTime(
+  events: readonly unknown[],
+  sessionId: string,
+  now: number
+): number {
+  let open: { sessionId: string; at: number } | undefined;
+  let total = 0;
+  for (const event of events) {
+    if (!isRecord(event) || event.type !== 'publication_wait') continue;
+    const at = typeof event.at === 'string' ? Date.parse(event.at) : NaN;
+    if (
+      event.v !== 1 ||
+      Object.keys(event).length !== 6 ||
+      !Number.isFinite(at) ||
+      at > now ||
+      typeof event.sessionId !== 'string'
+    )
+      throw new Error('invalid_journal');
+    if (event.operation === 'begin') {
+      if (open) throw new Error('invalid_journal');
+      open = { sessionId: event.sessionId, at };
+    } else if (event.operation === 'end') {
+      if (!open || open.sessionId !== event.sessionId || at < open.at)
+        throw new Error('invalid_journal');
+      if (open.sessionId === sessionId) total += at - open.at;
+      open = undefined;
+    } else throw new Error('invalid_journal');
+  }
+  if (open?.sessionId === sessionId) total += now - open.at;
+  if (!Number.isSafeInteger(total) || total < 0) throw new Error('invalid_journal');
+  return total;
 }

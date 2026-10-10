@@ -140,9 +140,18 @@ async function listKeyed(read: GitHubRead, p: string, key: string): Promise<unkn
     const response = await get(read, `${p}${separator}per_page=${PAGE_SIZE}&page=${page}`);
     const body = response?.status === 200 && isRecord(response.body) ? response.body : null;
     const list = body?.[key];
-    if (!body || !Array.isArray(list) || !Number.isSafeInteger(body.total_count)) return null;
+    if (
+      !body ||
+      !Array.isArray(list) ||
+      !Number.isSafeInteger(body.total_count) ||
+      (body.total_count as number) < 0 ||
+      list.length > PAGE_SIZE
+    )
+      return null;
     items.push(...list);
-    if (list.length < PAGE_SIZE || items.length >= (body.total_count as number)) return items;
+    if (items.length > (body.total_count as number)) return null;
+    if (items.length === body.total_count) return items;
+    if (list.length < PAGE_SIZE) return null;
   }
   return null;
 }
@@ -1340,6 +1349,9 @@ export class PrTracker {
   }
 
   private closedDuringRevision(): TrackOutcome {
+    // Closure takes precedence over an unfinished edit. Preserve its prepared
+    // bytes/journal evidence, but cancel that action before issuing the reopen.
+    if (this.state.action?.kind === 'edit') this.persist({ v: 1, type: 'action_cancelled' });
     if (!this.state.action && isAdmitted('pr_update', this.state.run.state))
       this.persist({
         v: 1,

@@ -43,7 +43,7 @@ import { ReasonCode, transitionRun } from '../../state';
 import { approveCheckpoint } from '../checkpoints';
 import { validateRunConfig } from '../config';
 import { readControlRequests, requestControl } from '../control';
-import { readOutcomeBudget } from '../outcome-records';
+import { readOutcomeBudget, readOutcomeTrack } from '../outcome-records';
 import { RunStore } from '../run-store';
 import { StepArtifacts } from '../steps';
 import { loadVerification } from '../verification-record';
@@ -108,6 +108,8 @@ function rig(
     revisionDecisionReject?: boolean;
     revisionPending?: boolean;
     revisionDivergeOnMint?: boolean;
+    revisionDrift?: boolean;
+    upstreamReplaced?: boolean;
   } = {}
 ) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zt-composition-'));
@@ -251,7 +253,7 @@ function rig(
       return {
         status: 200,
         body: {
-          id: UPSTREAM_ID,
+          id: options.upstreamReplaced ? UPSTREAM_ID + 1 : UPSTREAM_ID,
           full_name: 'upstream/fixture',
           default_branch: 'main',
           private: false,
@@ -279,8 +281,12 @@ function rig(
     if (p.includes('/timeline?')) return { status: 200, body: [] };
     if (p.startsWith('/repos/upstream/fixture/branches/')) {
       if (options.baseUnavailable) return { status: 503, body: null };
-      if (options.driftTouch && ++branchReads > 1) {
+      if (
+        (options.driftTouch && ++branchReads > 1) ||
+        (options.revisionDrift && revisionProduced)
+      ) {
         if (!advanced) {
+          if (options.revisionDrift) clock += 60000;
           const entry = CANDIDATE.entries.find((e) => e.path === 'package.json');
           if (!entry) throw new Error('fixture missing package');
           const bytes = JSON.stringify({
@@ -681,6 +687,12 @@ function rig(
     showRevision() {
       options.revisionPending = false;
     },
+    replaceUpstream() {
+      options.upstreamReplaced = true;
+    },
+    idleMinutes(minutes: number) {
+      clock += minutes * 60000;
+    },
     closePr() {
       if (submitted) submitted.state = 'closed';
     },
@@ -870,6 +882,81 @@ describe('createController real composition', () => {
     expect(readOutcomeBudget(a.store).sessions).toHaveLength(2);
     a.close();
   }, 30000);
+  it.each([
+    'candidate',
+    'confirmation',
+  ] as const)('recovers the durable revision %s crash prefix', async (point) => {
+    const h = rig();
+    const id = await published(h);
+    h.feedback();
+    const original = StepArtifacts.prototype.put;
+    let interrupted = false;
+    const fault = vi.spyOn(StepArtifacts.prototype, 'put').mockImplementation(function (
+      this: StepArtifacts,
+      key,
+      value
+    ) {
+      if (
+        !interrupted &&
+        h.repairEvidence.length > 0 &&
+        ((point === 'candidate' && key === 'candidate') ||
+          (point === 'confirmation' &&
+            key === 'tracking' &&
+            (value as { state?: string }).state === 'submitted'))
+      ) {
+        interrupted = true;
+        if (point === 'candidate') original.call(this, key, value);
+        throw new Error('durable publication interruption');
+      }
+      original.call(this, key, value);
+    });
+    await expect(h.authorize(h.controller.resume(id, { revise: true }))).rejects.toThrow();
+    fault.mockRestore();
+    expect(interrupted).toBe(true);
+    const pushes = pushCalls().length;
+    expect(((await h.authorize(h.controller.resume(id))) as { state: string }).state).toBe(
+      'submitted'
+    );
+    if (point === 'confirmation') expect(pushCalls()).toHaveLength(pushes);
+    const a = h.artifacts(id);
+    expect(readOutcomeBudget(a.store).sessions).toHaveLength(2);
+    a.close();
+  }, 30000);
+  it('refuses revision admission when the current upstream numeric identity changes', async () => {
+    const h = rig();
+    const id = await published(h);
+    h.feedback();
+    h.replaceUpstream();
+    const pushes = pushCalls().length;
+    const calls = h.modelCalls();
+    await expect(h.controller.resume(id, { revise: true })).rejects.toThrow();
+    expect(pushCalls()).toHaveLength(pushes);
+    expect(h.modelCalls()).toBe(calls);
+    const a = h.artifacts(id);
+    expect(readOutcomeBudget(a.store).sessions).toHaveLength(1);
+    a.close();
+  }, 30000);
+  it('rebases an unrelated upstream advance in a new revision session and freshly verifies before CAS', async () => {
+    const h = rig({ revisionDrift: true });
+    const id = await published(h);
+    h.feedback();
+    const before = h.artifacts(id);
+    before.put('rebases', 2);
+    before.close();
+    expect(
+      ((await h.authorize(h.controller.resume(id, { revise: true }))) as { state: string }).state
+    ).toBe('submitted');
+    const a = h.artifacts(id);
+    expect(a.get<{ count: number; sessionId: string }>('rebase_session')).toEqual({
+      count: 1,
+      sessionId: a.store.budgetSessionId(2),
+    });
+    const record = a.get<{ record: { candidateSha: string; baseSha: string } }>('candidate').record;
+    expect(record.baseSha).not.toBe(BASE_COMMIT.baseSha);
+    expect(h.fork.sha(`ztfc/${a.store.contributionId}`)).toBe(record.candidateSha);
+    expect(a.store.run.history.some((e) => e.reasonCode === ReasonCode.BaseAdvanced)).toBe(true);
+    a.close();
+  }, 30000);
   it('retains shipping on pending confirmation and resumes the exact candidate without another session or push', async () => {
     const h = rig({ revisionPending: true });
     const id = await published(h);
@@ -888,6 +975,39 @@ describe('createController real composition', () => {
     const a = h.artifacts(id);
     expect(readOutcomeBudget(a.store).sessions).toHaveLength(2);
     a.close();
+  }, 30000);
+  it('observes pending confirmation after idle time and spend exhaustion with no paid work or OAuth', async () => {
+    const h = rig({ revisionPending: true });
+    const id = await published(h);
+    h.feedback();
+    await h.authorize(h.controller.resume(id, { revise: true }));
+    const a = h.artifacts(id);
+    const file = path.join(a.store.storeDirectory('budget'), 'ledger.json');
+    const ledger = new BudgetLedger(file, a.store.contributionId);
+    const session = readOutcomeBudget(a.store).sessions.at(-1);
+    if (!session) throw new Error('missing session');
+    const hold = ledger.reserve(session.id, {
+      money: { currency: 'USD', minor: 900 },
+      tokens: 0,
+      timeMs: 1,
+      rates: h.config.modelProfile.rates.filter((r) => r.resource === 'local-qemu'),
+    });
+    ledger.settle(hold.id, {
+      money: { currency: 'USD', minor: 900 },
+      tokens: 0,
+      timeMs: 0,
+      source: 'fixture-spend',
+    });
+    a.close();
+    const pushes = pushCalls().length;
+    const calls = h.modelCalls();
+    const oauth = h.fake.oauthCalls.length;
+    h.idleMinutes(121);
+    h.showRevision();
+    expect((await h.controller.resume(id)).state).toBe('submitted');
+    expect(pushCalls()).toHaveLength(pushes);
+    expect(h.modelCalls()).toBe(calls);
+    expect(h.fake.oauthCalls.length).toBe(oauth);
   }, 30000);
   it.each([
     false,
@@ -958,6 +1078,91 @@ describe('createController real composition', () => {
     const done = h.artifacts(id);
     expect(done.get<{ action?: unknown }>('tracking').action).toBeUndefined();
     done.close();
+  }, 30000);
+  it('observed closure supersedes a pending edit with a reopen handoff, retaining its text', async () => {
+    const h = rig({ revisionPending: true });
+    const id = await published(h);
+    h.feedback();
+    await h.authorize(h.controller.resume(id, { revise: true }));
+    const body = `Clarified fix.\n\n${findHandoffMarkers(String(h.pr()?.body))[0]}`;
+    const edit = (await h.authorize(
+      h.controller.prAction(id, { kind: 'edit', title: 'Clarified fix', body })
+    )) as { bodyFile: string };
+    const pushes = pushCalls().length;
+    h.closePr();
+    expect((await h.controller.resume(id)).state).toBe('shipping');
+    const a = h.artifacts(id);
+    expect(a.get<{ action: { kind: string } }>('tracking').action.kind).toBe('reopen');
+    expect(fs.readFileSync(edit.bodyFile, 'utf8')).toBe(body);
+    a.close();
+    expect(pushCalls()).toHaveLength(pushes);
+    h.reopenPr();
+    h.showRevision();
+    expect((await h.controller.resume(id)).state).toBe('submitted');
+  }, 30000);
+  it('a legitimate cancel preempts a contributor command without returning a stale action', async () => {
+    const h = rig();
+    const id = await published(h);
+    await h.controller.prAction(id, {
+      kind: 'withdraw',
+      reason: 'user_instruction',
+      explanation: 'No longer needed.',
+    });
+    const a = h.artifacts(id);
+    requestControl(a.store, { kind: 'cancel', reason: 'Stop' }, new Date(TIME));
+    a.close();
+    await expect(h.controller.prAction(id, { kind: 'cancel-action' })).rejects.toThrow(
+      'admission_closed'
+    );
+    expect(h.controller.snapshot().state).toBe('cancelled');
+  }, 30000);
+  it.each([
+    'review_awaited',
+    'revision_started',
+    'outcome',
+  ] as const)('synchronizes durable tracker %s before concurrent legitimate cancellation', async (eventType) => {
+    const h = rig();
+    const id = await published(h);
+    h.feedback();
+    if (eventType === 'outcome') {
+      const pr = h.pr();
+      if (!pr) throw new Error('missing PR');
+      pr.merged_at = TIME;
+      pr.state = 'closed';
+    }
+    const original = Journal.prototype.append;
+    let requested = false;
+    const fault = vi.spyOn(Journal.prototype, 'append').mockImplementation(function (
+      this: Journal,
+      event
+    ) {
+      original.call(this, event);
+      if (!requested && (event as { type?: string }).type === eventType) {
+        requested = true;
+        const store = RunStore.open(path.join(h.config.executionProfile.stateDir, 'runs'), id, {
+          readOnly: true,
+          observe: true,
+        });
+        try {
+          requestControl(store, { kind: 'cancel', reason: 'Stop' }, new Date(TIME));
+        } finally {
+          store.close();
+        }
+      }
+    });
+    const run = (await h.authorize(
+      h.controller.resume(id, { revise: eventType === 'revision_started' })
+    )) as { state: string };
+    fault.mockRestore();
+    expect(requested).toBe(true);
+    expect(run.state).toBe(eventType === 'outcome' ? 'merged' : 'cancelled');
+    const a = h.artifacts(id);
+    const track = new Journal(a.store.storeDirectory('track'));
+    const events = track.read();
+    track.close();
+    expect(events.some((e) => (e as { type?: string }).type === eventType)).toBe(true);
+    expect(readOutcomeTrack(a.store, a.store.run)?.run).toEqual(a.store.run);
+    a.close();
   }, 30000);
   function request(h: ReturnType<typeof rig>, kind: 'pause' | 'cancel') {
     const id = h.controller.snapshot().runId;

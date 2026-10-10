@@ -378,17 +378,20 @@ nonce/intents/handoff stores, with fake GitHub adapters and no live network.
 
 ## Injected run controller core (#1106)
 
-`new RunController(deps)` supplies `start(config)`, `resume(runId)`,
+`new RunController(deps)` supplies `start(config)`, `resume(runId, { revise?, action? })`,
+`prAction(runId, TrackerActionRequest): Promise<TrackerActionResult>`,
 `snapshot(): RunRecord`, and `incidentStop(reason): Promise<RunRecord>`.
 Dependencies contain the controller-owned storage `root`, `PhaseSteps`,
 `RecoveryHooks`, all `ObservingDriver`s, the VM adapter's `create`/`destroy`/
 `listByRun`, `estimateVm(spec, purpose)`, `observeVm(hold, vm)` and a trusted
 `now(): Date` clock. This core never constructs a credential broker or upstream
-write adapter. There are no scheduled tasks, timers or polling loops.
+write adapter. It performs no upstream polling; a short-lived local stop-fence
+observer runs only while an explicit controller command holds the store.
 
 `PhaseSteps` has `gate`, `acquire`, `plan`, `implement`, `review`, `verify`,
 `drift`, `ship`, `resumeHandoff`, and `track`. Each receives a `PhaseContext`:
 the locked store, current immutable run, ledger, session ID, an `AbortSignal`,
+the explicit `revise` flag, awaited `observeRun(run)` for completed producer observations,
 and reserved `createVm(spec)` (run ID and limits come from the held store).
 Allocation capabilities are bound to the current launch, run, abort signal and
 phase lease; retaining a callback cannot retarget it to a later phase or run.
@@ -396,7 +399,10 @@ Already-admitted allocations are joined before phase completion/stop persistence
 and lock release, even if an injected step forgot to await its allocation.
 Production wiring must use this allocation path, honor cancellation, and keep
 effects journaled/idempotent through the existing drivers. Steps return facts;
-they must not persist lifecycle transitions themselves. The controller maps
+they must not directly persist lifecycle transitions themselves. Tracker-owned
+observations are synchronized through the awaited context `observeRun`; completed
+evidence remains reconcilable after a stop fence, without admitting new work.
+The controller maps
 typed outcomes to `ReasonCode` and uses `transitionRun`; an illegal edge throws,
 never silently changes phase. Unknown/malformed results refuse progress with
 fixed `ControllerError` diagnostics (no provider/guest error text).
@@ -410,7 +416,7 @@ Success outcomes are `proceed`, `acquired`, `planned { bindings }`,
 `unchanged` / `advanced { bindings }`, and `submitted`. Gate also accepts
 `request_permission`, `terminate`, `ineligible`, `contributor_handoff`,
 `fork_missing`, `installation_missing`; shipping accepts
-`contributor_handoff`, `fork_missing`, `installation_missing`. Explicit hand-off
+`contributor_handoff`, `fork_missing`, `installation_missing`, `waiting` (pending revision confirmation or reopen action). Explicit hand-off
 resume accepts `waiting`, `invited`, `engagement_observed`, `submitted`,
 `resume_gating`, `resume_shipping`, `declined`. Tracking accepts `waiting`,
 `awaiting_review`, `accepted`, `merged`, `declined`, `revision`.
@@ -448,7 +454,8 @@ controller journals refuse admission. Checkpoint approval reuses the completed
 phase result; no new plan/patch write is required.
 
 Resume order is store open/lifetime lock → budget open and old-hold reconciliation
-→ VM reconciliation (`listByRun` plus `teardownVm`) → credential recovery hook
+→ VM reconciliation (`listByRun` plus `teardownVm`) → existing tracker history and
+pending revision read-back reconciliation → credential recovery hook when new work remains
 (`broker.recover` in wiring) → intent resume → state-specific hand-off/tracker
 resume → next phase. Every item is injected in `RecoveryHooks`; VM reconciliation
 also runs directly so an injected wrapper cannot skip actual teardown. Recovery
@@ -1457,10 +1464,13 @@ checks identity and does not apply changed model/budget settings or reset histor
 Retention policy is configuration only here; this API performs no expiry deletion.
 
 `assembleStatus({ run, now, budget, sessionId, phase?, candidateSha?, handoff?,
-tracker?, prerequisite? })` returns all `StatusRecord` facts and performs no
+tracker?, prerequisite?, publicationWaitMs? })` returns all `StatusRecord` facts and performs no
 polling or network writes. Active time sums only gating, planning, implementing,
 verifying, shipping and revising intervals, including the current active interval;
-waits, pauses, submitted/outcome/terminal intervals are excluded. Estimated spend
+within the selected budget session; waits, pauses, submitted/outcome/terminal
+intervals are excluded. `publicationWaitTime` projects the controller journal's
+durable publication-wait intervals; supplying `publicationWaitMs` excludes those
+idle shipping intervals too (the CLI and core do this). Estimated spend
 is the selected budget session's conservative spent plus reserved **minor units**;
 remaining is the ceiling less that total, floored at zero. It reports the latest
 transition reason and prioritizes pending `handoffStatus`, credential-free
@@ -2268,11 +2278,15 @@ identities, targets, network policy, budget or checkpoints. Oversized/truncated
 feedback is unreadable, never silently clipped. `retainRevisionFeedback` on
 `TrackDeps` is the write-ahead persistence seam used by the composition root.
 
-The fresh implementation VM starts from the last verified controller-held overlay.
+The fresh implementation VM starts from the last verified controller-held overlay,
+retained separately from the next candidate so torn completion publication can replay.
 Review, independent verification and upstream drift checks run again; shipping uses
 a fresh v2 receipt and CAS from the last verified fork head, updating the same PR.
 `revision_pending` remains in `shipping`; explicit resume reuses that exact candidate,
-session and push intent until the PR head confirms it. A closed PR returns a reopen
+session and push intent until the PR head confirms it. Pending read-back is available
+after idle time or budget exhaustion without OAuth or new computation; its durable
+wait interval is excluded from active-time accounting. The rebase allowance is
+session-bound, with earlier session evidence retained. A closed PR returns a reopen
 link; a mid-revision merge or changed policy blocks and retains evidence. Every
 tracker call publishes its exact `snapshot().run` to all other drivers' `observeRun`.
 
@@ -2280,11 +2294,23 @@ CLI `pr-edit`, `withdraw` and `cancel-action` print a contributor link and instr
 Edit requires a live revision and a body preserving the existing PR marker; prepared
 title/body edits and close actions are confirmed only on a later read. Cancel-action
 only removes the local pending action. All three run under the same lifetime store
-lock and stop fences as resume; none writes upstream. Example (from this package):
+lock and stop fences as resume; none writes upstream. `prAction` returns only this
+invocation's result; a stop-preempted command refuses rather than printing a prior
+action. The body file must be a regular, single-link private file (mode `0600`),
+strict UTF-8, at most 65,536 bytes, and preserve the original PR marker.
+
+These are conditional examples, not a sequential session: a successful revision
+returns to submitted, where editing is not admitted. Issue `pr-edit` while a
+revision is in `shipping` with its verified confirmation still pending. A paused
+checkpoint does not itself admit a PR edit; approve/resume it to continue first.
+From this package:
 
 ```bash
 node scripts/zt-run.mjs resume --root state/runs --run ztc-0123456789abcdef-run-1 --revise
+# Only while that revision remains outstanding:
+chmod 600 revised-description.md
 node scripts/zt-run.mjs pr-edit --root state/runs --run ztc-0123456789abcdef-run-1 --title 'Clarify fix' --body-file revised-description.md
+# Withdraw only outside an active revision:
 node scripts/zt-run.mjs withdraw --root state/runs --run ztc-0123456789abcdef-run-1 --reason user_instruction --explanation 'Superseded by another fix.'
 node scripts/zt-run.mjs cancel-action --root state/runs --run ztc-0123456789abcdef-run-1
 ```

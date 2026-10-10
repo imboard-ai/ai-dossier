@@ -123,7 +123,16 @@ export function gateFreshness(
   ownPr?: { readonly number: number }
 ) {
   return createFreshnessProbe({
-    read,
+    read: async (request) => {
+      const response = await read(request);
+      if (
+        request === `/repos/${config.upstream.owner}/${config.upstream.repo}` &&
+        response.status === 200 &&
+        (response.body as { id?: unknown } | null)?.id !== g.eligibility.facts.repositoryId
+      )
+        return { status: 502, body: null };
+      return response;
+    },
     upstream: config.upstream,
     contributor: config.contributor,
     ...(ownPr ? { ownPr } : {}),
@@ -583,14 +592,33 @@ export function createSteps(
       const entered = [...c.run.history]
         .reverse()
         .find((e) => e.to === 'implementing' && e.reasonCode !== ReasonCode.ResumeImplementing);
+      const priorBasis = artifacts(c).get<{
+        phaseKey: number;
+        candidate: Candidate | null;
+        verification: string | null;
+      }>('implementation_basis');
       const old =
-        c.run.state === 'revising' || entered?.reasonCode === ReasonCode.RepairRequired
-          ? candidate(c)
-          : undefined;
+        priorBasis?.phaseKey === phaseKey
+          ? (priorBasis.candidate ?? undefined)
+          : c.run.state === 'revising' || entered?.reasonCode === ReasonCode.RepairRequired
+            ? candidate(c)
+            : undefined;
+      const basisVerification =
+        priorBasis?.phaseKey === phaseKey
+          ? priorBasis.verification
+          : old
+            ? artifacts(c).require<string>('verification')
+            : null;
+      if (priorBasis?.phaseKey !== phaseKey)
+        artifacts(c).put('implementation_basis', {
+          phaseKey,
+          candidate: old ?? null,
+          verification: basisVerification,
+        });
       const previousVerification = old
         ? loadVerification(c.store.storeDirectory('artifacts'), old.record.candidateSha, {
             runId: c.run.runId,
-            expectedDigest: artifacts(c).require<string>('verification'),
+            expectedDigest: basisVerification as string,
           })
         : undefined;
       const base = source(c);
@@ -773,7 +801,13 @@ export function createSteps(
           overlay,
           approval: held.record,
           basePack: base.pack,
-          rebases: artifacts(c).get<number>('rebases') ?? 0,
+          rebases:
+            artifacts(c).get<{ sessionId: string; count: number }>('rebase_session')?.sessionId ===
+            c.sessionId
+              ? artifacts(c).require<{ count: number }>('rebase_session').count
+              : c.sessionId === c.store.budgetSessionId(1)
+                ? (artifacts(c).get<number>('rebases') ?? 0)
+                : 0,
           pushIntentJournaled: artifacts(c).get<boolean>('push_intended') ?? false,
         }
       );
@@ -784,6 +818,7 @@ export function createSteps(
       artifacts(c).put('source', { manifest: next.manifest, pack: next.pack.toString('base64') });
       artifacts(c).put('gate', { ...gate(c), baseSha: result.candidate.record.baseSha });
       artifacts(c).put('rebases', result.rebases);
+      artifacts(c).put('rebase_session', { sessionId: c.sessionId, count: result.rebases });
       artifacts(c).put('candidate', {
         touched: held.touched,
         manifest: result.manifest,

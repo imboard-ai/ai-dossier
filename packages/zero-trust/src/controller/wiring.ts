@@ -17,7 +17,7 @@ import {
   listenLoopback,
 } from '../github/contributor';
 import { checkForkReadiness, type ForkReady, type ReadinessOutcome } from '../github/fork';
-import type { ForkBranch } from '../github/fork-ref';
+import { type ForkBranch, readForkBranch } from '../github/fork-ref';
 import { handoffMarker } from '../github/handoff';
 import { type HandoffAdmission, HandoffDriver } from '../github/handoff-driver';
 import { ForkPusher, type ForkPusherOptions } from '../github/push';
@@ -529,6 +529,7 @@ export function createController(
   let handoff: HandoffDriver | undefined;
   let handoffMode: 'contact' | 'shipping' | undefined;
   let tracker: PrTracker | undefined;
+  let revisionObservationWaiting = false;
   let app: AppCredentials | undefined;
   let shipping: ShippingAuthorizeDeps | undefined;
   let receipt: SignedReceipt | undefined;
@@ -971,7 +972,7 @@ export function createController(
       policyFresh: async () => {
         c.assertAdmission();
         const probe = await gateFreshness(read, config, artifacts(c).require<GateRecord>('gate'), {
-          number: pr.number,
+          number: tracker?.snapshot().pr.number ?? pr.number,
         }).check();
         artifacts(c).put('revision_freshness', probe);
         c.assertAdmission();
@@ -1009,6 +1010,7 @@ export function createController(
    * all other drivers before another capability can run. */
   const syncTracker = async (c: PhaseContext, t: PrTracker) => {
     artifacts(c).put('tracking', t.status());
+    artifacts(c).put('tracked_pr', { number: t.snapshot().pr.number });
     await c.observeRun(t.snapshot().run);
     for (const driver of [intents, handoff]) if (driver) observeDriver(driver, t.snapshot().run);
   };
@@ -1266,20 +1268,26 @@ export function createController(
   const controller: RunController = new RunController({
     trackerAction: async (c, request) => {
       const t = await openTracker(c);
-      if (request.kind === 'edit') await t.requestEdit(request);
-      else if (request.kind === 'withdraw') await t.requestWithdrawal(request);
-      else await t.cancelAction();
+      const result =
+        request.kind === 'edit'
+          ? await t.requestEdit(request)
+          : request.kind === 'withdraw'
+            ? await t.requestWithdrawal(request)
+            : await t.cancelAction();
       await syncTracker(c, t);
       const status = t.status();
-      artifacts(c).put(
-        'contributor_action',
-        status.action ?? {
+      if (request.kind !== 'cancel-action' && result.kind !== 'action')
+        throw new Error('action_not_issued');
+      const action =
+        status.action ??
+        ({
           kind: 'cancel-action',
           link: status.pr,
           instructions:
             'The local pending action was cancelled. No upstream change was made. Open the PR to inspect its state; resume explicitly to observe it.',
-        }
-      );
+        } as const);
+      artifacts(c).put('contributor_action', action);
+      return action;
     },
     incidentRequested: () => incidentRequested(root),
     root,
@@ -1293,6 +1301,8 @@ export function createController(
         observeRun: (run: RunRecord) => {
           for (const driver of [intents, handoff, tracker]) {
             if (driver && isRunContinuation(driver.snapshot().run, run)) observeDriver(driver, run);
+            else if (driver && !isRunContinuation(run, driver.snapshot().run))
+              throw new Error('producer_run_diverged');
           }
         },
       },
@@ -1332,7 +1342,15 @@ export function createController(
             ci: observed.ci,
             headSha: observed.headSha,
           });
-        const run = driver.snapshot().run;
+        let run = driver.snapshot().run;
+        // Completed tracker/intent observations precede stop transitions even
+        // when the stop became durable while their read or write was in flight.
+        for (const other of [intents, tracker]) {
+          if (!other) continue;
+          const observedRun = other.snapshot().run;
+          if (isRunContinuation(run, observedRun)) run = observedRun;
+          else if (!isRunContinuation(observedRun, run)) throw new Error('producer_run_diverged');
+        }
         return run;
       },
       prepareCancellation: async (c) => {
@@ -1397,13 +1415,39 @@ export function createController(
         return driver.snapshot().run;
       },
       resumeTracker: async (c) => {
+        if (!artifacts(c).get('publication')) return undefined;
+        if (
+          !['submitted', 'awaiting_review', 'accepted'].includes(c.store.run.state) &&
+          !c.store.run.history.some((e) => e.reasonCode === ReasonCode.RevisionRequested) &&
+          !fs.existsSync(path.join(c.store.storeDirectory('track'), 'events.jsonl'))
+        )
+          return undefined;
         const t = await openTracker(c);
         if (t.snapshot().revision) {
           artifacts(c).put('revision_base_sha', t.snapshot().verifiedSha);
           if (!t.snapshot().revision?.candidateSha) artifacts(c).put('push_intended', false);
         }
+        revisionObservationWaiting = false;
+        if (c.store.run.state === 'shipping' && t.snapshot().revision?.candidateSha) {
+          const result = await t.resume();
+          artifacts(c).put('tracking', t.status());
+          if (result.kind === 'revision_pending') {
+            const state = t.snapshot();
+            try {
+              revisionObservationWaiting =
+                (await readForkBranch(read, {
+                  fork: state.pr.fork,
+                  branch: state.pr.binding.branch,
+                })) === result.candidateSha;
+            } catch {
+              revisionObservationWaiting = true;
+            }
+          } else
+            revisionObservationWaiting = ['unknown', 'handoff', 'action'].includes(result.kind);
+        }
         return t.snapshot().run;
       },
+      revisionWaiting: () => revisionObservationWaiting,
       killAll: async (c) => {
         await stopResources(localVm(c), c.run.runId, async () => {
           await broker?.killAll();
@@ -1428,6 +1472,7 @@ export function createController(
         handoff = undefined;
         handoffMode = undefined;
         tracker = undefined;
+        revisionObservationWaiting = false;
         shipping = undefined;
         receipt = undefined;
         app = undefined;

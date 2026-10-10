@@ -29,6 +29,20 @@ import { FORK_ID, OWNER } from './github-fake';
 import { BRANCH, C1, C2, FORK, journal, Rig, SHA1, SHA2, temp } from './push-rig';
 
 const UP = Object.freeze({ owner: 'up', repo: 'proj' });
+it.each([2, -1])('truncated or invalid declared CI counts are unknown (%s)', async (count) => {
+  const read: GitHubRead = async (p) => ({
+    status: 200,
+    body: p.includes('/check-runs')
+      ? {
+          total_count: count,
+          check_runs: [{ head_sha: SHA1, status: 'completed', conclusion: 'success' }],
+        }
+      : p.includes('/actions/runs')
+        ? { total_count: 0, workflow_runs: [] }
+        : { total_count: 0, state: 'pending', statuses: [] },
+  });
+  expect(await observeCi(read, BINDING, SHA1)).toBe('unknown');
+});
 const BINDING: PrBinding = Object.freeze({
   upstream: UP,
   base: 'main',

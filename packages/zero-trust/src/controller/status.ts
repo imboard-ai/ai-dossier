@@ -31,6 +31,7 @@ export const DEFAULT_STATE_ACTIONS: Readonly<Record<RunState, string>> = Object.
   blocked_cleanup: 'Reconcile remaining resources and credentials before closing cleanup.',
 });
 export interface StatusParts {
+  readonly publicationWaitMs?: number;
   readonly run: RunRecord;
   readonly now: Date | string;
   readonly phase?: string;
@@ -69,6 +70,10 @@ export function assembleStatus(parts: StatusParts): StatusRecord {
         : Date.parse(run.createdAt);
     if (!Number.isFinite(since)) throw new InvalidStatusError();
     activeTimeMs = lifecycleTimes(run, now, since).activeMs;
+    const waiting = parts.publicationWaitMs ?? 0;
+    if (!Number.isSafeInteger(waiting) || waiting < 0 || waiting > activeTimeMs)
+      throw new InvalidStatusError();
+    activeTimeMs -= waiting;
   } catch {
     throw new InvalidStatusError();
   }

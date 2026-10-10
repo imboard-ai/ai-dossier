@@ -480,9 +480,9 @@ describe('RunController', () => {
       'store',
       'budget',
       'vm',
+      'tracker',
       'credentials',
       'intents',
-      'tracker',
     ]);
   });
   it('incident stop aborts a live step, joins it and tears down before cancelled', async () => {
