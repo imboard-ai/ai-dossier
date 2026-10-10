@@ -26,6 +26,7 @@ import {
 import type { ForkReady } from '../github/fork';
 import type { HandoffOutcome } from '../github/handoff-driver';
 import type { GitHubRead } from '../github/reconcile';
+import type { FeedbackItem } from '../github/track';
 import type { Journal } from '../journal';
 import type { ModelAdapter } from '../model/adapter';
 import { classifyPolicy, type PolicyAssessment, policyDigest } from '../policy/classify';
@@ -67,9 +68,10 @@ import {
   releaseWorkspace,
   type WorkspaceEvidence,
 } from './evidence-runner';
+import { assessRevisionFeedback } from './feedback';
 import { OutputCollector } from './output-collector';
 import type { ShippingAuthorizeDeps } from './shipping';
-import { loadVerification } from './verification-record';
+import { loadVerification, type VerificationRecord } from './verification-record';
 import { verificationPlan, verifyCandidate } from './verifier';
 import { WorkspaceOverlay } from './workspace-overlay';
 
@@ -137,12 +139,23 @@ export function policyReader(read: GitHubRead): GitHubRead {
 export function gateFreshness(
   read: GitHubRead,
   config: PhaseContext['store']['config'],
-  g: GateRecord
+  g: GateRecord,
+  ownPr?: { readonly number: number }
 ) {
   return createFreshnessProbe({
-    read,
+    read: async (request) => {
+      const response = await read(request);
+      if (
+        request === `/repos/${config.upstream.owner}/${config.upstream.repo}` &&
+        response.status === 200 &&
+        (response.body as { id?: unknown } | null)?.id !== g.eligibility.facts.repositoryId
+      )
+        return { status: 502, body: null };
+      return response;
+    },
     upstream: config.upstream,
     contributor: config.contributor,
+    ...(ownPr ? { ownPr } : {}),
     gated: {
       policy: g.policy,
       policyDigest: g.policyDigest,
@@ -211,7 +224,7 @@ export interface StepServices {
     deps: Omit<ShippingAuthorizeDeps, 'signer'>,
     meta: Candidate['meta'],
     policy: PolicyAssessment
-  ) => Promise<'contributor_handoff' | 'submitted' | 'blocked' | 'hand_off'>;
+  ) => Promise<'contributor_handoff' | 'submitted' | 'blocked' | 'hand_off' | 'waiting'>;
   readonly track: (context: PhaseContext) => Promise<ControllerTrackOutcome>;
 }
 
@@ -311,6 +324,16 @@ export function createSteps(
     return { manifest: validateManifest(held.manifest), pack: Buffer.from(held.pack, 'base64') };
   };
   const gate = (c: PhaseContext) => artifacts(c).require<GateRecord>('gate');
+  /** Rebases already spent in the current budget session. `rebase_session` is the record;
+   * the session-less `rebases` count is kept and read only for first-session runs that
+   * predate it. */
+  const rebasesForSession = (c: PhaseContext): number => {
+    const held = artifacts(c).get<{ sessionId: string; count: number }>('rebase_session');
+    if (held?.sessionId === c.sessionId) return held.count;
+    return c.sessionId === c.store.budgetSessionId(1)
+      ? (artifacts(c).get<number>('rebases') ?? 0)
+      : 0;
+  };
   const candidate = (c: PhaseContext): Candidate => {
     const edit = latestSourceEdit(c.store);
     const held =
@@ -358,7 +381,13 @@ export function createSteps(
     policyDigest: gate(c).policyDigest,
     budgetSessionId: c.sessionId,
   });
-  const fresh = (c: PhaseContext) => gateFreshness(services.read, c.store.config, gate(c));
+  const fresh = (c: PhaseContext) =>
+    gateFreshness(
+      services.read,
+      c.store.config,
+      gate(c),
+      artifacts(c).get<{ number: number }>('tracked_pr')
+    );
   const agentContext = (
     c: PhaseContext,
     w: ReturnType<typeof workspace>,
@@ -553,6 +582,34 @@ export function createSteps(
     },
     async implement(c) {
       const author = await approval(c);
+      if (c.run.state === 'revising') {
+        const assessed = artifacts(c).get<{ sessionId: string; admitted: boolean }>(
+          'feedback_decision'
+        );
+        if (assessed?.sessionId !== c.sessionId) {
+          const result = await assessRevisionFeedback(
+            artifacts(c).require<FeedbackItem[]>('feedback'),
+            gate(c),
+            artifacts(c).require<AgentPlan>('plan').text,
+            {
+              provider: createLlmDecisionProvider({ adapter: services.model('repair', c) }),
+              budget: {
+                ledger: c.ledger,
+                sessionId: c.sessionId,
+                rates: c.store.config.modelProfile.rates,
+              },
+              signal: c.signal,
+            }
+          );
+          artifacts(c).put('feedback_decision', {
+            sessionId: c.sessionId,
+            admitted: result.admitted,
+            verdict: JSON.stringify(result.verdict),
+          });
+          c.assertAdmission();
+          if (!result.admitted) return { kind: 'hand_off' };
+        } else if (!assessed.admitted) return { kind: 'hand_off' };
+      }
       const phaseKey = implementationPhaseKey(c.run);
       const edit = latestSourceEdit(c.store);
       const completion = artifacts(c).get<{ phaseKey: number; editCount: number }>(
@@ -596,16 +653,40 @@ export function createSteps(
       const entered = [...c.run.history]
         .reverse()
         .find((e) => e.to === 'implementing' && e.reasonCode !== ReasonCode.ResumeImplementing);
+      const priorBasis = artifacts(c).get<{
+        phaseKey: number;
+        candidate: Candidate | null;
+        verification: string | null;
+      }>('implementation_basis');
       const old =
-        c.run.state === 'revising' || entered?.reasonCode === ReasonCode.RepairRequired
-          ? candidate(c)
-          : undefined;
-      const previousVerification = old
-        ? loadVerification(c.store.storeDirectory('artifacts'), old.record.candidateSha, {
-            runId: c.run.runId,
-            expectedDigest: artifacts(c).require<string>('verification'),
-          })
-        : undefined;
+        priorBasis?.phaseKey === phaseKey
+          ? (priorBasis.candidate ?? undefined)
+          : c.run.state === 'revising' || entered?.reasonCode === ReasonCode.RepairRequired
+            ? candidate(c)
+            : undefined;
+      const basisVerification =
+        priorBasis?.phaseKey === phaseKey
+          ? priorBasis.verification
+          : old
+            ? artifacts(c).require<string>('verification')
+            : null;
+      if (priorBasis?.phaseKey !== phaseKey)
+        artifacts(c).put('implementation_basis', {
+          phaseKey,
+          candidate: old ?? null,
+          verification: basisVerification,
+        });
+      // A retained basis holds its candidate and verification together; a torn or corrupt
+      // record carrying one without the other is refused, never loaded as unverified.
+      let previousVerification: VerificationRecord | undefined;
+      if (old) {
+        if (typeof basisVerification !== 'string') throw new Error('implementation_basis_invalid');
+        previousVerification = loadVerification(
+          c.store.storeDirectory('artifacts'),
+          old.record.candidateSha,
+          { runId: c.run.runId, expectedDigest: basisVerification }
+        );
+      }
       const base = source(c);
       const w = workspace(c);
       let attemptMetadata = artifacts(c).get<{
@@ -799,7 +880,7 @@ export function createSteps(
           overlay,
           approval: held.record,
           basePack: base.pack,
-          rebases: artifacts(c).get<number>('rebases') ?? 0,
+          rebases: rebasesForSession(c),
           pushIntentJournaled: artifacts(c).get<boolean>('push_intended') ?? false,
         }
       );
@@ -810,6 +891,7 @@ export function createSteps(
       artifacts(c).put('source', { manifest: next.manifest, pack: next.pack.toString('base64') });
       artifacts(c).put('gate', { ...gate(c), baseSha: result.candidate.record.baseSha });
       artifacts(c).put('rebases', result.rebases);
+      artifacts(c).put('rebase_session', { sessionId: c.sessionId, count: result.rebases });
       artifacts(c).put('candidate', {
         touched: held.touched,
         manifest: result.manifest,
@@ -855,7 +937,7 @@ export function createSteps(
               defaultBranch: gate(c).eligibility.facts.defaultBranch,
               policyDigest: gate(c).policyDigest,
               verificationDigest: verification.recordDigest,
-              expectedRemoteSha: null,
+              expectedRemoteSha: artifacts(c).get<string>('revision_base_sha') ?? null,
             },
             profile: { digest, binding: verification.profile },
             commandPlan: verificationPlan(profile(c), services.endpoints, targets),

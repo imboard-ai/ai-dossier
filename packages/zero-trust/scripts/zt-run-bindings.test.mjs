@@ -276,6 +276,34 @@ test('cancelled CLI status retains publication URL and contributor withdrawal in
   assert.match(status.nextPermittedAction, /prepared contributor comment/);
 });
 
+test('status explains a revision paused because its feedback was not admitted', async () => {
+  const h = rig();
+  const store = h.seed();
+  for (const reason of [
+    ReasonCode.GatePassed,
+    ReasonCode.PlanApproved,
+    ReasonCode.CandidateReady,
+    ReasonCode.VerificationPassed,
+    ReasonCode.PublicationObserved,
+    ReasonCode.RevisionRequested,
+    ReasonCode.UserPaused,
+  ])
+    store.persistRun(transitionRun(store.run, reason, new Date().toISOString()));
+  const journal = new Journal(path.join(store.storeDirectory('control'), 'steps'));
+  const artifacts = new StepArtifacts(journal, store.runId);
+  artifacts.put('feedback_decision', {
+    sessionId: store.budgetSessionId(1),
+    admitted: false,
+    verdict: '{}',
+  });
+  journal.close();
+  store.close();
+  const commands = await createCommands({ root: h.root, createController });
+  const status = commands.status(store.runId);
+  assert.equal(status.state, 'paused_user');
+  assert.match(status.nextPermittedAction, /feedback was judged out of scope or ambiguous/);
+});
+
 test('start overrides file-supplied approval only with fresh OAuth consent; status opens the readOnly store API', async () => {
   const h = rig();
   const calls = [];
@@ -310,14 +338,18 @@ test('start overrides file-supplied approval only with fresh OAuth consent; stat
   await Promise.all(h.callbacks);
 });
 
-test('pure resume refuses changed authenticated account before constructing a controller or continuing work', async () => {
+test('resume delegates identity admission to the locked controller without a CLI OAuth preflight', async () => {
   const h = rig();
+  const calls = [];
   const commands = await createCommands({
     root: h.root,
     onAuthorizationUrl: h.onAuthorizationUrl,
-    createController: () => {
-      assert.fail('no continuation before identity binding');
-    },
+    createController: (config) => ({
+      resume: async (...args) => {
+        calls.push({ config, args });
+        throw Object.assign(new Error(), { code: 'author_approval_mismatch' });
+      },
+    }),
   });
   const approval = await commands.prepareAuthor(h.config);
   const store = h.seed({ ...h.config, authorApproval: approval });
@@ -325,9 +357,54 @@ test('pure resume refuses changed authenticated account before constructing a co
   store.close();
   h.setUser(13);
   await assert.rejects(commands.resume(runId), { code: 'author_approval_mismatch' });
-  await assert.rejects(commands.resume(runId, { revise: true }), { code: 'revision_unavailable' });
+  await assert.rejects(commands.resume(runId, { revise: true }), {
+    code: 'author_approval_mismatch',
+  });
   assert.equal(commands.status(runId).state, 'gating');
-  assert.deepEqual(h.counts(), { revoked: 2, userReads: 2 });
+  assert.deepEqual(h.counts(), { revoked: 1, userReads: 1 });
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].config.authorApproval.userId, approval.userId);
+  assert.deepEqual(
+    calls.map((c) => c.args),
+    [
+      [runId, { revise: false }],
+      [runId, { revise: true }],
+    ]
+  );
+  await Promise.all(h.callbacks);
+});
+test('shipping resume reaches the controller with an unavailable OAuth UI', async () => {
+  const h = rig();
+  const setup = await createCommands({
+    root: h.root,
+    onAuthorizationUrl: h.onAuthorizationUrl,
+    createController,
+  });
+  const approval = await setup.prepareAuthor(h.config);
+  const store = h.seed({ ...h.config, authorApproval: approval });
+  const runId = store.runId;
+  for (const reason of [
+    ReasonCode.GatePassed,
+    ReasonCode.PlanApproved,
+    ReasonCode.CandidateReady,
+    ReasonCode.VerificationPassed,
+  ])
+    store.persistRun(transitionRun(store.run, reason, store.run.updatedAt));
+  store.close();
+  let reached = false;
+  const commands = await createCommands({
+    root: h.root,
+    onAuthorizationUrl: () => assert.fail('no OAuth for observation'),
+    createController: () => ({
+      resume: async (id) => {
+        reached = true;
+        return { runId: id };
+      },
+    }),
+  });
+  assert.equal((await commands.resume(runId)).state, 'shipping');
+  assert.equal(reached, true);
+  assert.deepEqual(h.counts(), { revoked: 1, userReads: 1 });
   await Promise.all(h.callbacks);
 });
 

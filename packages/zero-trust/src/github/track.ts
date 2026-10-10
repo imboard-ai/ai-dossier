@@ -23,6 +23,7 @@ import {
   restoreRun,
   sameRunRecord,
   TERMINAL_STATES,
+  TRACKING_STATES,
   transitionRun,
 } from '../state';
 import { type ForkRef, ForkRefError, forkTarget, isCommitSha, readForkBranch } from './fork-ref';
@@ -140,9 +141,18 @@ async function listKeyed(read: GitHubRead, p: string, key: string): Promise<unkn
     const response = await get(read, `${p}${separator}per_page=${PAGE_SIZE}&page=${page}`);
     const body = response?.status === 200 && isRecord(response.body) ? response.body : null;
     const list = body?.[key];
-    if (!body || !Array.isArray(list) || !Number.isSafeInteger(body.total_count)) return null;
+    if (
+      !body ||
+      !Array.isArray(list) ||
+      !Number.isSafeInteger(body.total_count) ||
+      (body.total_count as number) < 0 ||
+      list.length > PAGE_SIZE
+    )
+      return null;
     items.push(...list);
-    if (list.length < PAGE_SIZE || items.length >= (body.total_count as number)) return items;
+    if (items.length > (body.total_count as number)) return null;
+    if (items.length === body.total_count) return items;
+    if (list.length < PAGE_SIZE) return null;
   }
   return null;
 }
@@ -187,7 +197,18 @@ export async function observeCi(
     get(read, `${repo}/commits/${sha}/status`),
   ]);
   const status = combined?.status === 200 && isRecord(combined.body) ? combined.body : null;
-  if (!checks || !runs || !status || !Number.isSafeInteger(status.total_count)) return 'unknown';
+  if (
+    !checks ||
+    !runs ||
+    !status ||
+    !Number.isSafeInteger(status.total_count) ||
+    (status.total_count as number) < 0 ||
+    (status.statuses !== undefined &&
+      (!Array.isArray(status.statuses) ||
+        status.statuses.length > (status.total_count as number))) ||
+    (status.total_count === 0 && status.state !== 'pending')
+  )
+    return 'unknown';
   const verdicts = [...checks, ...runs].map((item) => runVerdict(item, sha));
   // GitHub reports `pending` for a commit with no statuses at all: count only real ones.
   if ((status.total_count as number) > 0) verdicts.push(statusVerdict(status.state));
@@ -222,7 +243,7 @@ function feedbackItem(
     (raw.body !== null && typeof raw.body !== 'string')
   )
     return null;
-  const body = ((raw.body as string | null) ?? '').slice(0, MAX_FEEDBACK_BODY);
+  const body = (raw.body as string | null) ?? '';
   if (
     raw.user.type === 'Bot' ||
     !(MAINTAINER_ASSOCIATIONS as readonly unknown[]).includes(raw.author_association) ||
@@ -230,6 +251,9 @@ function feedbackItem(
     (kind === 'review' && raw.state !== 'CHANGES_REQUESTED' && !body.trim())
   )
     return undefined;
+  // Checked after the author filter: an oversized remark from anyone else must not make
+  // the whole listing unreadable, while truncated maintainer feedback is never used.
+  if (body.length > MAX_FEEDBACK_BODY) return null;
   return Object.freeze({
     id: `${kind}:${raw.id}`,
     author,
@@ -476,6 +500,8 @@ export type RevisionAdmission = Pick<
 
 /** What a `PrTracker` reads and writes with; all controller-owned. */
 export interface TrackDeps {
+  /** Write-ahead controller artifact, before revision_started becomes durable. */
+  readonly retainRevisionFeedback?: (feedback: readonly FeedbackItem[]) => void;
   readonly read: GitHubRead;
   /** Controller-held numeric authority: upstream from RunStore, fork from a validated
    * retained signed receipt. Never populate from fresh GitHub responses. Absent means
@@ -830,8 +856,6 @@ function actionOf(state: TrackState, value: unknown, directory: string | null): 
   return Object.freeze({ kind, ...base, ...text, reason: raw.reason as WithdrawalReason });
 }
 
-const TRACKING: readonly RunState[] = ['submitted', 'awaiting_review', 'accepted'];
-
 function reduce(state: TrackState | undefined, raw: unknown, directory: string | null): TrackState {
   if (!isRecord(raw) || raw.v !== 1) fail('event');
   if (raw.type === 'track') {
@@ -842,7 +866,7 @@ function reduce(state: TrackState | undefined, raw: unknown, directory: string |
     // The run, never a caller, names the target: its issue's repository and contributor.
     const issue = upstreamIssueBinding(run.upstreamIssue).upstream;
     if (
-      !TRACKING.includes(run.state) ||
+      !TRACKING_STATES.includes(run.state) ||
       !sameLogin(issue.owner, pr.binding.upstream.owner) ||
       !sameLogin(issue.repo, pr.binding.upstream.repo) ||
       !sameLogin(pr.binding.headOwner, run.contributor)
@@ -1200,6 +1224,15 @@ export class PrTracker {
       (track.branchSha !== null && !allowed.includes(track.branchSha))
     );
   }
+  private headBlockReason(
+    track: Observed,
+    candidate = this.state.revision?.candidateSha
+  ): TrackBlockReason {
+    return track.branchSha !== null &&
+      ![this.state.verifiedSha, candidate].includes(track.branchSha)
+      ? 'push_blocked'
+      : 'unexpected_head_sha';
+  }
 
   /** One read of the tracked PR, following a replacement PR when the tracked one is closed
    * (AC6). Records only a rebind; every other decision is the caller's. */
@@ -1293,7 +1326,7 @@ export class PrTracker {
     const revision = this.state.revision;
     if (revision) return this.duringRevision(track, revision);
     const state = this.state.run.state;
-    if (!TRACKING.includes(state)) return { kind: 'tracking', status: this.status() };
+    if (!TRACKING_STATES.includes(state)) return { kind: 'tracking', status: this.status() };
     const outcome = upstreamOutcome(track);
     if (outcome === 'merged' || outcome === 'declined') {
       const reason =
@@ -1302,7 +1335,7 @@ export class PrTracker {
       this.persist({ v: 1, type: 'outcome', outcome, headSha: track.headSha, run });
       return { kind: outcome, status: this.status() };
     }
-    if (this.unexpectedHead(track)) return this.block('unexpected_head_sha');
+    if (this.unexpectedHead(track)) return this.block(this.headBlockReason(track));
     if (state === 'submitted')
       this.persist({
         v: 1,
@@ -1317,7 +1350,7 @@ export class PrTracker {
   private duringRevision(track: Observed, revision: Revision): TrackOutcome {
     if (track.merged) return this.block('merged_during_revision', track.headSha);
     if (track.state === 'closed') return this.closedDuringRevision();
-    if (this.unexpectedHead(track)) return this.block('unexpected_head_sha');
+    if (this.unexpectedHead(track)) return this.block(this.headBlockReason(track));
     if (this.state.run.state !== 'shipping' || !revision.candidateSha)
       return { kind: 'tracking', status: this.status() };
     if (track.headSha !== revision.candidateSha)
@@ -1337,6 +1370,9 @@ export class PrTracker {
   }
 
   private closedDuringRevision(): TrackOutcome {
+    // Closure takes precedence over an unfinished edit. Preserve its prepared
+    // bytes/journal evidence, but cancel that action before issuing the reopen.
+    if (this.state.action?.kind === 'edit') this.persist({ v: 1, type: 'action_cancelled' });
     if (!this.state.action && isAdmitted('pr_update', this.state.run.state))
       this.persist({
         v: 1,
@@ -1380,13 +1416,15 @@ export class PrTracker {
       if (this.state.action) throw new TrackError('action_pending', this.state.action.kind);
       const read = await this.observe();
       const outcome = this.apply(read);
-      if (outcome.kind !== 'tracking' || !TRACKING.includes(this.state.run.state)) return outcome;
+      if (outcome.kind !== 'tracking' || !TRACKING_STATES.includes(this.state.run.state))
+        return outcome;
       if (read.kind !== 'observed' || !read.feedback)
         return { kind: 'unknown', detail: 'feedback', status: this.status() };
       const feedback = actionableFeedback(this.state, read.feedback);
       if (!feedback.length) return { kind: 'nothing_to_revise', status: this.status() };
       const stale = await this.fresh();
       if (stale) return this.block(stale);
+      this.deps.retainRevisionFeedback?.(feedback);
       this.persist({
         v: 1,
         type: 'revision_started',
@@ -1423,7 +1461,8 @@ export class PrTracker {
       if (track.merged) return this.block('merged_during_revision', track.headSha);
       if (track.state === 'closed') return this.closedDuringRevision();
       // Only the last verified SHA, or this candidate after a lost push response (scenario 18).
-      if (this.unexpectedHead(track, candidateSha)) return this.block('unexpected_head_sha');
+      if (this.unexpectedHead(track, candidateSha))
+        return this.block(this.headBlockReason(track, candidateSha));
       if (!revision.candidateSha) this.persist({ v: 1, type: 'revision_pushing', candidateSha });
       if (track.branchSha !== candidateSha) {
         try {
@@ -1482,7 +1521,10 @@ export class PrTracker {
       if (settled) return settled;
       if (!this.state.revision || !isAdmitted('pr_update', this.state.run.state))
         throw new TrackError('admission_state', this.state.run.state);
-      if (this.state.action) return this.pendingAction(this.state.action);
+      if (this.state.action) {
+        const stale = await this.fresh();
+        return stale ? this.block(stale) : this.pendingAction(this.state.action);
+      }
       const title = prTitle(request.title);
       const body = request.body;
       if (typeof body !== 'string' || body.length > MAX_BODY_LENGTH)
@@ -1492,6 +1534,8 @@ export class PrTracker {
       assertVisibleBody(body, this.state.pr.marker);
       assertNoSecrets(body);
       assertContentPolicy(`${title}\n${body}`, request.evidence);
+      const stale = await this.fresh();
+      if (stale) return this.block(stale);
       const input = this.input('pr_update');
       const action: PendingAction = {
         kind: 'edit',

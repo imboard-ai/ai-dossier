@@ -13,6 +13,7 @@ import {
   removeTemps,
   VerifierFakeVm,
 } from '../../__tests__/verifier-fixture';
+import { BudgetLedger } from '../../budget';
 import { TrustedGit } from '../../canonical/trusted-git';
 import {
   CLIENT_ID,
@@ -26,6 +27,7 @@ import {
 } from '../../github/__tests__/github-fake';
 import { Fork } from '../../github/__tests__/push-rig';
 import { ForkCredentialBroker } from '../../github/broker';
+import { findHandoffMarkers } from '../../github/handoff';
 import { Journal } from '../../journal';
 import {
   type ModelAdapter,
@@ -42,7 +44,7 @@ import { approveCheckpoint } from '../checkpoints';
 import { validateRunConfig } from '../config';
 import { readControlRequests, requestControl } from '../control';
 import { applyUserPatch, changeCheckpoints, changeModelProfile } from '../edits';
-import { readOutcomeBudget } from '../outcome-records';
+import { readOutcomeBudget, readOutcomeTrack } from '../outcome-records';
 import { RunStore } from '../run-store';
 import { StepArtifacts } from '../steps';
 import { loadVerification } from '../verification-record';
@@ -102,6 +104,13 @@ function rig(
     activeControl?: 'write' | 'exec' | 'model' | 'mint' | 'engagement';
     onlyRepair?: boolean;
     teardownFails?: boolean;
+    revisionStop?: 'issue' | 'ban' | 'merged' | 'closed';
+    revisionAmbiguous?: boolean;
+    revisionDecisionReject?: boolean;
+    revisionPending?: boolean;
+    revisionDivergeOnMint?: boolean;
+    revisionDrift?: boolean;
+    upstreamReplaced?: boolean;
   } = {}
 ) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zt-composition-'));
@@ -224,6 +233,9 @@ function rig(
     .update(`blob ${Buffer.byteLength(policy)}\0${policy}`)
     .digest('hex');
   let submitted: Record<string, unknown> | undefined;
+  let feedback: Record<string, unknown>[] = [];
+  let revisionMode = false;
+  let revisionProduced = false;
   let comment: Record<string, unknown> | undefined;
   let invitation: Record<string, unknown> | undefined;
   let branchReads = 0;
@@ -237,11 +249,12 @@ function rig(
     releaseFork = resolve;
   });
   const read: NonNullable<Parameters<typeof createController>[1]>['read'] = async (p) => {
+    if (revisionProduced && options.revisionStop === 'ban') policy = 'AI contributions are banned.';
     if (p === '/repos/upstream/fixture')
       return {
         status: 200,
         body: {
-          id: UPSTREAM_ID,
+          id: options.upstreamReplaced ? UPSTREAM_ID + 1 : UPSTREAM_ID,
           full_name: 'upstream/fixture',
           default_branch: 'main',
           private: false,
@@ -255,7 +268,7 @@ function rig(
         body: {
           number: 7,
           html_url: config.issueUrl,
-          state: 'open',
+          state: revisionProduced && options.revisionStop === 'issue' ? 'closed' : 'open',
           locked: false,
           user: { login: 'reporter', html_url: 'https://github.com/reporter' },
           author_association: 'CONTRIBUTOR',
@@ -269,8 +282,12 @@ function rig(
     if (p.includes('/timeline?')) return { status: 200, body: [] };
     if (p.startsWith('/repos/upstream/fixture/branches/')) {
       if (options.baseUnavailable) return { status: 503, body: null };
-      if (options.driftTouch && ++branchReads > 1) {
+      if (
+        (options.driftTouch && ++branchReads > 1) ||
+        (options.revisionDrift && revisionProduced)
+      ) {
         if (!advanced) {
+          if (options.revisionDrift) clock += 60000;
           const entry = CANDIDATE.entries.find((e) => e.path === 'package.json');
           if (!entry) throw new Error('fixture missing package');
           const bytes = JSON.stringify({
@@ -351,7 +368,20 @@ function rig(
     }
     if (p.startsWith('/repos/upstream/fixture/pulls?'))
       return { status: 200, body: submitted ? [submitted] : [] };
-    if (p === '/repos/upstream/fixture/pulls/8') return { status: 200, body: submitted };
+    if (p === '/repos/upstream/fixture/pulls/8') {
+      if (submitted && revisionProduced) {
+        if (options.revisionStop === 'merged') {
+          submitted.merged_at = TIME;
+          submitted.state = 'closed';
+        }
+        if (options.revisionStop === 'closed') submitted.state = 'closed';
+        if (!options.revisionPending) {
+          const head = submitted.head as { ref: string; sha: string };
+          head.sha = fork.sha(head.ref) ?? head.sha;
+        }
+      }
+      return { status: 200, body: submitted };
+    }
     if (p.includes('/issues/7/comments?') && options.activeControl === 'engagement' && !blocked) {
       blocked = true;
       controlReached();
@@ -360,14 +390,25 @@ function rig(
     if (p.includes('/issues/7/comments?'))
       return { status: 200, body: [comment, invitation].filter(Boolean) };
     if (p.endsWith('/issues/comments/10')) return { status: 200, body: invitation };
-    if (p.includes('/actions/runs?')) return { status: 200, body: { workflow_runs: [] } };
-    if (p.includes('/check-runs')) return { status: 200, body: { check_runs: [] } };
-    if (p.endsWith('/status')) return { status: 200, body: { statuses: [] } };
+    if (p.includes('/issues/8/comments?')) return { status: 200, body: feedback };
+    if (p.includes('/actions/runs?'))
+      return { status: 200, body: { total_count: 0, workflow_runs: [] } };
+    if (p.includes('/check-runs')) return { status: 200, body: { total_count: 0, check_runs: [] } };
+    if (p.endsWith('/status')) return { status: 200, body: { total_count: 0, statuses: [] } };
     if (p.includes('/comments?') || p.includes('/reviews?')) return { status: 200, body: [] };
     return { status: 404, body: null };
   };
   const fetcher: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
+    if (
+      options.revisionDivergeOnMint &&
+      revisionProduced &&
+      url.pathname.endsWith('/access_tokens')
+    ) {
+      const head = submitted?.head as { ref: string };
+      fork.git(['update-ref', `refs/heads/${head.ref}`, BASE_COMMIT.baseSha]);
+      options.revisionDivergeOnMint = false;
+    }
     if (options.activeControl === 'mint' && url.pathname.endsWith('/access_tokens') && !blocked) {
       blocked = true;
       controlReached();
@@ -424,6 +465,11 @@ function rig(
           value: values[question.id],
           citations: [{ sourceId: 'CONTRIBUTING.md', line: 1, quote: policy.split('\n')[0] }],
         };
+        if (question.id === 'revision-feedback')
+          arguments_ = {
+            value: options.revisionAmbiguous ? seq % 2 === 0 : !options.revisionDecisionReject,
+            citations: [{ sourceId: 'comment:11', line: 1, quote: String(feedback[0].body) }],
+          };
       } else if (JSON.stringify(request.tools).includes('submit_plan')) {
         planCalls++;
         if (options.cancelDuringPlan) {
@@ -471,7 +517,11 @@ function rig(
           ? {
               kind: 'worker_write_file',
               path: e.path,
-              content: Buffer.from(e.bytes, 'base64').toString('utf8'),
+              content:
+                Buffer.from(e.bytes, 'base64').toString('utf8') +
+                (revisionMode && e.path === 'src/duration.js'
+                  ? '\n// Clarify duration units.\n'
+                  : ''),
             }
           : {
               kind: 'candidate_ready',
@@ -480,6 +530,7 @@ function rig(
               scope: 'Duration conversion and regression',
               limitations: [],
             };
+        if (revisionMode && !e) revisionProduced = true;
       }
       return {
         kind: 'tool_calls',
@@ -632,6 +683,40 @@ function rig(
     identityUnavailable() {
       options.userUnavailable = true;
     },
+    feedback(body = 'Please clarify the duration units in the fix.') {
+      revisionMode = true;
+      implementTurn = 0;
+      feedback = [
+        {
+          id: 11,
+          html_url: 'https://github.com/upstream/fixture/pull/8#issuecomment-11',
+          user: { login: 'maintainer', type: 'User' },
+          author_association: 'MEMBER',
+          updated_at: new Date(clock).toISOString(),
+          body,
+        },
+      ];
+    },
+    showRevision() {
+      options.revisionPending = false;
+    },
+    replaceUpstream() {
+      options.upstreamReplaced = true;
+    },
+    banPolicy() {
+      policy = 'AI contributions are banned.';
+    },
+    idleMinutes(minutes: number) {
+      clock += minutes * 60000;
+    },
+    closePr() {
+      if (submitted) submitted.state = 'closed';
+    },
+    reopenPr() {
+      if (submitted) submitted.state = 'open';
+      options.revisionStop = undefined;
+    },
+    pr: () => submitted,
     invite() {
       invitation = {
         id: 10,
@@ -697,6 +782,547 @@ function rig(
 }
 
 describe('createController real composition', () => {
+  async function published(h: ReturnType<typeof rig>) {
+    const started = (await h.authorize(h.controller.start(h.config))) as { runId: string };
+    h.submit(started.runId);
+    expect(
+      ((await h.authorize(h.controller.resume(started.runId))) as { state: string }).state
+    ).toBe('submitted');
+    h.advanceClock();
+    return started.runId;
+  }
+  it('observes only, then revises the same PR with a retained-spend session and verified CAS', async () => {
+    const h = rig();
+    const id = await published(h);
+    h.feedback();
+    const before = h.artifacts(id);
+    const old = readOutcomeBudget(before.store);
+    before.close();
+    const calls = h.modelCalls();
+    const pushes = pushCalls().length;
+    expect((await h.controller.resume(id)).state).toBe('awaiting_review');
+    expect(h.modelCalls()).toBe(calls);
+    expect(pushCalls()).toHaveLength(pushes);
+    expect(
+      ((await h.authorize(h.controller.resume(id, { revise: true }))) as { state: string }).state
+    ).toBe('submitted');
+    const a = h.artifacts(id);
+    const budget = readOutcomeBudget(a.store);
+    expect(budget.sessions).toHaveLength(2);
+    expect(budget.sessions[0]).toEqual(old.sessions[0]);
+    expect(budget.reservations.filter((r) => r.sessionId === old.sessions[0].id)).toEqual(
+      old.reservations
+    );
+    const candidate = a.get<{ record: { candidateSha: string } }>('candidate');
+    expect((h.pr()?.head as { sha: string }).sha).toBe(candidate.record.candidateSha);
+    expect(h.fork.sha(`ztfc/${a.store.contributionId}`)).toBe(candidate.record.candidateSha);
+    expect(a.get<{ recordDigest: string }>('verification')).toBeDefined();
+    a.close();
+    expect(pushCalls().length).toBe(pushes + 1);
+    const afterCalls = h.modelCalls();
+    await h.controller.resume(id, { revise: true });
+    expect(h.modelCalls()).toBe(afterCalls);
+    expect(pushCalls().length).toBe(pushes + 1);
+    const repeated = h.artifacts(id);
+    expect(readOutcomeBudget(repeated.store).sessions).toHaveLength(2);
+    repeated.close();
+    expect(h.repairEvidence.join('\n')).toContain('Please clarify');
+    expect(await h.vm.listByRun(id)).toEqual([]);
+  }, 30000);
+  it.each([
+    'issue',
+    'ban',
+    'merged',
+    'closed',
+  ] as const)('retains revision evidence and pushes nothing after %s changes', async (revisionStop) => {
+    const h = rig({ revisionStop });
+    const id = await published(h);
+    h.feedback();
+    const pushes = pushCalls().length;
+    const run = (await h.authorize(h.controller.resume(id, { revise: true }))) as { state: string };
+    expect(run.state).toBe(revisionStop === 'closed' ? 'shipping' : 'blocked');
+    expect(pushCalls()).toHaveLength(pushes);
+    const a = h.artifacts(id);
+    expect(a.get('candidate')).toBeDefined();
+    expect(a.get('verification')).toBeDefined();
+    if (revisionStop === 'issue' || revisionStop === 'ban') {
+      // The stale issue or policy itself blocked the push, with its probe evidence retained.
+      expect(a.get<{ blockedReason: string }>('tracking').blockedReason).toBe('admission_policy');
+      expect(a.get<{ fresh: boolean }>('revision_freshness').fresh).toBe(false);
+    }
+    if (revisionStop === 'merged')
+      expect(a.get<{ blockedReason: string }>('tracking').blockedReason).toBe(
+        'merged_during_revision'
+      );
+    if (revisionStop === 'closed')
+      expect(a.get<{ action: { kind: string } }>('tracking').action.kind).toBe('reopen');
+    a.close();
+  }, 30000);
+  it('blocks an out-of-band fork head without overwriting it', async () => {
+    const h = rig();
+    const id = await published(h);
+    h.feedback();
+    const a = h.artifacts(id);
+    const branch = `ztfc/${a.store.contributionId}`;
+    a.close();
+    h.fork.git(['update-ref', `refs/heads/${branch}`, BASE_COMMIT.baseSha]);
+    const pushes = pushCalls().length;
+    expect((await h.controller.resume(id, { revise: true })).state).toBe('blocked');
+    expect(pushCalls()).toHaveLength(pushes);
+    expect(h.fork.sha(branch)).toBe(BASE_COMMIT.baseSha);
+    const blocked = h.artifacts(id);
+    expect(blocked.get<{ blockedReason: string }>('tracking').blockedReason).toBe('push_blocked');
+    blocked.close();
+  }, 30000);
+  it('CAS refuses divergence introduced after freshness admission, retaining remote bytes', async () => {
+    const h = rig({ revisionDivergeOnMint: true });
+    const id = await published(h);
+    h.feedback();
+    const result = await h.authorize(h.controller.resume(id, { revise: true }));
+    expect(result).toMatchObject({ state: 'blocked' });
+    const a = h.artifacts(id);
+    expect(h.fork.sha(`ztfc/${a.store.contributionId}`)).toBe(BASE_COMMIT.baseSha);
+    expect(a.get<{ blockedReason: string }>('tracking').blockedReason).toBe('push_blocked');
+    a.close();
+  }, 30000);
+  it('recovers a crash after tracker revision admission but before new-session allocation', async () => {
+    const h = rig();
+    const id = await published(h);
+    h.feedback();
+    const original = BudgetLedger.prototype.startSession;
+    const fail = vi.spyOn(BudgetLedger.prototype, 'startSession').mockImplementation(function (
+      this: BudgetLedger,
+      session
+    ) {
+      if (session.id.endsWith('-s2')) throw new Error('allocation interruption');
+      return original.call(this, session);
+    });
+    await expect(h.authorize(h.controller.resume(id, { revise: true }))).rejects.toThrow();
+    fail.mockRestore();
+    expect(((await h.authorize(h.controller.resume(id))) as { state: string }).state).toBe(
+      'submitted'
+    );
+    const a = h.artifacts(id);
+    expect(readOutcomeBudget(a.store).sessions).toHaveLength(2);
+    a.close();
+  }, 30000);
+  it.each([
+    'candidate',
+    'confirmation',
+  ] as const)('recovers the durable revision %s crash prefix', async (point) => {
+    const h = rig();
+    const id = await published(h);
+    h.feedback();
+    const original = StepArtifacts.prototype.put;
+    let interrupted = false;
+    const fault = vi.spyOn(StepArtifacts.prototype, 'put').mockImplementation(function (
+      this: StepArtifacts,
+      key,
+      value
+    ) {
+      if (
+        !interrupted &&
+        h.repairEvidence.length > 0 &&
+        ((point === 'candidate' && key === 'candidate') ||
+          (point === 'confirmation' &&
+            key === 'tracking' &&
+            (value as { state?: string }).state === 'submitted'))
+      ) {
+        interrupted = true;
+        if (point === 'candidate') original.call(this, key, value);
+        throw new Error('durable publication interruption');
+      }
+      original.call(this, key, value);
+    });
+    await expect(h.authorize(h.controller.resume(id, { revise: true }))).rejects.toThrow();
+    fault.mockRestore();
+    expect(interrupted).toBe(true);
+    const pushes = pushCalls().length;
+    expect(((await h.authorize(h.controller.resume(id))) as { state: string }).state).toBe(
+      'submitted'
+    );
+    if (point === 'confirmation') expect(pushCalls()).toHaveLength(pushes);
+    const a = h.artifacts(id);
+    expect(readOutcomeBudget(a.store).sessions).toHaveLength(2);
+    a.close();
+  }, 30000);
+  it('refuses revision admission when the current upstream numeric identity changes', async () => {
+    const h = rig();
+    const id = await published(h);
+    h.feedback();
+    h.replaceUpstream();
+    const pushes = pushCalls().length;
+    const calls = h.modelCalls();
+    await expect(h.controller.resume(id, { revise: true })).rejects.toThrow();
+    expect(pushCalls()).toHaveLength(pushes);
+    expect(h.modelCalls()).toBe(calls);
+    const a = h.artifacts(id);
+    expect(readOutcomeBudget(a.store).sessions).toHaveLength(1);
+    a.close();
+  }, 30000);
+  it('rebases an unrelated upstream advance in a new revision session and freshly verifies before CAS', async () => {
+    const h = rig({ revisionDrift: true });
+    const id = await published(h);
+    h.feedback();
+    const before = h.artifacts(id);
+    before.put('rebases', 2);
+    before.close();
+    expect(
+      ((await h.authorize(h.controller.resume(id, { revise: true }))) as { state: string }).state
+    ).toBe('submitted');
+    const a = h.artifacts(id);
+    expect(a.get<{ count: number; sessionId: string }>('rebase_session')).toEqual({
+      count: 1,
+      sessionId: a.store.budgetSessionId(2),
+    });
+    const record = a.get<{ record: { candidateSha: string; baseSha: string } }>('candidate').record;
+    expect(record.baseSha).not.toBe(BASE_COMMIT.baseSha);
+    expect(h.fork.sha(`ztfc/${a.store.contributionId}`)).toBe(record.candidateSha);
+    expect(a.store.run.history.some((e) => e.reasonCode === ReasonCode.BaseAdvanced)).toBe(true);
+    a.close();
+  }, 30000);
+  it('retains shipping on pending confirmation and resumes the exact candidate without another session or push', async () => {
+    const h = rig({ revisionPending: true });
+    const id = await published(h);
+    h.feedback();
+    expect(
+      ((await h.authorize(h.controller.resume(id, { revise: true }))) as { state: string }).state
+    ).toBe('shipping');
+    const pushes = pushCalls().length;
+    const calls = h.modelCalls();
+    h.showRevision();
+    expect(((await h.authorize(h.controller.resume(id))) as { state: string }).state).toBe(
+      'submitted'
+    );
+    expect(pushCalls()).toHaveLength(pushes);
+    expect(h.modelCalls()).toBe(calls);
+    const a = h.artifacts(id);
+    expect(readOutcomeBudget(a.store).sessions).toHaveLength(2);
+    a.close();
+  }, 30000);
+  it('observes pending confirmation after idle time and spend exhaustion with no paid work or OAuth', async () => {
+    const h = rig({ revisionPending: true });
+    const id = await published(h);
+    h.feedback();
+    await h.authorize(h.controller.resume(id, { revise: true }));
+    const a = h.artifacts(id);
+    const file = path.join(a.store.storeDirectory('budget'), 'ledger.json');
+    const ledger = new BudgetLedger(file, a.store.contributionId);
+    const session = readOutcomeBudget(a.store).sessions.at(-1);
+    if (!session) throw new Error('missing session');
+    const hold = ledger.reserve(session.id, {
+      money: { currency: 'USD', minor: 900 },
+      tokens: 0,
+      timeMs: 1,
+      rates: h.config.modelProfile.rates.filter((r) => r.resource === 'local-qemu'),
+    });
+    ledger.settle(hold.id, {
+      money: { currency: 'USD', minor: 900 },
+      tokens: 0,
+      timeMs: 0,
+      source: 'fixture-spend',
+    });
+    a.close();
+    const pushes = pushCalls().length;
+    const calls = h.modelCalls();
+    const oauth = h.fake.oauthCalls.length;
+    h.idleMinutes(121);
+    h.showRevision();
+    expect((await h.controller.resume(id)).state).toBe('submitted');
+    expect(pushCalls()).toHaveLength(pushes);
+    expect(h.modelCalls()).toBe(calls);
+    expect(h.fake.oauthCalls.length).toBe(oauth);
+  }, 30000);
+  it('new feedback after a nonzero confirmation wait allocates an independent third session', async () => {
+    const h = rig({ revisionPending: true });
+    const id = await published(h);
+    h.feedback();
+    await h.authorize(h.controller.resume(id, { revise: true }));
+    h.idleMinutes(10);
+    h.showRevision();
+    expect((await h.controller.resume(id)).state).toBe('submitted');
+    h.advanceClock();
+    h.feedback('Please clarify rounding in this same duration fix.');
+    expect(
+      ((await h.authorize(h.controller.resume(id, { revise: true }))) as { state: string }).state
+    ).toBe('submitted');
+    const a = h.artifacts(id);
+    expect(readOutcomeBudget(a.store).sessions).toHaveLength(3);
+    a.close();
+  }, 30000);
+  it('a long pre-push reopen wait preserves active allowance and ships only after observed reopen', async () => {
+    const h = rig({ revisionStop: 'closed' });
+    const id = await published(h);
+    h.feedback();
+    expect(
+      ((await h.authorize(h.controller.resume(id, { revise: true }))) as { state: string }).state
+    ).toBe('shipping');
+    const pushes = pushCalls().length;
+    h.idleMinutes(121);
+    h.reopenPr();
+    expect(((await h.authorize(h.controller.resume(id))) as { state: string }).state).toBe(
+      'submitted'
+    );
+    expect(pushCalls()).toHaveLength(pushes + 1);
+  }, 30000);
+  it('confirmation catching up does not drop an explicit withdrawal request', async () => {
+    const h = rig({ revisionPending: true });
+    const id = await published(h);
+    h.feedback();
+    await h.authorize(h.controller.resume(id, { revise: true }));
+    h.showRevision();
+    const action = await h.controller.prAction(id, {
+      kind: 'withdraw',
+      reason: 'user_instruction',
+      explanation: 'Stop.',
+    });
+    expect(action.kind).toBe('withdraw');
+    expect(h.controller.snapshot().state).toBe('submitted');
+  }, 30000);
+  it('local cancel-action remains credential-free while confirmation is pending', async () => {
+    const h = rig({ revisionPending: true });
+    const id = await published(h);
+    h.feedback();
+    await h.authorize(h.controller.resume(id, { revise: true }));
+    const body = `Updated fix.\n\n${findHandoffMarkers(String(h.pr()?.body))[0]}`;
+    await h.authorize(h.controller.prAction(id, { kind: 'edit', title: 'Updated fix', body }));
+    h.identityUnavailable();
+    const oauth = h.fake.oauthCalls.length;
+    expect((await h.controller.prAction(id, { kind: 'cancel-action' })).kind).toBe('cancel-action');
+    expect(h.fake.oauthCalls).toHaveLength(oauth);
+  }, 30000);
+  it('a contributor command is never answered with a different pending action', async () => {
+    const h = rig({ revisionPending: true });
+    const id = await published(h);
+    h.feedback();
+    await h.authorize(h.controller.resume(id, { revise: true }));
+    const body = `Updated fix.\n\n${findHandoffMarkers(String(h.pr()?.body))[0]}`;
+    const edit = { kind: 'edit', title: 'Updated fix', body } as const;
+    const first = (await h.authorize(h.controller.prAction(id, edit))) as { bodyFile: string };
+    // The same request re-issues the same pending link.
+    expect(await h.authorize(h.controller.prAction(id, edit))).toMatchObject({
+      kind: 'edit',
+      bodyFile: first.bodyFile,
+    });
+    await expect(
+      h.authorize(h.controller.prAction(id, { ...edit, title: 'Another fix' }))
+    ).rejects.toMatchObject({ code: 'action_pending' });
+    await expect(
+      h.controller.prAction(id, {
+        kind: 'withdraw',
+        reason: 'user_instruction',
+        explanation: 'Stop.',
+      })
+    ).rejects.toMatchObject({ code: 'action_unavailable' });
+    expect(fs.readFileSync(first.bodyFile, 'utf8')).toBe(body);
+  }, 30000);
+  it('revoked policy refuses an edit handoff and retains current refusal evidence', async () => {
+    const h = rig({ revisionPending: true });
+    const id = await published(h);
+    h.feedback();
+    await h.authorize(h.controller.resume(id, { revise: true }));
+    h.banPolicy();
+    const body = `Updated fix.\n\n${findHandoffMarkers(String(h.pr()?.body))[0]}`;
+    await expect(
+      h.controller.prAction(id, { kind: 'edit', title: 'Updated fix', body })
+    ).rejects.toThrow();
+    const a = h.artifacts(id);
+    expect(a.store.run.state).toBe('blocked');
+    expect(a.get<{ fresh: boolean }>('revision_freshness').fresh).toBe(false);
+    a.close();
+  }, 30000);
+  it('a legitimate cancellation during action issuance suppresses delivery and joins cleanup', async () => {
+    const h = rig();
+    const id = await published(h);
+    const original = Journal.prototype.append;
+    let requested = false;
+    const fault = vi.spyOn(Journal.prototype, 'append').mockImplementation(function (
+      this: Journal,
+      event
+    ) {
+      original.call(this, event);
+      if (!requested && (event as { type?: string }).type === 'action_issued') {
+        requested = true;
+        const store = RunStore.open(path.join(h.config.executionProfile.stateDir, 'runs'), id, {
+          readOnly: true,
+          observe: true,
+        });
+        try {
+          requestControl(store, { kind: 'cancel', reason: 'Stop' }, new Date(TIME));
+        } finally {
+          store.close();
+        }
+      }
+    });
+    await expect(
+      h.controller.prAction(id, {
+        kind: 'withdraw',
+        reason: 'user_instruction',
+        explanation: 'Stop.',
+      })
+    ).rejects.toThrow('admission_closed');
+    fault.mockRestore();
+    expect(requested).toBe(true);
+    expect(h.controller.snapshot().state).toBe('cancelled');
+    const a = h.artifacts(id);
+    expect(readControlRequests(a.store).pending).toHaveLength(0);
+    a.close();
+  }, 30000);
+  it.each([
+    false,
+    true,
+  ])('hands off restrictive/uncertain typed feedback before allocating a revision VM (uncertain=%s)', async (revisionAmbiguous) => {
+    const h = rig({ revisionAmbiguous, revisionDecisionReject: !revisionAmbiguous });
+    const id = await published(h);
+    h.feedback('Please change unrelated network credentials.');
+    const pushes = pushCalls().length;
+    expect(
+      ((await h.authorize(h.controller.resume(id, { revise: true }))) as { state: string }).state
+    ).toBe('paused_user');
+    expect(pushCalls()).toHaveLength(pushes);
+    const a = h.artifacts(id);
+    expect(a.get<{ admitted: boolean }>('feedback_decision').admitted).toBe(false);
+    a.close();
+  }, 30000);
+  it('withdrawal and cancel-action are contributor handoffs, declined only after observed close', async () => {
+    const h = rig();
+    const id = await published(h);
+    const pushes = pushCalls().length;
+    const action = {
+      kind: 'withdraw' as const,
+      reason: 'user_instruction' as const,
+      explanation: 'No longer needed.',
+    };
+    expect((await h.controller.resume(id, { action })).state).toBe('submitted');
+    let a = h.artifacts(id);
+    expect(a.get<{ link: string }>('contributor_action').link).toBe(
+      'https://github.com/upstream/fixture/pull/8'
+    );
+    a.close();
+    await h.controller.resume(id, { action: { kind: 'cancel-action' } });
+    a = h.artifacts(id);
+    expect(a.get<{ kind: string }>('contributor_action').kind).toBe('cancel-action');
+    a.close();
+    await h.controller.resume(id, { action });
+    h.closePr();
+    expect((await h.controller.resume(id)).state).toBe('declined');
+    expect(pushCalls()).toHaveLength(pushes);
+  }, 30000);
+  it('pr-edit is revision-only and confirms contributor edits by read-back on the same PR', async () => {
+    const h = rig({ revisionPending: true });
+    const id = await published(h);
+    const body = `Clarified duration fix.\n\n${findHandoffMarkers(String(h.pr()?.body))[0]}`;
+    const action = { kind: 'edit' as const, title: 'Clarified duration fix', body };
+    await expect(h.controller.resume(id, { action })).rejects.toThrow();
+    h.feedback();
+    await h.authorize(h.controller.resume(id, { revise: true }));
+    const pushes = pushCalls().length;
+    expect(
+      ((await h.authorize(h.controller.resume(id, { action }))) as { state: string }).state
+    ).toBe('shipping');
+    const a = h.artifacts(id);
+    const pending = a.get<{ link: string; title: string; bodyFile: string }>('contributor_action');
+    expect(pending.title).toBe(action.title);
+    expect(fs.readFileSync(pending.bodyFile, 'utf8')).toBe(body);
+    a.close();
+    const pr = h.pr();
+    if (!pr) throw new Error('missing PR');
+    pr.title = action.title;
+    pr.body = body;
+    h.showRevision();
+    expect(((await h.authorize(h.controller.resume(id))) as { state: string }).state).toBe(
+      'submitted'
+    );
+    expect(pushCalls()).toHaveLength(pushes);
+    const done = h.artifacts(id);
+    expect(done.get<{ action?: unknown }>('tracking').action).toBeUndefined();
+    done.close();
+  }, 30000);
+  it('observed closure supersedes a pending edit with a reopen handoff, retaining its text', async () => {
+    const h = rig({ revisionPending: true });
+    const id = await published(h);
+    h.feedback();
+    await h.authorize(h.controller.resume(id, { revise: true }));
+    const body = `Clarified fix.\n\n${findHandoffMarkers(String(h.pr()?.body))[0]}`;
+    const edit = (await h.authorize(
+      h.controller.prAction(id, { kind: 'edit', title: 'Clarified fix', body })
+    )) as { bodyFile: string };
+    const pushes = pushCalls().length;
+    h.closePr();
+    expect((await h.controller.resume(id)).state).toBe('shipping');
+    const a = h.artifacts(id);
+    expect(a.get<{ action: { kind: string } }>('tracking').action.kind).toBe('reopen');
+    expect(fs.readFileSync(edit.bodyFile, 'utf8')).toBe(body);
+    a.close();
+    expect(pushCalls()).toHaveLength(pushes);
+    h.reopenPr();
+    h.showRevision();
+    expect((await h.controller.resume(id)).state).toBe('submitted');
+  }, 30000);
+  it('a legitimate cancel preempts a contributor command without returning a stale action', async () => {
+    const h = rig();
+    const id = await published(h);
+    await h.controller.prAction(id, {
+      kind: 'withdraw',
+      reason: 'user_instruction',
+      explanation: 'No longer needed.',
+    });
+    const a = h.artifacts(id);
+    requestControl(a.store, { kind: 'cancel', reason: 'Stop' }, new Date(TIME));
+    a.close();
+    await expect(h.controller.prAction(id, { kind: 'cancel-action' })).rejects.toThrow(
+      'admission_closed'
+    );
+    expect(h.controller.snapshot().state).toBe('cancelled');
+  }, 30000);
+  it.each([
+    'review_awaited',
+    'revision_started',
+    'outcome',
+  ] as const)('synchronizes durable tracker %s before concurrent legitimate cancellation', async (eventType) => {
+    const h = rig();
+    const id = await published(h);
+    h.feedback();
+    if (eventType === 'outcome') {
+      const pr = h.pr();
+      if (!pr) throw new Error('missing PR');
+      pr.merged_at = TIME;
+      pr.state = 'closed';
+    }
+    const original = Journal.prototype.append;
+    let requested = false;
+    const fault = vi.spyOn(Journal.prototype, 'append').mockImplementation(function (
+      this: Journal,
+      event
+    ) {
+      original.call(this, event);
+      if (!requested && (event as { type?: string }).type === eventType) {
+        requested = true;
+        const store = RunStore.open(path.join(h.config.executionProfile.stateDir, 'runs'), id, {
+          readOnly: true,
+          observe: true,
+        });
+        try {
+          requestControl(store, { kind: 'cancel', reason: 'Stop' }, new Date(TIME));
+        } finally {
+          store.close();
+        }
+      }
+    });
+    const run = (await h.authorize(
+      h.controller.resume(id, { revise: eventType === 'revision_started' })
+    )) as { state: string };
+    fault.mockRestore();
+    expect(requested).toBe(true);
+    expect(run.state).toBe(eventType === 'outcome' ? 'merged' : 'cancelled');
+    const a = h.artifacts(id);
+    const track = new Journal(a.store.storeDirectory('track'));
+    const events = track.read();
+    track.close();
+    expect(events.some((e) => (e as { type?: string }).type === eventType)).toBe(true);
+    expect(readOutcomeTrack(a.store, a.store.run)?.run).toEqual(a.store.run);
+    a.close();
+  }, 30000);
   it('model switch preserves ledger bytes and uses the new adapter under the existing session', async () => {
     const h = rig({ checkpoint: 'plan' });
     const run = (await h.authorize(h.controller.start(h.config))) as {

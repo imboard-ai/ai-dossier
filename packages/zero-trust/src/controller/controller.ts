@@ -4,18 +4,22 @@ import { type BudgetLedger, isBudgetSessionExhausted } from '../budget';
 import type { BudgetEstimate, BudgetObservation, BudgetReservation } from '../budget-types';
 import { readPrivate } from '../durable-fs';
 import { applyVerification } from '../ecosystem/classify';
+import { WITHDRAWAL_REASONS, type WithdrawalReason } from '../github/track';
 import { Journal } from '../journal';
 import { canonicalJson } from '../receipt/schema';
 import { assertSecretFree } from '../redaction';
 import {
   isRecord,
   isRunContinuation,
+  isTrackerPhase,
   ReasonCode,
   type RunRecord,
   type RunState,
   restoreRun,
+  revisionCount,
   sameRunRecord,
   TERMINAL_STATES,
+  TRACKING_STATES,
   transitionRun,
 } from '../state';
 import type { VmAdapter, VmHandle, VmSpec } from '../vm/adapter';
@@ -36,6 +40,11 @@ import {
   readControlRequests,
 } from './control';
 import { latestSourceEdit, sourceEditCount } from './edits';
+import {
+  nextPublicationWait,
+  type OpenPublicationWait,
+  publicationWaitTime,
+} from './lifecycle-times';
 import { RunStore } from './run-store';
 import { assembleStatus } from './status';
 import { loadVerification, type VerificationRecord } from './verification-record';
@@ -85,7 +94,12 @@ export type DriftOutcome =
 export type ShipOutcome =
   | PhaseStop
   | {
-      readonly kind: 'submitted' | 'contributor_handoff' | 'fork_missing' | 'installation_missing';
+      readonly kind:
+        | 'submitted'
+        | 'contributor_handoff'
+        | 'fork_missing'
+        | 'installation_missing'
+        | 'waiting';
     };
 export type ResumeHandoffOutcome =
   | PhaseStop
@@ -112,6 +126,9 @@ export type ControllerTrackOutcome =
     };
 
 export interface PhaseContext {
+  /** The operator explicitly requested a revision (`resume --revise`). */
+  readonly revise: boolean;
+  readonly observeRun: (run: RunRecord) => Promise<void>;
   readonly store: RunStore;
   readonly run: RunRecord;
   readonly ledger: BudgetLedger;
@@ -140,6 +157,8 @@ export interface ObservingDriver {
 }
 /** Structural interfaces deliberately avoid even type imports from credential modules. */
 export interface RecoveryHooks {
+  /** True while a pushed revision awaits read-back; resume then only observes. */
+  revisionWaiting?(context: PhaseContext): boolean;
   openStore(root: string, runId: string): RunStore;
   openBudget(store: RunStore): BudgetLedger;
   reconcileHold(hold: BudgetReservation, context: PhaseContext): Promise<BudgetObservation | null>;
@@ -163,6 +182,10 @@ export interface RecoveryHooks {
   prepareCancellation?(context: PhaseContext): Promise<void>;
 }
 export interface ControllerDependencies {
+  readonly trackerAction?: (
+    context: PhaseContext,
+    request: TrackerActionRequest
+  ) => Promise<TrackerActionResult>;
   /** Stop-only external fence. It can revoke admission, never grant authority. */
   readonly incidentRequested?: () => boolean;
   /** Release run-owned journals/credential leases before the RunStore pins close. */
@@ -180,12 +203,28 @@ export interface ControllerDependencies {
   ) => Promise<BudgetObservation | null>;
   readonly now: () => Date;
 }
+export type TrackerActionRequest =
+  | { readonly kind: 'edit'; readonly title: string; readonly body: string }
+  | {
+      readonly kind: 'withdraw';
+      readonly reason: WithdrawalReason;
+      readonly explanation: string;
+    }
+  | { readonly kind: 'cancel-action' };
+export interface TrackerActionResult {
+  readonly kind: 'edit' | 'withdraw' | 'reopen' | 'cancel-action';
+  readonly link: string;
+  readonly instructions: string;
+  readonly title?: string;
+  readonly bodyFile?: string;
+}
 export class ControllerError extends Error {
   constructor(
     readonly code:
       | 'busy'
       | 'not_running'
       | 'invalid_outcome'
+      | 'revision_unavailable'
       | 'invalid_journal'
       | 'step_failed'
       | 'admission_closed'
@@ -222,7 +261,7 @@ const KINDS: Record<PhaseName, readonly string[]> = {
   review: ['approved'],
   verify: ['verified'],
   drift: ['unchanged', 'advanced'],
-  ship: ['submitted', 'contributor_handoff', 'fork_missing', 'installation_missing'],
+  ship: ['submitted', 'contributor_handoff', 'fork_missing', 'installation_missing', 'waiting'],
   resumeHandoff: [
     'waiting',
     'invited',
@@ -263,6 +302,35 @@ const REASONS: Partial<Record<Outcome['kind'], ReasonCode>> = {
   revision: ReasonCode.RevisionRequested,
   ...STOP_REASONS,
 };
+/** Tracker outcomes that re-observe an already recorded state: when the run already carries
+ * the same reason, a repeat observation must not append a duplicate transition. */
+const IDEMPOTENT_TRACK_OUTCOMES: readonly Outcome['kind'][] = [
+  'revision',
+  'submitted',
+  'merged',
+  'declined',
+  'awaiting_review',
+  'blocked',
+];
+const ACTION_KEYS: Record<TrackerActionRequest['kind'], readonly string[]> = {
+  edit: ['body', 'kind', 'title'],
+  withdraw: ['explanation', 'kind', 'reason'],
+  'cancel-action': ['kind'],
+};
+/** A contributor action is a closed shape; anything else is refused before any effect. */
+function assertTrackerAction(action: TrackerActionRequest): void {
+  assertSecretFree(action);
+  const keys = Object.hasOwn(ACTION_KEYS, action.kind) ? ACTION_KEYS[action.kind] : undefined;
+  if (
+    !keys ||
+    Object.keys(action).sort().join(',') !== keys.join(',') ||
+    (action.kind === 'edit' &&
+      (typeof action.title !== 'string' || typeof action.body !== 'string')) ||
+    (action.kind === 'withdraw' &&
+      (!WITHDRAWAL_REASONS.includes(action.reason) || typeof action.explanation !== 'string'))
+  )
+    throw new ControllerError('invalid_outcome');
+}
 function stopped(state: RunState): boolean {
   return (
     state.startsWith('awaiting_') ||
@@ -313,6 +381,10 @@ export class RunController {
   private controlCleanup?: Promise<void>;
   private controlReconciled?: Promise<void>;
   private controlReconciledKind?: 'pause' | 'cancel';
+  /** The operator passed `--revise`: this invocation may admit a new revision. */
+  private revise = false;
+  private actionResult?: TrackerActionResult;
+  private publicationWait?: OpenPublicationWait;
   constructor(private readonly deps: ControllerDependencies) {}
   snapshot(): RunRecord {
     if (!this.last) throw new ControllerError('not_running');
@@ -323,22 +395,25 @@ export class RunController {
       this.store = RunStore.create(this.deps.root, config, this.deps.now());
       this.ledger = this.deps.recovery.openBudget(this.store);
       this.ledger.initialize([], this.store.config.modelProfile.rates);
-      const budget = this.store.config.budget;
-      this.ledger.startSession({
-        id: this.store.budgetSessionId(1),
-        ceiling: { currency: budget.currency, minor: budget.ceilingMinor },
-        cleanupAllowance: budget.cleanupAllowanceMinor,
-        tokenLimit: budget.tokenLimit,
-        timeLimitMs: budget.activeMinutes * 60_000,
-      });
+      this.ledger.startSession(this.sessionInput(1));
       this.openJournal(false);
       this.notify(this.store.run);
       return this.loop(false);
     });
   }
-  resume(runId: string): Promise<RunRecord> {
+  resume(
+    runId: string,
+    options: { readonly revise?: boolean; readonly action?: TrackerActionRequest } = {}
+  ): Promise<RunRecord> {
+    const revise = options.revise === true;
+    const action = options.action ? structuredClone(options.action) : undefined;
+    if (action) assertTrackerAction(action);
     return this.launch(async () => {
+      this.revise = revise;
       this.store = this.deps.recovery.openStore(this.deps.root, runId);
+      // Only a published PR (or a revision already in progress) can be revised.
+      if (revise && !isTrackerPhase(this.store.run))
+        throw new ControllerError('revision_unavailable');
       this.recovering = true;
       this.ledger = this.deps.recovery.openBudget(this.store);
       for (const hold of this.ledger
@@ -366,6 +441,32 @@ export class RunController {
       );
       // A wrapper cannot bypass actual listByRun/teardown reconciliation.
       await this.attemptRecovery(() => this.cleanup(), failures);
+      const beforeTracker = await this.reconcileTracker(failures);
+      this.observeControl();
+      this.observeIncident();
+      if (this.control) return this.applyControl();
+      // A completed publication or unresolved read-back is observation only.
+      // Never require credentials, work budget or source reacquisition to confirm it.
+      if (
+        !this.incident &&
+        !failures.length &&
+        beforeTracker === 'shipping' &&
+        this.store.run.state === 'submitted' &&
+        !action
+      ) {
+        this.ensureRevisionSession();
+        return this.store.run;
+      }
+      // An unconfirmed revision push is observation only: no new work until it is read back.
+      const revisionWaiting =
+        !action && this.deps.recovery.revisionWaiting?.(this.context()) === true;
+      if (!this.incident && !failures.length && revisionWaiting) return this.store.run;
+      if (!this.incident && !failures.length && action) {
+        this.ensureRevisionSession();
+        this.recovering = false;
+        return this.performAction(action);
+      }
+      if (!action && !revisionWaiting) this.finishPublicationWait();
       this.observeIncident();
       if (!this.incident)
         await this.attemptRecovery(
@@ -383,33 +484,80 @@ export class RunController {
         await this.recovered(
           await this.recover(() => this.deps.recovery.resumeHandoff(this.context()))
         );
-      if (['submitted', 'awaiting_review', 'accepted'].includes(this.store.run.state))
-        await this.recovered(
-          await this.recover(() => this.deps.recovery.resumeTracker(this.context()))
-        );
+      this.ensureRevisionSession();
       this.recovering = false;
       this.needsAcquisition = true;
-      if (
-        this.store.run.state === 'paused_user' &&
-        !['plan', 'patch', 'verification'].some(
-          (p) => this.store?.checkpoint(p as CheckpointPoint)?.status === 'open'
-        )
-      ) {
-        const phase = this.store.run.history.at(-1)?.from;
-        const reasons: Partial<Record<RunState, ReasonCode>> = {
-          gating: ReasonCode.ResumeGating,
-          planning: ReasonCode.ResumePlanning,
-          implementing: ReasonCode.ResumeImplementing,
-          verifying: ReasonCode.ResumeVerifying,
-          shipping: ReasonCode.ResumeShipping,
-          revising: ReasonCode.ResumeRevising,
-        };
-        const reason = phase ? reasons[phase] : undefined;
-        if (!reason) throw new ControllerError('invalid_journal');
-        await this.persist(transitionRun(this.store.run, reason, this.deps.now().toISOString()));
-      }
+      await this.leaveUserPause();
       return this.loop(true);
     });
+  }
+  /** Reconcile the PR tracker's own effects when it owns the run; returns the state the
+   * run was in before, which decides whether resume is observation only. */
+  private async reconcileTracker(failures: unknown[]): Promise<RunState> {
+    const before = this.held.run.state;
+    if (
+      !this.control &&
+      !this.incident &&
+      isTrackerPhase(this.held.run) &&
+      !TERMINAL_STATES.includes(before) &&
+      before !== 'blocked_cleanup'
+    )
+      await this.attemptRecovery(
+        async () => this.recovered(await this.deps.recovery.resumeTracker(this.context())),
+        failures
+      );
+    if (this.held.run.state !== 'shipping') this.finishPublicationWait();
+    return before;
+  }
+  /** An explicit resume of a user pause (not an open checkpoint) re-enters its phase. */
+  private async leaveUserPause(): Promise<void> {
+    const run = this.held.run;
+    if (
+      run.state !== 'paused_user' ||
+      ['plan', 'patch', 'verification'].some(
+        (p) => this.held.checkpoint(p as CheckpointPoint)?.status === 'open'
+      )
+    )
+      return;
+    const phase = run.history.at(-1)?.from;
+    const reasons: Partial<Record<RunState, ReasonCode>> = {
+      gating: ReasonCode.ResumeGating,
+      planning: ReasonCode.ResumePlanning,
+      implementing: ReasonCode.ResumeImplementing,
+      verifying: ReasonCode.ResumeVerifying,
+      shipping: ReasonCode.ResumeShipping,
+      revising: ReasonCode.ResumeRevising,
+    };
+    const reason = phase ? reasons[phase] : undefined;
+    if (!reason) throw new ControllerError('invalid_journal');
+    await this.persist(transitionRun(run, reason, this.deps.now().toISOString()));
+  }
+  private async performAction(action: TrackerActionRequest): Promise<RunRecord> {
+    try {
+      this.assertAdmission();
+      if (!this.deps.trackerAction) throw new ControllerError('invalid_outcome');
+      const result = await this.deps.trackerAction(this.context(), action);
+      this.observeControl();
+      this.observeIncident();
+      if (this.control) return this.applyControl();
+      if (this.incident) return this.cancel();
+      this.assertAdmission();
+      this.actionResult = result;
+      return this.held.run;
+    } catch (error) {
+      this.observeControl();
+      this.observeIncident();
+      if (this.control) return this.applyControl();
+      if (this.incident) return this.cancel();
+      throw error;
+    }
+  }
+  /** The result belongs to this locked invocation, never a prior artifact. A stop
+   * request may preempt the command; then no contributor capability is returned. */
+  async prAction(runId: string, action: TrackerActionRequest): Promise<TrackerActionResult> {
+    await this.resume(runId, { action });
+    if (!this.actionResult) throw new ControllerError('admission_closed');
+    return structuredClone(this.actionResult);
   }
   private launch(work: () => Promise<RunRecord>): Promise<RunRecord> {
     if (this.running) throw new ControllerError('busy');
@@ -428,6 +576,9 @@ export class RunController {
     this.controlCleanup = undefined;
     this.controlReconciled = undefined;
     this.controlReconciledKind = undefined;
+    this.revise = false;
+    this.actionResult = undefined;
+    this.publicationWait = undefined;
     const watcher = setInterval(() => {
       this.observeIncident();
       this.observeControl();
@@ -607,9 +758,31 @@ export class RunController {
   private sessionId(): string {
     const sessions = this.budget.snapshot().sessions;
     const session = sessions.at(-1);
-    if (!session || session.id !== this.held.budgetSessionId(1))
+    if (!session || sessions.some((s, i) => s.id !== this.held.budgetSessionId(i + 1)))
       throw new ControllerError('invalid_journal');
     return session.id;
+  }
+  /** The tracker transition is durable before allocation. A crash at either boundary
+   * recovers the same numbered session, never resets any historical spend. */
+  private ensureRevisionSession(): void {
+    const count = revisionCount(this.held.run) + 1;
+    const sessions = this.budget.snapshot().sessions;
+    if (sessions.length > count || sessions.length < count - 1)
+      throw new ControllerError('invalid_journal');
+    if (sessions.length === count) return;
+    if (this.control || this.incident || TERMINAL_STATES.includes(this.held.run.state)) return;
+    this.budget.startSession(this.sessionInput(count));
+  }
+  /** Each numbered session gets the configured ceiling afresh; history is never reset. */
+  private sessionInput(n: number) {
+    const budget = this.held.config.budget;
+    return {
+      id: this.held.budgetSessionId(n),
+      ceiling: { currency: budget.currency, minor: budget.ceilingMinor },
+      cleanupAllowance: budget.cleanupAllowanceMinor,
+      tokenLimit: budget.tokenLimit,
+      timeLimitMs: budget.activeMinutes * 60_000,
+    };
   }
   private context(lease?: symbol, allocations?: Set<Promise<VmHandle>>): PhaseContext {
     const operation = this.operation;
@@ -618,6 +791,15 @@ export class RunController {
     const sessionId = this.sessionId();
     const signal = this.abort.signal;
     return {
+      revise: this.revise,
+      observeRun: async (run) => {
+        // Completed producer observations remain evidence after admission closes.
+        // New revision resources/sessions still require an open stop fence.
+        await this.recovered(run);
+        this.observeControl();
+        this.observeIncident();
+        if (!this.control && !this.incident) this.ensureRevisionSession();
+      },
       store: this.held,
       run: this.held.run,
       ledger: this.budget,
@@ -657,6 +839,7 @@ export class RunController {
   private async persist(run: RunRecord): Promise<void> {
     if (!isRunContinuation(this.held.run, run)) throw new ControllerError('invalid_outcome');
     if (sameRunRecord(run, this.held.run)) return;
+    if (run.state !== 'shipping') this.finishPublicationWait();
     // Terminal rows have no CleanupFailed edge. Fence admission and finish cleanup
     // before committing a terminal snapshot; cleanup failure wins instead.
     if (TERMINAL_STATES.includes(run.state)) {
@@ -739,7 +922,7 @@ export class RunController {
         )
           this.cached.set(
             event.key,
-            this.validatedOutcome(event.phase as PhaseName, event.outcome)
+            this.validatedOutcome(event.phase as PhaseName, event.outcome, true)
           );
       } else if (
         event.type === 'cleanup' &&
@@ -750,6 +933,15 @@ export class RunController {
         Object.keys(event).length === 6
       ) {
         if (!event.funded) this.unfundedCleanup.add(event.vmId);
+      } else if (
+        event.type === 'publication_wait' &&
+        this.budget.snapshot().sessions.some((s) => s.id === event.sessionId)
+      ) {
+        try {
+          this.publicationWait = nextPublicationWait(this.publicationWait, event).open;
+        } catch {
+          throw new ControllerError('invalid_journal');
+        }
       } else if (
         event.type === 'cleanup_reconciled' &&
         typeof event.vmId === 'string' &&
@@ -798,7 +990,25 @@ export class RunController {
     const edits = sourceEditCount(this.held);
     return `${history.length}:${phase}${edits ? `:edit-${edits}` : ''}`;
   }
-  private validatedOutcome(phase: PhaseName, input: unknown): Outcome {
+  private finishPublicationWait(): void {
+    if (!this.publicationWait) return;
+    const at = this.deps.now().toISOString();
+    const elapsed = Date.parse(at) - this.publicationWait.at;
+    if (!Number.isSafeInteger(elapsed) || elapsed < 0) throw new ControllerError('invalid_journal');
+    this.appendPublicationWait('end', this.publicationWait.sessionId, at);
+    this.publicationWait = undefined;
+  }
+  private appendPublicationWait(operation: 'begin' | 'end', sessionId: string, at: string): void {
+    this.journal?.append({
+      v: 1,
+      type: 'publication_wait',
+      runId: this.held.runId,
+      operation,
+      sessionId,
+      at,
+    });
+  }
+  private validatedOutcome(phase: PhaseName, input: unknown, historical = false): Outcome {
     try {
       const result = outcome(phase, input);
       if (result.kind === 'planned' || result.kind === 'candidate' || result.kind === 'advanced') {
@@ -807,7 +1017,11 @@ export class RunController {
           result.kind === 'planned' ? 'plan' : 'patch',
           this.held.runId
         );
-        if (bindings.budgetSessionId !== this.sessionId())
+        if (
+          historical
+            ? !this.budget.snapshot().sessions.some((s) => s.id === bindings.budgetSessionId)
+            : bindings.budgetSessionId !== this.sessionId()
+        )
           throw new ControllerError('invalid_outcome');
       } else if (result.kind === 'verified') {
         if (
@@ -835,16 +1049,24 @@ export class RunController {
       return stopped(this.held.run.state) ? { kind: 'waiting' } : { kind: 'hand_off' };
     const key = this.key(phase);
     const cached = this.cached.get(key);
-    if (cached && !reacquire) return cached;
+    if (cached && !reacquire && !['track', 'ship'].includes(phase)) return cached;
+    const observedAt = this.deps.now();
     const status = assembleStatus({
       run: this.held.run,
-      now: this.deps.now(),
+      now: observedAt,
       budget: this.budget.snapshot(),
       sessionId: this.sessionId(),
+      publicationWaitMs: publicationWaitTime(
+        this.journal?.read() ?? [],
+        this.sessionId(),
+        observedAt.getTime(),
+        this.held.runId
+      ),
     });
     if (
-      status.activeTimeMs >= this.held.config.budget.activeMinutes * 60_000 ||
-      isBudgetSessionExhausted(this.budget.snapshot(), this.sessionId()) ||
+      (phase !== 'track' &&
+        status.activeTimeMs >= this.held.config.budget.activeMinutes * 60_000) ||
+      (phase !== 'track' && isBudgetSessionExhausted(this.budget.snapshot(), this.sessionId())) ||
       this.budget
         .snapshot()
         .reservations.some((hold) => hold.status === 'reserved' && this.oldHolds.has(hold.id))
@@ -890,6 +1112,12 @@ export class RunController {
       });
       this.cached.set(key, result);
     }
+    if (phase === 'ship' && result.kind === 'waiting' && !this.publicationWait) {
+      const at = this.deps.now().toISOString();
+      const sessionId = this.sessionId();
+      this.appendPublicationWait('begin', sessionId, at);
+      this.publicationWait = { sessionId, at: Date.parse(at) };
+    } else if (phase === 'ship' && result.kind !== 'waiting') this.finishPublicationWait();
     return result;
   }
   private async apply(result: Outcome): Promise<boolean> {
@@ -919,8 +1147,12 @@ export class RunController {
       await this.persist(run);
     } else {
       const reason = REASONS[result.kind];
-      if (reason)
+      if (
+        reason &&
+        !(IDEMPOTENT_TRACK_OUTCOMES.includes(result.kind) && this.held.run.reasonCode === reason)
+      )
         await this.persist(transitionRun(this.held.run, reason, this.deps.now().toISOString()));
+      if (result.kind === 'revision') this.ensureRevisionSession();
     }
     return !stopped(this.held.run.state);
   }
@@ -958,10 +1190,7 @@ export class RunController {
         ['awaiting_contributor', 'awaiting_maintainer'].includes(this.held.run.state)
       ) {
         if (!(await this.apply(await this.step('resumeHandoff')))) return this.held.run;
-      } else if (
-        resuming &&
-        ['submitted', 'awaiting_review', 'accepted'].includes(this.held.run.state)
-      ) {
+      } else if (resuming && TRACKING_STATES.includes(this.held.run.state)) {
         if (!(await this.apply(await this.step('track')))) return this.held.run;
       }
       while (!stopped(this.held.run.state)) {

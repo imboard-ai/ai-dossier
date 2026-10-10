@@ -3,7 +3,13 @@ import type { BudgetState } from '../budget-types';
 import { prerequisiteAction } from '../github/fork';
 import { type HandoffState, handoffStatus } from '../github/handoff-driver';
 import { assertSecretFree } from '../redaction';
-import { type RunRecord, type RunState, restoreRun, sameRunRecord } from '../state';
+import {
+  type RunRecord,
+  type RunState,
+  restoreRun,
+  sameRunRecord,
+  sessionStartedAt,
+} from '../state';
 import { InvalidStatusError, renderJson, type StatusRecord } from '../status';
 import type { AuthorApproval } from './config';
 import { contributionIdOf } from './ids';
@@ -31,6 +37,7 @@ export const DEFAULT_STATE_ACTIONS: Readonly<Record<RunState, string>> = Object.
   blocked_cleanup: 'Reconcile remaining resources and credentials before closing cleanup.',
 });
 export interface StatusParts {
+  readonly publicationWaitMs?: number;
   readonly run: RunRecord;
   readonly now: Date | string;
   readonly phase?: string;
@@ -61,7 +68,16 @@ export function assembleStatus(parts: StatusParts): StatusRecord {
   if (!Number.isFinite(now) || now < Date.parse(run.updatedAt)) throw new InvalidStatusError();
   let activeTimeMs: number;
   try {
-    activeTimeMs = lifecycleTimes(run, now).activeMs;
+    // Active time counts only the selected session; durable publication-wait time is
+    // subtracted from it and may never exceed it.
+    const sessionIndex = parts.budget.sessions.findIndex((s) => s.id === parts.sessionId);
+    const since = Date.parse(sessionStartedAt(run, Math.max(0, sessionIndex)) ?? '');
+    if (!Number.isFinite(since)) throw new InvalidStatusError();
+    activeTimeMs = lifecycleTimes(run, now, since).activeMs;
+    const waiting = parts.publicationWaitMs ?? 0;
+    if (!Number.isSafeInteger(waiting) || waiting < 0 || waiting > activeTimeMs)
+      throw new InvalidStatusError();
+    activeTimeMs -= waiting;
   } catch {
     throw new InvalidStatusError();
   }
