@@ -47,6 +47,18 @@ the first run is executing. Different configurations can start independently.
 The guard releases at the first durable stop. Resume targets the existing run ID
 and retains its per-run writer guard.
 
+The filesystem threat model covers accidental/environmental corruption (including
+crashes, torn writes, invalid bytes and older-run leftovers) and concurrent
+legitimate controllers. Active filesystem tampering by an adversary with the same
+OS-user privileges is outside that boundary, as clarified in the
+[owner decision on #1109](https://github.com/imboard-ai/ai-dossier/issues/1109#issuecomment-6097937051).
+Two out-of-scope hardening notes remain: substituting a `stateDir` ancestor with a
+symlink can redirect start-guard creation/permission changes, and unlinking a held
+start guard permits a new inode to be locked. **Never manually delete or replace
+files in `<stateDir>/.start-guards` while controllers may be active: doing so defeats
+overlapping-start exclusion.** These notes do not weaken refusal of corrupt
+evidence or exclusion between legitimate concurrent starts.
+
 Start performs real GitHub App OAuth/PKCE through a loopback callback, prints
 `authorization_url`, then reads `/user`. Its author default is profile `name`
 (or login) and `<userId>+<login>@users.noreply.github.com`. The script displays
