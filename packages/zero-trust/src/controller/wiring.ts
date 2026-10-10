@@ -462,7 +462,7 @@ export function createController(
     )
   )
     throw new Error('invalid_controller_override');
-  const config = validateRunConfig(runConfigInput(input));
+  let config = validateRunConfig(runConfigInput(input));
   if (!config.authorApproval) throw new AuthorApprovalError('author_approval_missing');
   const now = overrides.now ?? (() => new Date());
   const fetcher = overrides.fetch ?? fetch;
@@ -500,7 +500,8 @@ export function createController(
     activeContext = context;
     const held = models.get(phase);
     if (held) return held;
-    const selected = config.modelProfile.phases[phase] ?? config.modelProfile.phases.implementing;
+    const currentProfile = context.store.config.modelProfile;
+    const selected = currentProfile.phases[phase] ?? currentProfile.phases.implementing;
     if (!overrides.models?.[phase] && selected.adapter !== 'openai-compatible')
       throw new ModelError('model_unavailable');
     const adapter =
@@ -1141,6 +1142,11 @@ export function createController(
             currentBaseSha,
             limitations: [
               ...meta.limitations,
+              ...(c.store.userChanges.some((change) => change.kind === 'source')
+                ? [
+                    'Includes contributor edits; every edited candidate was independently re-verified.',
+                  ]
+                : []),
               ...(policy.draftRequired
                 ? ['Upstream requires a draft PR; select Create draft PR when submitting.']
                 : []),
@@ -1389,8 +1395,16 @@ export function createController(
       openStore: (r, id) => {
         const store = RunStore.open(r, id);
         if (!sameConfig(store.config, config)) {
-          store.close();
-          throw new Error('resume_identity_mismatch');
+          const { modelProfile: _oldModel, checkpoints: _oldPoints, ...oldIdentity } = config;
+          const { modelProfile: _newModel, checkpoints: _newPoints, ...newIdentity } = store.config;
+          if (
+            !store.userChanges.length ||
+            canonicalJson(oldIdentity, 1024 * 1024) !== canonicalJson(newIdentity, 1024 * 1024)
+          ) {
+            store.close();
+            throw new Error('resume_identity_mismatch');
+          }
+          config = validateRunConfig(runConfigInput(store.config));
         }
         return store;
       },
@@ -1500,6 +1514,7 @@ export function createController(
         shipping = undefined;
         receipt = undefined;
         app = undefined;
+        models.clear();
         if (!overrides.vm) rawVm = undefined;
       }
     },

@@ -23,6 +23,40 @@ import { createCommands } from './zt-run-bindings.mjs';
 import { main } from './zt-run-lib.mjs';
 
 const nativeFetch = globalThis.fetch;
+test('resume with missing model rates refuses before OAuth/continuation and retains paused state across reopen', async () => {
+  const h = rig();
+  const store = h.seed();
+  const at = store.run.updatedAt;
+  for (const reason of [ReasonCode.GatePassed, ReasonCode.PlanApproved, ReasonCode.UserPaused])
+    store.persistRun(transitionRun(store.run, reason, at));
+  const id = store.runId;
+  const config = store.config;
+  const ledgerFile = path.join(store.storeDirectory('budget'), 'ledger.json');
+  const before = fs.readFileSync(ledgerFile);
+  store.close();
+  const construct = vi.fn(() => {
+    throw new Error('forbidden controller construction');
+  });
+  const commands = await createCommands({
+    root: h.root,
+    createController: construct,
+    onAuthorizationUrl: () => assert.fail('forbidden OAuth'),
+  });
+  await assert.rejects(
+    commands.resume(id, { modelProfile: { ...config.modelProfile, rates: [] } }),
+    (e) => e.code === 'missing_rate'
+  );
+  assert.equal(construct.mock.calls.length, 0);
+  const reopened = RunStore.open(h.root, id);
+  try {
+    assert.equal(reopened.run.state, 'paused_user');
+    assert.deepEqual(reopened.config, config);
+    assert.deepEqual(fs.readFileSync(ledgerFile), before);
+    assert.deepEqual(reopened.userChanges, []);
+  } finally {
+    reopened.close();
+  }
+});
 const cleanup = [];
 const env = { key: process.env.BINDING_APP_KEY, secret: process.env.BINDING_APP_SECRET };
 afterEach(() => {

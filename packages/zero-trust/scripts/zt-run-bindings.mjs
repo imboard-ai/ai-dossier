@@ -11,6 +11,13 @@ import {
 } from '../dist/controller/checkpoints.js';
 import { runConfigInput } from '../dist/controller/config.js';
 import { readControlRequests, requestControl } from '../dist/controller/control.js';
+import {
+  applyUserPatch,
+  changeCheckpoints,
+  changeModelProfile,
+  latestSourceEdit,
+  sourceEditCount,
+} from '../dist/controller/edits.js';
 import { publicationWaitTime } from '../dist/controller/lifecycle-times.js';
 import {
   readOutcomeBudget,
@@ -160,7 +167,10 @@ export async function createCommands({ root, createController, onAuthorizationUr
           );
           return {
             gate: artifacts.get('gate'),
-            candidate: artifacts.get('candidate'),
+            candidate:
+              artifacts.get('applied_user_edit') !== sourceEditCount(store)
+                ? (latestSourceEdit(store)?.candidate ?? artifacts.get('candidate'))
+                : artifacts.get('candidate'),
             tracking: artifacts.get('tracking'),
             publication: artifacts.get('publication'),
             withdrawal: artifacts.get('withdrawal'),
@@ -296,13 +306,27 @@ export async function createCommands({ root, createController, onAuthorizationUr
         fs.closeSync(guard);
       }
     },
-    async resume(runId, { revise } = {}) {
+    edit(runId, bytes) {
+      if (incidentRequested(root)) refuse('incident_active');
+      withStore(runId, false, (store) => {
+        checkRoot(store.config);
+        applyUserPatch(store, store.run, bytes, new Date());
+      });
+      return status(runId);
+    },
+    async resume(runId, { revise, modelProfile, checkpoints } = {}) {
       if (incidentRequested(root)) {
         const held = RunStore.open(root, runId, { cleanup: true });
         held.close();
         await stopStoredRun(root, runId, 'Incident root fence');
         return status(runId);
       }
+      if (modelProfile !== undefined || checkpoints !== undefined)
+        withStore(runId, false, (store) => {
+          checkRoot(store.config);
+          if (modelProfile !== undefined) changeModelProfile(store, store.run, modelProfile);
+          if (checkpoints !== undefined) changeCheckpoints(store, store.run, checkpoints);
+        });
       const config = configFor(runId, true);
       if (!config.authorApproval) refuse('author_approval_missing');
       // Locked controller reconciliation decides whether identity is needed.

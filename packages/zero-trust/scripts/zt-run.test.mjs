@@ -250,6 +250,59 @@ test('status human and JSON carry identical parsed facts, including recorded aut
   assert.deepEqual(facts, JSON.parse(json.stdout[0]));
   assert.deepEqual(facts.authorApproval, approval);
 });
+test('edit reads exact bounded patch bytes and resume passes model/checkpoint inputs', async () => {
+  const h = rig();
+  const file = path.join(h.dir, 'edit.diff');
+  const bytes = Buffer.from('diff --git a/file b/file\nold mode 100644\nnew mode 100755\n');
+  fs.writeFileSync(file, bytes);
+  const calls = [];
+  const edited = await invoke(['edit', '--root', h.root, '--run', run, '--patch', file], {
+    edit: (...args) => {
+      calls.push(args);
+      return status;
+    },
+  });
+  assert.equal(edited.code, 0);
+  assert.deepEqual(calls, [[run, bytes]]);
+  const profileFile = path.join(h.dir, 'model.json');
+  fs.writeFileSync(profileFile, JSON.stringify(h.raw.modelProfile));
+  const resumed = await invoke(
+    [
+      'resume',
+      '--root',
+      h.root,
+      '--run',
+      run,
+      '--model-profile',
+      profileFile,
+      '--checkpoints',
+      'plan,patch',
+    ],
+    {
+      resume: (...args) => {
+        calls.push(args);
+        return status;
+      },
+    }
+  );
+  assert.equal(resumed.code, 0);
+  assert.deepEqual(calls[1], [
+    run,
+    { revise: false, modelProfile: h.raw.modelProfile, checkpoints: ['plan', 'patch'] },
+  ]);
+  const malformed = await invoke([
+    'edit',
+    '--root',
+    h.root,
+    '--run',
+    run,
+    '--patch',
+    file,
+    '--unsafe-paths',
+  ]);
+  assert.equal(malformed.code, 3);
+  assert.equal(malformed.factories.length, 0);
+});
 test('start displays author and records explicit/interactive consent; absent or declined consent cannot create a run', async () => {
   const h = rig();
   const calls = [];

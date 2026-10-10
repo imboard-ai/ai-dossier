@@ -39,6 +39,7 @@ import {
   controlRefusal,
   readControlRequests,
 } from './control';
+import { latestSourceEdit, sourceEditCount } from './edits';
 import {
   nextPublicationWait,
   type OpenPublicationWait,
@@ -911,12 +912,19 @@ export class RunController {
         typeof event.phase === 'string' &&
         Object.hasOwn(KINDS, event.phase) &&
         Object.keys(event).length === 6
-      )
-        this.cached.set(
-          event.key,
-          this.validatedOutcome(event.phase as PhaseName, event.outcome, true)
-        );
-      else if (
+      ) {
+        if (
+          !(
+            sourceEditCount(this.held) &&
+            !event.key.endsWith(`:edit-${sourceEditCount(this.held)}`) &&
+            ['review', 'verify', 'drift', 'ship'].includes(event.phase)
+          )
+        )
+          this.cached.set(
+            event.key,
+            this.validatedOutcome(event.phase as PhaseName, event.outcome, true)
+          );
+      } else if (
         event.type === 'cleanup' &&
         ['pending', 'destroyed', 'blocked_cleanup'].includes(String(event.kind)) &&
         (event.kind !== 'pending' || event.funded === false) &&
@@ -946,6 +954,24 @@ export class RunController {
         this.unfundedCleanup.delete(event.vmId);
       else throw new ControllerError('invalid_journal');
     }
+    const edit = latestSourceEdit(this.held);
+    if (
+      edit &&
+      ![...this.cached].some(
+        ([key, value]) =>
+          key.endsWith(`:edit-${sourceEditCount(this.held)}`) &&
+          (value.kind === 'candidate' || value.kind === 'advanced')
+      )
+    )
+      this.cached.set('user-edit', {
+        kind: 'candidate',
+        bindings: {
+          candidateSha: edit.candidate.record.candidateSha,
+          policyDigest: edit.policyDigest,
+          reviewDigest: edit.reviewDigest,
+          budgetSessionId: this.sessionId(),
+        },
+      });
   }
   private key(phase: PhaseName): string {
     // A checkpoint's pause/approval pair is not a new phase attempt.
@@ -961,7 +987,8 @@ export class RunController {
           ReasonCode.ResumeShipping,
         ].includes(event.reasonCode)
     );
-    return `${history.length}:${phase}`;
+    const edits = sourceEditCount(this.held);
+    return `${history.length}:${phase}${edits ? `:edit-${edits}` : ''}`;
   }
   private finishPublicationWait(): void {
     if (!this.publicationWait) return;

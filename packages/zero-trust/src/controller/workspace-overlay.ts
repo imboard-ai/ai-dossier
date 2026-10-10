@@ -15,12 +15,43 @@ import {
 import { isTestPath } from '../review/integrity';
 import { assertWorkspacePath } from '../vm/broker';
 
-/** Exact controller-held baseline plus admitted writes. VM reads never enter this map.
- * No deletion or mode-changing action exists in the MVP. */
+/** Controller-held baseline and delta; VM reads never enter this map. Model actions
+ * only write files; trusted contributor exports also admit deletion/exec-bit changes. */
 export class WorkspaceOverlay {
   readonly base: SourceManifest;
   private entries: Map<string, SourceEntry>;
   private readonly written = new Set<string>();
+  private readonly removed = new Set<string>();
+
+  /** Controller-exported source only. Retain deletions and exec-bit changes in the delta. */
+  replaceSource(source: SourceManifest, touched: readonly string[]): void {
+    const manifest = validateManifest(source);
+    const entries = new Map(manifest.entries.map((e) => [e.path, e]));
+    for (const file of touched) {
+      assertWorkspacePath(file);
+      if (entries.get(file)?.mode === '040000') throw new CanonicalError('path_collision');
+    }
+    const touchedSet = new Set(touched);
+    const baseline = new Map(
+      this.base.entries.filter((e) => e.mode !== '040000').map((e) => [e.path, e])
+    );
+    for (const file of new Set([...baseline.keys(), ...entries.keys()])) {
+      const old = baseline.get(file);
+      const next = entries.get(file);
+      if (next?.mode === '040000') continue;
+      if ((old?.sha256 !== next?.sha256 || old?.mode !== next?.mode) && !touchedSet.has(file))
+        throw new CanonicalError('tree_mismatch');
+    }
+    this.entries = entries;
+    for (const file of touched) {
+      this.written.add(file);
+      if (!entries.has(file)) this.removed.add(file);
+      else this.removed.delete(file);
+    }
+  }
+  touchedPaths(): readonly string[] {
+    return Object.freeze([...this.written].sort(comparePaths));
+  }
 
   constructor(base: SourceManifest) {
     this.base = validateManifest(base);
@@ -47,6 +78,7 @@ export class WorkspaceOverlay {
     const manifest = createManifest([...next.values()]);
     this.entries = new Map(manifest.entries.map((entry) => [entry.path, entry]));
     this.written.add(name);
+    this.removed.delete(name);
   }
 
   executable(file: string): boolean {
@@ -57,11 +89,14 @@ export class WorkspaceOverlay {
     return Object.freeze([...this.written].filter(isTestPath).sort(comparePaths));
   }
 
-  /** Immutable admitted delta, including writes byte-identical to the baseline.
-   * Drift must check every touched path, not just the final diff. */
+  /** Surviving writes, including byte-identical writes. Use touchedPaths() for the
+   * complete delta (including deletions) and conservative drift conflict checks. */
   writtenEntries(): readonly SourceEntry[] {
     return Object.freeze(
-      [...this.written].sort(comparePaths).map((file) => this.entries.get(file) as SourceEntry)
+      [...this.written]
+        .filter((file) => !this.removed.has(file))
+        .sort(comparePaths)
+        .map((file) => this.entries.get(file) as SourceEntry)
     );
   }
 
@@ -75,6 +110,7 @@ export class WorkspaceOverlay {
     const next = new WorkspaceOverlay(this.base);
     next.entries = new Map(this.entries);
     for (const file of this.written) next.written.add(file);
+    for (const file of this.removed) next.removed.add(file);
     return next;
   }
 
@@ -82,6 +118,11 @@ export class WorkspaceOverlay {
   onBase(base: SourceManifest): WorkspaceOverlay {
     const next = new WorkspaceOverlay(base);
     next.applyEntries(this.writtenEntries());
+    for (const file of this.removed) {
+      next.entries.delete(file);
+      next.removed.add(file);
+      next.written.add(file);
+    }
     return next;
   }
 
@@ -96,11 +137,14 @@ export class WorkspaceOverlay {
       for (const parent of parentPaths(entry.path))
         if (!next.has(parent))
           next.set(parent, { path: parent, mode: '040000', bytes: '', sha256: sha256('') });
-      next.set(entry.path, Object.freeze({ ...entry, mode: old?.mode ?? '100644' }));
+      next.set(entry.path, Object.freeze({ ...entry }));
     }
     const manifest = createManifest([...next.values()]);
     this.entries = new Map(manifest.entries.map((entry) => [entry.path, entry]));
-    for (const entry of writes) this.written.add(entry.path);
+    for (const entry of writes) {
+      this.written.add(entry.path);
+      this.removed.delete(entry.path);
+    }
   }
 
   /** Compose a repair workspace into the cumulative contribution delta. The repair
@@ -110,6 +154,8 @@ export class WorkspaceOverlay {
     const next = this.snapshot();
     next.applyEntries(repair.writtenEntries());
     this.entries = next.entries;
+    this.removed.clear();
+    for (const file of next.removed) this.removed.add(file);
     for (const file of next.written) this.written.add(file);
   }
 

@@ -379,6 +379,8 @@ function decodeVerification(
   candidateSha: string,
   options: LoadVerificationOptions
 ): VerificationRecord {
+  if (exists(path.join(artifactsDir, `superseded-${candidateSha}`)))
+    throw new VerificationRecordError('not_shippable');
   let record: unknown;
   try {
     if (bytes.length > MAX_RECORD_BYTES) throw new Error('oversize');
