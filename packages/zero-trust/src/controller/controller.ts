@@ -506,7 +506,8 @@ export class RunController {
       return await work();
     } catch (error) {
       if (error instanceof AuthorApprovalError) throw error;
-      if (error instanceof ControllerError) throw error;
+      if (error instanceof ControllerError && error.code === 'recovery_failed' && error.diagnostic)
+        throw error;
       throw new ControllerError('recovery_failed');
     }
   }
@@ -852,7 +853,17 @@ export class RunController {
     return vm;
   }
   private async cleanup(): Promise<void> {
-    const vms = await this.recover(() => this.deps.vm.listByRun(this.held.runId));
+    let vms: Awaited<ReturnType<VmAdapter['listByRun']>>;
+    try {
+      vms = await this.recover(() => this.deps.vm.listByRun(this.held.runId));
+    } catch (error) {
+      const run = this.held.run;
+      if (run.state !== 'blocked_cleanup' && !TERMINAL_STATES.includes(run.state))
+        this.persistObserved(
+          transitionRun(run, ReasonCode.CleanupFailed, this.deps.now().toISOString())
+        );
+      throw error;
+    }
     const failures: unknown[] = [];
     let cleanupRun = this.held.run;
     const limits = this.held.config.limits;

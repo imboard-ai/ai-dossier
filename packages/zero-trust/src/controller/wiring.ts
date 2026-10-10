@@ -766,6 +766,43 @@ export function createController(
     },
     artifacts
   );
+  const diagnose = (
+    c: PhaseContext,
+    phase: keyof typeof steps | 'recovery',
+    error: unknown
+  ): never => {
+    if (error instanceof AuthorApprovalError) throw error;
+    const code =
+      error instanceof Error &&
+      [
+        'contributor_authorization_unavailable',
+        'invalid_step_artifact',
+        'missing_step_artifact',
+      ].includes(error.message)
+        ? (error.message as
+            | 'contributor_authorization_unavailable'
+            | 'invalid_step_artifact'
+            | 'missing_step_artifact')
+        : 'producer_unavailable';
+    artifacts(c).put('diagnostic', {
+      runId: c.run.runId,
+      phase,
+      operation: `${phase}_producer`,
+      code,
+      next: 'Inspect retained evidence and explicitly resume after correcting the unavailable input.',
+    });
+    throw new ControllerError(phase === 'recovery' ? 'recovery_failed' : 'step_failed', {
+      phase,
+      code,
+    });
+  };
+  const recoverWithDiagnostic = async <T>(c: PhaseContext, work: () => Promise<T>): Promise<T> => {
+    try {
+      return await work();
+    } catch (error) {
+      return diagnose(c, 'recovery', error);
+    }
+  };
   for (const phase of Object.keys(steps) as (keyof typeof steps)[]) {
     const invoke = steps[phase].bind(steps);
     const wrapped = async (c: PhaseContext) => {
@@ -789,27 +826,7 @@ export function createController(
             );
           return { kind: 'hand_off' };
         }
-        const code =
-          error instanceof Error &&
-          [
-            'contributor_authorization_unavailable',
-            'invalid_step_artifact',
-            'missing_step_artifact',
-          ].includes(error.message)
-            ? (error.message as
-                | 'contributor_authorization_unavailable'
-                | 'invalid_step_artifact'
-                | 'missing_step_artifact')
-            : 'producer_unavailable';
-        artifacts(c).put('diagnostic', {
-          runId: c.run.runId,
-          phase,
-          operation: `${phase}_producer`,
-          code,
-          next: 'Inspect retained evidence and explicitly resume after correcting the unavailable input.',
-        });
-        if (error instanceof AuthorApprovalError) throw error;
-        throw new ControllerError('step_failed', { phase, code });
+        return diagnose(c, phase, error);
       }
     };
     // Each wrapper preserves its real phase's outcome; only shared failure mapping is added.
@@ -878,13 +895,14 @@ export function createController(
         localVm(c);
         await cleanup();
       },
-      recoverCredentials: async (c) => {
-        if (!TERMINAL_STATES.includes(c.run.state) && c.run.state !== 'blocked_cleanup') {
-          if (prerequisiteWaitOrigin(c.run) && !artifacts(c).get('fork')) return;
-          await identity(c);
-          await recoverShipping(c);
-        }
-      },
+      recoverCredentials: async (c) =>
+        recoverWithDiagnostic(c, async () => {
+          if (!TERMINAL_STATES.includes(c.run.state) && c.run.state !== 'blocked_cleanup') {
+            if (prerequisiteWaitOrigin(c.run) && !artifacts(c).get('fork')) return;
+            await identity(c);
+            await recoverShipping(c);
+          }
+        }),
       resumeIntents: async () => {
         await intents?.resume();
         return intents?.snapshot().run;

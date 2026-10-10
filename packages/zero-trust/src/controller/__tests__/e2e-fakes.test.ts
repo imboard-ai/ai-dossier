@@ -93,6 +93,7 @@ function rig(
     baseUnavailable?: boolean;
     driftTouch?: boolean;
     corruptPolicy?: boolean;
+    restrictPolicy?: boolean;
     delayFork?: boolean;
   } = {}
 ) {
@@ -291,6 +292,7 @@ function rig(
         status: 200,
         body: { ref: 'refs/heads/main', object: { type: 'commit', sha: BASE_COMMIT.baseSha } },
       };
+    if (options.restrictPolicy && planCalls > 0) policy = 'AI contributions are banned.';
     if (p.startsWith('/repos/upstream/fixture/contents/'))
       return p.startsWith('/repos/upstream/fixture/contents/CONTRIBUTING.md?')
         ? {
@@ -522,6 +524,9 @@ function rig(
     repairEvidence,
     forkReached,
     releaseFork,
+    identityUnavailable() {
+      options.userUnavailable = true;
+    },
     invite() {
       invitation = {
         id: 10,
@@ -709,6 +714,34 @@ describe('createController real composition', () => {
     });
     noShipping();
   }, 60000);
+  it('refuses a consistently hashed restrictive policy change before shipping', async () => {
+    const h = rig({ restrictPolicy: true });
+    await expect(h.authorize(h.controller.start(h.config))).rejects.toMatchObject({
+      code: 'step_failed',
+    });
+    noShipping();
+  }, 60000);
+  it('retains a closed recovery diagnostic for an identity outage', async () => {
+    const h = rig({ checkpoint: 'plan' });
+    const run = (await h.authorize(h.controller.start(h.config))) as Awaited<
+      ReturnType<typeof h.controller.start>
+    >;
+    h.identityUnavailable();
+    await expect(h.authorize(h.controller.resume(run.runId))).rejects.toMatchObject({
+      code: 'recovery_failed',
+      diagnostic: { phase: 'recovery', code: 'contributor_authorization_unavailable' },
+    });
+    const a = h.artifacts(run.runId);
+    // The same unavailable /user probe cannot confirm old-token revocation;
+    // retain that cleanup fence, never manufacture an account mismatch.
+    expect(a.store.run.state).toBe('blocked_cleanup');
+    expect(a.get('diagnostic')).toMatchObject({
+      phase: 'recovery',
+      operation: 'recovery_producer',
+    });
+    a.close();
+    noShipping();
+  }, 60000);
   it('retains byte-identical admitted writes when checking upstream drift', async () => {
     const h = rig({ driftTouch: true });
     const run = (await h.authorize(h.controller.start(h.config))) as Awaited<
@@ -721,11 +754,16 @@ describe('createController real composition', () => {
     a.close();
     noShipping();
   }, 60000);
-  it('revokes credentials even when incident VM destruction fails', async () => {
+  it.each([
+    'destruction',
+    'enumeration',
+  ] as const)('revokes credentials even when incident VM %s fails', async (failure) => {
     const h = rig({ cancelDuringPlan: true });
     const task = h.authorize(h.controller.start(h.config));
     await h.planReached;
-    h.vm.failDestroy = 100;
+    if (failure === 'destruction') h.vm.failDestroy = 100;
+    else
+      vi.spyOn(h.vm, 'listByRun').mockRejectedValue(new Error('external enumeration unavailable'));
     await expect(h.controller.incidentStop('cleanup failure control')).rejects.toThrow();
     await task.catch(() => {});
     expect(h.controller.snapshot().state).toBe('blocked_cleanup');
