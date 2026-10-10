@@ -68,3 +68,37 @@ None.
 
 ## Base Branch
 `main`; private zero-trust package, no version bump or changeset.
+
+## Recovery execution outcome
+
+Run `r-1109-5130`, model `openai/gpt-6.1-sol`: implementation is preserved on
+`feature/1109-zt-run-cli`. Seven independent report-only review dimensions ran
+serially, followed by focused security/conformance checks. Three progress-gated
+repair loops addressed 19 deduplicated findings. One proposed polymorphic test-rig
+abstraction was dismissed as premature abstraction; distinct edge fixtures remain
+isolated. Browser review was not applicable.
+
+Verification at code head `509257c`: 4,609 package tests passed, 14 opt-in live VM
+tests skipped. Coverage: 95.48% statements, 92.71% branches, 97.79% functions,
+97.29% lines, all above unchanged thresholds. Repository build, warning-fails lint,
+other workspace/repository-script suites and strict changed-test-inclusive
+TypeScript checks passed. Tests use fake external services and local fixtures.
+
+### Authorized review hand-off: loop cap
+
+Final independent security review still reproduced two start-guard defects in
+`packages/zero-trust/scripts/zt-run-bindings.mjs:50–76`:
+
+1. Swapping `executionProfile.stateDir` to a symlink after authenticated author
+   preparation redirects `.start-guards` creation/chmod outside the intended tree.
+   Pin no-follow directory traversal before guard creation or permission changes.
+2. Unlinking the held configuration-digest guard permits creation/locking of a new
+   inode, allowing two real controllers for identical configuration while the
+   first run remains writer-locked. AC4 is therefore not met under the binding
+   filesystem-substitution threat model. Exclusion needs stable authority that
+   cannot be replaced through the untrusted state tree.
+
+These findings need a renewed bounded repair cycle or an explicit owner decision
+about the lock authority/threat-model scope. No PR, merge or deployment is claimed.
+The branch and worktree are retained for continuation; completed reviewers and
+verification evidence should be reused, with changed-area follow-up only.
