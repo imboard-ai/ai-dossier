@@ -1,4 +1,6 @@
 /** Real phase glue. Credential capabilities are constructed only by wiring.ts. */
+
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import type { AcquiredSource } from '../canonical/acquire';
 import { acquireSource, resolveBase } from '../canonical/acquire';
@@ -39,7 +41,12 @@ import { assertSecretFree } from '../redaction';
 import { isTestPath, reviewCandidate } from '../review/integrity';
 import { isRunContinuation, prerequisiteWaitOrigin, ReasonCode } from '../state';
 import type { ProxyTarget, VmAdapter } from '../vm/adapter';
-import { type AgentPlan, runImplementation, runPlanning } from './agent-loop';
+import {
+  type AgentLoopContext,
+  type AgentPlan,
+  runImplementation,
+  runPlanning,
+} from './agent-loop';
 import { requireAuthorApproval } from './author-approval';
 import type {
   ControllerTrackOutcome,
@@ -74,6 +81,7 @@ export interface GateRecord {
   readonly invitation?: InvitationEvidence;
 }
 interface Candidate {
+  readonly touched: readonly string[];
   readonly manifest: SourceManifest;
   readonly record: CandidateRecord;
   readonly authority: CandidateAuthority;
@@ -83,6 +91,74 @@ interface Candidate {
     readonly scope: string;
     readonly limitations: readonly string[];
   };
+}
+
+/** Reject contradictory policy bytes at every composed gate/freshness read. */
+export function policyReader(read: GitHubRead): GitHubRead {
+  return async (request) => {
+    const response = await read(request);
+    if (request.includes('/contents/') && response.status === 200) {
+      const file = response.body as Record<string, unknown> | null;
+      if (file?.type === 'file' && file.encoding === 'base64' && typeof file.content === 'string') {
+        const bytes = Buffer.from(file.content.replace(/\s/gu, ''), 'base64');
+        const digest = createHash('sha1')
+          .update(`blob ${bytes.length}\0`)
+          .update(bytes)
+          .digest('hex');
+        if (digest !== file.sha) return { status: 502, body: null };
+      }
+    }
+    return response;
+  };
+}
+
+/** One binding rule for normal execution and recovered shipping, never cached results. */
+export function gateFreshness(
+  read: GitHubRead,
+  config: PhaseContext['store']['config'],
+  g: GateRecord
+) {
+  return createFreshnessProbe({
+    read,
+    upstream: config.upstream,
+    contributor: config.contributor,
+    gated: {
+      policy: g.policy,
+      policyDigest: g.policyDigest,
+      eligibilityDigest: g.eligibility.evidenceDigest,
+      ...(g.invitation ? { invitation: g.invitation } : {}),
+    },
+  });
+}
+
+function candidateOverlay(base: SourceManifest, held: Candidate): WorkspaceOverlay {
+  const overlay = new WorkspaceOverlay(base);
+  if (!Array.isArray(held.touched)) throw new Error('invalid_step_artifact');
+  for (const name of held.touched) {
+    const entry = held.manifest.entries.find((e) => e.path === name && e.mode !== '040000');
+    if (!entry) throw new Error('invalid_step_artifact');
+    overlay.write(name, Buffer.from(entry.bytes, 'base64').toString('utf8'));
+  }
+  if (overlay.manifest().digest !== held.manifest.digest) throw new Error('invalid_step_artifact');
+  return overlay;
+}
+
+/** Human checkpoint material is derived only from held snapshots, never VM reads. */
+function reviewDiff(base: SourceManifest, next: SourceManifest): Buffer {
+  const chunks: string[] = [];
+  for (const entry of next.entries) {
+    if (entry.mode === '040000') continue;
+    const old = base.entries.find((e) => e.path === entry.path);
+    if (old?.sha256 === entry.sha256) continue;
+    const before = old ? Buffer.from(old.bytes, 'base64').toString('utf8').split('\n') : [];
+    const after = Buffer.from(entry.bytes, 'base64').toString('utf8').split('\n');
+    chunks.push(
+      `--- ${old ? `a/${entry.path}` : '/dev/null'}\n+++ b/${entry.path}\n@@ -${before.length ? 1 : 0},${before.length} +1,${after.length} @@\n${before.map((l) => `-${l}\n`).join('')}${after.map((l) => `+${l}\n`).join('')}`
+    );
+  }
+  const bytes = Buffer.from(chunks.join(''));
+  assertSecretFree(bytes.toString('utf8'));
+  return bytes;
 }
 export interface StepServices {
   readonly read: GitHubRead;
@@ -250,20 +326,31 @@ export function createSteps(
     policyDigest: gate(c).policyDigest,
     budgetSessionId: c.sessionId,
   });
-  const fresh = (c: PhaseContext) => {
-    const g = gate(c);
-    return createFreshnessProbe({
-      read: services.read,
-      upstream: c.store.config.upstream,
-      contributor: c.run.contributor,
-      gated: {
-        policy: g.policy,
-        policyDigest: g.policyDigest,
-        eligibilityDigest: g.eligibility.evidenceDigest,
-        ...(g.invitation ? { invitation: g.invitation } : {}),
-      },
-    });
-  };
+  const fresh = (c: PhaseContext) => gateFreshness(services.read, c.store.config, gate(c));
+  const agentContext = (
+    c: PhaseContext,
+    w: ReturnType<typeof workspace>,
+    vm: AgentLoopContext['vm'],
+    phase: Parameters<StepServices['model']>[0],
+    baseManifest: SourceManifest
+  ): AgentLoopContext => ({
+    ...w,
+    vm,
+    model: services.model(phase, c),
+    ledger: c.ledger,
+    sessionId: c.sessionId,
+    rates: c.store.config.modelProfile.rates,
+    limits: c.store.config.limits,
+    binding: {
+      contributionId: c.store.contributionId,
+      candidateSha: null,
+      publicationTargets: { push_branch: '', pr_create: '', pr_update: '' },
+    },
+    issue: gate(c),
+    baseManifest,
+    now: services.now,
+    persist: (entry) => artifacts(c).put('transcript', entry),
+  });
   const summary = (e: WorkspaceEvidence) => {
     const r = e.records.find((r) => r.captureReport);
     return r && r.suites !== null && r.tests !== null && r.failures !== null && r.skipped !== null
@@ -308,7 +395,7 @@ export function createSteps(
         return { kind: decision.kind };
       c.store.recordUpstreamRepositoryId(e.facts.repositoryId);
       const lines = files.files.flatMap((file) =>
-        policyRegions(file).flatMap((r) => r.lines.map((l) => l.text))
+        policyRegions(file).map((r) => r.lines.map((l) => l.text).join(' '))
       );
       const signoffRequired = lines.some(
         (line) =>
@@ -332,11 +419,16 @@ export function createSteps(
         (text.body !== null && typeof text.body !== 'string')
       )
         return { kind: 'hand_off' };
+      const prior = artifacts(c).get<GateRecord>('gate');
+      const currentDigest = policyDigest(p, files.files);
       artifacts(c).put('gate', {
         signoffRequired,
         ...(templates[0] ? { template: templates[0].content } : {}),
         policy: p,
-        policyDigest: policyDigest(p, files.files),
+        policyDigest: currentDigest,
+        ...(prior?.invitation && prior.policyDigest === currentDigest
+          ? { invitation: prior.invitation }
+          : {}),
         eligibility: e,
         baseSha,
         title: text.title,
@@ -344,6 +436,7 @@ export function createSteps(
       });
       await approval(c);
       if (decision.kind === 'request_permission') {
+        if (gate(c).invitation && (await fresh(c).policyFresh())) return { kind: 'proceed' };
         const result = await services.engage(c, engagementBody({}));
         return {
           kind:
@@ -377,16 +470,17 @@ export function createSteps(
       if (!selection.ok) return { kind: 'unsupported' };
       recordProfileSelection(c.store.storeDirectory('profile'), c.run.runId, selection);
       buildCommandPlan(selection.manager, services.endpoints);
-      if (!artifacts(c).get('baseline')) {
-        const baseline = await baselineEvidence({
+      let baseline = artifacts(c).get<WorkspaceEvidence>('baseline');
+      if (!baseline) {
+        baseline = await baselineEvidence({
           ...workspace(c),
           manifest: acquired.manifest,
           plan: buildCommandPlan(selection.manager, services.endpoints),
         });
         artifacts(c).put('baseline', baseline);
-        if (baseline.status !== 'passed' && !gate(c).policy.baselineFailuresPermitted)
-          return { kind: 'hand_off' };
       }
+      if (baseline.status !== 'passed' && !gate(c).policy.baselineFailuresPermitted)
+        return { kind: 'hand_off' };
       return { kind: 'acquired' };
     },
     async plan(c) {
@@ -397,30 +491,10 @@ export function createSteps(
         plan: buildCommandPlan(profile(c).manager, services.endpoints),
       });
       try {
-        const result = await runPlanning({
-          ...w,
-          vm: vm.vm,
-          model: services.model('planning', c),
-          ledger: c.ledger,
-          sessionId: c.sessionId,
-          rates: c.store.config.modelProfile.rates,
-          limits: c.store.config.limits,
-          binding: {
-            contributionId: c.store.contributionId,
-            candidateSha: null,
-            publicationTargets: {
-              push_branch: '',
-              pr_create: '',
-              pr_update: '',
-            },
-          },
-          issue: gate(c),
-          baseManifest: source(c).manifest,
-          now: services.now,
-          persist: (entry) => artifacts(c).put('transcript', entry),
-        });
+        const result = await runPlanning(agentContext(c, w, vm.vm, 'planning', source(c).manifest));
         if (result.kind !== 'plan') return { kind: 'hand_off' };
         artifacts(c).put('plan', result);
+        c.store.replaceArtifact('plan.txt', Buffer.from(result.text));
         return { kind: 'planned', bindings: { ...bindings(c), planDigest: result.digest } };
       } finally {
         await releaseWorkspace(w.adapter, vm, w.lifecycle);
@@ -447,28 +521,13 @@ export function createSteps(
       });
       try {
         const result = await runImplementation(
-          {
-            ...w,
-            vm: vm.vm,
-            model: services.model(old ? 'repair' : 'implementing', c),
-            ledger: c.ledger,
-            sessionId: c.sessionId,
-            rates: c.store.config.modelProfile.rates,
-            limits: c.store.config.limits,
-            binding: {
-              contributionId: c.store.contributionId,
-              candidateSha: null,
-              publicationTargets: {
-                push_branch: '',
-                pr_create: '',
-                pr_update: '',
-              },
-            },
-            issue: gate(c),
-            baseManifest: old?.manifest ?? base.manifest,
-            now: services.now,
-            persist: (entry) => artifacts(c).put('transcript', entry),
-          },
+          agentContext(
+            c,
+            w,
+            vm.vm,
+            old ? 'repair' : 'implementing',
+            old?.manifest ?? base.manifest
+          ),
           {
             plan: artifacts(c).require<AgentPlan>('plan'),
             ...(old
@@ -486,6 +545,10 @@ export function createSteps(
           }
         );
         if (result.kind !== 'candidate') return { kind: 'hand_off' };
+        const cumulative = old
+          ? candidateOverlay(base.manifest, old)
+          : new WorkspaceOverlay(base.manifest);
+        cumulative.applyRepair(result.overlay);
         const manifest = result.overlay.manifest();
         const attempt = (artifacts(c).get<number>('attempt') ?? 0) + 1;
         const produced = createCandidate(
@@ -503,11 +566,13 @@ export function createSteps(
         );
         artifacts(c).put('attempt', attempt);
         artifacts(c).put('candidate', {
+          touched: cumulative.writtenEntries().map((e) => e.path),
           manifest,
           record: produced.record,
           authority: produced.authority,
           meta: result.meta,
         });
+        c.store.replaceArtifact('candidate.diff', reviewDiff(base.manifest, manifest));
         return {
           kind: 'candidate',
           bindings: { ...bindings(c), candidateSha: produced.record.candidateSha },
@@ -578,13 +643,7 @@ export function createSteps(
       await approval(c);
       const held = candidate(c);
       const base = source(c);
-      const overlay = new WorkspaceOverlay(base.manifest);
-      for (const e of held.manifest.entries)
-        if (
-          e.mode !== '040000' &&
-          base.manifest.entries.find((b) => b.path === e.path)?.sha256 !== e.sha256
-        )
-          overlay.write(e.path, Buffer.from(e.bytes, 'base64').toString('utf8'));
+      const overlay = candidateOverlay(base.manifest, held);
       const nextSources = new Map<string, AcquiredSource>();
       const result = await checkShippingBase(
         {
@@ -620,11 +679,13 @@ export function createSteps(
       artifacts(c).put('gate', { ...gate(c), baseSha: result.candidate.record.baseSha });
       artifacts(c).put('rebases', result.rebases);
       artifacts(c).put('candidate', {
+        touched: held.touched,
         manifest: result.manifest,
         record: result.candidate.record,
         authority: result.candidate.authority,
         meta: held.meta,
       });
+      c.store.replaceArtifact('candidate.diff', reviewDiff(next.manifest, result.manifest));
       return {
         kind: 'advanced',
         bindings: { ...bindings(c), candidateSha: result.candidate.record.candidateSha },

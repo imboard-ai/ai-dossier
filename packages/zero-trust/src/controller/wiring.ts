@@ -50,7 +50,12 @@ import { preflightHost } from '../vm/host';
 import { LocalQemuAdapter } from '../vm/local-qemu';
 import { AuthorApprovalError, requireAuthorApproval } from './author-approval';
 import { type RunConfig, runConfigInput, validateRunConfig } from './config';
-import { type ControllerDependencies, type PhaseContext, RunController } from './controller';
+import {
+  type ControllerDependencies,
+  ControllerError,
+  type PhaseContext,
+  RunController,
+} from './controller';
 import { ProvisioningFailedError } from './evidence-runner';
 import { RunStore } from './run-store';
 import {
@@ -60,7 +65,7 @@ import {
   type ShippingAuthorizeDeps,
   shippingIntent,
 } from './shipping';
-import { createSteps, type GateRecord, StepArtifacts } from './steps';
+import { createSteps, type GateRecord, gateFreshness, policyReader, StepArtifacts } from './steps';
 import { loadVerification } from './verification-record';
 
 /** Only physical edges. Never inject a phase, gate, author, ledger or verifier. */
@@ -94,6 +99,44 @@ class PrerequisiteError extends Error {
   }
 }
 
+function readProxyFile(file: string): unknown {
+  try {
+    const bytes = readPrivate(file, (stat) => {
+      if (stat.size > 16384) throw new Error();
+    });
+    const value: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    assertSecretFree(value);
+    return value;
+  } catch {
+    throw new Error('invalid_proxy_file');
+  }
+}
+
+/** Revocation is independent of guest availability; join every obligation before refusing. */
+async function stopResources(vm: VmAdapter, runId: string, revoke: () => Promise<void>) {
+  const failures: unknown[] = [];
+  await Promise.all([
+    revoke().catch((error: unknown) => {
+      failures.push(error);
+    }),
+    (async () => {
+      try {
+        const handles = await vm.listByRun(runId);
+        for (const handle of handles) {
+          try {
+            await vm.destroy(handle);
+          } catch (error) {
+            failures.push(error);
+          }
+        }
+      } catch (error) {
+        failures.push(error);
+      }
+    })(),
+  ]);
+  if (failures.length) throw new Error('cleanup_incomplete');
+}
+
 /** Configuration is validated once here and independently by RunStore at start/resume.
  * OAuth consent remains the real loopback flow. authorizationUrl is a read-only UI edge
  * for the start script while start/resume is awaiting the contributor's browser. */
@@ -111,17 +154,12 @@ export function createController(
   if (!config.authorApproval) throw new AuthorApprovalError('author_approval_missing');
   const now = overrides.now ?? (() => new Date());
   const fetcher = overrides.fetch ?? fetch;
-  const read = overrides.read ?? anonymousReader(fetcher);
+  const read = policyReader(overrides.read ?? anonymousReader(fetcher));
   const signer = overrides.signer ?? new Ed25519Signer(config.signerKeyFile);
   const root = path.join(config.executionProfile.stateDir, 'runs');
   // Closed proxy configuration. Command builders validate URLs; the VM broker validates
   // the physical IP/port before provisioning. No repository input can select endpoints.
-  const proxy: unknown = JSON.parse(
-    readPrivate(config.executionProfile.proxyEndpointsFile, (stat) => {
-      if (stat.size > 16384) throw new Error('invalid_proxy_file');
-    }).toString('utf8')
-  );
-  assertSecretFree(proxy);
+  const proxy = readProxyFile(config.executionProfile.proxyEndpointsFile);
   if (!proxy || typeof proxy !== 'object' || Array.isArray(proxy))
     throw new Error('invalid_proxy_file');
   const p = proxy as Record<string, unknown>;
@@ -185,6 +223,7 @@ export function createController(
   let pusher: ForkPusher | undefined;
   let intents: IntentDriver | undefined;
   let handoff: HandoffDriver | undefined;
+  let handoffMode: 'contact' | 'shipping' | undefined;
   let tracker: PrTracker | undefined;
   let app: AppCredentials | undefined;
   let shipping: ShippingAuthorizeDeps | undefined;
@@ -377,8 +416,10 @@ export function createController(
     c.store.validateEvidence();
     if (!c.store.config.authorApproval) throw new AuthorApprovalError('author_approval_missing');
     await credentials(c);
+    c.signal.throwIfAborted();
     if (!contributor) throw new Error('authorization_unavailable');
     let bound = await contributor.bindLogin(c.store.run, c.store.config.authorApproval?.userId);
+    c.signal.throwIfAborted();
     if (bound.kind === 'reauthorize') {
       const receiver = await listenLoopback({
         isExpected: (state) => contributor?.matchesPending(state) ?? false,
@@ -386,6 +427,8 @@ export function createController(
       const aborted = () => receiver.close();
       c.signal.addEventListener('abort', aborted, { once: true });
       try {
+        if (c.signal.aborted) receiver.close();
+        c.signal.throwIfAborted();
         authUrl = contributor.begin(receiver.redirectUri).url;
         bound = await contributor.complete(
           await receiver.callback,
@@ -397,6 +440,11 @@ export function createController(
         receiver.close();
         c.signal.removeEventListener('abort', aborted);
       }
+    }
+    c.signal.throwIfAborted();
+    if (bound.kind === 'unknown' || bound.kind === 'reauthorize') {
+      artifacts(c).put('refusal', 'contributor_authorization_unavailable');
+      throw new Error('contributor_authorization_unavailable');
     }
     if (bound.kind !== 'bound') {
       artifacts(c).put('refusal', 'author_approval_mismatch');
@@ -457,17 +505,30 @@ export function createController(
       );
     },
   });
-  const openHandoff = (c: PhaseContext, admission: HandoffAdmission) => {
-    handoff ??= new HandoffDriver(
-      journal(c, 'handoff'),
-      {
-        read,
-        admission,
-        bodyDirectory: c.store.storeDirectory('bodies'),
-        now: () => now().toISOString(),
-      },
-      { run: c.store.run, contributionId: c.store.contributionId }
-    );
+  const openHandoff = (
+    c: PhaseContext,
+    admission: HandoffAdmission,
+    mode: 'contact' | 'shipping' = 'contact'
+  ) => {
+    // Reconstruct against the same durable history when authority mode changes.
+    // The journal is retained; drivers bind their admission functions once.
+    if (handoff && handoffMode !== mode) {
+      journals.get('handoff')?.close();
+      journals.delete('handoff');
+      handoff = undefined;
+    }
+    if (!handoff)
+      handoff = new HandoffDriver(
+        journal(c, 'handoff'),
+        {
+          read,
+          admission,
+          bodyDirectory: c.store.storeDirectory('bodies'),
+          now: () => now().toISOString(),
+        },
+        { run: c.store.run, contributionId: c.store.contributionId }
+      );
+    handoffMode = mode;
     return handoff;
   };
   const buildShipping = async (c: PhaseContext, deps: Omit<ShippingAuthorizeDeps, 'signer'>) => {
@@ -475,7 +536,24 @@ export function createController(
     shipping = { ...deps, signer };
     const nonces = new ReceiptNonceStore(c.store.storeDirectory('nonces'));
     if (!artifacts(c).get<boolean>('nonces_initialized')) {
-      nonces.initialize();
+      const recovering = artifacts(c).get<boolean>('nonces_initializing') === true;
+      artifacts(c).put('nonces_initializing', true);
+      try {
+        nonces.initialize();
+      } catch (error) {
+        // Before root completion no consumption can have occurred. Accept only
+        // the exact completed initial header, never missing/corrupt established history.
+        if (
+          !recovering ||
+          !(error instanceof Error) ||
+          !('code' in error) ||
+          error.code !== 'store_exists' ||
+          !readPrivate(path.join(c.store.storeDirectory('nonces'), 'events.jsonl')).equals(
+            Buffer.from('{"v":1,"type":"receipt-nonces"}\n')
+          )
+        )
+          throw error;
+      }
       artifacts(c).put('nonces_initialized', true);
     }
     pusher ??= new EdgeForkPusher(
@@ -572,7 +650,11 @@ export function createController(
         });
       },
       handoff: async (c) => {
-        const driver = openHandoff(c, contactAdmission(c));
+        const driver = openHandoff(
+          c,
+          shipping && receipt ? await shippingAdmission(c) : contactAdmission(c),
+          shipping && receipt ? 'shipping' : 'contact'
+        );
         const result = await driver.resume();
         if (result?.kind === 'observed' && result.operation === 'pr_create')
           artifacts(c).put('publication', {
@@ -627,7 +709,7 @@ export function createController(
         const baseline = artifacts(c).require<{ records: { status: string; argv: string }[] }>(
           'baseline'
         );
-        const result = await openHandoff(c, await shippingAdmission(c)).issuePr({
+        const result = await openHandoff(c, await shippingAdmission(c), 'shipping').issuePr({
           binding: {
             upstream: config.upstream,
             base: deps.bindings.defaultBranch,
@@ -707,7 +789,27 @@ export function createController(
             );
           return { kind: 'hand_off' };
         }
-        throw error;
+        const code =
+          error instanceof Error &&
+          [
+            'contributor_authorization_unavailable',
+            'invalid_step_artifact',
+            'missing_step_artifact',
+          ].includes(error.message)
+            ? (error.message as
+                | 'contributor_authorization_unavailable'
+                | 'invalid_step_artifact'
+                | 'missing_step_artifact')
+            : 'producer_unavailable';
+        artifacts(c).put('diagnostic', {
+          runId: c.run.runId,
+          phase,
+          operation: `${phase}_producer`,
+          code,
+          next: 'Inspect retained evidence and explicitly resume after correcting the unavailable input.',
+        });
+        if (error instanceof AuthorApprovalError) throw error;
+        throw new ControllerError('step_failed', { phase, code });
       }
     };
     // Each wrapper preserves its real phase's outcome; only shared failure mapping is added.
@@ -728,17 +830,7 @@ export function createController(
       now: () => now().getTime(),
       policyFresh: async () => {
         await identity(c);
-        return createFreshnessProbe({
-          read,
-          upstream: config.upstream,
-          contributor: config.contributor,
-          gated: {
-            policy: g.policy,
-            policyDigest: g.policyDigest,
-            eligibilityDigest: g.eligibility.evidenceDigest,
-            ...(g.invitation ? { invitation: g.invitation } : {}),
-          },
-        }).policyFresh();
+        return gateFreshness(read, config, g).policyFresh();
       },
     });
     receipt = artifacts(c).get<SignedReceipt>('receipt');
@@ -800,15 +892,16 @@ export function createController(
       resumeHandoff: async (c) => {
         const driver = openHandoff(
           c,
-          shipping && receipt ? await shippingAdmission(c) : contactAdmission(c)
+          shipping && receipt ? await shippingAdmission(c) : contactAdmission(c),
+          shipping && receipt ? 'shipping' : 'contact'
         );
         return driver.snapshot().run;
       },
       resumeTracker: async (c) => (await openTracker(c)).snapshot().run,
       killAll: async (c) => {
-        for (const handle of await localVm(c).listByRun(c.run.runId))
-          await localVm(c).destroy(handle);
-        await broker?.killAll();
+        await stopResources(localVm(c), c.run.runId, async () => {
+          await broker?.killAll();
+        });
       },
     },
     release: async () => {
@@ -827,6 +920,7 @@ export function createController(
         pusher = undefined;
         intents = undefined;
         handoff = undefined;
+        handoffMode = undefined;
         tracker = undefined;
         shipping = undefined;
         receipt = undefined;

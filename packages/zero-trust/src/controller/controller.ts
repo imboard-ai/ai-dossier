@@ -173,7 +173,15 @@ export class ControllerError extends Error {
       | 'step_failed'
       | 'admission_closed'
       | 'driver_failed'
-      | 'recovery_failed'
+      | 'recovery_failed',
+    readonly diagnostic?: {
+      readonly phase: keyof PhaseSteps | 'recovery';
+      readonly code:
+        | 'producer_unavailable'
+        | 'contributor_authorization_unavailable'
+        | 'invalid_step_artifact'
+        | 'missing_step_artifact';
+    }
   ) {
     super(`Run controller refused (${code})`);
     this.name = 'ControllerError';
@@ -498,6 +506,7 @@ export class RunController {
       return await work();
     } catch (error) {
       if (error instanceof AuthorApprovalError) throw error;
+      if (error instanceof ControllerError) throw error;
       throw new ControllerError('recovery_failed');
     }
   }

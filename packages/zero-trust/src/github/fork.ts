@@ -474,11 +474,13 @@ function blockedAction(
   };
 }
 
-/** One explicit check of every prerequisite. Moves the run into, within, or out of the
+/** One explicit check of every prerequisite. In default mode moves the run into, within, or out of the
  * durable wait; the caller persists the returned run. Never schedules anything. Throws
  * `ForkError`: `admission_state` outside gating, shipping or a fork/installation wait (a
  * pending link hand-off included); `invalid_binding` / `invalid_app` on a bad issue URL,
- * upstream id or App slug. */
+ * upstream id or App slug. `readOnly: true` bypasses the lifecycle-state restriction,
+ * preserves the run, maps missing prerequisites to `unknown`, and reports positive
+ * invalidity as `blocked` without applying a transition. */
 export async function checkForkReadiness(
   input: ReadinessInput,
   deps: ReadinessDeps

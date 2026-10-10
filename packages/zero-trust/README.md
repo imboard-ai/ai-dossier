@@ -33,15 +33,19 @@ provider. An interrupted charge remains unknown, never replaced with an estimate
 ```json
 {
   "endpoints": {
-    "npmRegistry": "http://npm-proxy:4873/",
-    "pypiIndex": "http://pypi-proxy:5000/index/"
+    "npmRegistry": "<worker-relay-url>/",
+    "pypiIndex": "<worker-relay-url>/index/"
   },
-  "target": { "host": "10.0.0.2", "port": 4873 }
+  "target": { "host": "<physical-mirror-ipv4>", "port": 4873 }
 }
 ```
 
-Use the relay URLs required by the baked execution profile. The physical target
-is the controller-selected mirror; repository or model text cannot change it.
+Replace these placeholders before use: obtain the worker-facing relay URL from the
+baked execution profile's `WORKER_RELAY` contract, not the mirror service address.
+See the package-proxy setup section below. `target.host` and `target.port` identify
+the controller-reachable physical mirror and are deployment-specific; repository
+or model text cannot change them. Invalid or malformed proxy files produce only
+the non-echoing `invalid_proxy_file` diagnostic.
 GitHub App secrets are read only when constructing the credential session from
 the environment names in config; the Ed25519 signer uses `signerKeyFile`.
 
@@ -83,6 +87,15 @@ passed. Journals, source/approval/candidate bindings and digest-named immutable
 phase artifacts are reopened and checked on resume. The broker's cleanup-failure
 hook fences the run with `CleanupFailed`; the incident kill hook revokes the grant
 and destroys run VMs. Every run-owned journal is released before RunStore pins close.
+VM cleanup failures cannot skip credential revocation. Retained baseline refusals
+apply on replay, invitations are revalidated before leaving permission waits, and
+the cumulative admitted touched paths survive repair and drift checks, including
+byte-identical writes. Plan/patch checkpoints publish the held plan text and a
+deterministic held-source-to-candidate diff in the documented artifact paths.
+Producer failures retain a secret-free `diagnostic` step artifact with run, phase,
+operation, closed reason and explicit retry guidance; `ControllerError.diagnostic`
+exposes its safe phase/reason. An unavailable identity read remains recoverable;
+only a positively observed different account is `author_approval_mismatch`.
 
 Test overrides are **edges only**: `vm`, `fetch`, credential-free `read`, phase
 `models`, `gitRemoteUrl` (Vitest-only local bare upstream/fork), `now`, and `signer`.
@@ -213,12 +226,15 @@ assume every start/resume rejection has the same error class.
 Success outcomes are `proceed`, `acquired`, `planned { bindings }`,
 `candidate { bindings }`, `approved`, `verified { record }`,
 `unchanged` / `advanced { bindings }`, and `submitted`. Gate also accepts
-`request_permission`, `terminate`, `ineligible`; shipping accepts
+`request_permission`, `terminate`, `ineligible`, `contributor_handoff`,
+`fork_missing`, `installation_missing`; shipping accepts
 `contributor_handoff`, `fork_missing`, `installation_missing`. Explicit hand-off
 resume accepts `waiting`, `invited`, `engagement_observed`, `submitted`,
 `resume_gating`, `resume_shipping`, `declined`. Tracking accepts `waiting`,
 `awaiting_review`, `accepted`, `merged`, `declined`, `revision`.
 All phases accept `hand_off`, `blocked`, `unsupported`, `failed`, `cancelled`.
+Gate `contributor_handoff` waits for the contributor's engagement comment;
+fork/App prerequisite waits recheck and return to gating when satisfied.
 A gating hand-off stops in gating; other active hand-offs pause. Hand-offs from
 an existing durable wait/submission/tracker state preserve that state. Wait outcomes
 do not poll. Start stops at any durable wait, user pause, submission, review wait,
@@ -1153,7 +1169,7 @@ derives active time and monetary facts from controller history and the budget le
 
 ## Controller configuration, storage and status (#1090)
 
-`validateRunConfig(raw)` accepts only the issue #1090 configuration fields and
+`validateRunConfig(raw)` accepts only the closed configuration fields below and
 returns a detached `RunConfig` with parsed `upstream: { owner, repo, issue }`.
 The exact GitHub issue URL and contributor login are validated; unknown keys at
 every configuration object level fail closed. Environment fields name variables
@@ -1167,6 +1183,7 @@ The input shape is:
 | Field | Shape / units |
 |---|---|
 | `issueUrl`, `contributor` | Exact issue URL; GitHub login, at most 39 characters |
+| `authorApproval` | `{ userId, login, name, email, source: 'default' \| 'override', approvedAt }`; optional for foundational stored-config compatibility, required by composition |
 | `executionProfile` | `{ provider: 'local-qemu', profileDir, stateDir, accelerator, proxyEndpointsFile }` |
 | `modelProfile` | `{ phases: { planning, implementing, repair? }, rates }`; each phase is exported `ModelPhase` |
 | `budget` | `{ currency, ceilingMinor, cleanupAllowanceMinor, tokenLimit, activeMinutes }`; money in minor units, tokens in counts |
@@ -1175,6 +1192,11 @@ The input shape is:
 | `signerKeyFile` | Ed25519 receipt-key path |
 | `githubApp` | `{ appId, clientId, slug, privateKeyEnv, clientSecretEnv }`; positive numeric App ID, client ID and valid App slug; credentials are variable names |
 | `retentionDays`, `resumeRunId` | Optional retention and supported `ztc-<16 hex>-run-1` resume ID |
+
+Malformed approval gives `invalid_author_approval`. `approvedAt` accepts canonical
+UTC whole seconds or milliseconds (`...ssZ` / `...ss.sssZ`); the authenticated
+numeric account and login must match. See Controller composition for digest
+binding and #1109's responsibility for explicit consent and verified overrides.
 
 Rates use exported `BudgetRate`: `resource`, `currency`, `unit`, `price`, `units`,
 `source`, `fx: { currency, numerator, denominator, timestamp }`. `price` is
@@ -2828,13 +2850,15 @@ the gate under KVM, plus a TCG smoke test, on every PR touching this package.
 
 ## Fork-side GitHub credential broker
 
-`src/github/broker.ts`, `app-auth.ts`, `token-journal.ts`, `contributor.ts` and `push.ts`
-(which hands the broker's push credential to git) are the only code that holds or handles
+`src/github/broker.ts`, `app-auth.ts`, `token-journal.ts`, `contributor.ts`, `push.ts`
+(which hands the broker's push credential to git), and `src/controller/wiring.ts`
+(the sole non-GitHub composition-root exception) are the only code that holds or handles
 GitHub credentials (the hand-off and fork modules beside them are credential-free). They
 are controller-only: the package index does not export them, and
 `src/github/__tests__/isolation.test.ts` fails if any other module, including the index,
 the hand-off modules and the worker broker, can reach them through an import chain.
-Import them by path from trusted controller code.
+Scripts import the unexported wiring root by path. Other production `src/` modules
+cannot reach the root or credential modules, even through type-only imports.
 
 Under the hybrid hand-off ([decision record](../../docs/features/zero-trust-full-cycle/decisions/github-credentials.md))
 the broker performs fork pushes only. Upstream comments and PRs are contributor

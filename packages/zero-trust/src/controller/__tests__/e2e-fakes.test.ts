@@ -1,5 +1,5 @@
 /** Offline vertical slice: real controller/producers, only transport/VM/model edges fake. */
-import { generateKeyPairSync } from 'node:crypto';
+import { createHash, generateKeyPairSync } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,6 +13,7 @@ import {
   removeTemps,
   VerifierFakeVm,
 } from '../../__tests__/verifier-fixture';
+import { TrustedGit } from '../../canonical/trusted-git';
 import {
   CLIENT_ID,
   CLIENT_SECRET,
@@ -33,6 +34,10 @@ import {
 } from '../../model/adapter';
 import { discoverPolicy } from '../../policy/discover';
 import { assessIssue } from '../../policy/eligibility';
+import * as receipts from '../../receipt/issue';
+import { ReceiptNonceStore } from '../../receipt/nonces';
+import { ReasonCode, transitionRun } from '../../state';
+import { approveCheckpoint } from '../checkpoints';
 import { validateRunConfig } from '../config';
 import { RunStore } from '../run-store';
 import { StepArtifacts } from '../steps';
@@ -43,7 +48,20 @@ const TIME = '2026-10-10T00:00:00.000Z';
 const POLICY =
   'AI-assisted contributions are welcome. Assignment is not required. Direct pull requests are welcome. Non-draft PRs and verification receipts are allowed. Baseline failures are not allowed.';
 const dirs: string[] = [];
+let issued: ReturnType<typeof vi.spyOn>;
+let syncGit: ReturnType<typeof vi.spyOn>;
+let asyncGit: ReturnType<typeof vi.spyOn>;
+function pushCalls() {
+  return [...syncGit.mock.calls, ...asyncGit.mock.calls].filter((call) => call[0][0] === 'push');
+}
+function noShipping() {
+  expect(issued.mock.calls).toHaveLength(0);
+  expect(pushCalls()).toHaveLength(0);
+}
 beforeEach(() => {
+  issued = vi.spyOn(receipts, 'issueReceipt');
+  syncGit = vi.spyOn(TrustedGit.prototype, 'exec');
+  asyncGit = vi.spyOn(TrustedGit.prototype, 'execAsync');
   vi.spyOn(os, 'networkInterfaces').mockReturnValue({
     fixture: [
       { address: '127.0.0.1', family: 'IPv4', internal: false, netmask: '', mac: '', cidr: null },
@@ -68,6 +86,14 @@ function rig(
     signoff?: boolean;
     realNameOnlyLogin?: boolean;
     cancelDuringPlan?: boolean;
+    checkpoint?: 'plan' | 'patch' | 'verification';
+    failBaseline?: boolean;
+    wrappedPolicy?: boolean;
+    userUnavailable?: boolean;
+    baseUnavailable?: boolean;
+    driftTouch?: boolean;
+    corruptPolicy?: boolean;
+    delayFork?: boolean;
   } = {}
 ) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zt-composition-'));
@@ -148,6 +174,7 @@ function rig(
       privateKeyEnv: 'ZT_APP_KEY',
       clientSecretEnv: 'ZT_APP_SECRET',
     },
+    checkpoints: options.checkpoint ? [options.checkpoint] : [],
   });
   config.modelProfile.rates.push({
     resource: 'local-qemu',
@@ -169,16 +196,38 @@ function rig(
   });
   fake.selected.set(INSTALLATION_ID, [FORK_ID]);
   if (options.missingInstallation) fake.appInstallations.clear();
-  const policy =
+  let policy =
     (options.policy === 'ban'
       ? 'AI contributions are banned.'
       : options.policy === 'permission'
         ? 'AI contributions require maintainer approval. Assignment is not required. Direct pull requests are welcome. Non-draft PRs and verification receipts are allowed. Baseline failures are not allowed.'
         : POLICY) +
-    (options.signoff ? '\nA Signed-off-by line is required under the DCO.' : '') +
-    (options.realNameOnlyLogin ? '\nYour real name is required for commits.' : '');
+    (options.signoff
+      ? options.wrappedPolicy
+        ? '\n## DCO\nAll commits must include a\nSigned-off-by trailer.'
+        : '\nA Signed-off-by line is required under the DCO.'
+      : '') +
+    (options.realNameOnlyLogin
+      ? options.wrappedPolicy
+        ? '\nA real name\nis required on commits.'
+        : '\nYour real name is required for commits.'
+      : '');
+  const originalPolicySha = createHash('sha1')
+    .update(`blob ${Buffer.byteLength(policy)}\0${policy}`)
+    .digest('hex');
   let submitted: Record<string, unknown> | undefined;
   let comment: Record<string, unknown> | undefined;
+  let invitation: Record<string, unknown> | undefined;
+  let branchReads = 0;
+  let advanced: string | undefined;
+  let releaseFork!: () => void;
+  let reachedFork!: () => void;
+  const forkReached = new Promise<void>((resolve) => {
+    reachedFork = resolve;
+  });
+  const forkReleased = new Promise<void>((resolve) => {
+    releaseFork = resolve;
+  });
   const read: NonNullable<Parameters<typeof createController>[1]>['read'] = async (p) => {
     if (p === '/repos/upstream/fixture')
       return {
@@ -210,8 +259,33 @@ function rig(
         },
       };
     if (p.includes('/timeline?')) return { status: 200, body: [] };
-    if (p.startsWith('/repos/upstream/fixture/branches/'))
+    if (p.startsWith('/repos/upstream/fixture/branches/')) {
+      if (options.baseUnavailable) return { status: 503, body: null };
+      if (options.driftTouch && ++branchReads > 1) {
+        if (!advanced) {
+          const entry = CANDIDATE.entries.find((e) => e.path === 'package.json');
+          if (!entry) throw new Error('fixture missing package');
+          const bytes = JSON.stringify({
+            ...JSON.parse(Buffer.from(entry.bytes, 'base64').toString()),
+            description: 'upstream change',
+          });
+          const blob = upstream.git(['hash-object', '-w', '--stdin'], bytes);
+          const tree = upstream.git(
+            ['mktree'],
+            `${upstream.git(['ls-tree', BASE_COMMIT.baseSha]).replace(/blob [a-f0-9]{40}\tpackage.json/u, `blob ${blob}\tpackage.json`)}\n`
+          );
+          advanced = upstream.git(['commit-tree', tree, '-p', BASE_COMMIT.baseSha], 'advance\n', {
+            GIT_AUTHOR_NAME: 'Upstream',
+            GIT_AUTHOR_EMAIL: 'upstream@example.org',
+            GIT_COMMITTER_NAME: 'Upstream',
+            GIT_COMMITTER_EMAIL: 'upstream@example.org',
+          });
+          upstream.git(['update-ref', 'refs/heads/main', advanced]);
+        }
+        return { status: 200, body: { commit: { sha: advanced } } };
+      }
       return { status: 200, body: { commit: { sha: BASE_COMMIT.baseSha } } };
+    }
     if (p.startsWith('/repos/upstream/fixture/git/ref/heads/'))
       return {
         status: 200,
@@ -224,16 +298,29 @@ function rig(
             body: {
               path: 'CONTRIBUTING.md',
               type: 'file',
-              sha: 'a'.repeat(40),
-              size: Buffer.byteLength(policy),
+              sha:
+                options.corruptPolicy && planCalls > 0
+                  ? originalPolicySha
+                  : createHash('sha1')
+                      .update(`blob ${Buffer.byteLength(policy)}\0${policy}`)
+                      .digest('hex'),
+              size: Buffer.byteLength(
+                options.corruptPolicy && planCalls > 0 ? 'AI contributions are banned.' : policy
+              ),
               encoding: 'base64',
-              content: Buffer.from(policy).toString('base64'),
+              content: Buffer.from(
+                options.corruptPolicy && planCalls > 0 ? 'AI contributions are banned.' : policy
+              ).toString('base64'),
             },
           }
         : { status: 404, body: null };
     if (p.includes('/forks?')) return { status: 200, body: [] };
     if (p === `/repos/${OWNER}/fixture` && options.missingFork) return { status: 404, body: null };
-    if (p === `/repos/${OWNER}/fixture`)
+    if (p === `/repos/${OWNER}/fixture`) {
+      if (options.delayFork) {
+        reachedFork();
+        await forkReleased;
+      }
       return {
         status: 200,
         body: {
@@ -245,6 +332,7 @@ function rig(
           owner: { login: OWNER },
         },
       };
+    }
     if (p.startsWith(`/repos/${OWNER}/fixture/git/ref/heads/`)) {
       const branch = decodeURIComponent(p.split('/heads/')[1]);
       const sha = fork.sha(branch);
@@ -255,7 +343,9 @@ function rig(
     if (p.startsWith('/repos/upstream/fixture/pulls?'))
       return { status: 200, body: submitted ? [submitted] : [] };
     if (p === '/repos/upstream/fixture/pulls/8') return { status: 200, body: submitted };
-    if (p.includes('/issues/7/comments?')) return { status: 200, body: comment ? [comment] : [] };
+    if (p.includes('/issues/7/comments?'))
+      return { status: 200, body: [comment, invitation].filter(Boolean) };
+    if (p.endsWith('/issues/comments/10')) return { status: 200, body: invitation };
     if (p.includes('/actions/runs?')) return { status: 200, body: { workflow_runs: [] } };
     if (p.includes('/check-runs')) return { status: 200, body: { check_runs: [] } };
     if (p.endsWith('/status')) return { status: 200, body: { statuses: [] } };
@@ -264,6 +354,8 @@ function rig(
   };
   const fetcher: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
+    if (options.userUnavailable && url.pathname === '/user')
+      return new Response('{}', { status: 503 });
     const response =
       url.hostname === 'api.github.com'
         ? await fake.http({
@@ -273,12 +365,15 @@ function rig(
             ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}),
           })
         : await fake.oauth(JSON.parse(String(init?.body)) as Record<string, string>);
-    return new Response(JSON.stringify(response.json), { status: response.status });
+    return new Response(response.status === 204 ? null : JSON.stringify(response.json), {
+      status: response.status,
+    });
   };
   let seq = 0;
   let implementTurn = 0;
   let planCalls = 0;
   const repairEvidence: string[] = [];
+  let touched = false;
   let reachedPlan!: () => void;
   const planReached = new Promise<void>((resolve) => {
     reachedPlan = resolve;
@@ -326,7 +421,11 @@ function rig(
         const writes = CANDIDATE.entries.filter((e) =>
           ['test/regression.test.js', 'src/duration.js'].includes(e.path)
         );
-        const e = writes[implementTurn++ % 3];
+        let e: (typeof CANDIDATE.entries)[number] | undefined;
+        if (options.driftTouch && !touched) {
+          touched = true;
+          e = CANDIDATE.entries.find((entry) => entry.path === 'package.json');
+        } else e = writes[implementTurn++ % 3];
         arguments_ = e
           ? {
               kind: 'worker_write_file',
@@ -350,6 +449,8 @@ function rig(
   };
   const reports = new Map<object, number>();
   const vm = new VerifierFakeVm((request, guest) => {
+    if (options.failBaseline && request.report && !guest.files.has('test/regression.test.js'))
+      return { exitCode: 1, report: junit(1, true) };
     if (request.report) reports.set(guest, (reports.get(guest) ?? 0) + 1);
     if (
       options.failVerification &&
@@ -399,6 +500,7 @@ function rig(
       store,
       dir,
       get,
+      put: held.put.bind(held),
       close: () => {
         j.close();
         store.close();
@@ -418,6 +520,23 @@ function rig(
     planCalls: () => planCalls,
     planReached,
     repairEvidence,
+    forkReached,
+    releaseFork,
+    invite() {
+      invitation = {
+        id: 10,
+        html_url: `${config.issueUrl}#issuecomment-10`,
+        body: 'Go ahead.',
+        user: { login: 'maintainer', html_url: 'https://github.com/maintainer' },
+        author_association: 'MEMBER',
+        created_at: '2026-10-10T00:00:01.000Z',
+        updated_at: '2026-10-10T00:00:01.000Z',
+      };
+    },
+    welcome() {
+      options.policy = undefined;
+      policy = POLICY;
+    },
     submit(runId: string) {
       const a = artifacts(runId);
       const held = a.get<{ record: { candidateSha: string } }>('candidate');
@@ -468,6 +587,173 @@ function rig(
 }
 
 describe('createController real composition', () => {
+  it.each([
+    false,
+    true,
+  ])('carries invitation authority into shipping (policy changed=%s)', async (changed) => {
+    const h = rig({ policy: 'permission' });
+    const run = (await h.authorize(h.controller.start(h.config))) as Awaited<
+      ReturnType<typeof h.controller.start>
+    >;
+    h.submitEngagement(run.runId);
+    expect(((await h.authorize(h.controller.resume(run.runId))) as { state: string }).state).toBe(
+      'awaiting_maintainer'
+    );
+    h.invite();
+    if (changed) h.welcome();
+    expect(((await h.authorize(h.controller.resume(run.runId))) as { state: string }).state).toBe(
+      'awaiting_contributor'
+    );
+    const a = h.artifacts(run.runId);
+    const journal = new Journal(a.store.storeDirectory('handoff'));
+    const links = journal.read().filter((row) => (row as { type: string }).type === 'link_issued');
+    expect(links).toHaveLength(2);
+    journal.close();
+    expect(h.fork.sha(`ztfc/${a.store.contributionId}`)).toBe(
+      a.get<{ record: { candidateSha: string } }>('candidate').record.candidateSha
+    );
+    a.close();
+  }, 60000);
+  it('retains a prohibited baseline refusal on legal continuation', async () => {
+    const h = rig({ failBaseline: true });
+    const run = (await h.authorize(h.controller.start(h.config))) as Awaited<
+      ReturnType<typeof h.controller.start>
+    >;
+    expect(run.state).toBe('paused_user');
+    const a = h.artifacts(run.runId);
+    a.store.persistRun(transitionRun(a.store.run, ReasonCode.ResumePlanning, TIME));
+    a.close();
+    expect(((await h.authorize(h.controller.resume(run.runId))) as { state: string }).state).toBe(
+      'paused_user'
+    );
+    expect(h.planCalls()).toBe(0);
+    noShipping();
+  }, 60000);
+  it.each([
+    'plan',
+    'patch',
+  ] as const)('publishes held human-readable %s checkpoint evidence', async (checkpoint) => {
+    const h = rig({ checkpoint });
+    const run = (await h.authorize(h.controller.start(h.config))) as Awaited<
+      ReturnType<typeof h.controller.start>
+    >;
+    expect(run.state).toBe('paused_user');
+    const a = h.artifacts(run.runId);
+    expect(a.store.checkpoint(checkpoint)?.status).toBe('open');
+    const bytes = fs.readFileSync(
+      path.join(a.dir, checkpoint === 'plan' ? 'plan.txt' : 'candidate.diff'),
+      'utf8'
+    );
+    if (checkpoint === 'plan') expect(bytes).toBe(a.get<{ text: string }>('plan').text);
+    else {
+      expect(bytes).toContain('+++ b/src/duration.js');
+      expect(bytes).toContain('+');
+      expect(bytes).toContain('millis / 1000');
+    }
+    a.close();
+    noShipping();
+  }, 60000);
+  it('reconciles the completed nonce-header crash prefix without resetting history', async () => {
+    const h = rig({ checkpoint: 'verification' });
+    const run = (await h.authorize(h.controller.start(h.config))) as Awaited<
+      ReturnType<typeof h.controller.start>
+    >;
+    const a = h.artifacts(run.runId);
+    const cp = a.store.checkpoint('verification');
+    if (!cp) throw new Error('fixture missing checkpoint');
+    approveCheckpoint(a.store, a.store.run, { point: 'verification', digest: cp.digest }, TIME);
+    a.put('nonces_initializing', true);
+    new ReceiptNonceStore(a.store.storeDirectory('nonces')).initialize();
+    a.close();
+    expect(((await h.authorize(h.controller.resume(run.runId))) as { state: string }).state).toBe(
+      'awaiting_contributor'
+    );
+    const b = h.artifacts(run.runId);
+    expect(b.get('nonces_initialized')).toBe(true);
+    expect(
+      fs.readFileSync(path.join(b.store.storeDirectory('nonces'), 'events.jsonl'), 'utf8')
+    ).toContain('receiptDigest');
+    b.close();
+  }, 60000);
+  it('does not relabel an unavailable authenticated identity as a different account', async () => {
+    const h = rig({ userUnavailable: true });
+    await expect(h.authorize(h.controller.start(h.config))).rejects.toMatchObject({
+      code: 'step_failed',
+      diagnostic: { phase: 'gate', code: 'contributor_authorization_unavailable' },
+    });
+    const a = h.artifacts(h.controller.snapshot().runId);
+    expect(a.store.run.state).toBe('gating');
+    expect(a.get('refusal')).toBe('contributor_authorization_unavailable');
+    a.close();
+    noShipping();
+  }, 60000);
+  it('retains a safe actionable gate diagnostic without external response text', async () => {
+    const h = rig({ baseUnavailable: true });
+    await expect(h.controller.start(h.config)).rejects.toMatchObject({
+      code: 'step_failed',
+      diagnostic: { phase: 'gate', code: 'producer_unavailable' },
+    });
+    const a = h.artifacts(h.controller.snapshot().runId);
+    expect(a.get('diagnostic')).toMatchObject({
+      phase: 'gate',
+      operation: 'gate_producer',
+      code: 'producer_unavailable',
+      next: expect.stringContaining('explicitly resume'),
+    });
+    a.close();
+  });
+  it('refuses contradictory external policy bytes before receipt issuance', async () => {
+    const h = rig({ corruptPolicy: true });
+    await expect(h.authorize(h.controller.start(h.config))).rejects.toMatchObject({
+      code: 'step_failed',
+    });
+    noShipping();
+  }, 60000);
+  it('retains byte-identical admitted writes when checking upstream drift', async () => {
+    const h = rig({ driftTouch: true });
+    const run = (await h.authorize(h.controller.start(h.config))) as Awaited<
+      ReturnType<typeof h.controller.start>
+    >;
+    expect(run.state).toBe('paused_user');
+    const a = h.artifacts(run.runId);
+    expect(a.get<{ touched: string[] }>('candidate').touched).toContain('package.json');
+    expect(h.fork.sha(`ztfc/${a.store.contributionId}`)).toBeNull();
+    a.close();
+    noShipping();
+  }, 60000);
+  it('revokes credentials even when incident VM destruction fails', async () => {
+    const h = rig({ cancelDuringPlan: true });
+    const task = h.authorize(h.controller.start(h.config));
+    await h.planReached;
+    h.vm.failDestroy = 100;
+    await expect(h.controller.incidentStop('cleanup failure control')).rejects.toThrow();
+    await task.catch(() => {});
+    expect(h.controller.snapshot().state).toBe('blocked_cleanup');
+    expect(h.fake.calls.some((call) => call.method === 'DELETE')).toBe(true);
+    expect([...h.fake.tokens.values()].every((token) => !token.live)).toBe(true);
+    noShipping();
+  }, 60000);
+  it('does not open OAuth after cancellation during an external fork read', async () => {
+    const h = rig({ delayFork: true });
+    const task = h.controller.start(h.config);
+    await h.forkReached;
+    const stopped = h.controller.incidentStop('delayed read cancellation');
+    h.releaseFork();
+    await stopped;
+    await task;
+    expect(h.controller.authorizationUrl).toBeNull();
+    expect(h.fake.oauthCalls).toEqual([]);
+    noShipping();
+  }, 60000);
+  it('never echoes malformed credential-shaped proxy bytes', () => {
+    const h = rig();
+    fs.writeFileSync(
+      h.config.executionProfile.proxyEndpointsFile,
+      'ghp_sensitive_malformed_fixture',
+      { mode: 0o600 }
+    );
+    expect(() => createController(h.config)).toThrow(/^invalid_proxy_file$/u);
+  });
   it('produces a verified fork push and contributor compare handoff, then observes submission honestly', async () => {
     const h = rig();
     expect(
@@ -487,6 +773,8 @@ describe('createController real composition', () => {
       ReturnType<typeof h.controller.start>
     >;
     expect(run.state).toBe('awaiting_contributor');
+    expect(issued.mock.calls.length).toBeGreaterThan(0);
+    expect(pushCalls().length).toBeGreaterThan(0);
     const a = h.artifacts(run.runId);
     const held = a.get<{ record: { candidateSha: string } }>('candidate');
     expect(h.fork.sha(`ztfc/${a.store.contributionId}`)).toBe(held.record.candidateSha);
@@ -569,6 +857,7 @@ describe('createController real composition', () => {
     const a = h.artifacts(run.runId);
     expect(a.get('receipt')).toBeUndefined();
     expect(h.fork.sha(`ztfc/${a.store.contributionId}`)).toBeNull();
+    noShipping();
     a.close();
   }, 60000);
   it('exhausts exactly two repair attempts after three independent verification failures without pushing', async () => {
@@ -588,6 +877,7 @@ describe('createController real composition', () => {
     ).toBe(true);
     expect(a.get('receipt')).toBeUndefined();
     expect(h.fork.sha(`ztfc/${a.store.contributionId}`)).toBeNull();
+    noShipping();
     expect(
       fs.readdirSync(path.join(a.dir, 'verification')).filter((name) => name.endsWith('.json'))
     ).toHaveLength(3);
@@ -626,8 +916,11 @@ describe('createController real composition', () => {
     expect(h.vm.calls).toEqual([]);
     expect(h.fake.oauthCalls).toEqual([]);
   });
-  it('uses the persisted approved identity for a required DCO trailer', async () => {
-    const h = rig({ signoff: true });
+  it.each([
+    false,
+    true,
+  ])('uses the persisted approved identity for a required DCO trailer (wrapped=%s)', async (wrappedPolicy) => {
+    const h = rig({ signoff: true, wrappedPolicy });
     const run = (await h.authorize(h.controller.start(h.config))) as Awaited<
       ReturnType<typeof h.controller.start>
     >;
@@ -638,8 +931,11 @@ describe('createController real composition', () => {
     );
     a.close();
   }, 60000);
-  it('hands off an explicit real-name requirement when the approved name is only the login', async () => {
-    const h = rig({ realNameOnlyLogin: true });
+  it.each([
+    false,
+    true,
+  ])('hands off an explicit real-name requirement when the approved name is only the login (wrapped=%s)', async (wrappedPolicy) => {
+    const h = rig({ realNameOnlyLogin: true, wrappedPolicy });
     const run = await h.controller.start(h.config);
     expect(run.state).toBe('gating');
     expect(h.vm.calls).toEqual([]);
