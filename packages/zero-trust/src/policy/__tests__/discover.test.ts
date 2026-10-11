@@ -30,7 +30,7 @@ function fake(responses: Record<string, GitHubResponse> = {}) {
   const calls: string[] = [];
   const read: GitHubRead = async (url) => {
     calls.push(url);
-    const path = decodeURIComponent(url.split('/contents/')[1].split('?')[0]).replace(/\/$/u, '');
+    const path = decodeURIComponent(url.split('/contents/')[1].split('?')[0]);
     return responses[path] ?? { status: 404, body: null };
   };
   return { calls, read };
@@ -67,7 +67,7 @@ describe('pinned, fail-closed discovery', () => {
     const { read, calls } = fake();
     expect(await discoverPolicy(read, upstream)).toEqual({ kind: 'known', files: [] });
     expect(calls).toEqual(
-      [...POLICY_PATHS, `${POLICY_TEMPLATE_DIRECTORY}/`].map(
+      [...POLICY_PATHS, POLICY_TEMPLATE_DIRECTORY].map(
         (path) => `/repos/synthetic-owner/synthetic-repo/contents/${path}?ref=${upstream.ref}`
       )
     );
@@ -261,7 +261,7 @@ describe('pinned, fail-closed discovery', () => {
       if (d.kind !== 'known') throw new Error('Expected complete hostile fixture');
       expect(classifyPolicy(d.files).ai).toBe('unclear');
       expect(calls).toEqual(
-        [...POLICY_PATHS, `${POLICY_TEMPLATE_DIRECTORY}/`].map(
+        [...POLICY_PATHS, POLICY_TEMPLATE_DIRECTORY].map(
           (path) => `/repos/synthetic-owner/synthetic-repo/contents/${path}?ref=${upstream.ref}`
         )
       );
