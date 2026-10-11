@@ -34,7 +34,7 @@ import { assessPolicy } from '../policy/decide-policy';
 import { discoverPolicy } from '../policy/discover';
 import { assessIssue, type Eligibility } from '../policy/eligibility';
 import { engagementBody } from '../policy/engagement';
-import { createFreshnessProbe } from '../policy/freshness';
+import { createFreshnessProbe, type FreshnessReport } from '../policy/freshness';
 import { decideGate } from '../policy/gate';
 import { checkInvitation, type InvitationEvidence } from '../policy/invitation';
 import { policyRegions } from '../policy/regions';
@@ -71,7 +71,11 @@ import {
 import { assessRevisionFeedback } from './feedback';
 import { OutputCollector } from './output-collector';
 import type { ShippingAuthorizeDeps } from './shipping';
-import { loadVerification, type VerificationRecord } from './verification-record';
+import {
+  loadVerification,
+  type VerificationRecord,
+  VerificationRecordError,
+} from './verification-record';
 import { verificationPlan, verifyCandidate } from './verifier';
 import { WorkspaceOverlay } from './workspace-overlay';
 
@@ -86,6 +90,25 @@ export interface GateRecord {
   readonly body: string;
   readonly invitation?: InvitationEvidence;
 }
+/** Why the run stopped, shown by status for exactly that stop: `historyLength` is the run
+ * history length once the stop is recorded, so a later stop never displays a stale notice. */
+export interface StopNotice {
+  readonly state: 'paused_user' | 'awaiting_contributor' | 'blocked';
+  readonly historyLength: number;
+  readonly reason: string;
+  readonly nextPermittedAction: string;
+}
+export const STOP_NOTICE_KEY = 'stop_notice';
+const DRIFT_HANDOFF_ACTIONS: Readonly<Record<string, string>> = Object.freeze({
+  rebase_conflict:
+    'Upstream changed a file this patch also changes, so the candidate was not rebased (no text merging). Nothing was pushed. Start a new run on the current upstream.',
+  base_unknown:
+    'The current upstream base could not be read, so nothing was pushed. Resume explicitly to check it again.',
+  base_unstable:
+    "Upstream kept advancing past this session's rebase limit. Nothing was pushed. Start a new run on the current upstream.",
+  rebase_unavailable:
+    'The candidate could not be rebased onto the current upstream base. Nothing was pushed. Start a new run on the current upstream.',
+});
 export function implementationPhaseKey(run: RunRecord): number {
   return run.history.filter(
     (e) =>
@@ -885,6 +908,18 @@ export function createSteps(
         }
       );
       if (result.kind === 'unchanged') return { kind: 'unchanged' };
+      if (result.kind === 'hand_off') {
+        artifacts(c).put('drift_handoff', {
+          reason: result.reason,
+          ...(result.paths ? { paths: result.paths } : {}),
+        });
+        artifacts(c).put(STOP_NOTICE_KEY, {
+          state: 'paused_user',
+          historyLength: c.run.history.length + 1,
+          reason: result.reason,
+          nextPermittedAction: DRIFT_HANDOFF_ACTIONS[result.reason],
+        } satisfies StopNotice);
+      }
       if (result.kind !== 'rebased') return { kind: 'hand_off' };
       const next = nextSources.get(result.candidate.record.baseSha);
       if (!next) return { kind: 'hand_off' };
@@ -910,16 +945,47 @@ export function createSteps(
       const fork = await services.readiness(c);
       if (typeof fork === 'string') return { kind: fork };
       const held = candidate(c);
-      const verification = loadVerification(
-        c.store.storeDirectory('artifacts'),
-        held.record.candidateSha,
-        { runId: c.run.runId, expectedDigest: artifacts(c).require<string>('verification') }
-      );
+      const load = () =>
+        loadVerification(c.store.storeDirectory('artifacts'), held.record.candidateSha, {
+          runId: c.run.runId,
+          expectedDigest: artifacts(c).require<string>('verification'),
+        });
+      // Scenario 10: verification evidence altered after the verdict (an accidental torn
+      // or corrupted write) cannot authorize a receipt. The write-once record cannot be
+      // re-verified in place, so the run blocks; a transient read failure does not.
+      const altered = () => {
+        try {
+          load();
+          return false;
+        } catch (error) {
+          return error instanceof VerificationRecordError && error.code === 'invalid_record';
+        }
+      };
+      const blockAltered = () => {
+        artifacts(c).put(STOP_NOTICE_KEY, {
+          state: 'blocked',
+          historyLength: c.run.history.length + 1,
+          reason: 'verification_altered',
+          nextPermittedAction:
+            'The verification record changed after the verdict, so no receipt was issued and nothing was pushed. Fresh verification requires a new run.',
+        } satisfies StopNotice);
+        return { kind: 'blocked' as const };
+      };
+      let verification: VerificationRecord;
+      try {
+        verification = load();
+      } catch (error) {
+        if (altered()) return blockAltered();
+        throw error;
+      }
       const targets = artifacts(c).require<string[]>('targets');
       artifacts(c).put('push_intended', true);
       const digest = sha256(Buffer.from(canonicalJson(profile(c))));
-      return {
-        kind: await services.ship(
+      // The first stale observation of this step; any later failure is then a block.
+      let refused: FreshnessReport | undefined;
+      let kind: Awaited<ReturnType<StepServices['ship']>>;
+      try {
+        kind = await services.ship(
           c,
           {
             store: c.store,
@@ -948,13 +1014,29 @@ export function createSteps(
             now: () => services.now().getTime(),
             policyFresh: async () => {
               await approval(c);
-              return fresh(c).policyFresh();
+              const probe = await fresh(c).check();
+              if (!probe.fresh) refused ??= probe;
+              return probe.fresh;
             },
           },
           held.meta,
           gate(c).policy
-        ),
-      };
+        );
+      } catch (error) {
+        if (!refused && altered()) return blockAltered();
+        if (!refused) throw error;
+        // Permission freshness (PRD §5.9): revocation, closure or a policy change blocks
+        // the write and retains the evidence; it is never retried.
+        artifacts(c).put('shipping_freshness', refused);
+        artifacts(c).put(STOP_NOTICE_KEY, {
+          state: 'blocked',
+          historyLength: c.run.history.length + 1,
+          reason: refused.reasons.join(','),
+          nextPermittedAction: `Blocked by the publication freshness check (${refused.reasons.join(', ')}). No further write or link follows; the candidate, its verification and the freshness evidence are retained. Start a new run if the contribution should continue.`,
+        } satisfies StopNotice);
+        return { kind: 'blocked' };
+      }
+      return { kind };
     },
     async resumeHandoff(c): Promise<ResumeHandoffOutcome> {
       const origin = prerequisiteWaitOrigin(c.run);

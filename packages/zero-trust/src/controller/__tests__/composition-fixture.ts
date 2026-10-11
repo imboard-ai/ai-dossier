@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { BareFork as Fork } from '../../__tests__/bare-fork';
-import { junit } from '../../__tests__/fake-vm';
+import { type FakeScript, junit } from '../../__tests__/fake-vm';
 import {
   BASE_COMMIT,
   CANDIDATE,
@@ -24,6 +24,7 @@ import {
   UPSTREAM_ID,
   USER_ID,
 } from '../../github/__tests__/github-fake';
+import type { GitHubResponse } from '../../github/reconcile';
 import { Journal } from '../../journal';
 import {
   type ModelAdapter,
@@ -33,6 +34,7 @@ import {
 } from '../../model/adapter';
 import type { ExecRequest, ExecResult } from '../../vm/adapter';
 import { validateRunConfig } from '../config';
+import { contributionIdOf } from '../ids';
 import { RunStore } from '../run-store';
 import { StepArtifacts } from '../steps';
 import { createController } from '../wiring';
@@ -46,6 +48,12 @@ const SIGNER = generateKeyPairSync('ed25519').privateKey.export({ format: 'pem',
 const APP_KEY = generateKeyPairSync('rsa', { modulusLength: 2048 })
   .privateKey.export({ format: 'pem', type: 'pkcs8' })
   .toString();
+const UPSTREAM_IDENTITY = {
+  GIT_AUTHOR_NAME: 'Upstream',
+  GIT_AUTHOR_EMAIL: 'upstream@example.org',
+  GIT_COMMITTER_NAME: 'Upstream',
+  GIT_COMMITTER_EMAIL: 'upstream@example.org',
+};
 const dirs: string[] = [];
 let instrumentVm: (vm: VerifierFakeVm) => void = () => {};
 let setEnv = (key: string, value: string) => {
@@ -83,6 +91,8 @@ export interface RigOptions {
   onlyRepair?: boolean;
   teardownFails?: boolean;
   beforeRead?: (path: string) => Promise<void>;
+  /** Called before each credentialed GitHub/OAuth request reaches the fake server. */
+  beforeFetch?: (url: URL) => Promise<void>;
   beforeModel?: (request: ModelRequest) => Promise<void>;
   beforeExec?: () => Promise<void>;
   tokenLimit?: number;
@@ -250,8 +260,21 @@ export function rig(options: RigOptions = {}) {
       .digest('hex');
   const originalPolicySha = policySha(policy);
   let submitted: Record<string, unknown> | undefined;
+  /** Further marked PRs from the same head: a repeated contributor submission. */
+  let resubmitted: Record<string, unknown>[] = [];
+  let feedback: Record<string, unknown>[] = [];
+  let revisionMode = false;
+  let issueState: 'open' | 'closed' = 'open';
+  /** Upstream default-branch head; `advanceUpstream` moves it. */
+  let head = BASE_COMMIT.baseSha;
+  let advances = 0;
+  /** Fork commits a scenario wrote out of band; the audit requires them untouched. */
+  const foreign = new Set<string>();
+  let intercept: ((path: string) => GitHubResponse | undefined) | undefined;
+  let report: FakeScript | undefined;
   let comment: Record<string, unknown> | undefined;
   let invitation: Record<string, unknown> | undefined;
+  let revocation: Record<string, unknown> | undefined;
   let branchReads = 0;
   let advanced: string | undefined;
   let releaseFork!: () => void;
@@ -264,6 +287,8 @@ export function rig(options: RigOptions = {}) {
   });
   const read: NonNullable<Parameters<typeof createController>[1]>['read'] = async (p) => {
     await options.beforeRead?.(p);
+    const replaced = intercept?.(p);
+    if (replaced) return replaced;
     if (p === '/repos/upstream/fixture')
       return {
         status: 200,
@@ -282,7 +307,7 @@ export function rig(options: RigOptions = {}) {
         body: {
           number: 7,
           html_url: config.issueUrl,
-          state: 'open',
+          state: issueState,
           locked: false,
           user: { login: 'reporter', html_url: 'https://github.com/reporter' },
           author_association: 'CONTRIBUTOR',
@@ -319,12 +344,12 @@ export function rig(options: RigOptions = {}) {
         }
         return { status: 200, body: { commit: { sha: advanced } } };
       }
-      return { status: 200, body: { commit: { sha: BASE_COMMIT.baseSha } } };
+      return { status: 200, body: { commit: { sha: head } } };
     }
     if (p.startsWith('/repos/upstream/fixture/git/ref/heads/'))
       return {
         status: 200,
-        body: { ref: 'refs/heads/main', object: { type: 'commit', sha: BASE_COMMIT.baseSha } },
+        body: { ref: 'refs/heads/main', object: { type: 'commit', sha: head } },
       };
     if (options.restrictPolicy && planCalls > 0) policy = 'AI contributions are banned.';
     if (p.startsWith('/repos/upstream/fixture/contents/')) {
@@ -369,8 +394,13 @@ export function rig(options: RigOptions = {}) {
         ? { status: 200, body: { ref: `refs/heads/${branch}`, object: { type: 'commit', sha } } }
         : { status: 404, body: null };
     }
+    if (submitted && revisionMode) {
+      // A pull request's head follows its fork branch.
+      const pr = submitted.head as { ref: string; sha: string };
+      pr.sha = fork.sha(pr.ref) ?? pr.sha;
+    }
     if (p.startsWith('/repos/upstream/fixture/pulls?'))
-      return { status: 200, body: submitted ? [submitted] : [] };
+      return { status: 200, body: submitted ? [submitted, ...resubmitted] : [] };
     if (p === '/repos/upstream/fixture/pulls/8') return { status: 200, body: submitted };
     if (p.includes('/issues/7/comments?') && options.activeControl === 'engagement' && !blocked) {
       blocked = true;
@@ -378,8 +408,9 @@ export function rig(options: RigOptions = {}) {
       await controlReleased;
     }
     if (p.includes('/issues/7/comments?'))
-      return { status: 200, body: [comment, invitation].filter(Boolean) };
+      return { status: 200, body: [comment, invitation, revocation].filter(Boolean) };
     if (p.endsWith('/issues/comments/10')) return { status: 200, body: invitation };
+    if (p.includes('/issues/8/comments?')) return { status: 200, body: feedback };
     if (p.includes('/actions/runs?')) return { status: 200, body: { workflow_runs: [] } };
     if (p.includes('/check-runs')) return { status: 200, body: { check_runs: [] } };
     if (p.endsWith('/status')) return { status: 200, body: { statuses: [] } };
@@ -389,6 +420,7 @@ export function rig(options: RigOptions = {}) {
   const fetcher: typeof fetch = async (input, init) => {
     loadServer();
     const url = new URL(String(input));
+    await options.beforeFetch?.(url);
     if (options.activeControl === 'mint' && url.pathname.endsWith('/access_tokens') && !blocked) {
       blocked = true;
       controlReached();
@@ -485,10 +517,16 @@ export function rig(options: RigOptions = {}) {
           'policy-receipt': true,
           'policy-baseline': false,
         };
-        arguments_ = {
-          value: values[question.id],
-          citations: [{ sourceId: 'CONTRIBUTING.md', line: 1, quote: policy.split('\n')[0] }],
-        };
+        arguments_ =
+          question.id === 'revision-feedback'
+            ? {
+                value: true,
+                citations: [{ sourceId: 'comment:11', line: 1, quote: String(feedback[0]?.body) }],
+              }
+            : {
+                value: values[question.id],
+                citations: [{ sourceId: 'CONTRIBUTING.md', line: 1, quote: policy.split('\n')[0] }],
+              };
       } else if (JSON.stringify(request.tools).includes('submit_plan')) {
         planCalls++;
         if (options.cancelDuringPlan) {
@@ -536,7 +574,11 @@ export function rig(options: RigOptions = {}) {
           ? {
               kind: 'worker_write_file',
               path: e.path,
-              content: Buffer.from(e.bytes, 'base64').toString('utf8'),
+              content:
+                Buffer.from(e.bytes, 'base64').toString('utf8') +
+                (revisionMode && e.path === 'src/duration.js'
+                  ? '\n// Clarify duration units.\n'
+                  : ''),
             }
           : {
               kind: 'candidate_ready',
@@ -558,6 +600,8 @@ export function rig(options: RigOptions = {}) {
   };
   const reports = new Map<object, number>();
   const vm = new VerifierFakeVm((request, guest) => {
+    const replaced = report?.(request, guest);
+    if (replaced) return replaced;
     if (options.failBaseline && request.report && !guest.files.has('test/regression.test.js'))
       return { exitCode: 1, report: junit(1, true) };
     if (request.report) reports.set(guest, (reports.get(guest) ?? 0) + 1);
@@ -739,12 +783,16 @@ export function rig(options: RigOptions = {}) {
       },
     };
   };
-  const linkBody = (runId: string) => {
+  const linkBody = (runId: string, operationKind: 'pr_create' | 'engagement_comment') => {
     const a = artifacts(runId);
     const hand = new Journal(a.store.storeDirectory('handoff'));
-    const row = hand.read().find((r) => (r as { type: string }).type === 'link_issued') as {
-      body: string;
-    };
+    const row = hand
+      .read()
+      .find(
+        (r) =>
+          (r as { type: string }).type === 'link_issued' &&
+          (r as { input: { operationKind: string } }).input.operationKind === operationKind
+      ) as { body: string };
     hand.close();
     a.close();
     return row.body;
@@ -762,6 +810,81 @@ export function rig(options: RigOptions = {}) {
     edges,
     executions,
     reopen: () => createController(config, edges),
+    foreign,
+    /** Answer matching credential-free reads from `fn`; `undefined` falls through. */
+    interceptRead(fn: typeof intercept) {
+      intercept = fn;
+    },
+    /** Replace supervised command results while `fn` answers. */
+    overrideExec(fn: FakeScript | undefined) {
+      report = fn;
+    },
+    closeIssue() {
+      issueState = 'closed';
+    },
+    banPolicy() {
+      policy = 'AI contributions are banned.';
+    },
+    /** The inviting maintainer later withdraws permission in a new comment. */
+    revokeInvitation() {
+      // Strictly after the invitation (00:00:01) even while the fixture clock is frozen.
+      const at = new Date(Math.max(clock, Date.parse('2026-10-10T00:00:02.000Z'))).toISOString();
+      revocation = {
+        id: 12,
+        html_url: `${config.issueUrl}#issuecomment-12`,
+        body: 'Do not proceed.',
+        user: { login: 'maintainer', html_url: 'https://github.com/maintainer' },
+        author_association: 'MEMBER',
+        created_at: at,
+        updated_at: at,
+      };
+    },
+    /** Commit an edit of `file` onto the upstream default branch. */
+    advanceUpstream(file: string, edit: (text: string) => string) {
+      // Upstream commits take time: a rebased candidate gets a later committer timestamp.
+      clock += 60000;
+      const env = { GIT_INDEX_FILE: path.join(root, `advance-${++advances}.index`) };
+      upstream.git(['read-tree', head], undefined, env);
+      const blob = upstream.git(
+        ['hash-object', '-w', '--stdin'],
+        edit(upstream.git(['cat-file', 'blob', `${head}:${file}`]))
+      );
+      upstream.git(['update-index', '--cacheinfo', `100644,${blob},${file}`], undefined, env);
+      const tree = upstream.git(['write-tree'], undefined, env);
+      head = upstream.git(['commit-tree', tree, '-p', head], 'advance\n', UPSTREAM_IDENTITY);
+      upstream.git(['update-ref', 'refs/heads/main', head]);
+      return head;
+    },
+    /** A contributor commit on the run's fork branch that no verified push left there. */
+    writeOutOfBand(runId: string) {
+      // Derived, not read: the controller may hold the store while a read is answered.
+      const branch = `ztfc/${contributionIdOf(runId)}`;
+      if (!fork.sha(branch)) fork.git(['index-pack', '--stdin'], BASE_COMMIT.pack);
+      const parent = fork.sha(branch) ?? BASE_COMMIT.baseSha;
+      const sha = fork.git(
+        ['commit-tree', `${parent}^{tree}`, '-p', parent],
+        'contributor edit\n',
+        UPSTREAM_IDENTITY
+      );
+      fork.git(['update-ref', `refs/heads/${branch}`, sha]);
+      foreign.add(sha);
+      return sha;
+    },
+    feedback(body = 'Please clarify the duration units in the fix.') {
+      revisionMode = true;
+      implementTurn = 0;
+      feedback = [
+        {
+          id: 11,
+          html_url: 'https://github.com/upstream/fixture/pull/8#issuecomment-11',
+          user: { login: 'maintainer', type: 'User' },
+          author_association: 'MEMBER',
+          updated_at: new Date(clock).toISOString(),
+          body,
+        },
+      ];
+    },
+    pr: () => submitted,
     forkPresent: () => {
       options.missingFork = false;
     },
@@ -799,8 +922,8 @@ export function rig(options: RigOptions = {}) {
       options.policy = undefined;
       policy = POLICY;
     },
-    submit(runId: string) {
-      const body = linkBody(runId);
+    submit(runId: string, copies = 1) {
+      const body = linkBody(runId, 'pr_create');
       const a = artifacts(runId);
       const held = a.get<{ record: { candidateSha: string } }>('candidate');
       const branch = `ztfc/${a.store.contributionId}`;
@@ -821,13 +944,18 @@ export function rig(options: RigOptions = {}) {
         },
         base: { ref: 'main', repo: { id: UPSTREAM_ID, full_name: 'upstream/fixture' } },
       };
+      resubmitted = Array.from({ length: copies - 1 }, (_, i) => ({
+        ...submitted,
+        number: 9 + i,
+        html_url: `https://github.com/upstream/fixture/pull/${9 + i}`,
+      }));
       a.close();
     },
     submitEngagement(runId: string) {
       comment = {
         id: 9,
         html_url: `${config.issueUrl}#issuecomment-9`,
-        body: linkBody(runId),
+        body: linkBody(runId, 'engagement_comment'),
         user: { login: OWNER, html_url: `https://github.com/${OWNER}` },
         author_association: 'CONTRIBUTOR',
         created_at: TIME,

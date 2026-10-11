@@ -24,7 +24,7 @@ import { ForkPusher, type ForkPusherOptions } from '../github/push';
 import { anonymousReader, type GitHubRead } from '../github/reconcile';
 import { OUTSTANDING, TokenJournal, TokenVault } from '../github/token-journal';
 import { PrTracker, TrackError, trackFromHandoff } from '../github/track';
-import { IntentDriver } from '../intents';
+import { IntentDriver, WriteBlockedError } from '../intents';
 import { Journal } from '../journal';
 import { StoreLockedError } from '../lock';
 import { type ModelAdapter, ModelError } from '../model/adapter';
@@ -76,7 +76,15 @@ import {
   type ShippingAuthorizeDeps,
   shippingIntent,
 } from './shipping';
-import { createSteps, type GateRecord, gateFreshness, policyReader, StepArtifacts } from './steps';
+import {
+  createSteps,
+  type GateRecord,
+  gateFreshness,
+  policyReader,
+  STOP_NOTICE_KEY,
+  StepArtifacts,
+  type StopNotice,
+} from './steps';
 import { loadVerification } from './verification-record';
 
 /** Only physical edges. Never inject a phase, gate, author, ledger or verifier. */
@@ -1114,6 +1122,14 @@ export function createController(
           shipping && receipt ? 'shipping' : 'contact'
         );
         const result = await driver.resume();
+        if (result?.kind === 'awaiting_contributor' && result.reconciliation === 'ambiguous')
+          // No new link: status must not point the contributor back at the old one.
+          artifacts(c).put(STOP_NOTICE_KEY, {
+            state: 'awaiting_contributor',
+            historyLength: c.store.run.history.length,
+            reason: `ambiguous:${result.ambiguity}`,
+            nextPermittedAction: result.status.nextPermittedAction,
+          } satisfies StopNotice);
         if (result?.kind === 'observed' && result.operation === 'pr_create')
           artifacts(c).put('publication', {
             url: result.url,
@@ -1144,7 +1160,23 @@ export function createController(
               ? 'blocked'
               : 'hand_off';
         }
-        await intents.execute(shippingIntent(shipping.bindings));
+        try {
+          await intents.execute(shippingIntent(shipping.bindings));
+        } catch (error) {
+          if (!(error instanceof WriteBlockedError)) throw error;
+          // The intent journal proved the push must not happen (a diverged remote, a
+          // refused receipt): adopt its durable block, as revision tracking does.
+          const reason = intents.snapshot().blockedReason ?? 'unknown';
+          artifacts(c).put('shipping_block', { reason });
+          artifacts(c).put(STOP_NOTICE_KEY, {
+            state: 'blocked',
+            historyLength: c.store.run.history.length + 1,
+            reason,
+            nextPermittedAction: `Blocked before publication (${reason}). Nothing on the fork branch was overwritten and no link was issued. Inspect the fork branch and start a new run if the contribution should continue.`,
+          } satisfies StopNotice);
+          await c.observeRun(intents.snapshot().run);
+          return 'blocked';
+        }
         receipt ??= artifacts(c).require<SignedReceipt>('receipt');
         const record = loadVerification(
           c.store.storeDirectory('artifacts'),
