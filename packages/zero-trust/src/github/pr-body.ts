@@ -67,6 +67,13 @@ function quoted(text: string): string {
     .join('\n');
 }
 
+/** One Verification line exactly as the body renders it: the receipt command (bounded,
+ * normalized and HTML-escaped as untrusted text) with its status, exit status and suite count.
+ * Exported so read-only checkers compare against the renderer instead of a copy of it. */
+export function prCommandLine(c: CommandEvidence): string {
+  return `- ${code(c.command)}${c.required ? '' : ' (optional)'}: ${c.status}; exit=${c.exitStatus}; suites=${c.suites}`;
+}
+
 export function buildPrContent(input: PrContentInput): PrContent {
   if (input.intent?.operationKind !== 'pr_create') throw new HandoffError('not_a_handoff');
   const marker = handoffMarker(input.intent);
@@ -103,10 +110,7 @@ export function buildPrContent(input: PrContentInput): PrContent {
     '',
     '## Verification',
     `Commands run against \`${sha}\` (status, exit status, test suites counted):`,
-    ...commands.map(
-      (c) =>
-        `- ${code(c.command)}${c.required ? '' : ' (optional)'}: ${c.status}; exit=${c.exitStatus}; suites=${c.suites}`
-    ),
+    ...commands.map(prCommandLine),
     '',
     everyPassed
       ? 'All tests passed.'

@@ -2479,6 +2479,10 @@ run prepares the exact content, issues a link, waits durably in
   bounded, cannot forge a marker, and cannot make a blanket success claim. "All
   tests passed" is written only when every command passed. Star requests and
   advertising are rejected.
+  `prCommandLine(command)` returns one Verification line exactly as the body renders
+  it (NFKC and format-character normalization, control-character strip, marker and
+  success-claim neutralization, HTML escaping). It throws `HandoffError` for text the
+  body could not carry. `scripts/zt-acceptance-check.mjs` compares PR bodies with it.
 - `compareLink` / `issueCommentLink` (`src/github/handoff.ts`) take owner, repository,
   base and head only from the controller binding (`prBinding`, `issueBinding`).
   Prefilled fields are URL-encoded. A body that would push the URL past

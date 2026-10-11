@@ -8,14 +8,12 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   CheckError,
   checkPrBody,
-  commandLine,
   formatTable,
   LIVE_FLAG,
   loadPackages,
   main,
   parseArgs,
   readRunEvidence,
-  renderedCommand,
   runChecks,
   TOKEN_ENV,
   verifyReceiptEnvelope,
@@ -733,16 +731,12 @@ describe('zt-acceptance-check: command line', () => {
       );
   });
 
-  it('renders commands exactly as the PR body does and formats the table', () => {
-    expect(renderedCommand('npm  test -- "a<b>" `x`')).toBe(
-      'npm test -- &quot;a&lt;b&gt;&quot; &#96;x&#96;'
+  it('matches command lines with the package renderer and formats the table', () => {
+    const optional = { ...commands()[1], required: false };
+    const body0 = prBody(
+      envelope(FIRST, { overrides: { commands: [optional, commands()[0]] } }).receipt
     );
-    expect(commandLine({ ...commands()[1], required: false })).toBe(
-      '- <code>node --test</code> (optional): passed; exit=0; suites=2'
-    );
-    expect(renderedCommand('npm\u200b test # all tests passed')).toBe(
-      'npm test # [untrusted success claim]'
-    );
+    expect(body0.split('\r\n')).toContain(zt.prCommandLine(optional));
     expect(formatTable([{ id: 'receipts', pass: true, detail: 'ok' }])).toBe(
       'CHECK     RESULT  DETAIL\nreceipts  PASS    ok'
     );
