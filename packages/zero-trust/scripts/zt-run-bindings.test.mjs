@@ -14,6 +14,7 @@ import { acknowledgeControl, readControlRequests } from '../dist/controller/cont
 import { RunController } from '../dist/controller/controller.js';
 import { RunStore } from '../dist/controller/run-store.js';
 import { StepArtifacts } from '../dist/controller/steps.js';
+import { STOP_NOTICE_KEY } from '../dist/controller/stop-notice.js';
 import { createController, incidentRequested, stopStoredRun } from '../dist/controller/wiring.js';
 import { AppCredentials } from '../dist/github/app-auth.js';
 import { ForkCredentialBroker } from '../dist/github/broker.js';
@@ -292,6 +293,37 @@ test('cancelled CLI status retains publication URL and contributor withdrawal in
   assert.equal(status.state, 'cancelled');
   assert.match(status.nextPermittedAction, /https:\/\/github.com\/owner\/repo\/pull\/2/);
   assert.match(status.nextPermittedAction, /prepared contributor comment/);
+});
+
+test('status shows a stop notice only for the exact stop it explains', async () => {
+  const h = rig();
+  const store = h.seed();
+  for (const reason of [
+    ReasonCode.GatePassed,
+    ReasonCode.PlanApproved,
+    ReasonCode.CandidateReady,
+    ReasonCode.VerificationPassed,
+    ReasonCode.UserPaused,
+  ])
+    store.persistRun(transitionRun(store.run, reason, new Date().toISOString()));
+  const journal = new Journal(path.join(store.storeDirectory('control'), 'steps'));
+  const artifacts = new StepArtifacts(journal, store.runId);
+  const notice = {
+    state: 'paused_user',
+    historyLength: store.run.history.length,
+    reason: 'rebase_conflict',
+    nextPermittedAction: 'Upstream changed a file this patch also changes. Nothing was pushed.',
+  };
+  artifacts.put(STOP_NOTICE_KEY, notice);
+  const commands = await createCommands({ root: h.root, createController });
+  assert.equal(commands.status(store.runId).nextPermittedAction, notice.nextPermittedAction);
+  // A stale notice (another history length or state) never explains a later stop.
+  artifacts.put(STOP_NOTICE_KEY, { ...notice, historyLength: notice.historyLength - 1 });
+  assert.notEqual(commands.status(store.runId).nextPermittedAction, notice.nextPermittedAction);
+  artifacts.put(STOP_NOTICE_KEY, { ...notice, state: 'blocked' });
+  assert.notEqual(commands.status(store.runId).nextPermittedAction, notice.nextPermittedAction);
+  journal.close();
+  store.close();
 });
 
 test('status explains a revision paused because its feedback was not admitted', async () => {

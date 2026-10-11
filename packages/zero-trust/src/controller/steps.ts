@@ -26,7 +26,9 @@ import {
 import type { ForkReady } from '../github/fork';
 import type { HandoffOutcome } from '../github/handoff-driver';
 import type { GitHubRead } from '../github/reconcile';
+import { HandoffError } from '../github/text';
 import type { FeedbackItem } from '../github/track';
+import { MutationDeferredError } from '../intents';
 import type { Journal } from '../journal';
 import type { ModelAdapter } from '../model/adapter';
 import { classifyPolicy, type PolicyAssessment, policyDigest } from '../policy/classify';
@@ -34,11 +36,11 @@ import { assessPolicy } from '../policy/decide-policy';
 import { discoverPolicy } from '../policy/discover';
 import { assessIssue, type Eligibility } from '../policy/eligibility';
 import { engagementBody } from '../policy/engagement';
-import { createFreshnessProbe } from '../policy/freshness';
+import { createFreshnessProbe, type FreshnessReport } from '../policy/freshness';
 import { decideGate } from '../policy/gate';
 import { checkInvitation, type InvitationEvidence } from '../policy/invitation';
 import { policyRegions } from '../policy/regions';
-import { canonicalJson } from '../receipt/schema';
+import { canonicalJson, ReceiptError } from '../receipt/schema';
 import { assertSecretFree } from '../redaction';
 import { isTestPath, reviewCandidate } from '../review/integrity';
 import type { RunRecord } from '../state';
@@ -71,6 +73,14 @@ import {
 import { assessRevisionFeedback } from './feedback';
 import { OutputCollector } from './output-collector';
 import type { ShippingAuthorizeDeps } from './shipping';
+import {
+  alteredEvidenceNotice,
+  clearStopNotice,
+  driftHandoffNotice,
+  freshnessNotice,
+  isAlteredEvidence,
+  recordStopNotice,
+} from './stop-notice';
 import { loadVerification, type VerificationRecord } from './verification-record';
 import { verificationPlan, verifyCandidate } from './verifier';
 import { WorkspaceOverlay } from './workspace-overlay';
@@ -163,6 +173,16 @@ export function gateFreshness(
       ...(g.invitation ? { invitation: g.invitation } : {}),
     },
   });
+}
+
+/** How a stale freshness check surfaces from shipping: the push admission refused its
+ * receipt (deferred, nothing sent) or the PR hand-off admission refused its link. */
+function isFreshnessRefusal(error: unknown): boolean {
+  return (
+    error instanceof MutationDeferredError ||
+    error instanceof HandoffError ||
+    error instanceof ReceiptError
+  );
 }
 
 export function candidateOverlay(base: SourceManifest, held: Candidate): WorkspaceOverlay {
@@ -854,6 +874,7 @@ export function createSteps(
     },
     async drift(c) {
       await approval(c);
+      clearStopNotice(artifacts(c));
       const held = candidate(c);
       const base = source(c);
       const overlay = candidateOverlay(base.manifest, held);
@@ -885,6 +906,13 @@ export function createSteps(
         }
       );
       if (result.kind === 'unchanged') return { kind: 'unchanged' };
+      if (result.kind === 'hand_off') {
+        artifacts(c).put('drift_handoff', {
+          reason: result.reason,
+          ...(result.paths ? { paths: result.paths } : {}),
+        });
+        recordStopNotice(artifacts(c), c.run, driftHandoffNotice(result.reason), true);
+      }
       if (result.kind !== 'rebased') return { kind: 'hand_off' };
       const next = nextSources.get(result.candidate.record.baseSha);
       if (!next) return { kind: 'hand_off' };
@@ -907,19 +935,38 @@ export function createSteps(
     },
     async ship(c) {
       await approval(c);
+      clearStopNotice(artifacts(c));
       const fork = await services.readiness(c);
       if (typeof fork === 'string') return { kind: fork };
       const held = candidate(c);
-      const verification = loadVerification(
-        c.store.storeDirectory('artifacts'),
-        held.record.candidateSha,
-        { runId: c.run.runId, expectedDigest: artifacts(c).require<string>('verification') }
-      );
+      const load = () =>
+        loadVerification(c.store.storeDirectory('artifacts'), held.record.candidateSha, {
+          runId: c.run.runId,
+          expectedDigest: artifacts(c).require<string>('verification'),
+        });
+      // Scenario 10: evidence altered after the verdict (an accidental torn or corrupted
+      // write) cannot authorize a receipt. The write-once record cannot be re-verified in
+      // place, so the run blocks; a transient read failure is rethrown instead.
+      const blockAltered = () => {
+        const receiptIssued = artifacts(c).get('receipt') !== undefined;
+        recordStopNotice(artifacts(c), c.run, alteredEvidenceNotice(receiptIssued), true);
+        return { kind: 'blocked' as const };
+      };
+      let verification: VerificationRecord;
+      try {
+        verification = load();
+      } catch (error) {
+        if (isAlteredEvidence(error)) return blockAltered();
+        throw error;
+      }
       const targets = artifacts(c).require<string[]>('targets');
       artifacts(c).put('push_intended', true);
       const digest = sha256(Buffer.from(canonicalJson(profile(c))));
-      return {
-        kind: await services.ship(
+      // The first stale freshness observation of this step: the refusal it causes blocks.
+      let stale: FreshnessReport | undefined;
+      let kind: Awaited<ReturnType<StepServices['ship']>>;
+      try {
+        kind = await services.ship(
           c,
           {
             store: c.store,
@@ -948,13 +995,30 @@ export function createSteps(
             now: () => services.now().getTime(),
             policyFresh: async () => {
               await approval(c);
-              return fresh(c).policyFresh();
+              const probe = await fresh(c).check();
+              if (!probe.fresh) stale ??= probe;
+              return probe.fresh;
             },
           },
           held.meta,
           gate(c).policy
-        ),
-      };
+        );
+      } catch (error) {
+        if (stale && isFreshnessRefusal(error)) {
+          // Permission freshness (PRD §5.9): the write is refused and the evidence retained;
+          // it is never retried.
+          artifacts(c).put('shipping_freshness', stale);
+          recordStopNotice(artifacts(c), c.run, freshnessNotice(stale.reasons), true);
+          return { kind: 'blocked' };
+        }
+        try {
+          load();
+        } catch (reload) {
+          if (isAlteredEvidence(reload)) return blockAltered();
+        }
+        throw error;
+      }
+      return { kind };
     },
     async resumeHandoff(c): Promise<ResumeHandoffOutcome> {
       const origin = prerequisiteWaitOrigin(c.run);

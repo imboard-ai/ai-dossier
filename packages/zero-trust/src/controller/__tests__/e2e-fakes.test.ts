@@ -1920,9 +1920,15 @@ describe('createController real composition', () => {
   }, 60000);
   it('refuses a consistently hashed restrictive policy change before shipping', async () => {
     const h = rig({ restrictPolicy: true });
-    await expect(h.authorize(h.controller.start(h.config))).rejects.toMatchObject({
-      code: 'step_failed',
+    const run = (await h.authorize(h.controller.start(h.config))) as { state: string };
+    // A permission freshness refusal blocks with retained evidence (PRD §5.9).
+    expect(run.state).toBe('blocked');
+    const a = h.artifacts(h.controller.snapshot().runId);
+    expect(a.get('shipping_freshness')).toMatchObject({
+      fresh: false,
+      reasons: ['policy_changed'],
     });
+    a.close();
     noShipping();
   }, 60000);
   it('retains a closed recovery diagnostic for an identity outage', async () => {

@@ -27,6 +27,7 @@ import {
 import { RunStore } from '../dist/controller/run-store.js';
 import { assembleStatus } from '../dist/controller/status.js';
 import { StepArtifacts } from '../dist/controller/steps.js';
+import { STOP_NOTICE_KEY, stopNoticeAction } from '../dist/controller/stop-notice.js';
 import {
   fenceIncident,
   incidentRequested,
@@ -176,6 +177,7 @@ export async function createCommands({ root, createController, onAuthorizationUr
             withdrawal: artifacts.get('withdrawal'),
             authorizationRequired: artifacts.get('authorization_required'),
             feedbackDecision: artifacts.get('feedback_decision'),
+            stopNotice: artifacts.get(STOP_NOTICE_KEY),
           };
         });
         let handoff;
@@ -260,6 +262,9 @@ export async function createCommands({ root, createController, onAuthorizationUr
           authorApproval: store.config.authorApproval,
           authorizationRequired: retained.authorizationRequired,
         });
+        // A producer's reason for exactly this stop; any later transition retires it.
+        const noticed = stopNoticeAction(retained.stopNotice, run);
+        if (noticed) result.nextPermittedAction = noticed;
         const control = readControlRequests(store);
         if (control.invalid) {
           result.phase = 'invalid_control';

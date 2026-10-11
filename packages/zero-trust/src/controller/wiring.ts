@@ -24,7 +24,7 @@ import { ForkPusher, type ForkPusherOptions } from '../github/push';
 import { anonymousReader, type GitHubRead } from '../github/reconcile';
 import { OUTSTANDING, TokenJournal, TokenVault } from '../github/token-journal';
 import { PrTracker, TrackError, trackFromHandoff } from '../github/track';
-import { IntentDriver } from '../intents';
+import { IntentDriver, WriteBlockedError, WriteRefusedError } from '../intents';
 import { Journal } from '../journal';
 import { StoreLockedError } from '../lock';
 import { type ModelAdapter, ModelError } from '../model/adapter';
@@ -77,6 +77,7 @@ import {
   shippingIntent,
 } from './shipping';
 import { createSteps, type GateRecord, gateFreshness, policyReader, StepArtifacts } from './steps';
+import { clearStopNotice, recordStopNotice, writeBlockedNotice } from './stop-notice';
 import { loadVerification } from './verification-record';
 
 /** Only physical edges. Never inject a phase, gate, author, ledger or verifier. */
@@ -1114,6 +1115,22 @@ export function createController(
           shipping && receipt ? 'shipping' : 'contact'
         );
         const result = await driver.resume();
+        // An ambiguous match issues no new link: status must not point back at the old one.
+        // The run stays waiting (no transition). An unreadable listing decides nothing and
+        // keeps the notice; any other answer retires it.
+        const waiting = result?.kind === 'awaiting_contributor' ? result.reconciliation : null;
+        if (result?.kind === 'awaiting_contributor' && waiting === 'ambiguous')
+          recordStopNotice(
+            artifacts(c),
+            c.store.run,
+            {
+              state: 'awaiting_contributor',
+              reason: `ambiguous:${result.ambiguity}`,
+              nextPermittedAction: result.status.nextPermittedAction,
+            },
+            false
+          );
+        else if (waiting !== 'unknown') clearStopNotice(artifacts(c));
         if (result?.kind === 'observed' && result.operation === 'pr_create')
           artifacts(c).put('publication', {
             url: result.url,
@@ -1144,7 +1161,20 @@ export function createController(
               ? 'blocked'
               : 'hand_off';
         }
-        await intents.execute(shippingIntent(shipping.bindings));
+        try {
+          await intents.execute(shippingIntent(shipping.bindings));
+        } catch (error) {
+          // Only a block the intent journal recorded (a diverged remote, a refused receipt)
+          // ends shipping; a failed journal write latches without one and is rethrown.
+          const reason = intents.snapshot().blockedReason;
+          if (!(error instanceof WriteBlockedError) || !reason) throw error;
+          const detail = error.cause instanceof WriteRefusedError ? error.cause.detail : undefined;
+          artifacts(c).put('shipping_block', { reason, ...(detail ? { detail } : {}) });
+          recordStopNotice(artifacts(c), c.store.run, writeBlockedNotice(reason), true);
+          // Adopt its durable block, as revision tracking does.
+          await c.observeRun(intents.snapshot().run);
+          return 'blocked';
+        }
         receipt ??= artifacts(c).require<SignedReceipt>('receipt');
         const record = loadVerification(
           c.store.storeDirectory('artifacts'),

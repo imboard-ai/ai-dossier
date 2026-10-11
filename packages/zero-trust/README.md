@@ -79,9 +79,9 @@ the actor, expected outcome and S1–S5 ownership. A shared final audit checks
 receipt-v2/nonce/candidate correspondence, unique publication and push identities,
 loaded supervisor verification evidence, guest destruction or recorded cleanup
 IDs, absence of direct upstream mutations, and absence of usable access **and
-refresh** credentials. Negative controls insert a forbidden upstream mutation or
-unreceipted push observation and remove supervisor command observations: the
-same audit rejects all three. Passed command records match actual argv, exit
+refresh** credentials. Negative controls insert a forbidden upstream mutation, an
+unreceipted push observation or a duplicated push observation, and remove supervisor
+command observations: the same audit rejects all four. Passed command records match actual argv, exit
 status, report suite count and candidate files, not merely the presence of a VM.
 
 When a composed controller returns to a durable wait or pause, its release path
@@ -122,13 +122,79 @@ pause/checkpoint resume, fork waiting with no compute, broad App installation
 refusal, contributor refresh refusal, mid-push credential expiry, and a real
 SIGKILL/reopen with an in-flight model hold. It uses shared immutable test keys;
 run-owned credentials, journals, repositories and receipt authority stay separate.
-The broader gate-4 verdict, including upstream scenarios, belongs to #1114.
+The gate-4 verdict covering both halves is recorded in
+[`release-gate-4.md`](../../docs/features/zero-trust-full-cycle/decisions/release-gate-4.md).
 On reopen, `RecoveryHooks.cleanupCredentials(context)` reconciles retained
 credential obligations without OAuth or paid work before observation-only or
 contributor-action fast returns. A crash after publication but before release
 cannot leave an ordinary tracking state with silently abandoned authority:
 lost values retain their token IDs and `blocked_cleanup`, while publication
 facts remain recorded.
+
+#### Upstream gate evidence (#1114)
+
+`src/__tests__/gate4-upstream.test.ts` runs the upstream half through the same real
+composition, titles and audit. The audit lives in `src/__tests__/gate4-audit.ts`
+(`gate4Suite()` registers it for every fixture a suite creates); the lifecycle suite
+uses it too. A fork commit a scenario writes out of band (`rig().writeOutOfBand`) is
+declared in `rig().foreign` and must survive untouched; any other fork-branch SHA
+must be a `push_verified` write with a receipt-v2 and a supervised pass. A negative
+control removes the declaration and the audit refuses the same remote. Every
+verification record must load, except those a scenario corrupts on purpose and
+declares in `rig().altered`.
+
+Scenarios: a lost push acknowledgment (the real bare-repository push lands, its
+answer is dropped) reconciles from the remote SHA with no second push; an unobserved
+prefilled PR is found once by head, base, `state=all` and marker; a double submission
+stays an ambiguous hand-off with no further link until exactly one marked PR matches;
+an unobserved engagement comment is
+reconciled after a controller restart without a second request; an AI ban, issue
+closure or invitation revocation after implementation or during a revision blocks
+before any receipt; upstream drift before the push rebases and freshly verifies the
+new SHA (the old verdict is never receipted), after the push records the PR
+limitation without re-verification, and on a touched file hands off `rebase_conflict`;
+an out-of-band fork commit before a push, before a revision, or between revision
+admission and the lease blocks with nothing overwritten; the expected revision
+rewrite pushes with `--force-with-lease` from the last verified SHA; an altered or
+torn verification record or altered boundary evidence refuses the receipt, while a
+transiently unreadable record only fails the step; and malformed, missing, oversize or
+zero-suite junit reports are `inconclusive` in both the regression evidence and the
+independent verifier, never `shipping`.
+
+Behavior fixed by these scenarios:
+- **Publication freshness blocks.** When the receipt's freshness check reports a
+  policy change, issue closure or invitation revocation during initial shipping, the
+  run moves `shipping → blocked` and retains the report as the `shipping_freshness`
+  step artifact. Previously the step failed and the run stayed `shipping`.
+- **Intent-journal blocks end shipping.** A `WriteBlockedError` from the initial push
+  (for example `remote_diverged`) adopts the intent journal's blocked run, as revision
+  tracking already did, and retains `shipping_block: { reason, detail? }` (`detail`
+  carries the refusal's expected and observed SHAs). Only a block the intent journal
+  recorded ends shipping this way; a journal write failure latches without a reason
+  and is rethrown.
+- **Altered verification evidence blocks.** A verification record that is corrupted
+  or torn (`invalid_record`), or whose boundary or log evidence no longer matches it
+  (`evidence_mismatch`, which by design also covers an unreadable evidence file),
+  blocks shipping. An unavailable record (`unavailable`, a transient read failure) is
+  rethrown and does not block. The write-once record cannot be re-verified in place,
+  so fresh verification needs a new run, and resuming such a run refuses with
+  `invalid_outcome` during journal replay.
+- **Drift hand-off reasons are retained.** A drift hand-off records
+  `drift_handoff: { reason, paths? }` (`rebase_conflict`, `base_unknown`,
+  `base_unstable`, `rebase_unavailable`).
+- **Stop notices.** `controller/stop-notice.ts` exports `StopNotice`,
+  `STOP_NOTICE_KEY` (`stop_notice`), `recordStopNotice(store, run, notice,
+  transitionPending)`, `clearStopNotice(store)` and `stopNoticeAction(notice, run)`.
+  A notice is `{ state, historyLength, reason, nextPermittedAction }` with fixed text
+  only; `transitionPending` adds the history entry the controller records after the
+  producer returns. `zt-run status` shows the action only while the run is in that
+  `state` with exactly that `historyLength`, so a later stop never shows a stale
+  notice; the drift and ship steps also clear their notice when they run again.
+  Producers: the three refusals above (`blocked`; a write block names whether the fork
+  branch state is known), the drift hand-off (`paused_user`) and an ambiguous PR or
+  engagement reconciliation (`awaiting_contributor`, whose status would otherwise point
+  back at the prefilled link). The ambiguity notice survives an unreadable listing and
+  is retired by any other answer.
 
 `approveBudgetCeiling(root, runId, approval, now)` is an explicit trusted local
 user command exported from the package (`controller/budget-extension`). It is
@@ -293,6 +359,9 @@ execution may request a separate authorization when it needs a fork credential.
 
 `status` performs observational reads without the writer lock, never creates or
 repairs files, and refuses incomplete/corrupt or concurrently changed evidence.
+When a retained `stop_notice` explains exactly the current stop (see "Upstream gate
+evidence (#1114)" above), its action replaces the default next action; pending or refused
+control requests still take precedence.
 Maintenance retains the guarded read-only API; adoption and checkpoint decisions
 take the writer lock. Approve/reject resolve only the selected checkpoint and
 print status; execution continues only on explicit resume. `kill-all` joins every
