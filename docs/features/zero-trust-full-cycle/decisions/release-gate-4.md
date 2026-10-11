@@ -1,5 +1,6 @@
 # Decision record: lifecycle and upstream failures (release gate 4)
 
+- **Date:** 2026-10-11.
 - **Status:** **GO**. Every gate-4 item has a passing scenario through the real controller,
   the shared global-invariant audit holds after every scenario, and no scenario is
   `it.fails`. Part 1 (lifecycle) is #1113 (PR #1171); part 2 (upstream) and this record are
@@ -11,7 +12,7 @@
   [`gate4-lifecycle.test.ts`](../../../../packages/zero-trust/src/__tests__/gate4-lifecycle.test.ts)
   (part 1, 15 scenarios),
   [`gate4-upstream.test.ts`](../../../../packages/zero-trust/src/__tests__/gate4-upstream.test.ts)
-  (part 2, 27 scenarios), and the shared audit
+  (part 2, 29 scenarios), and the shared audit
   [`gate4-audit.ts`](../../../../packages/zero-trust/src/__tests__/gate4-audit.ts).
 - **Builds on:** [execution-profile](execution-profile.md) (gate 1),
   [package-proxy](package-proxy.md) (gate 2), [github-credentials](github-credentials.md)
@@ -46,12 +47,14 @@ Each test title names the actor, the expected outcome and the owning release sli
 
 Negative controls show the audit rejects a forbidden upstream mutation, an unreceipted
 push, a duplicated push observation, a vanished supervised command (part 1) and an
-undeclared out-of-band remote (part 2).
+undeclared out-of-band remote (part 2). Every verification record must load, except
+those a scenario corrupts on purpose and declares.
 
 ## Gate items
 
-Results are from the PR's CI run on Node 20 and 22 and from local runs of both suites
-(15/15 and 27/27 passed). "L" is `gate4-lifecycle.test.ts`, "U" is `gate4-upstream.test.ts`.
+Results are from local runs of both suites (15/15 and 29/29 passed) and from the
+package's full CI run on Node 20 and 22 for PR #1114's head, linked from the PR. "L" is
+`gate4-lifecycle.test.ts`, "U" is `gate4-upstream.test.ts`.
 
 | Gate item (PRD §9 / epic checkbox) | Scenario (test title) | File | Result |
 |---|---|---|---|
@@ -72,7 +75,7 @@ Results are from the PR's CI run on Node 20 and 22 and from local runs of both s
 | Fork delay: over-broad App installation | `actor=contributor App configuration outcome=broad installation blocked owner=S1/S4` | L | pass |
 | Lost API response: push acknowledgment (scenario 18) | `actor=GitHub transport outcome=lost push acknowledgment reconciled from the remote SHA, no second push owner=S4` | U | pass |
 | Lost API response: unobserved PR submission (scenario 11) | `actor=contributor outcome=unobserved prefilled PR found once by head, base, state=all and marker owner=S4` | U | pass |
-| Lost API response: repeated PR submission (scenario 11) | `actor=contributor outcome=double submission is an ambiguous hand-off, never a third link owner=S4` | U | pass |
+| Lost API response: repeated PR submission (scenario 11) | `actor=contributor outcome=double submission is an ambiguous hand-off, never a third link, until one marked PR matches owner=S4` | U | pass |
 | Lost API response: unobserved engagement comment (scenario 16) | `actor=contributor outcome=unobserved engagement comment reconciled after restart without a duplicate request owner=S2` | U | pass |
 | Policy change after implementation: AI ban (scenario 16) | `actor=maintainer outcome='AI ban' after implementation blocks before any receipt, evidence retained owner=S2/S4` | U | pass |
 | Policy change after implementation: issue closed | `actor=maintainer outcome='issue closure' after implementation blocks before any receipt, evidence retained owner=S2/S4` | U | pass |
@@ -87,13 +90,19 @@ Results are from the PR's CI run on Node 20 and 22 and from local runs of both s
 | Remote divergence before a revision | `actor=contributor outcome=out-of-band fork commit 'before the revision' blocks, nothing overwritten owner=S4/S5` | U | pass |
 | Remote divergence after revision admission (lease race) | `actor=contributor outcome=out-of-band fork commit 'after revision admission (CAS race)' blocks, nothing overwritten owner=S4/S5` | U | pass |
 | Expected history rewrite during a revision (scenario 18) | `actor=contributor outcome=expected revision history rewrite is a CAS push from the last verified SHA owner=S4/S5` | U | pass |
-| Shipping integrity: artifact modified after verification (scenario 10) | `actor=filesystem outcome=verification record 'altered byte' after the verdict refuses the receipt and needs fresh verification owner=S3/S4` | U | pass |
-| Shipping integrity: torn verification record | `actor=filesystem outcome=verification record 'torn write' after the verdict refuses the receipt and needs fresh verification owner=S3/S4` | U | pass |
+| Shipping integrity: artifact modified after verification (scenario 10) | `actor=filesystem outcome=verification evidence 'record byte altered' after the verdict refuses the receipt and needs fresh verification owner=S3/S4` | U | pass |
+| Shipping integrity: torn verification record | `actor=filesystem outcome=verification evidence 'record torn' after the verdict refuses the receipt and needs fresh verification owner=S3/S4` | U | pass |
+| Shipping integrity: altered boundary evidence | `actor=filesystem outcome=verification evidence 'boundary evidence altered' after the verdict refuses the receipt and needs fresh verification owner=S3/S4` | U | pass |
+| Shipping integrity: a transient read failure is not a block | `actor=filesystem outcome=transiently unreadable verification record fails the step without blocking, then ships owner=S3/S4` | U | pass |
 | Shipping integrity: changed SHA after verification | the drift-before-push scenario above: the rebased SHA is freshly verified and the old verified SHA is never receipted or pushed; the direct receipt refusal is `scenario 10: changed SHA after verification refuses without effects` in `shipping.integration.test.ts` | U | pass |
-| Report parsing: malformed junit | `actor=repository tests outcome='malformed' junit report in 'regression evidence' is inconclusive and never ships owner=S3` and `… in 'independent verifier' …` | U | pass |
-| Report parsing: missing junit | `actor=repository tests outcome='missing' junit report in 'regression evidence' …` and `… in 'independent verifier' …` | U | pass |
-| Report parsing: oversize junit | `actor=repository tests outcome='oversize' junit report in 'regression evidence' …` and `… in 'independent verifier' …` | U | pass |
-| Report parsing: zero suites | `actor=repository tests outcome='zero-suite' junit report in 'regression evidence' …` and `… in 'independent verifier' …` | U | pass |
+| Report parsing: malformed junit (regression evidence) | `actor=repository tests outcome='malformed' junit report in 'regression evidence' is inconclusive and never ships owner=S3` | U | pass |
+| Report parsing: malformed junit (independent verifier) | `actor=repository tests outcome='malformed' junit report in 'independent verifier' is inconclusive and never ships owner=S3` | U | pass |
+| Report parsing: missing junit (regression evidence) | `actor=repository tests outcome='missing' junit report in 'regression evidence' is inconclusive and never ships owner=S3` | U | pass |
+| Report parsing: missing junit (independent verifier) | `actor=repository tests outcome='missing' junit report in 'independent verifier' is inconclusive and never ships owner=S3` | U | pass |
+| Report parsing: oversize junit (regression evidence) | `actor=repository tests outcome='oversize' junit report in 'regression evidence' is inconclusive and never ships owner=S3` | U | pass |
+| Report parsing: oversize junit (independent verifier) | `actor=repository tests outcome='oversize' junit report in 'independent verifier' is inconclusive and never ships owner=S3` | U | pass |
+| Report parsing: zero suites (regression evidence) | `actor=repository tests outcome='zero-suite' junit report in 'regression evidence' is inconclusive and never ships owner=S3` | U | pass |
+| Report parsing: zero suites (independent verifier) | `actor=repository tests outcome='zero-suite' junit report in 'independent verifier' is inconclusive and never ships owner=S3` | U | pass |
 
 ## What the scenarios found
 
@@ -109,16 +118,20 @@ commit and pass with the fix):
 2. **A diverged fork branch before the first push left the run unresumable.** The intent
    journal blocked with `remote_diverged` and nothing was overwritten, but the controller
    stayed in `shipping` and every resume failed in recovery. The initial path now adopts the
-   intent journal's block, as revision tracking does.
-3. **A verification record altered after the verdict failed the step instead of
-   blocking.** It now blocks with no receipt and no push. A transient read failure still
-   fails the step without blocking.
+   intent journal's recorded block, as revision tracking does, and retains the expected and
+   observed SHAs. Its status text claims "nothing was overwritten" only for refusals proven
+   before any write.
+3. **Verification evidence altered after the verdict failed the step instead of
+   blocking.** A corrupted or torn record, or altered boundary or log evidence, now blocks
+   with no receipt and no push. A transient read failure of the record still fails the
+   step without blocking, and the run ships once the record is readable again.
 4. **The `rebase_conflict` reason was dropped.** Drift onto a touched file became a bare
    `paused_user`. The reason and paths are now retained as `drift_handoff`.
 5. **An ambiguous reconciliation pointed the contributor back at the prefilled link.** With
    two marked PRs the run issued no new link, but `zt-run status` still told the contributor
    to submit through the old one. A history-bound `stop_notice` now carries the hand-off
-   text, and status shows it only for exactly that stop.
+   text, and status shows it only for exactly that stop. An unreadable listing keeps it;
+   once exactly one marked PR matches, it is retired.
 
 ## Residual risks
 
@@ -126,13 +139,18 @@ commit and pass with the fix):
   timing (for example, a listing that trails a just-created PR) are covered by the
   fail-closed reconciliation rules, not by these suites. The live acceptance demo on the
   controlled upstream/fork pair (#1115) is the owner-run end-to-end check on real services.
-- **An ambiguous double submission cannot be resolved in place.** Reconciliation lists PRs
-  with `state=all`, so closing the extra PR does not make the match unique. The run hands
-  off and never issues another link; continuing needs a person and, in practice, a new run.
+- **An ambiguous double submission is hard to resolve in place.** Reconciliation lists PRs
+  with `state=all`, so closing the extra PR does not make the match unique; retargeting it
+  to another base does. The run hands off and never issues another link.
 - **A deleted invitation comment is unknown, not revoked.** Revocation is modelled as a
   later maintainer refusal (a negative comment), which blocks. If the inviting comment is
   deleted, permission cannot be established; shipping fails closed with a step failure and
-  a diagnostic instead of a `blocked` state.
+  a diagnostic. That is a hand-off to a person (PRD §5.9 "if authority cannot be
+  established, hand off"), but not a recorded `blocked` state.
+- **An unreadable boundary or log evidence file blocks.** The verifier's loader reports a
+  missing or unreadable evidence file as `evidence_mismatch`, so even a transient read
+  failure of such a file blocks the run (fail closed). Only the record itself has a
+  separate transient `unavailable` outcome.
 - **Resuming a run whose verification record was altered refuses during journal replay**
   (`invalid_outcome`). The run stays `blocked` and never ships; a new run verifies afresh.
 - **A receipt can be issued and never used.** `makeAuthorize` checks freshness before
@@ -144,7 +162,7 @@ commit and pass with the fix):
 
 ## Verdict
 
-**GO** for release gate 4. All 42 gate scenarios pass through the real controller, the
+**GO** for release gate 4. All 44 gate scenarios pass through the real controller, the
 global invariants hold after each of them, and no scenario is marked `it.fails`. The
 residual risks above are recorded limits, not failing gate items. As PRD §9 notes, this
 establishes release readiness for the engine, not market validation.

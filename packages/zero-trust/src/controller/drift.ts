@@ -117,12 +117,17 @@ export interface ShippingBaseDeps {
   readonly acquire: (baseSha: string) => AcquiredSource;
   readonly now: () => Date;
 }
+export type DriftHandoffReason =
+  | 'base_unknown'
+  | 'base_unstable'
+  | 'rebase_conflict'
+  | 'rebase_unavailable';
 export type ShippingBaseResult =
   | { readonly kind: 'unchanged'; readonly run: RunRecord; readonly rebases: number }
   | { readonly kind: 'recorded'; readonly run: RunRecord; readonly observation: DriftObservation }
   | {
       readonly kind: 'hand_off';
-      readonly reason: 'base_unknown' | 'base_unstable' | 'rebase_conflict' | 'rebase_unavailable';
+      readonly reason: DriftHandoffReason;
       readonly paths?: readonly string[];
     }
   | (Extract<RebaseResult, { kind: 'rebased' }> & {

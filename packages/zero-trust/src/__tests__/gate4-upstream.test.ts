@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { TrustedGit } from '../canonical/trusted-git';
-import type { StopNotice } from '../controller/steps';
+import { STOP_NOTICE_KEY, type StopNotice } from '../controller/stop-notice';
 import { loadVerification } from '../controller/verification-record';
 import { OWNER } from '../github/__tests__/github-fake';
 import type { FreshnessReport } from '../policy/freshness';
@@ -14,7 +14,15 @@ import * as receipts from '../receipt/issue';
 import { ReasonCode } from '../state';
 import { MAX_REPORT_BYTES } from '../vm/adapter';
 import { junit } from './fake-vm';
-import { assertGlobalInvariants, forkPushes, gate4Suite, type Rig, rows } from './gate4-audit';
+import {
+  assertGlobalInvariants,
+  forkPushes,
+  gate4Suite,
+  links,
+  type Rig,
+  rows,
+  verificationShas,
+} from './gate4-audit';
 
 vi.setConfig({ testTimeout: 60000, hookTimeout: 60000 });
 const fixture = gate4Suite();
@@ -64,7 +72,7 @@ function held(h: Rig, id: string) {
     return {
       branch: `ztfc/${a.store.contributionId}`,
       candidate: a.get<{ record: { candidateSha: string; baseSha: string } }>('candidate')?.record,
-      notice: a.get<StopNotice>('stop_notice'),
+      notice: a.get<StopNotice | null>(STOP_NOTICE_KEY),
       artifacts: Object.fromEntries(
         [
           'drift_handoff',
@@ -86,10 +94,6 @@ function held(h: Rig, id: string) {
   }
 }
 
-function links(h: Rig) {
-  return rows(h, 'handoff').filter((row) => row.type === 'link_issued');
-}
-
 /** Receipt authorizations actually consumed (nonce rows other than the store header). */
 function consumed(h: Rig) {
   return rows(h, 'nonces').filter((row) => row.type !== 'receipt-nonces');
@@ -101,13 +105,6 @@ async function issuedReceipts() {
       .mocked(receipts.issueReceipt)
       .mock.results.map((result) => result.value as Promise<receipts.SignedReceipt>)
   );
-}
-
-function verificationRecords(dir: string) {
-  const directory = path.join(dir, 'verification');
-  return fs.existsSync(directory)
-    ? fs.readdirSync(directory).filter((name) => /^[a-f0-9]{40}\.json$/u.test(name))
-    : [];
 }
 
 describe('gate 4 upstream: API-response loss', () => {
@@ -177,7 +174,7 @@ describe('gate 4 upstream: API-response loss', () => {
     expect(rows(h, 'handoff').filter((row) => row.type === 'handoff_observed')).toHaveLength(1);
   });
 
-  it('actor=contributor outcome=double submission is an ambiguous hand-off, never a third link owner=S4', async () => {
+  it('actor=contributor outcome=double submission is an ambiguous hand-off, never a third link, until one marked PR matches owner=S4', async () => {
     const h = fixture();
     const run = (await h.authorize(h.controller.start(h.config))) as Run;
     h.submit(run.runId, 2);
@@ -197,6 +194,24 @@ describe('gate 4 upstream: API-response loss', () => {
       reason: 'ambiguous:multiple_matches',
       nextPermittedAction: expect.stringContaining('No new link will be issued'),
     });
+    // An unreadable listing decides nothing: the ambiguity notice stays.
+    h.interceptRead((p) =>
+      p.startsWith('/repos/upstream/fixture/pulls?') ? { status: 502, body: null } : undefined
+    );
+    expect(((await h.authorize(h.controller.resume(run.runId))) as Run).state).toBe(
+      'awaiting_contributor'
+    );
+    expect(held(h, run.runId).notice).toEqual(after.notice);
+    h.interceptRead(undefined);
+    // Once exactly one marked PR matches, it is observed and the notice is retired.
+    h.resolveDuplicates();
+    expect(((await h.authorize(h.controller.resume(run.runId))) as Run).state).toBe('submitted');
+    const resolved = held(h, run.runId);
+    expect(resolved.notice).toBeNull();
+    expect(resolved.artifacts.publication).toMatchObject({
+      url: 'https://github.com/upstream/fixture/pull/8',
+    });
+    expect(links(h)).toHaveLength(1);
   });
 
   it('actor=contributor outcome=unobserved engagement comment reconciled after restart without a duplicate request owner=S2', async () => {
@@ -356,7 +371,7 @@ describe('gate 4 upstream: upstream drift', () => {
       baseSha: advanced,
     });
     // The first verdict (old base) stays retained, but no receipt or push ever names it.
-    const records = verificationRecords(after.dir).map((name) => name.slice(0, -5));
+    const records = verificationShas(after.dir);
     expect(records).toHaveLength(2);
     const old = records.find((sha) => sha !== shipped) as string;
     expect(loadVerification(after.dir, old, { runId: run.runId }).verdict).toBe('passed');
@@ -388,7 +403,7 @@ describe('gate 4 upstream: upstream drift', () => {
     });
     expect(after.candidate?.baseSha).not.toBe(advanced);
     expect(after.history.some((e) => e.reasonCode === ReasonCode.BaseAdvanced)).toBe(false);
-    expect(verificationRecords(after.dir)).toHaveLength(1);
+    expect(verificationShas(after.dir)).toHaveLength(1);
     expect(String(links(h)[0]?.body)).toContain(
       `upstream is now at \`${advanced}\`; the merge result was not verified`
     );
@@ -447,7 +462,10 @@ describe('gate 4 upstream: remote divergence', () => {
     expect(rows(h, 'intents')).toContainEqual(
       expect.objectContaining({ type: 'blocked', reason: 'remote_diverged' })
     );
-    expect(after.artifacts.shipping_block).toEqual({ reason: 'remote_diverged' });
+    expect(after.artifacts.shipping_block).toEqual({
+      reason: 'remote_diverged',
+      detail: `expected=absent,observed=${foreign}`,
+    });
     expect(after.notice).toMatchObject({
       state: 'blocked',
       historyLength: after.history.length,
@@ -531,40 +549,54 @@ describe('gate 4 upstream: remote divergence', () => {
   });
 });
 
+/** Corrupt matching run files at the push preflight; every verification record of the run
+ * is declared altered, since altered boundary evidence invalidates them all. */
+function corruptBeforePush(h: () => Rig, target: RegExp, corrupt: (bytes: Buffer) => Buffer) {
+  return beforePush(h, () => {
+    const runs = path.join(h().config.executionProfile.stateDir, 'runs');
+    for (const file of fs.readdirSync(runs, { recursive: true, encoding: 'utf8' })) {
+      const record = /verification\/([a-f0-9]{40})\.json$/u.exec(file);
+      if (record) h().altered.add(record[1] as string);
+      if (target.test(file)) {
+        const at = path.join(runs, file);
+        fs.writeFileSync(at, corrupt(fs.readFileSync(at)));
+      }
+    }
+  });
+}
+
+const RECORD = /verification\/[a-f0-9]{40}\.json$/u;
+
 describe('gate 4 upstream: shipping integrity', () => {
   it.each([
     {
-      damage: 'altered byte',
+      damage: 'record byte altered',
+      target: RECORD,
       corrupt: (bytes: Buffer) =>
         Buffer.from(bytes.toString().replace('"exitStatus":0', '"exitStatus":1')),
     },
-    { damage: 'torn write', corrupt: (bytes: Buffer) => bytes.subarray(0, 40) },
-  ])('actor=filesystem outcome=verification record $damage after the verdict refuses the receipt and needs fresh verification owner=S3/S4', async ({
+    { damage: 'record torn', target: RECORD, corrupt: (bytes: Buffer) => bytes.subarray(0, 40) },
+    {
+      damage: 'boundary evidence altered',
+      target: /boundary-[a-f0-9]{32}\.json$/u,
+      corrupt: (bytes: Buffer) => Buffer.from(bytes.toString().replace('"denied"', '"allowed"')),
+    },
+  ])('actor=filesystem outcome=verification evidence $damage after the verdict refuses the receipt and needs fresh verification owner=S3/S4', async ({
+    target,
     corrupt,
   }) => {
     let h!: Rig;
-    h = fixture({
-      beforeRead: beforePush(
-        () => h,
-        () => {
-          const runs = path.join(h.config.executionProfile.stateDir, 'runs');
-          for (const file of fs.readdirSync(runs, { recursive: true, encoding: 'utf8' }))
-            if (/verification\/[a-f0-9]{40}\.json$/u.test(file)) {
-              const target = path.join(runs, file);
-              fs.writeFileSync(target, corrupt(fs.readFileSync(target)));
-            }
-        }
-      ),
-    });
+    h = fixture({ beforeRead: corruptBeforePush(() => h, target, corrupt) });
     const run = (await h.authorize(h.controller.start(h.config))) as Run;
     expect(run.state).toBe('blocked');
+    expect(h.altered.size).toBeGreaterThan(0);
     expect(vi.mocked(receipts.issueReceipt)).not.toHaveBeenCalled();
     expect(consumed(h)).toEqual([]);
     expect(forkPushes(h)).toHaveLength(0);
     expect(held(h, run.runId).notice).toMatchObject({
       state: 'blocked',
       reason: 'verification_altered',
-      nextPermittedAction: expect.stringContaining('Fresh verification requires a new run'),
+      nextPermittedAction: expect.stringContaining('no receipt was issued and nothing was pushed'),
     });
     // Replaying the altered verdict refuses; the run never ships from it.
     await expect(h.authorize(h.controller.resume(run.runId))).rejects.toMatchObject({
@@ -572,6 +604,38 @@ describe('gate 4 upstream: shipping integrity', () => {
     });
     expect(h.controller.snapshot().state).toBe('blocked');
     expect(forkPushes(h)).toHaveLength(0);
+  });
+
+  it('actor=filesystem outcome=transiently unreadable verification record fails the step without blocking, then ships owner=S3/S4', async () => {
+    let h!: Rig;
+    const unreadable: string[] = [];
+    h = fixture({
+      beforeRead: beforePush(
+        () => h,
+        () => {
+          const runs = path.join(h.config.executionProfile.stateDir, 'runs');
+          for (const file of fs.readdirSync(runs, { recursive: true, encoding: 'utf8' }))
+            if (RECORD.test(file)) {
+              unreadable.push(path.join(runs, file));
+              fs.chmodSync(path.join(runs, file), 0o000);
+            }
+        }
+      ),
+    });
+    await expect(h.authorize(h.controller.start(h.config))).rejects.toMatchObject({
+      code: 'step_failed',
+    });
+    const id = h.controller.snapshot().runId;
+    expect(h.controller.snapshot().state).toBe('shipping');
+    expect(held(h, id).notice ?? null).toBeNull();
+    expect(consumed(h)).toEqual([]);
+    expect(forkPushes(h)).toHaveLength(0);
+    for (const file of unreadable) fs.chmodSync(file, 0o600);
+    expect(((await h.authorize(h.controller.resume(id))) as Run).state).toBe(
+      'awaiting_contributor'
+    );
+    const after = held(h, id);
+    expect(h.fork.sha(after.branch)).toBe(after.candidate?.candidateSha);
   });
 });
 
@@ -613,7 +677,7 @@ describe('gate 4 upstream: report parsing failures', () => {
     });
     const run = (await h.authorize(h.controller.start(h.config))) as Run;
     const after = held(h, run.runId);
-    const records = verificationRecords(after.dir);
+    const records = verificationShas(after.dir);
     if (layer === 'regression evidence') {
       expect(run.state).toBe('paused_user');
       expect(after.artifacts.regression).toMatchObject({ proof: 'inconclusive' });
@@ -622,10 +686,8 @@ describe('gate 4 upstream: report parsing failures', () => {
       // Every independent verdict, original and both repairs, is inconclusive: no pass.
       expect(run.state).toBe('failed');
       expect(records).toHaveLength(3);
-      for (const name of records)
-        expect(loadVerification(after.dir, name.slice(0, -5), { runId: run.runId }).verdict).toBe(
-          'inconclusive'
-        );
+      for (const sha of records)
+        expect(loadVerification(after.dir, sha, { runId: run.runId }).verdict).toBe('inconclusive');
     }
     expect(after.history.some((e) => e.reasonCode === ReasonCode.VerificationPassed)).toBe(false);
     expect(after.history.some((e) => e.to === 'shipping')).toBe(false);

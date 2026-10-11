@@ -9,7 +9,7 @@ import { rig, TIME } from '../controller/__tests__/composition-fixture';
 import { compositionHooks } from '../controller/__tests__/composition-hooks';
 import { requestControl } from '../controller/control';
 import { RunStore } from '../controller/run-store';
-import { loadVerification, VerificationRecordError } from '../controller/verification-record';
+import { loadVerification, VERIFICATION_DIRECTORY } from '../controller/verification-record';
 import { parseJunitReport } from '../ecosystem/report';
 import { type IntentInput, idempotencyKey } from '../intents';
 import { Journal } from '../journal';
@@ -56,6 +56,22 @@ export function forkPushes(h: Rig) {
     .mock.calls.filter((c) => c[0][0] === 'push' && c[0].includes(`file://${h.fork.dir}`));
 }
 
+/** Hand-off links the run issued (engagement comment or prefilled PR). */
+export function links(h: Rig) {
+  return rows(h, 'handoff').filter((row) => row.type === 'link_issued');
+}
+
+/** Candidate SHAs with a verification record in an artifacts directory. */
+export function verificationShas(artifactsDir: string): string[] {
+  const directory = path.join(artifactsDir, VERIFICATION_DIRECTORY);
+  return fs.existsSync(directory)
+    ? fs
+        .readdirSync(directory)
+        .filter((name) => /^[a-f0-9]{40}\.json$/u.test(name))
+        .map((name) => name.slice(0, -'.json'.length))
+    : [];
+}
+
 /** One audit for every scenario, including refusal paths. Load real supervisor evidence,
  * compare durable write identities and verify each outstanding guest is reported. */
 export async function assertGlobalInvariants(h: Rig) {
@@ -94,38 +110,29 @@ export async function assertGlobalInvariants(h: Rig) {
         regression: 'reproduced_and_fixed',
       });
     }
-    const verificationDir = path.join(a.dir, 'verification');
-    if (fs.existsSync(verificationDir)) {
-      for (const name of fs
-        .readdirSync(verificationDir)
-        .filter((n) => /^[a-f0-9]{40}\.json$/u.test(n))) {
-        let record: ReturnType<typeof loadVerification>;
-        try {
-          record = loadVerification(a.dir, name.slice(0, -5), { runId: id });
-        } catch (error) {
-          // An altered record claims nothing; the remote check above loads its own SHA.
-          if (error instanceof VerificationRecordError && error.code === 'invalid_record') continue;
-          throw error;
-        }
-        if (record.verdict === 'passed') {
-          expect(record.boundaryHeld).toBe(true);
-          expect(record.commands.every((command) => command.status === 'passed')).toBe(true);
-          for (const command of record.commands) {
-            const observed = h.executions.find((execution) => {
-              const report = parseJunitReport(execution.result.report);
-              const guest = h.vm.vms.get(execution.vmId);
-              return (
-                execution.request.argv.join(' ') === command.command &&
-                execution.request.network === 'none' &&
-                execution.result.exitCode === command.exitStatus &&
-                !execution.result.timedOut &&
-                !execution.result.truncated &&
-                report?.suites === command.suites &&
-                guest?.files.get('src/duration.js')?.bytes.toString().includes('millis / 1000')
-              );
-            });
-            expect(observed, `supervised command ${command.id}`).toBeDefined();
-          }
+    for (const sha of verificationShas(a.dir)) {
+      // A record the scenario corrupted on purpose claims nothing; every other record
+      // must load. The remote check above loads the remote's own record regardless.
+      if (h.altered.has(sha)) continue;
+      const record = loadVerification(a.dir, sha, { runId: id });
+      if (record.verdict === 'passed') {
+        expect(record.boundaryHeld).toBe(true);
+        expect(record.commands.every((command) => command.status === 'passed')).toBe(true);
+        for (const command of record.commands) {
+          const observed = h.executions.find((execution) => {
+            const report = parseJunitReport(execution.result.report);
+            const guest = h.vm.vms.get(execution.vmId);
+            return (
+              execution.request.argv.join(' ') === command.command &&
+              execution.request.network === 'none' &&
+              execution.result.exitCode === command.exitStatus &&
+              !execution.result.timedOut &&
+              !execution.result.truncated &&
+              report?.suites === command.suites &&
+              guest?.files.get('src/duration.js')?.bytes.toString().includes('millis / 1000')
+            );
+          });
+          expect(observed, `supervised command ${command.id}`).toBeDefined();
         }
       }
     }
@@ -165,10 +172,10 @@ export async function assertGlobalInvariants(h: Rig) {
 
 function assertPushInvariants(h: Rig) {
   const id = h.controller.snapshot().runId;
-  const links = rows(h, 'handoff').filter((row) => row.type === 'link_issued');
-  const linkKeys = links.map((row) => idempotencyKey(row.input as IntentInput));
-  expect(new Set(linkKeys).size).toBe(links.length);
-  expect(new Set(links.map((row) => row.bodyFile)).size).toBe(links.length);
+  const issued = links(h);
+  const linkKeys = issued.map((row) => idempotencyKey(row.input as IntentInput));
+  expect(new Set(linkKeys).size).toBe(issued.length);
+  expect(new Set(issued.map((row) => row.bodyFile)).size).toBe(issued.length);
   const pushRows = rows(h, 'push-ledger');
   const writes = pushRows.filter((row) => row.type === 'push_verified');
   for (const row of writes) expect(typeof row.key).toBe('string');

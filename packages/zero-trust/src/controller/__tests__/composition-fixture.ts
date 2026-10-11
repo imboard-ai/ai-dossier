@@ -54,6 +54,10 @@ const UPSTREAM_IDENTITY = {
   GIT_COMMITTER_NAME: 'Upstream',
   GIT_COMMITTER_EMAIL: 'upstream@example.org',
 };
+/** When the fixture maintainer invites the contributor. */
+const INVITED_AT = '2026-10-10T00:00:01.000Z';
+/** The number GitHub gives the contributor's submitted PR. */
+const PR_NUMBER = 8;
 const dirs: string[] = [];
 let instrumentVm: (vm: VerifierFakeVm) => void = () => {};
 let setEnv = (key: string, value: string) => {
@@ -270,8 +274,10 @@ export function rig(options: RigOptions = {}) {
   let advances = 0;
   /** Fork commits a scenario wrote out of band; the audit requires them untouched. */
   const foreign = new Set<string>();
-  let intercept: ((path: string) => GitHubResponse | undefined) | undefined;
-  let report: FakeScript | undefined;
+  /** Verification records a scenario corrupted on purpose; the audit skips only these. */
+  const altered = new Set<string>();
+  let readOverride: ((path: string) => GitHubResponse | undefined) | undefined;
+  let execOverride: FakeScript | undefined;
   let comment: Record<string, unknown> | undefined;
   let invitation: Record<string, unknown> | undefined;
   let revocation: Record<string, unknown> | undefined;
@@ -287,7 +293,7 @@ export function rig(options: RigOptions = {}) {
   });
   const read: NonNullable<Parameters<typeof createController>[1]>['read'] = async (p) => {
     await options.beforeRead?.(p);
-    const replaced = intercept?.(p);
+    const replaced = readOverride?.(p);
     if (replaced) return replaced;
     if (p === '/repos/upstream/fixture')
       return {
@@ -334,12 +340,11 @@ export function rig(options: RigOptions = {}) {
             ['mktree'],
             `${upstream.git(['ls-tree', BASE_COMMIT.baseSha]).replace(/blob [a-f0-9]{40}\tpackage.json/u, `blob ${blob}\tpackage.json`)}\n`
           );
-          advanced = upstream.git(['commit-tree', tree, '-p', BASE_COMMIT.baseSha], 'advance\n', {
-            GIT_AUTHOR_NAME: 'Upstream',
-            GIT_AUTHOR_EMAIL: 'upstream@example.org',
-            GIT_COMMITTER_NAME: 'Upstream',
-            GIT_COMMITTER_EMAIL: 'upstream@example.org',
-          });
+          advanced = upstream.git(
+            ['commit-tree', tree, '-p', BASE_COMMIT.baseSha],
+            'advance\n',
+            UPSTREAM_IDENTITY
+          );
           upstream.git(['update-ref', 'refs/heads/main', advanced]);
         }
         return { status: 200, body: { commit: { sha: advanced } } };
@@ -401,7 +406,7 @@ export function rig(options: RigOptions = {}) {
     }
     if (p.startsWith('/repos/upstream/fixture/pulls?'))
       return { status: 200, body: submitted ? [submitted, ...resubmitted] : [] };
-    if (p === '/repos/upstream/fixture/pulls/8') return { status: 200, body: submitted };
+    if (p === `/repos/upstream/fixture/pulls/${PR_NUMBER}`) return { status: 200, body: submitted };
     if (p.includes('/issues/7/comments?') && options.activeControl === 'engagement' && !blocked) {
       blocked = true;
       controlReached();
@@ -410,7 +415,7 @@ export function rig(options: RigOptions = {}) {
     if (p.includes('/issues/7/comments?'))
       return { status: 200, body: [comment, invitation, revocation].filter(Boolean) };
     if (p.endsWith('/issues/comments/10')) return { status: 200, body: invitation };
-    if (p.includes('/issues/8/comments?')) return { status: 200, body: feedback };
+    if (p.includes(`/issues/${PR_NUMBER}/comments?`)) return { status: 200, body: feedback };
     if (p.includes('/actions/runs?')) return { status: 200, body: { workflow_runs: [] } };
     if (p.includes('/check-runs')) return { status: 200, body: { check_runs: [] } };
     if (p.endsWith('/status')) return { status: 200, body: { statuses: [] } };
@@ -600,7 +605,7 @@ export function rig(options: RigOptions = {}) {
   };
   const reports = new Map<object, number>();
   const vm = new VerifierFakeVm((request, guest) => {
-    const replaced = report?.(request, guest);
+    const replaced = execOverride?.(request, guest);
     if (replaced) return replaced;
     if (options.failBaseline && request.report && !guest.files.has('test/regression.test.js'))
       return { exitCode: 1, report: junit(1, true) };
@@ -783,6 +788,15 @@ export function rig(options: RigOptions = {}) {
       },
     };
   };
+  const maintainerComment = (id: number, body: string, at: string) => ({
+    id,
+    html_url: `${config.issueUrl}#issuecomment-${id}`,
+    body,
+    user: { login: 'maintainer', html_url: 'https://github.com/maintainer' },
+    author_association: 'MEMBER',
+    created_at: at,
+    updated_at: at,
+  });
   const linkBody = (runId: string, operationKind: 'pr_create' | 'engagement_comment') => {
     const a = artifacts(runId);
     const hand = new Journal(a.store.storeDirectory('handoff'));
@@ -811,13 +825,14 @@ export function rig(options: RigOptions = {}) {
     executions,
     reopen: () => createController(config, edges),
     foreign,
+    altered,
     /** Answer matching credential-free reads from `fn`; `undefined` falls through. */
-    interceptRead(fn: typeof intercept) {
-      intercept = fn;
+    interceptRead(fn: typeof readOverride) {
+      readOverride = fn;
     },
     /** Replace supervised command results while `fn` answers. */
     overrideExec(fn: FakeScript | undefined) {
-      report = fn;
+      execOverride = fn;
     },
     closeIssue() {
       issueState = 'closed';
@@ -827,17 +842,9 @@ export function rig(options: RigOptions = {}) {
     },
     /** The inviting maintainer later withdraws permission in a new comment. */
     revokeInvitation() {
-      // Strictly after the invitation (00:00:01) even while the fixture clock is frozen.
-      const at = new Date(Math.max(clock, Date.parse('2026-10-10T00:00:02.000Z'))).toISOString();
-      revocation = {
-        id: 12,
-        html_url: `${config.issueUrl}#issuecomment-12`,
-        body: 'Do not proceed.',
-        user: { login: 'maintainer', html_url: 'https://github.com/maintainer' },
-        author_association: 'MEMBER',
-        created_at: at,
-        updated_at: at,
-      };
+      // Strictly after the invitation even while the fixture clock is frozen.
+      const at = new Date(Math.max(clock, Date.parse(INVITED_AT) + 1000)).toISOString();
+      revocation = maintainerComment(12, 'Do not proceed.', at);
     },
     /** Commit an edit of `file` onto the upstream default branch. */
     advanceUpstream(file: string, edit: (text: string) => string) {
@@ -876,7 +883,7 @@ export function rig(options: RigOptions = {}) {
       feedback = [
         {
           id: 11,
-          html_url: 'https://github.com/upstream/fixture/pull/8#issuecomment-11',
+          html_url: `https://github.com/upstream/fixture/pull/${PR_NUMBER}#issuecomment-11`,
           user: { login: 'maintainer', type: 'User' },
           author_association: 'MEMBER',
           updated_at: new Date(clock).toISOString(),
@@ -908,15 +915,7 @@ export function rig(options: RigOptions = {}) {
       options.userUnavailable = true;
     },
     invite() {
-      invitation = {
-        id: 10,
-        html_url: `${config.issueUrl}#issuecomment-10`,
-        body: 'Go ahead.',
-        user: { login: 'maintainer', html_url: 'https://github.com/maintainer' },
-        author_association: 'MEMBER',
-        created_at: '2026-10-10T00:00:01.000Z',
-        updated_at: '2026-10-10T00:00:01.000Z',
-      };
+      invitation = maintainerComment(10, 'Go ahead.', INVITED_AT);
     },
     welcome() {
       options.policy = undefined;
@@ -928,9 +927,9 @@ export function rig(options: RigOptions = {}) {
       const held = a.get<{ record: { candidateSha: string } }>('candidate');
       const branch = `ztfc/${a.store.contributionId}`;
       submitted = {
-        number: 8,
+        number: PR_NUMBER,
         title: 'Fix duration conversion',
-        html_url: 'https://github.com/upstream/fixture/pull/8',
+        html_url: `https://github.com/upstream/fixture/pull/${PR_NUMBER}`,
         state: 'open',
         merged_at: null,
         user: { login: OWNER, html_url: `https://github.com/${OWNER}` },
@@ -946,10 +945,15 @@ export function rig(options: RigOptions = {}) {
       };
       resubmitted = Array.from({ length: copies - 1 }, (_, i) => ({
         ...submitted,
-        number: 9 + i,
-        html_url: `https://github.com/upstream/fixture/pull/${9 + i}`,
+        number: PR_NUMBER + 1 + i,
+        html_url: `https://github.com/upstream/fixture/pull/${PR_NUMBER + 1 + i}`,
       }));
       a.close();
+    },
+    /** The contributor retargets the extra submissions to another base, so exactly one
+     * marked PR still matches the run's head and base. */
+    resolveDuplicates() {
+      resubmitted = [];
     },
     submitEngagement(runId: string) {
       comment = {

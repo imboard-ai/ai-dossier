@@ -23,6 +23,7 @@ import {
   gate4Suite,
   type Rig,
   rows,
+  verificationShas,
 } from './gate4-audit';
 
 vi.setConfig({ testTimeout: 60000, hookTimeout: 60000 });
@@ -163,13 +164,8 @@ describe('gate 4 lifecycle', () => {
         .snapshot()
         .history.some((event) => event.reasonCode === ReasonCode.VerificationPassed)
     ).toBe(false);
-    const verificationDir = path.join(a.dir, 'verification');
-    for (const file of fs.existsSync(verificationDir) ? fs.readdirSync(verificationDir) : []) {
-      if (/^[a-f0-9]{40}\.json$/u.test(file))
-        expect(loadVerification(a.dir, file.slice(0, -5), { runId: run.runId }).verdict).not.toBe(
-          'passed'
-        );
-    }
+    for (const sha of verificationShas(a.dir))
+      expect(loadVerification(a.dir, sha, { runId: run.runId }).verdict).not.toBe('passed');
     expect(a.get('publication')).toBeUndefined();
     a.close();
   });

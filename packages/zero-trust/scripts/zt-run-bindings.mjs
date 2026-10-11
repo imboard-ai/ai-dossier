@@ -26,7 +26,8 @@ import {
 } from '../dist/controller/outcome-records.js';
 import { RunStore } from '../dist/controller/run-store.js';
 import { assembleStatus } from '../dist/controller/status.js';
-import { STOP_NOTICE_KEY, StepArtifacts } from '../dist/controller/steps.js';
+import { StepArtifacts } from '../dist/controller/steps.js';
+import { STOP_NOTICE_KEY, stopNoticeAction } from '../dist/controller/stop-notice.js';
 import {
   fenceIncident,
   incidentRequested,
@@ -262,9 +263,8 @@ export async function createCommands({ root, createController, onAuthorizationUr
           authorizationRequired: retained.authorizationRequired,
         });
         // A producer's reason for exactly this stop; any later transition retires it.
-        const notice = retained.stopNotice;
-        if (notice?.state === run.state && notice.historyLength === run.history.length)
-          result.nextPermittedAction = notice.nextPermittedAction;
+        const noticed = stopNoticeAction(retained.stopNotice, run);
+        if (noticed) result.nextPermittedAction = noticed;
         const control = readControlRequests(store);
         if (control.invalid) {
           result.phase = 'invalid_control';
