@@ -379,21 +379,43 @@ export class ForkCredentialBroker {
 
   /** A refresh replaced the user token. The old one is marked rotated only once
    * observed dead (401); its scoped children stay live and journaled. */
-  async rotateUserToken(value: string, expiresAt: string): Promise<string> {
+  async rotateUserToken(
+    value: string,
+    expiresAt: string,
+    spentRefreshParentId?: string
+  ): Promise<string> {
     this.assertOpen();
     const previous = this.liveUserToken();
     if (!previous) throw new CredentialBrokerError('no_user_token');
+    if (spentRefreshParentId !== undefined) {
+      if (spentRefreshParentId !== previous.id) throw new CredentialBrokerError('no_user_token');
+      this.replacedUserChains.add(previous.id);
+    }
     const observed = await statusOf(
       probeToken(this.options.http, 'user', this.vault.get(previous.id) as string)
     );
     // The kill switch or run end may have acted during the probe.
     this.assertOpen();
-    if (observed === UNAUTHORIZED && this.ledger.tokens.get(previous.id)?.status === 'live') {
+    if (
+      observed === UNAUTHORIZED &&
+      this.replacedUserChains.has(previous.id) &&
+      this.ledger.tokens.get(previous.id)?.status === 'live'
+    ) {
       this.record({ v: 1, type: 'token_rotated', id: previous.id, at: this.iso() });
       this.vault.delete(previous.id);
     }
     // Not observed dead: it stays journaled live and is revoked at run end.
     return this.holdUserToken(value, expiresAt);
+  }
+
+  /** Credential owner's bad_refresh_token observation for this exact held pair.
+   * Access liveness must still be checked by the normal revocation path. */
+  confirmRefreshChainEnded(tokenId: string): void {
+    this.assertOpen();
+    const token = this.ledger.tokens.get(tokenId);
+    if (token?.kind !== 'user' || token.status !== 'live' || !this.vault.has(tokenId))
+      throw new CredentialBrokerError('no_user_token');
+    this.replacedUserChains.add(tokenId);
   }
 
   /** Contributor authorization reads (#1065) with the held unscoped user token; the value
@@ -696,7 +718,11 @@ export class ForkCredentialBroker {
     for (let attempt = 1; attempt <= MAX_REVOKE_ATTEMPTS; attempt++) {
       if (attempt > 1) await this.sleep(REVOKE_BACKOFF_MS[attempt - 2] ?? 0);
       if (!this.stillOutstanding(tokenId)) return;
-      const result = await this.deleteAndProbe(kind, value);
+      const result = await this.deleteAndProbe(
+        kind,
+        value,
+        token.kind !== 'user' || this.replacedUserChains.has(tokenId)
+      );
       if (!this.stillOutstanding(tokenId)) return;
       if (result.ok) {
         // Journal first: if this write is lost, a held value lets a restart re-check.
@@ -720,9 +746,19 @@ export class ForkCredentialBroker {
   }
 
   /** A revocation counts only when a liveness read afterwards observes 401. */
-  private async deleteAndProbe(kind: 'installation' | 'user', value: string): Promise<Attempt> {
+  private readonly replacedUserChains = new Set<string>();
+
+  private async deleteAndProbe(
+    kind: 'installation' | 'user',
+    value: string,
+    acceptMissing = true
+  ): Promise<Attempt> {
     const deleted = await statusOf(deleteToken(this.options.http, this.options.app, kind, value));
     if (!TOKEN_GONE.includes(deleted)) return { ok: false, stage: 'delete', status: deleted };
+    // 404 plus access 401 may mean native expiry, while refresh authority lives.
+    // Only successful deletion or a chain known spent by rotation proves death.
+    if ((deleted === 404 || deleted === 401) && !acceptMissing)
+      return { ok: false, stage: 'delete', status: deleted };
     const probed = await statusOf(probeToken(this.options.http, kind, value));
     return probed === UNAUTHORIZED ? { ok: true } : { ok: false, stage: 'probe', status: probed };
   }

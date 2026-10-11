@@ -68,6 +68,19 @@ jobs:
       - name: Build
         run: make build-all
 
+      # Isolate the release-gate timing from unrelated parallel suites. Real
+      # journals and bare Git repositories survive the child SIGKILL in tmpfs;
+      # no persistence API or controller internals are mocked for speed.
+      - name: Gate 4 lifecycle under 60 seconds
+        env:
+          TMPDIR: /dev/shm
+        run: |
+          start=$SECONDS
+          timeout 60s npm test --workspace=@ai-dossier/zero-trust -- src/__tests__/gate4-lifecycle.test.ts
+          elapsed=$((SECONDS - start))
+          echo "Gate 4 lifecycle wall_seconds=$elapsed node=$(node --version)"
+          test "$elapsed" -lt 60
+
       - name: Run tests with coverage
         run: make test-coverage
 

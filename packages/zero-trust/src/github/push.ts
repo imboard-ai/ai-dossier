@@ -179,6 +179,7 @@ export function replayPushes(events: readonly unknown[], repositoryId: number): 
 interface PushOutcome {
   readonly git: 'pushed' | 'rejected' | 'failed' | 'killed';
   readonly remote: string | null | undefined;
+  readonly stoppedAfterStart?: boolean;
 }
 
 export class ForkPusher implements WriteAdapter {
@@ -299,6 +300,34 @@ export class ForkPusher implements WriteAdapter {
     if (outcome.remote === sha) return this.verified(intent, at, sha);
     if (outcome.remote !== undefined && outcome.remote !== expected)
       throw diverged(expected, outcome.remote);
+    if (outcome.git === 'killed' && outcome.stoppedAfterStart && !this.options.signal?.aborted) {
+      // withForkPush joined the stopped Git operation and confirmed revocation.
+      // The API can trail a landed write. Bind identity with it, but ask the Git
+      // server itself for the ref before claiming that nothing landed.
+      let observed: string | null;
+      try {
+        await this.readRef(at);
+        const { url, config } = this.remote(at);
+        const git = new TrustedGit();
+        try {
+          const listed = await git.execAsync(['ls-remote', url, `refs/heads/${at.branch}`], {
+            config,
+            timeoutMs: PUSH_TIMEOUT_MS,
+            signal: this.options.signal ?? new AbortController().signal,
+          });
+          const sha = lsRemote(listed, `refs/heads/${at.branch}`);
+          if (sha === undefined) throw new ForkPushError('push_uncertain', outcome.git);
+          observed = sha;
+        } finally {
+          git.close();
+        }
+      } catch {
+        throw new ForkPushError('push_uncertain', outcome.git);
+      }
+      if (observed === sha) return this.verified(intent, at, sha);
+      if (observed !== expected) throw diverged(expected, observed);
+      throw new MutationVoidedError('push:stopped_remote_absent');
+    }
     // Unknown, or still at the expected value (nothing landed): reconciliation decides.
     throw new ForkPushError('push_uncertain', outcome.git);
   }
@@ -371,6 +400,7 @@ export class ForkPusher implements WriteAdapter {
     const sha = candidate.record.candidateSha;
     const ref = `refs/heads/${at.branch}`;
     const git = new TrustedGit();
+    const started = !signal.aborted;
     try {
       git.run(['index-pack', '--stdin', '--strict'], candidate.pack);
       if (git.run(['cat-file', '-t', sha]).toString().trim() !== 'commit')
@@ -393,7 +423,11 @@ export class ForkPusher implements WriteAdapter {
       const listed = signal.aborted
         ? undefined
         : await git.execAsync(['ls-remote', url, ref], options);
-      return { git: pushOutcome(push, ref), remote: listed && lsRemote(listed, ref) };
+      return {
+        git: pushOutcome(push, ref),
+        remote: listed && lsRemote(listed, ref),
+        stoppedAfterStart: started && signal.aborted,
+      };
     } finally {
       git.close();
     }
@@ -405,7 +439,15 @@ export class ForkPusher implements WriteAdapter {
    * to exactly that repository, so if the name were renamed or transferred to another
    * repository in between, GitHub refuses the push (403) and the read-back stays put. */
   protected remote(at: ForkBranch): { url: string; config: readonly string[] } {
-    return { url: `https://github.com/${at.fork.owner}/${at.fork.repo}.git`, config: [] };
+    return {
+      url: `https://github.com/${at.fork.owner}/${at.fork.repo}.git`,
+      config: [
+        'protocol.https.allow=always',
+        'http.sslVerify=true',
+        'http.followRedirects=false',
+        'http.proxy=',
+      ],
+    };
   }
 
   private verified(intent: Intent, at: ForkBranch, sha: string): MutationResult {

@@ -2,13 +2,13 @@
  * repository stands in for the fork, ref reads go through an HTTP fake answering from it,
  * and the broker, nonce store, push ledger and intent journal are real. No network, no
  * real credentials. */
-import { execFileSync } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
 import fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { Ed25519Signer } from '@ai-dossier/core';
 import { afterEach, beforeEach, expect, vi } from 'vitest';
+import { BareFork } from '../../__tests__/bare-fork';
 import { createManifest, sha256 } from '../../canonical/export';
 import { type CanonicalCandidate, createCandidate } from '../../canonical/reconstruct';
 import { TrustedGit } from '../../canonical/trusted-git';
@@ -21,6 +21,7 @@ import { createRun, ReasonCode, type RunRecord, transitionRun } from '../../stat
 import { type BoundaryInput, evaluateBoundary } from '../../vm/evidence';
 import { AppCredentials } from '../app-auth';
 import { ForkCredentialBroker } from '../broker';
+import type { ForkBranch } from '../fork-ref';
 import { ForkPusher, type ShippingAuthorization } from '../push';
 import type { GitHubRead, GitHubResponse } from '../reconcile';
 import { CLIENT_ID, FORK_ID, GitHubFake, INSTALLATION_ID, OWNER, UPSTREAM_ID } from './github-fake';
@@ -116,31 +117,13 @@ export const C2 = candidateWith('rebased revision\n');
 export const SHA1 = C1.record.candidateSha;
 export const SHA2 = C2.record.candidateSha;
 
-const FORK_GIT_ENV = {
-  PATH: '/usr/bin:/bin',
-  GIT_CONFIG_NOSYSTEM: '1',
-  GIT_CONFIG_GLOBAL: '/dev/null',
-};
 /** The contributor fork: a local bare repository. */
-export class Fork {
-  readonly dir = temp('zt-fork-');
+export class Fork extends BareFork {
   constructor() {
-    this.git(['init', '--bare', '--quiet']);
+    super(temp('zt-fork-'));
   }
-  git(args: string[], input?: Buffer | string, extraEnv: Record<string, string> = {}): string {
-    return execFileSync('/usr/bin/git', ['--git-dir', this.dir, ...args], {
-      input,
-      env: { ...FORK_GIT_ENV, ...extraEnv },
-    })
-      .toString()
-      .trim();
-  }
-  sha(branch = BRANCH): string | null {
-    try {
-      return this.git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]);
-    } catch {
-      return null;
-    }
+  override sha(branch = BRANCH): string | null {
+    return super.sha(branch);
   }
   /** Someone else moves the branch: a commit of their own on top of `base`. */
   outOfBand(branch = BRANCH): string {
@@ -306,7 +289,8 @@ class LocalForkPusher extends ForkPusher {
   ) {
     super(options);
   }
-  protected override remote(): { url: string; config: readonly string[] } {
+  protected override remote(at: ForkBranch): { url: string; config: readonly string[] } {
+    if (!this.bare) return super.remote(at);
     return { url: `file://${this.bare}`, config: ['protocol.file.allow=always'] };
   }
 }
@@ -336,7 +320,7 @@ export class Rig {
     if (!previous) new ReceiptNonceStore(this.dirs.nonces).initialize();
   }
   /** `run`: the lifecycle the intent driver starts from (a revision ships later in it). */
-  async start(run: RunRecord = shipping): Promise<this> {
+  async start(run: RunRecord = shipping, productionRemote = false): Promise<this> {
     const tokens = journal(this.dirs.tokens);
     this.broker = new ForkCredentialBroker({
       store: tokens,
@@ -364,7 +348,7 @@ export class Rig {
           return authorization(grant);
         },
       },
-      this.fork.dir
+      productionRemote ? '' : this.fork.dir
     );
     this.driver = new IntentDriver(
       journal(this.dirs.intents),

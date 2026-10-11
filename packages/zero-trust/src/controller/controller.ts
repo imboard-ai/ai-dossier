@@ -167,6 +167,8 @@ export interface RecoveryHooks {
   reconcileCleanup?(vmId: string, context: PhaseContext): Promise<string | null>;
   reconcileVms(context: PhaseContext, cleanup: () => Promise<void>): Promise<void>;
   recoverCredentials(context: PhaseContext): Promise<void>;
+  /** Reconcile old credential obligations without identity acquisition or OAuth. */
+  cleanupCredentials?(context: PhaseContext): Promise<void>;
   resumeIntents(context: PhaseContext): Promise<undefined | RunRecord>;
   /** Replay/reconcile existing effects only; fresh invitation checks belong to PhaseSteps. */
   resumeHandoff(context: PhaseContext): Promise<undefined | RunRecord>;
@@ -174,7 +176,7 @@ export interface RecoveryHooks {
   resumeTracker(context: PhaseContext): Promise<undefined | RunRecord>;
   killAll(context: PhaseContext): Promise<void>;
   /** Per-run cancellation, distinct from the root-wide incident kill switch. */
-  endRun?(context: PhaseContext): Promise<void>;
+  endRun?(context: PhaseContext, reason?: 'completed' | 'cancelled'): Promise<void>;
   reconcileControl?(
     context: PhaseContext,
     kind: 'pause' | 'cancel'
@@ -442,6 +444,10 @@ export class RunController {
       // A wrapper cannot bypass actual listByRun/teardown reconciliation.
       await this.attemptRecovery(() => this.cleanup(), failures);
       const beforeTracker = await this.reconcileTracker(failures);
+      await this.attemptRecovery(
+        () => this.deps.recovery.cleanupCredentials?.(this.context()) ?? Promise.resolve(),
+        failures
+      );
       this.observeControl();
       this.observeIncident();
       if (this.control) return this.applyControl();
@@ -589,15 +595,24 @@ export class RunController {
       .finally(async () => {
         clearInterval(watcher);
         try {
-          this.last = this.store?.run ?? this.last;
           await this.deps.release?.();
         } finally {
-          this.journal?.close();
-          this.store?.close();
-          this.store = undefined;
-          this.ledger = undefined;
-          this.journal = undefined;
-          this.running = undefined;
+          // Release can persist a cleanup block even when revocation rejects.
+          // Publish that final durable state before the store pins are closed.
+          try {
+            if (this.store) {
+              const final = this.store.run;
+              if (!this.last || !sameRunRecord(this.last, final)) this.notify(final);
+              else this.last = final;
+            }
+          } finally {
+            this.journal?.close();
+            this.store?.close();
+            this.store = undefined;
+            this.ledger = undefined;
+            this.journal = undefined;
+            this.running = undefined;
+          }
         }
       });
     this.running = task;
@@ -845,6 +860,26 @@ export class RunController {
     if (TERMINAL_STATES.includes(run.state)) {
       await this.cleanup();
       if (this.held.run.state === 'blocked_cleanup') return;
+      const before = this.held.run;
+      try {
+        await this.deps.recovery.endRun?.(
+          this.context(),
+          run.state === 'cancelled' ? 'cancelled' : 'completed'
+        );
+      } catch (error) {
+        const after = this.store?.run ?? before;
+        if (after.state !== 'blocked_cleanup')
+          this.persistObserved(
+            transitionRun(this.held.run, ReasonCode.CleanupFailed, this.deps.now().toISOString())
+          );
+        else if (!sameRunRecord(before, after)) this.notify(after);
+        throw error;
+      }
+      const after = this.store?.run ?? before;
+      if (after.state === 'blocked_cleanup') {
+        if (!sameRunRecord(before, after)) this.notify(after);
+        return;
+      }
     }
     const previous = this.held.run;
     // Recovery drivers may return several transitions. Deliver each, never just the tail.

@@ -150,6 +150,7 @@ REFACTORING_PLAN.md
 # Per-issue full-cycle planning scaffolds — the durable copy is the issue's
 # plan:v1 artifact comment (ai-dossier plan post), not the repo tree (#455, #500)
 PLANNING-*.md
+!/PLANNING-1113-gate4-lifecycle.md
 
 # Registry
 .vercel

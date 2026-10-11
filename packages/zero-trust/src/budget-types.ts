@@ -73,6 +73,17 @@ export interface BudgetState {
   contributionId: string;
   sessions: BudgetSession[];
   reservations: BudgetReservation[];
+  /** Append-only explicit user approvals; original sessions and holds stay intact. */
+  ceilingExtensions?: BudgetCeilingExtension[];
+}
+
+export interface BudgetCeilingExtension {
+  sessionId: string;
+  previousMinor: number;
+  ceiling: Money;
+  approvalId: string;
+  approvedAt: string;
+  actor: 'user';
 }
 
 export type BudgetErrorCode =

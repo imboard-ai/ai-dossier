@@ -1936,9 +1936,10 @@ describe('createController real composition', () => {
       diagnostic: { phase: 'recovery', code: 'contributor_authorization_unavailable' },
     });
     const a = h.artifacts(run.runId);
-    // The same unavailable /user probe cannot confirm old-token revocation;
-    // retain that cleanup fence, never manufacture an account mismatch.
-    expect(a.store.run.state).toBe('blocked_cleanup');
+    // The paused exit already confirmed old-token revocation. An identity outage
+    // creates no new journaled cleanup obligation or account mismatch.
+    expect(a.store.run.state).toBe('paused_user');
+    expect([...h.fake.tokens.values()].every((token) => !token.live)).toBe(true);
     expect(a.get('diagnostic')).toMatchObject({
       phase: 'recovery',
       operation: 'recovery_producer',

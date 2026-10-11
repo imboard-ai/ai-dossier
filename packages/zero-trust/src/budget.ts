@@ -256,6 +256,28 @@ function validate(raw: unknown, contributionId: string): BudgetState {
       sessions.set(s.id, s);
     }
     const ids = new Set<string>();
+    const approvalIds = new Set<string>();
+    const ceilings = new Map(state.sessions.map((s) => [s.id, s.ceiling.minor]));
+    if (state.ceilingExtensions !== undefined && !Array.isArray(state.ceilingExtensions))
+      throw new Error('invalid extensions');
+    for (const extension of state.ceilingExtensions ?? []) {
+      const s = sessions.get(extension.sessionId);
+      if (!s || Object.keys(extension).length !== 6 || extension.actor !== 'user')
+        throw new Error('invalid extension');
+      text(extension.approvalId, 'approval ID');
+      if (approvalIds.has(extension.approvalId)) throw new Error('duplicate approval');
+      approvalIds.add(extension.approvalId);
+      money(extension.ceiling);
+      if (
+        extension.ceiling.currency !== s.ceiling.currency ||
+        extension.previousMinor !== ceilings.get(s.id) ||
+        extension.ceiling.minor <= extension.previousMinor ||
+        typeof extension.approvedAt !== 'string' ||
+        new Date(extension.approvedAt).toISOString() !== extension.approvedAt
+      )
+        throw new Error('invalid extension chain');
+      ceilings.set(s.id, extension.ceiling.minor);
+    }
     for (const r of state.reservations) {
       text(r.id, 'reservation ID');
       const s = sessions.get(r.sessionId);
@@ -338,8 +360,7 @@ export function budgetTotals(state: BudgetState, sessionId: string): BudgetTotal
 /** Read-only stopping predicate. Work cannot consume the protected cleanup
  * allowance; bigint totals also recognize observed overruns beyond safe sums. */
 export function isBudgetSessionExhausted(state: BudgetState, sessionId: string): boolean {
-  const session = state.sessions.find((entry) => entry.id === sessionId);
-  if (!session) throw new BudgetError('unknown_session', 'Unknown budget session');
+  const session = effectiveBudgetSession(state, sessionId);
   const totals = reservationTotals(state, sessionId);
   const committedMoney = totals.spent + totals.reserved;
   const workCeiling = BigInt(session.ceiling.minor) - BigInt(session.cleanupAllowance);
@@ -349,6 +370,13 @@ export function isBudgetSessionExhausted(state: BudgetState, sessionId: string):
     totals.tokens >= BigInt(session.tokenLimit) ||
     totals.timeMs >= BigInt(session.timeLimitMs)
   );
+}
+
+export function effectiveBudgetSession(state: BudgetState, sessionId: string): BudgetSession {
+  const original = state.sessions.find((s) => s.id === sessionId);
+  if (!original) throw new BudgetError('unknown_session', 'Unknown budget session');
+  const latest = state.ceilingExtensions?.filter((e) => e.sessionId === sessionId).at(-1);
+  return { ...original, ceiling: { ...(latest?.ceiling ?? original.ceiling) } };
 }
 
 /** Controller-owned LOCAL filesystem ledger. Opening is read-only and never resets history. */
@@ -484,6 +512,37 @@ export class BudgetLedger {
     });
   }
 
+  /** Explicit trusted user command; CAS prevents stale approval and replay. This
+   * changes only the effective money ceiling, never clears debt or unknown holds. */
+  extendCeiling(input: {
+    sessionId: string;
+    previousMinor: number;
+    ceiling: { currency: string; minor: number };
+    approvalId: string;
+    approvedAt: string;
+    actor: 'user';
+  }): void {
+    const extension = structuredClone(input);
+    this.mutate((state) => {
+      const current = effectiveBudgetSession(state, extension.sessionId);
+      if (
+        Object.keys(extension).length !== 6 ||
+        extension.actor !== 'user' ||
+        extension.previousMinor !== current.ceiling.minor ||
+        extension.ceiling.currency !== current.ceiling.currency ||
+        extension.ceiling.minor <= current.ceiling.minor
+      )
+        throw new BudgetError('invalid_budget', 'Explicit increasing ceiling approval required');
+      // Validate as a ledger before publication so malformed approvals never land.
+      const proposed = {
+        ...state,
+        ceilingExtensions: [...(state.ceilingExtensions ?? []), extension],
+      };
+      validate(proposed, this.contributionId);
+      state.ceilingExtensions = proposed.ceilingExtensions;
+    });
+  }
+
   reserve(
     sessionId: string,
     estimateMax: BudgetEstimate,
@@ -512,8 +571,7 @@ export class BudgetLedger {
           'persistence_uncertain',
           'Reconcile recovered reservations before new work'
         );
-      const s = state.sessions.find((entry) => entry.id === sessionId);
-      if (!s) throw new BudgetError('unknown_session', 'Unknown budget session');
+      const s = effectiveBudgetSession(state, sessionId);
       estimate(e, s.ceiling.currency);
       const t = reservationTotals(state, sessionId);
       const workCeiling = BigInt(s.ceiling.minor) - BigInt(s.cleanupAllowance);

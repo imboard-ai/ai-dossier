@@ -444,6 +444,7 @@ export function createController(
   overrides: ControllerOverrides = {}
 ): RunController & {
   readonly authorizationUrl: string | null;
+  readonly nextPermittedAction: 'authorize' | null;
   authorize(runId: string): Promise<void>;
 } {
   if (
@@ -695,6 +696,35 @@ export function createController(
       }
     );
   };
+  const openBroker = (c: PhaseContext, fork: ForkReady) =>
+    new ForkCredentialBroker({
+      assertAdmission: controller.assertAdmission.bind(controller),
+      store: journal(c, 'tokens'),
+      http,
+      app: appCredentials(),
+      fork,
+      vault,
+      intents: () => {
+        controller.assertAdmission();
+        if (!intents) throw new Error('intents_not_ready');
+        return intents.snapshot();
+      },
+      now: () => now().getTime(),
+      onCleanupBlocked: () => {
+        const current = c.store.run;
+        if (!TERMINAL_STATES.includes(current.state) && current.state !== 'blocked_cleanup')
+          c.store.persistRun(transitionRun(current, ReasonCode.CleanupFailed, now().toISOString()));
+      },
+    });
+  const cleanupCredentials = async (c: PhaseContext) => {
+    const fork = artifacts(c).get<ForkReady>('fork');
+    if (!fork) return;
+    const retained = new TokenJournal(journal(c, 'tokens')).state;
+    if (![...retained.tokens.values()].some((token) => OUTSTANDING.includes(token.status))) return;
+    broker ??= openBroker(c, fork);
+    const result = await broker.recover();
+    if (result.report) throw new Error('cleanup_incomplete');
+  };
   const credentials = async (c: PhaseContext) => {
     controller.assertAdmission();
     if (broker && contributor) return;
@@ -714,25 +744,7 @@ export function createController(
     controller.assertAdmission();
     if (stored && stored.repositoryId !== fork.repositoryId) throw new Error('fork_replaced');
     artifacts(c).put('fork', fork);
-    broker = new ForkCredentialBroker({
-      assertAdmission: controller.assertAdmission.bind(controller),
-      store: journal(c, 'tokens'),
-      http,
-      app: appCredentials(),
-      fork,
-      vault,
-      intents: () => {
-        controller.assertAdmission();
-        if (!intents) throw new Error('intents_not_ready');
-        return intents.snapshot();
-      },
-      now: () => now().getTime(),
-      onCleanupBlocked: () => {
-        const current = c.store.run;
-        if (!TERMINAL_STATES.includes(current.state) && current.state !== 'blocked_cleanup')
-          c.store.persistRun(transitionRun(current, ReasonCode.CleanupFailed, now().toISOString()));
-      },
-    });
+    broker ??= openBroker(c, fork);
     contributor = new ContributorAuthorization({
       app: appCredentials(),
       http,
@@ -744,18 +756,48 @@ export function createController(
     });
     await broker.recover();
   };
+  class AuthorizationRequired extends Error {}
+  let authorizationRequired = false;
+  const requireAuthorization = (c: PhaseContext): never => {
+    authorizationRequired = true;
+    artifacts(c).put('authorization_required', { nextPermittedAction: 'authorize' });
+    artifacts(c).put('diagnostic', {
+      runId: c.run.runId,
+      phase: 'authorization',
+      operation: 'contributor_refresh',
+      code: 'reauthorize',
+      next: 'authorize',
+    });
+    throw new AuthorizationRequired();
+  };
   const identity = async (c: PhaseContext) => {
     controller.assertAdmission();
     c.store.validateEvidence();
     if (!c.store.config.authorApproval) throw new AuthorApprovalError('author_approval_missing');
     await credentials(c);
+    // Cleanup recovery precedes an authorization fence: a crash may have left
+    // journaled credentials whose values the new process cannot revoke.
+    if (artifacts(c).get('authorization_required')) requireAuthorization(c);
     controller.assertAdmission();
     c.signal.throwIfAborted();
     if (!contributor) throw new Error('authorization_unavailable');
+    const parent = broker
+      ?.status()
+      .tokens.filter((token) => token.kind === 'user' && token.status === 'live')
+      .at(-1);
+    if (parent?.expiresAt && Date.parse(parent.expiresAt) <= now().getTime()) {
+      const refreshed = await contributor.refresh();
+      controller.assertAdmission();
+      if (refreshed.kind === 'reauthorize') requireAuthorization(c);
+      if (refreshed.kind !== 'refreshed') throw new Error('contributor_authorization_unavailable');
+    }
     let bound = await contributor.bindLogin(c.store.run, c.store.config.authorApproval?.userId);
     controller.assertAdmission();
     c.signal.throwIfAborted();
     if (bound.kind === 'reauthorize') {
+      // A once-bound identity losing its authority requires an explicit user
+      // authorize command, never automatic interactive renewal inside shipping.
+      if (parent) requireAuthorization(c);
       const receiver = await listenLoopback({
         isExpected: (state) => contributor?.matchesPending(state) ?? false,
       });
@@ -1224,10 +1266,14 @@ export function createController(
       code,
     });
   };
-  const recoverWithDiagnostic = async <T>(c: PhaseContext, work: () => Promise<T>): Promise<T> => {
+  const recoverWithDiagnostic = async (
+    c: PhaseContext,
+    work: () => Promise<void>
+  ): Promise<void> => {
     try {
       return await work();
     } catch (error) {
+      if (error instanceof AuthorizationRequired) return;
       return diagnose(c, 'recovery', error);
     }
   };
@@ -1235,8 +1281,10 @@ export function createController(
     const invoke = steps[phase].bind(steps);
     const wrapped = async (c: PhaseContext) => {
       try {
+        if (artifacts(c).get('authorization_required')) requireAuthorization(c);
         return await invoke(c);
       } catch (error) {
+        if (error instanceof AuthorizationRequired) return { kind: 'hand_off' };
         if (error instanceof PrerequisiteError)
           return { kind: phase === 'gate' ? error.kind : 'hand_off' };
         if (
@@ -1279,6 +1327,27 @@ export function createController(
       },
     });
     receipt = artifacts(c).get<SignedReceipt>('receipt');
+  };
+  const refreshBeforeCleanup = async () => {
+    const parent = broker
+      ?.status()
+      .tokens.filter((t) => t.kind === 'user' && t.status === 'live')
+      .at(-1);
+    if (!parent?.expiresAt || Date.parse(parent.expiresAt) > now().getTime() || !contributor)
+      return;
+    const refreshed = await contributor.refresh();
+    if (refreshed.kind === 'unavailable') {
+      const current = activeStore?.run;
+      if (
+        current &&
+        !TERMINAL_STATES.includes(current.state) &&
+        current.state !== 'blocked_cleanup'
+      )
+        activeStore?.persistRun(
+          transitionRun(current, ReasonCode.CleanupFailed, now().toISOString())
+        );
+      throw new Error('cleanup_incomplete');
+    }
   };
   const controller: RunController = new RunController({
     trackerAction: async (c, request) => {
@@ -1337,7 +1406,7 @@ export function createController(
       },
     ],
     recovery: {
-      endRun: async (c) => {
+      endRun: async (c, reason = 'cancelled') => {
         // Dormant cancellation must not perform OAuth to revoke an old lease.
         if (!broker && artifacts(c).get('fork')) {
           broker = new ForkCredentialBroker({
@@ -1352,7 +1421,8 @@ export function createController(
             now: () => now().getTime(),
           });
         }
-        await broker?.endRun('cancelled');
+        await refreshBeforeCleanup();
+        await broker?.endRun(reason);
       },
       reconcileControl: async (c) => {
         if (!intents && artifacts(c).get('shipping')) {
@@ -1422,6 +1492,7 @@ export function createController(
         localVm(c);
         await cleanup();
       },
+      cleanupCredentials,
       recoverCredentials: async (c) =>
         recoverWithDiagnostic(c, async () => {
           for (const point of ['plan', 'patch'] as const) {
@@ -1488,14 +1559,23 @@ export function createController(
       revisionWaiting: () => revisionObservationWaiting,
       killAll: async (c) => {
         await stopResources(localVm(c), c.run.runId, async () => {
+          await refreshBeforeCleanup();
           await broker?.killAll();
         });
       },
     },
     release: async () => {
       try {
+        await refreshBeforeCleanup();
         if (activeStore && TERMINAL_STATES.includes(activeStore.run.state))
           await broker?.endRun(activeStore.run.state === 'cancelled' ? 'cancelled' : 'completed');
+        else if (broker) {
+          // A dormant controller has no operation that needs a credential. Sweep
+          // held values before stopping lease timers, without closing resumable
+          // admission permanently as endRun would do.
+          const recovered = await broker.recover();
+          if (!recovered.admitted && recovered.report) throw new Error('cleanup_incomplete');
+        }
       } finally {
         broker?.close();
         for (const j of journals.values()) j.close();
@@ -1528,11 +1608,22 @@ export function createController(
       if (!approval) throw new AuthorApprovalError('author_approval_missing');
       await prepareAuthor(store.config, { userId: approval.userId }, overrides);
       store.validateEvidence();
+      const j = new Journal(path.join(store.storeDirectory('control'), 'steps'));
+      try {
+        const held = new StepArtifacts(j, runId);
+        held.put('authorization_required', null);
+        authorizationRequired = false;
+      } finally {
+        j.close();
+      }
     } finally {
       store.close();
     }
   };
   Object.defineProperty(controller, 'authorize', { value: authorize });
+  Object.defineProperty(controller, 'nextPermittedAction', {
+    get: () => (authorizationRequired ? 'authorize' : null),
+  });
   Object.defineProperty(controller, 'start', {
     value: (next: RunConfig) => {
       if (
@@ -1547,6 +1638,7 @@ export function createController(
     get: () => authUrl,
   }) as RunController & {
     readonly authorizationUrl: string | null;
+    readonly nextPermittedAction: 'authorize' | null;
     authorize(runId: string): Promise<void>;
   };
 }

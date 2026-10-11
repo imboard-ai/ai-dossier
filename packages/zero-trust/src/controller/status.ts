@@ -1,4 +1,4 @@
-import { budgetTotals } from '../budget';
+import { budgetTotals, effectiveBudgetSession } from '../budget';
 import type { BudgetState } from '../budget-types';
 import { prerequisiteAction } from '../github/fork';
 import { type HandoffState, handoffStatus } from '../github/handoff-driver';
@@ -37,6 +37,7 @@ export const DEFAULT_STATE_ACTIONS: Readonly<Record<RunState, string>> = Object.
   blocked_cleanup: 'Reconcile remaining resources and credentials before closing cleanup.',
 });
 export interface StatusParts {
+  readonly authorizationRequired?: unknown;
   readonly publicationWaitMs?: number;
   readonly run: RunRecord;
   readonly now: Date | string;
@@ -61,6 +62,16 @@ export interface StatusParts {
 }
 /** Pure assembly, no reads/polling or external writes. Monetary amounts are minor units. */
 export function assembleStatus(parts: StatusParts): StatusRecord {
+  const authorization = parts.authorizationRequired;
+  if (
+    authorization != null &&
+    (typeof authorization !== 'object' ||
+      Array.isArray(authorization) ||
+      Object.keys(authorization).length !== 1 ||
+      !('nextPermittedAction' in authorization) ||
+      authorization.nextPermittedAction !== 'authorize')
+  )
+    throw new InvalidStatusError();
   parts = structuredClone(parts);
   assertSecretFree(parts);
   const run = restoreRun(parts.run);
@@ -81,9 +92,12 @@ export function assembleStatus(parts: StatusParts): StatusRecord {
   } catch {
     throw new InvalidStatusError();
   }
-  const session = parts.budget.sessions.find((s) => s.id === parts.sessionId);
-  if (!session || parts.budget.contributionId !== contributionIdOf(run.runId))
+  if (
+    !parts.budget.sessions.some((s) => s.id === parts.sessionId) ||
+    parts.budget.contributionId !== contributionIdOf(run.runId)
+  )
     throw new InvalidStatusError();
+  const session = effectiveBudgetSession(parts.budget, parts.sessionId);
   const totals = budgetTotals(parts.budget, parts.sessionId);
   const spend = totals.spent + totals.reserved;
   if (!Number.isSafeInteger(spend)) throw new InvalidStatusError();
@@ -103,7 +117,7 @@ export function assembleStatus(parts: StatusParts): StatusRecord {
         parts.prerequisite.forkName
       )
     : null;
-  const status: StatusRecord = {
+  let status: StatusRecord = {
     runId: run.runId,
     phase: parts.phase ?? run.state,
     state: run.state,
@@ -124,6 +138,11 @@ export function assembleStatus(parts: StatusParts): StatusRecord {
       prerequisite?.nextPermittedAction ??
       DEFAULT_STATE_ACTIONS[run.state],
   };
+  if (
+    authorization &&
+    !['blocked_cleanup', 'blocked', 'cancelled', 'failed', 'merged', 'declined'].includes(run.state)
+  )
+    status = { ...status, nextPermittedAction: 'authorize' };
   // Validate every emitted fact through the same whitelist used by both renderers.
   renderJson(status);
   return status;

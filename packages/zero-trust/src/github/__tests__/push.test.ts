@@ -365,7 +365,68 @@ describe('verified CAS push to the fork (#1066)', () => {
     expect(r.fork.refReads()).toBe(1);
   });
 
-  it('an aborted lease kills the push and leaves the attempt to reconciliation', async () => {
+  it('a landed push with lost client result and stale API absence is never voided', async () => {
+    const r = await rig();
+    r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
+    const lease = new AbortController();
+    const real = TrustedGit.prototype.execAsync;
+    vi.spyOn(TrustedGit.prototype, 'execAsync').mockImplementation(async function (args, options) {
+      const result = await real.call(this, args, options);
+      if (args[0] === 'push') {
+        lease.abort();
+        return { status: null, stdout: Buffer.alloc(0) };
+      }
+      return result;
+    });
+    r.fork.overrides.push((p) =>
+      p.includes('/git/ref/') ? { status: 404, body: null } : undefined
+    );
+    r.wrap = (inner) => async (intent, target, operation, cancel) =>
+      inner(intent, target, (credential) => operation(credential, lease.signal), cancel);
+    expect(await r.driver.execute(pushOf(SHA1))).toBe(`${TARGET}@${SHA1}`);
+    expect(r.fork.sha()).toBe(SHA1);
+    expect(r.driver.snapshot().intents.get(idempotencyKey(pushOf(SHA1)))?.voided ?? 0).toBe(0);
+    expect(r.events()).toEqual(['push_intended', 'push_verified']);
+  });
+
+  it('stopped production HTTPS pushes read back with TLS, no redirects/proxy/helpers and HTTPS explicitly enabled', async () => {
+    const r = await new Rig().start(undefined, true);
+    r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
+    const lease = new AbortController();
+    const transport = vi
+      .spyOn(TrustedGit.prototype, 'execAsync')
+      .mockImplementation(async (args) => {
+        if (args[0] === 'push') {
+          lease.abort();
+          return { status: null, stdout: Buffer.alloc(0) };
+        }
+        return { status: 0, stdout: Buffer.alloc(0) };
+      });
+    r.wrap = (inner) => async (intent, target, operation, cancel) =>
+      inner(intent, target, (credential) => operation(credential, lease.signal), cancel);
+    await expect(r.driver.execute(pushOf(SHA1))).rejects.toThrow(MutationVoidedError);
+    const call = transport.mock.calls.find(([args]) => args[0] === 'ls-remote');
+    expect(call?.[0][1]).toBe(`https://github.com/${OWNER}/fixture.git`);
+    expect(call?.[1]?.config).toEqual([
+      'protocol.https.allow=always',
+      'http.sslVerify=true',
+      'http.followRedirects=false',
+      'http.proxy=',
+    ]);
+    expect(call?.[1]?.env).toBeUndefined();
+    const git = new TrustedGit();
+    try {
+      expect(
+        git
+          .exec(['config', '--get', 'credential.helper'], { config: call?.[1]?.config })
+          .stdout.toString()
+      ).toBe('\n');
+    } finally {
+      git.close();
+    }
+  });
+
+  it('an already-aborted lease kills the push and leaves the attempt to reconciliation', async () => {
     const r = await rig();
     r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
     r.wrap = (inner) => async (intent, target, operation, cancel) =>
@@ -378,6 +439,41 @@ describe('verified CAS push to the fork (#1066)', () => {
     // The remote still holds the expected value: the one retry is admitted.
     await r.driver.resume();
     expect(r.driver.snapshot().intents.get(idempotencyKey(pushOf(SHA1)))?.retryReady).toBe(true);
+  });
+
+  it.each([
+    'unavailable',
+    'divergent',
+  ] as const)('an expired/stopped push with %s remote is never voided', async (failure) => {
+    const r = await rig();
+    r.grants.push({ candidate: C1, expected: null, nonce: 'nonce-1' });
+    if (failure === 'unavailable')
+      r.fork.overrides.push((p) =>
+        p.includes('/git/ref/') && r.fork.refReads() > 1 ? { status: 503, body: null } : undefined
+      );
+    const lease = new AbortController();
+    const real = TrustedGit.prototype.execAsync;
+    vi.spyOn(TrustedGit.prototype, 'execAsync').mockImplementation(async function (args, options) {
+      if (args[0] !== 'push') return real.call(this, args, options);
+      lease.abort();
+      return { status: null, stdout: Buffer.alloc(0) };
+    });
+    r.wrap = (inner) => async (intent, target, operation, cancel) =>
+      inner(
+        intent,
+        target,
+        (credential) => {
+          if (failure === 'divergent') r.fork.outOfBand();
+          return operation(credential, lease.signal);
+        },
+        cancel
+      );
+    const error = await r.driver.execute(pushOf(SHA1)).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(
+      failure === 'unavailable' ? MutationUncertainError : WriteBlockedError
+    );
+    expect(r.driver.snapshot().intents.get(idempotencyKey(pushOf(SHA1)))?.voided ?? 0).toBe(0);
+    if (failure === 'divergent') expect(r.driver.snapshot().blockedReason).toBe('remote_diverged');
   });
 
   it('transient failures before the write never spend the retry budget or block', async () => {

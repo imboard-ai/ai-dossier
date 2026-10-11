@@ -99,6 +99,24 @@ function secrets(env: ReturnType<typeof setup>): string[] {
 }
 
 describe('authorization web flow', () => {
+  it('second consent after native expiry never claims the old refresh chain was spent', async () => {
+    const env = await authorized();
+    const old = env.broker.status().tokens.find((t) => t.kind === 'user');
+    if (!old) throw new Error('missing original user token');
+    for (const token of env.fake.tokens.values()) if (token.kind === 'user') token.live = false;
+    const { code, state } = approve(env);
+    expect((await env.auth.complete({ code, state }, run)).kind).toBe('bound');
+    expect(env.fake.oauthCalls.filter((form) => form.grant_type === 'refresh_token')).toEqual([]);
+    expect(env.broker.status().tokens.find((t) => t.id === old.id)?.status).toBe('live');
+    await expect(env.broker.endRun()).rejects.toMatchObject({
+      report: { outstanding: expect.arrayContaining([expect.objectContaining({ id: old.id })]) },
+    });
+    expect(
+      [...env.fake.refreshTokens.values()].filter(
+        (t) => t.live && env.fake.tokens.get(t.access)?.refreshAlive
+      )
+    ).toHaveLength(1);
+  });
   it('begins with a fresh state, PKCE S256, the run login hint and a loopback redirect', () => {
     const env = setup();
     const first = new URL(env.auth.begin(REDIRECT).url);

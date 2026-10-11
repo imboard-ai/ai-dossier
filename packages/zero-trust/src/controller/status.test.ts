@@ -50,6 +50,33 @@ const parts = () => ({
   sessionId: `${id}-run-1-s1`,
 });
 describe('assembleStatus', () => {
+  it('reports durable reauthorization while retaining cleanup and terminal precedence', () => {
+    const authorizationRequired = { nextPermittedAction: 'authorize' };
+    const paused = transitionRun(initial(), ReasonCode.UserPaused, at(1));
+    expect(
+      assembleStatus({ ...parts(), run: paused, authorizationRequired }).nextPermittedAction
+    ).toBe('authorize');
+    for (const reason of [
+      ReasonCode.CleanupFailed,
+      ReasonCode.UserCancelled,
+      ReasonCode.PolicyBlocked,
+    ]) {
+      const run = transitionRun(paused, reason, at(2));
+      expect(assembleStatus({ ...parts(), run, authorizationRequired }).nextPermittedAction).toBe(
+        assembleStatus({ ...parts(), run }).nextPermittedAction
+      );
+    }
+    for (const authorizationRequired of [
+      true,
+      [],
+      {},
+      { nextPermittedAction: 'resume' },
+      { nextPermittedAction: 'authorize', extra: true },
+    ])
+      expect(() => assembleStatus({ ...parts(), authorizationRequired })).toThrow(
+        InvalidStatusError
+      );
+  });
   it('preserves the typed status error on active-time overflow', () => {
     const run = createRun(
       {
