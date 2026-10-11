@@ -52,8 +52,11 @@ those a scenario corrupts on purpose and declares.
 
 ## Gate items
 
-Results are from local runs of both suites (15/15 and 29/29 passed) and from the
-package's full CI run on Node 20 and 22 for PR #1114's head, linked from the PR. "L" is
+Results: both suites passed locally (15/15 and 29/29) and in
+[CI](https://github.com/imboard-ai/ai-dossier/actions/runs/38119269518) on Node 20 and 22
+(PR #1175 at `3d84e09`; this record's own wording changed after that run). In CI the
+isolated lifecycle timing step took 20 s (Node 20) and 18 s (Node 22) against its 60 s
+limit, and the upstream suite ran in the coverage job in 89 s and 76 s. "L" is
 `gate4-lifecycle.test.ts`, "U" is `gate4-upstream.test.ts`.
 
 | Gate item (PRD §9 / epic checkbox) | Scenario (test title) | File | Result |
