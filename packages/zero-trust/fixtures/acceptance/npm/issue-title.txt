@@ -1,0 +1,1 @@
+toSeconds() returns ten times too many seconds

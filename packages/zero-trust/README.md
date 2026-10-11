@@ -9,6 +9,12 @@ prerequisites and one-time setup, every `RunConfig` field, the six-step journey 
 metrics, honest provenance for portfolio use, what maintainers receive, and the security model.
 The rest of this README is the implementer's spec of record.
 
+The owner-run live acceptance demonstration (#1115) follows the
+[acceptance runbook](../../docs/features/zero-trust-full-cycle/acceptance-runbook.md). Its seeded
+upstream lives in [`fixtures/acceptance`](fixtures/acceptance/README.md), and the repository
+script `scripts/zt-acceptance-check.mjs` checks the result read-only behind
+`ZT_ACCEPTANCE_LIVE=1`.
+
 ## Trusted mid-run changes
 
 The contributor can edit a paused candidate with
