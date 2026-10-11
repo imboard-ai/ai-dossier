@@ -32,7 +32,7 @@ const BRANCH = `ztfc/${CID}`;
 const ROOT = '/state/runs';
 const UPSTREAM = 'imboard-ai/ztfc-upstream-fixture';
 const FORK = 'ydhidden/ztfc-upstream-fixture';
-const UPSTREAM_ID = 1407414328;
+const UPSTREAM_ID = 1100000001;
 const FORK_ID = 2200000001;
 const BASE = 'a'.repeat(40);
 const FIRST = 'b'.repeat(40);
@@ -117,9 +117,40 @@ function envelope(candidateSha, { session = 1, key = controller, overrides = {} 
   };
 }
 
-/** In-memory run store: the step journal plus its content-addressed artifact files. */
-function store(artifacts, { tear = false } = {}) {
+/** The intent the controller's pr_create hand-off was issued for; its marker is the one the
+ * tracker records and the PR body carries. */
+const PR_INTENT = {
+  contributionId: CID,
+  target: `${UPSTREAM}#2`,
+  operationKind: 'pr_create',
+  candidateSha: FIRST,
+};
+const TRACK_MARKER = zt.handoffMarker(PR_INTENT);
+
+/** In-memory run store: the step journal, its content-addressed artifact files and the PR
+ * tracker's journal (absent before submission). */
+function store(artifacts, { tear = false, track = true } = {}) {
   const files = new Map();
+  if (track)
+    files.set(
+      path.join(ROOT, CID, 'track', 'events.jsonl'),
+      Buffer.from(
+        `${JSON.stringify({
+          v: 1,
+          type: 'track',
+          run: { runId: RUN_ID },
+          contributionId: CID,
+          pr: {
+            binding: { upstream: { owner: 'imboard-ai', repo: 'ztfc-upstream-fixture' } },
+            fork: { repositoryId: FORK_ID, owner: 'ydhidden', repo: 'ztfc-upstream-fixture' },
+            number: 2,
+            url: PR_URL,
+            marker: TRACK_MARKER,
+          },
+          verifiedSha: FIRST,
+        })}\n`
+      )
+    );
   const dir = path.join(ROOT, CID, 'control', 'steps');
   const lines = artifacts.map(([key, value]) => {
     const bytes = Buffer.from(JSON.stringify(value));
@@ -144,12 +175,7 @@ function store(artifacts, { tear = false } = {}) {
 function prBody(receipt) {
   return zt
     .buildPrContent({
-      intent: {
-        contributionId: CID,
-        target: `${UPSTREAM}#2`,
-        operationKind: 'pr_create',
-        candidateSha: receipt.candidateSha,
-      },
+      intent: PR_INTENT,
       issue: 2,
       title: 'Fix toSeconds() unit conversion',
       cause: 'Milliseconds were divided by the wrong factor.',
@@ -217,10 +243,27 @@ function initialRun(overrides = {}) {
       ['publication', { url: PR_URL, ci: 'none', headSha: FIRST }],
       ['tracked_pr', { number: 2 }],
     ],
-    overrides
+    { tear: overrides.tear, track: overrides.track }
   );
   const gh = github({ body: prBody(first.receipt), ...overrides.github });
   return { run, gh, first };
+}
+
+const verifyWithController = (env) => verifyReceiptEnvelope(env, CONTROLLER_PEM, { zt, core });
+
+function revisedRun(githubOverrides = {}) {
+  const first = envelope(FIRST);
+  const second = envelope(SECOND, { session: 2 });
+  const run = store([
+    ['receipt', first],
+    ['publication', { url: PR_URL, ci: 'none', headSha: FIRST }],
+    ['tracked_pr', { number: 2 }],
+    ['receipt', second],
+    ['tracked_pr', { number: 2 }],
+  ]);
+  // The body keeps the first candidate's verification unless the contributor ran pr-edit.
+  const gh = github({ head: SECOND, body: prBody(first.receipt), ...githubOverrides });
+  return { run, gh };
 }
 
 async function check(run, gh, extra = {}) {
@@ -271,7 +314,9 @@ describe('zt-acceptance-check: initial submission', () => {
 
   it('fails when the fork branch is not the verified candidate', async () => {
     const { run, gh } = initialRun({ github: { branch: SECOND } });
-    expect(verdict(await check(run, gh))['fork-branch']).toBe(`fork_sha_${SECOND.slice(0, 12)}`);
+    expect(verdict(await check(run, gh))['fork-branch']).toBe(
+      `fork_sha_mismatch: ${SECOND.slice(0, 12)} expected ${FIRST.slice(0, 12)}`
+    );
   });
 
   it('fails single-pr and everything that needs the PR when two PRs share the head', async () => {
@@ -294,7 +339,9 @@ describe('zt-acceptance-check: initial submission', () => {
 
   it('fails when the PR head is not the verified candidate', async () => {
     const { run, gh } = initialRun({ github: { head: SECOND, branch: FIRST } });
-    expect(verdict(await check(run, gh))['pr-head']).toBe('pull_head_not_verified');
+    expect(verdict(await check(run, gh))['pr-head']).toBe(
+      `pull_head_not_latest_verified: ${SECOND.slice(0, 12)} expected ${FIRST.slice(0, 12)}`
+    );
   });
 
   it('fails the body check without marker, disclosure or the exact commands', async () => {
@@ -309,8 +356,9 @@ describe('zt-acceptance-check: initial submission', () => {
         'pr_commands_missing: test',
       ],
       [body.replace('exit=0; suites=2', 'exit=0; suites=3'), 'pr_commands_missing: test'],
-      [body.replaceAll(FIRST, SECOND), 'pr_names_unverified_candidate'],
-      [body.replace(CID, 'ztc-ffffffffffffffff'), 'pr_marker_other_contribution'],
+      [body.replaceAll(FIRST, SECOND), `pr_names_unverified_candidate: ${SECOND.slice(0, 12)}`],
+      [body.replace(CID, 'ztc-ffffffffffffffff'), 'pr_marker_not_tracked_marker'],
+      [body.replace('op=pr_create', 'op=pr_update'), 'pr_marker_not_pr_create'],
     ]) {
       const { run, gh } = initialRun({ github: { body: broken } });
       expect(verdict(await check(run, gh))['pr-body']).toBe(code);
@@ -318,9 +366,7 @@ describe('zt-acceptance-check: initial submission', () => {
   });
 
   it('fails when the PR is by someone else or the run never recorded it', async () => {
-    const { run } = initialRun();
-    const first = envelope(FIRST);
-    const gh = github({ body: prBody(first.receipt) });
+    const { run, gh, first } = initialRun();
     const other = async (url, init) => {
       const response = await gh.fetch(url, init);
       if (!url.endsWith('/pulls/2')) return response;
@@ -355,7 +401,7 @@ describe('zt-acceptance-check: initial submission', () => {
     const { run, gh } = initialRun({
       github: { status: { [`/repos/${FORK}/git/ref/heads/${BRANCH}`]: 404 } },
     });
-    expect(verdict(await check(run, gh))['fork-branch']).toBe('github_http_404');
+    expect(verdict(await check(run, gh))['fork-branch']).toBe('github_http_404: fork branch');
     const garbage = async () => ({
       status: 200,
       headers: { get: () => null },
@@ -363,12 +409,41 @@ describe('zt-acceptance-check: initial submission', () => {
     });
     const v = verdict(await check(initialRun().run, { fetch: garbage }));
     expect(Object.values(v).filter((x) => x === 'PASS')).toEqual(['PASS']);
-    expect(v.identity).toBe('github_invalid_json');
+    expect(v.identity).toBe('github_invalid_json: upstream repository');
     const offline = async () => {
       throw new Error('offline');
     };
     expect(verdict(await check(initialRun().run, { fetch: offline }))['single-pr']).toBe(
-      'github_unreachable'
+      'github_unreachable: pull list'
+    );
+  });
+});
+
+describe('zt-acceptance-check: diagnostics', () => {
+  it('names a rate limit and keeps the cause of an unexpected error', async () => {
+    const limited = async () => ({
+      status: 403,
+      headers: { get: (name) => (name === 'x-ratelimit-remaining' ? '0' : null) },
+      text: async () => '{}',
+    });
+    expect(verdict(await check(initialRun().run, { fetch: limited })).identity).toBe(
+      `github_rate_limited: upstream repository (set ${TOKEN_ENV})`
+    );
+    const broken = { ...zt, findHandoffMarkers: undefined };
+    const { run, gh } = initialRun();
+    const results = await runChecks(
+      {
+        root: ROOT,
+        runId: RUN_ID,
+        upstream: UPSTREAM,
+        fork: FORK,
+        controllerKey: CONTROLLER_PEM,
+        afterRevision: false,
+      },
+      { zt: broken, core, fetch: gh.fetch, readFile: run.readFile }
+    );
+    expect(results.find((r) => r.id === 'pr-body').detail).toMatch(
+      /^unexpected_error: TypeError: /u
     );
   });
 });
@@ -383,30 +458,30 @@ describe('zt-acceptance-check: receipts and run evidence', () => {
       ],
     });
     const v = verdict(await check(run, gh));
-    expect(v.receipts).toBe('receipt_signed_by_other_key');
+    expect(v.receipts).toBe('receipt_signed_by_other_key (receipt 1 of 1)');
     expect(Object.values(v).every((x) => x !== 'PASS')).toBe(true);
   });
 
   it('rejects a tampered receipt, an unverified one and one from another run', () => {
     const good = envelope(FIRST);
     const tampered = { ...good, receipt: { ...good.receipt, candidateSha: SECOND } };
-    expect(() => verifyOrCode(tampered)).toThrow('receipt_digest_mismatch');
+    expect(() => verifyWithController(tampered)).toThrow('receipt_digest_mismatch');
     const forged = {
       ...good,
       digest: zt.receiptDigest(tampered.receipt),
       receipt: tampered.receipt,
     };
-    expect(() => verifyOrCode(forged)).toThrow('receipt_bad_signature');
+    expect(() => verifyWithController(forged)).toThrow('receipt_bad_signature');
     const failed = commands().map((c) => ({ ...c, status: 'failed', exitStatus: 1 }));
     expect(() =>
-      verifyOrCode(envelope(FIRST, { overrides: { commands: failed, verified: false } }))
+      verifyWithController(envelope(FIRST, { overrides: { commands: failed, verified: false } }))
     ).toThrow('receipt_not_verified');
-    expect(() => verifyOrCode(envelope(FIRST, { overrides: { verified: false } }))).toThrow(
+    expect(() => verifyWithController(envelope(FIRST, { overrides: { verified: false } }))).toThrow(
       'receipt_schema_invalid'
     );
-    expect(() => verifyOrCode({ ...good, extra: 1 })).toThrow('receipt_envelope_invalid');
+    expect(() => verifyWithController({ ...good, extra: 1 })).toThrow('receipt_envelope_invalid');
     expect(() =>
-      verifyOrCode(envelope(FIRST, { overrides: { schemaVersion: 'ztfc-receipt-v1' } }))
+      verifyWithController(envelope(FIRST, { overrides: { schemaVersion: 'ztfc-receipt-v1' } }))
     ).toThrow('receipt_schema_invalid');
   });
 
@@ -418,13 +493,13 @@ describe('zt-acceptance-check: receipts and run evidence', () => {
       },
     });
     const { run, gh } = initialRun({ artifacts: [['receipt', other]] });
-    expect(verdict(await check(run, gh)).receipts).toBe('receipt_other_run');
+    expect(verdict(await check(run, gh)).receipts).toBe('receipt_other_run (receipt 1 of 1)');
   });
 
   it('fails closed on a torn journal, a missing store, a bad row or a changed artifact', async () => {
     const torn = initialRun({ tear: true });
     expect(new Set(Object.values(verdict(await check(torn.run, torn.gh))))).toEqual(
-      new Set(['step_journal_incomplete'])
+      new Set([`step_journal_incomplete: ${path.join(CID, 'control', 'steps', 'events.jsonl')}`])
     );
     const empty = { readFile: () => Buffer.alloc(0) };
     expect(() => readRunEvidence({ root: ROOT, runId: RUN_ID }, empty)).toThrow(
@@ -432,11 +507,11 @@ describe('zt-acceptance-check: receipts and run evidence', () => {
     );
     const missing = {
       readFile: () => {
-        throw new Error('ENOENT');
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
       },
     };
     expect(() => readRunEvidence({ root: ROOT, runId: RUN_ID }, missing)).toThrow(
-      'step_journal_unreadable'
+      /step_journal_unreadable: .*events\.jsonl \(ENOENT\)/u
     );
     const { run } = initialRun();
     const journal = path.join(ROOT, CID, 'control', 'steps', 'events.jsonl');
@@ -460,26 +535,74 @@ describe('zt-acceptance-check: receipts and run evidence', () => {
     expect(evidence.branch).toBe(BRANCH);
     expect(evidence.receipts.map((e) => e.receipt.candidateSha)).toEqual([FIRST, SECOND]);
     expect(evidence.publication.url).toBe(PR_URL);
-    expect(evidence.trackedPr).toEqual({ number: 2 });
+    expect(evidence.trackedPrNumber).toBe(2);
+    expect(evidence.trackedPr().marker).toBe(TRACK_MARKER);
+  });
+
+  it('takes the latest value of a key from its last row, as StepArtifacts does', () => {
+    const a = { url: PR_URL, ci: 'none', headSha: FIRST };
+    const b = { url: `https://github.com/${UPSTREAM}/pull/9`, ci: 'none', headSha: FIRST };
+    const run = store([
+      ['publication', a],
+      ['publication', b],
+      ['publication', a],
+    ]);
+    expect(readRunEvidence({ root: ROOT, runId: RUN_ID }, run).publication).toEqual(a);
+  });
+
+  it('fails the body check when the tracker journal is missing', async () => {
+    const { run, gh } = initialRun({ track: false });
+    expect(verdict(await check(run, gh))['pr-body']).toMatch(/^track_journal_unreadable: /u);
+  });
+
+  it('never writes to the run store it reads', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zt-acceptance-store-'));
+    try {
+      const { run, gh } = initialRun();
+      for (const [file, bytes] of run.files)
+        if (file.startsWith(ROOT)) {
+          const target = path.join(root, path.relative(ROOT, file));
+          fs.mkdirSync(path.dirname(target), { recursive: true });
+          fs.writeFileSync(target, bytes, { mode: 0o600 });
+        }
+      const snapshot = () =>
+        fs
+          .readdirSync(root, { recursive: true, withFileTypes: true })
+          .map((entry) => {
+            const full = path.join(entry.parentPath, entry.name);
+            const stat = fs.statSync(full);
+            return `${full} ${stat.mode} ${stat.size} ${stat.mtimeMs} ${entry.isFile() ? fs.readFileSync(full, 'hex') : 'dir'}`;
+          })
+          .sort();
+      const before = snapshot();
+      const reads = [];
+      const results = await runChecks(
+        {
+          root,
+          runId: RUN_ID,
+          upstream: UPSTREAM,
+          fork: FORK,
+          controllerKey: CONTROLLER_PEM,
+          afterRevision: false,
+        },
+        {
+          zt,
+          core,
+          fetch: gh.fetch,
+          readFile: (file) => {
+            reads.push(file);
+            return fs.readFileSync(file);
+          },
+        }
+      );
+      expect(results.every((r) => r.pass)).toBe(true);
+      expect(reads.length).toBeGreaterThan(0);
+      expect(snapshot()).toEqual(before);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });
-
-const verifyOrCode = (env) => verifyReceiptEnvelope(env, CONTROLLER_PEM, { zt, core });
-
-function revisedRun(github_ = {}) {
-  const first = envelope(FIRST);
-  const second = envelope(SECOND, { session: 2 });
-  const run = store([
-    ['receipt', first],
-    ['publication', { url: PR_URL, ci: 'none', headSha: FIRST }],
-    ['tracked_pr', { number: 2 }],
-    ['receipt', second],
-    ['tracked_pr', { number: 2 }],
-  ]);
-  // The body keeps the first candidate's verification unless the contributor ran pr-edit.
-  const gh = github({ head: SECOND, body: prBody(first.receipt), ...github_ });
-  return { run, gh };
-}
 
 describe('zt-acceptance-check: after the verified revision', () => {
   it('passes when the PR head is the second verified candidate', async () => {
@@ -494,6 +617,9 @@ describe('zt-acceptance-check: after the verified revision', () => {
       'pr-head': 'PASS',
     });
     expect(results.at(-1).detail).toBe(`${FIRST.slice(0, 12)} -> ${SECOND}`);
+    expect(results.find((r) => r.id === 'pr-body').detail).toContain(
+      `head is ${SECOND.slice(0, 12)} (body not updated after the revision)`
+    );
   });
 
   it('fails without a second verified candidate or when the head did not move', async () => {
@@ -503,12 +629,14 @@ describe('zt-acceptance-check: after the verified revision', () => {
     );
     const stale = revisedRun({ head: FIRST, branch: SECOND });
     expect(verdict(await check(stale.run, stale.gh, { afterRevision: true }))['pr-head']).toBe(
-      'pull_head_not_latest_verified'
+      `pull_head_not_latest_verified: ${FIRST.slice(0, 12)} expected ${SECOND.slice(0, 12)}`
     );
     const unpushed = revisedRun({ branch: FIRST });
     expect(
       verdict(await check(unpushed.run, unpushed.gh, { afterRevision: true }))['fork-branch']
-    ).toBe(`fork_sha_${FIRST.slice(0, 12)}`);
+    ).toBe(
+      `fork_sha_mismatch: ${FIRST.slice(0, 12)} expected ${SECOND.slice(0, 12)} (an earlier verified candidate)`
+    );
   });
 });
 
@@ -580,7 +708,7 @@ describe('zt-acceptance-check: command line', () => {
       2
     );
     expect(await main(['--root'], io(ok.run, ok.gh).deps)).toBe(2);
-    expect(gh.calls).toEqual([]);
+    expect([...gh.calls, ...ok.gh.calls]).toEqual([]);
     const help = io(ok.run, ok.gh, {});
     expect(await main(['--help'], help.deps)).toBe(0);
     expect(help.lines.out[0]).toContain('--controller-key');
@@ -599,9 +727,10 @@ describe('zt-acceptance-check: command line', () => {
     expect(() => parseArgs(argv.map((a) => (a === RUN_ID ? 'run-1' : a)))).toThrow(
       'invalid_run_id'
     );
-    expect(() => parseArgs(argv.map((a) => (a === FORK ? 'a/b/c' : a)))).toThrow(
-      'invalid_repository'
-    );
+    for (const bad of ['a/b/c', 'owner/..', 'owner/.'])
+      expect(() => parseArgs(argv.map((a) => (a === FORK ? bad : a)))).toThrow(
+        'invalid_repository'
+      );
   });
 
   it('renders commands exactly as the PR body does and formats the table', () => {
@@ -611,12 +740,15 @@ describe('zt-acceptance-check: command line', () => {
     expect(commandLine({ ...commands()[1], required: false })).toBe(
       '- <code>node --test</code> (optional): passed; exit=0; suites=2'
     );
+    expect(renderedCommand('npm\u200b test # all tests passed')).toBe(
+      'npm test # [untrusted success claim]'
+    );
     expect(formatTable([{ id: 'receipts', pass: true, detail: 'ok' }])).toBe(
       'CHECK     RESULT  DETAIL\nreceipts  PASS    ok'
     );
     const body = prBody(envelope(FIRST).receipt);
     expect(
-      checkPrBody(body, { contributionId: CID, receipts: [envelope(FIRST).receipt] }, zt)
+      checkPrBody(body, { marker: TRACK_MARKER, receipts: [envelope(FIRST).receipt] }, zt)
         .candidateSha
     ).toBe(FIRST);
   });

@@ -7,28 +7,30 @@
 // verified revision, with --after-revision). Runbook:
 // docs/features/zero-trust-full-cycle/acceptance-runbook.md
 //
-// It reads the run store's step-artifact journal (never through RunStore, so
-// it takes no lock and repairs nothing) and makes GET requests to the GitHub
-// REST API, anonymously or with an optional read token. It never writes to
-// GitHub or to the run store.
+// It reads the run store's step-artifact and PR-tracker journals directly
+// (never through RunStore, so it takes no lock and repairs nothing) and makes
+// GET requests to the GitHub REST API, anonymously or with an optional read
+// token. It never writes to GitHub or to the run store.
 //
 //   receipts     every retained receipt is ztfc-receipt-v2, intact, verified,
 //                bound to this run and signed by the given controller key
-//   identity     upstream and fork repository IDs equal the signed IDs, and
-//                the fork's parent is the upstream
+//   identity     upstream and fork repository IDs equal the signed IDs, the
+//                fork's parent is the upstream, and the contributor owns it
 //   fork-branch  the fork branch `ztfc/<contribution>` points at the latest
 //                verified candidate
 //   single-pr    exactly one pull request exists for that head and base
-//                (state=all), by the contributor
-//   pr-body      the body carries one pr_create marker for this contribution,
-//                the LLM disclosure, and the receipt's exact command lines
+//                (state=all), by the contributor, and it is the one the run
+//                recorded
+//   pr-body      the body carries exactly the marker the run tracks, the LLM
+//                disclosure, and the exact command lines of a verified receipt
 //   pr-head      the PR head is the latest verified candidate; with
-//                --after-revision it is the second verified candidate and
-//                differs from the first
+//                --after-revision there are at least two verified candidates
+//                and the head also differs from the first
 //
 // Fail closed: an unreadable, truncated, paginated or ambiguous answer is a
-// FAIL, never a pass. Exit 0 only when every check passes; 1 when any check
-// fails; 2 when the run is refused (no live flag, bad arguments, bad key).
+// FAIL, never a pass.
+// Exit: 0 every check passed; 1 a check failed; 2 refused (no live flag, bad
+// arguments, unreadable or private key, packages not built, malformed token).
 // ------------------------------------------------------------------
 import { createHash, createPublicKey, verify } from 'node:crypto';
 import fs from 'node:fs';
@@ -39,11 +41,19 @@ import { pathToFileURL } from 'node:url';
 export const LIVE_FLAG = 'ZT_ACCEPTANCE_LIVE';
 export const TOKEN_ENV = 'ZT_ACCEPTANCE_READ_TOKEN';
 const API = 'https://api.github.com';
+const GITHUB_TIMEOUT_MS = 30_000;
 const DISCLOSURE_HEADING = '## LLM disclosure';
+const RUN_ID_PATTERN = /^(ztc-[a-f0-9]{16})-run-1$/u;
+const BRANCH_PREFIX = 'ztfc/';
+const JOURNAL_ROW_KEYS = 'digest,key,runId,type,version';
+const ENVELOPE_KEYS = 'digest,receipt,signature';
+/** Mirrors `SUCCESS_CLAIM` in packages/zero-trust/src/github/text.ts. */
+const SUCCESS_CLAIM = /all\s*tests\s*passed/giu;
 
 export const USAGE = `Usage: ${LIVE_FLAG}=1 node scripts/zt-acceptance-check.mjs --root <stateDir>/runs --run <runId> --upstream <owner/repo> --fork <owner/repo> --controller-key <public-key-file> [--after-revision] [--json]
 
-Optional: ${TOKEN_ENV}=<read-only token> raises the anonymous GitHub rate limit.`;
+Optional: ${TOKEN_ENV}=<read-only token> raises the anonymous GitHub rate limit.
+Use absolute paths. Exit: 0 all checks passed; 1 a check failed; 2 refused.`;
 
 const VALUE_FLAGS = new Set(['root', 'run', 'upstream', 'fork', 'controller-key']);
 const BOOLEAN_FLAGS = new Set(['after-revision', 'json', 'help']);
@@ -55,6 +65,20 @@ export class CheckError extends Error {
     this.code = code;
   }
 }
+
+const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
+const shortSha = (sha) => String(sha).slice(0, 12);
+const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+const hasExactKeys = (value, keys) =>
+  isRecord(value) && Object.keys(value).sort().join(',') === keys;
+const sameLogin = (a, b) =>
+  typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
+const encodePath = (value) =>
+  value
+    .split('/')
+    .map((part) => encodeURIComponent(part))
+    .join('/');
+const repoPath = (fullName) => `/repos/${encodePath(fullName)}`;
 
 export function parseArgs(argv) {
   const opts = {};
@@ -74,10 +98,16 @@ export function parseArgs(argv) {
   }
   if (opts.help) return { help: true };
   for (const name of VALUE_FLAGS) if (!opts[name]) throw new CheckError(`missing_flag: --${name}`);
-  if (!/^ztc-[a-f0-9]{16}-run-1$/u.test(opts.run)) throw new CheckError('invalid_run_id');
-  for (const name of ['upstream', 'fork'])
-    if (!/^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9_.-]{1,100}$/u.test(opts[name]))
+  if (!RUN_ID_PATTERN.test(opts.run)) throw new CheckError('invalid_run_id');
+  for (const name of ['upstream', 'fork']) {
+    const repo = opts[name].split('/')[1];
+    if (
+      !/^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9_.-]{1,100}$/u.test(opts[name]) ||
+      repo === '.' ||
+      repo === '..'
+    )
       throw new CheckError(`invalid_repository: --${name}`);
+  }
   return {
     root: opts.root,
     runId: opts.run,
@@ -88,11 +118,6 @@ export function parseArgs(argv) {
     json: Boolean(opts.json),
   };
 }
-
-const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
-const lower = (text) => String(text).toLowerCase();
-const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
-const isSha = (value) => typeof value === 'string' && /^[a-f0-9]{40}$/u.test(value);
 
 function strictUtf8(bytes, code) {
   try {
@@ -110,30 +135,43 @@ function strictJson(text, code) {
   }
 }
 
-/**
- * The step-artifact journal the controller keeps at
- * `<root>/<contribution>/control/steps/events.jsonl`, read with the same row rules as
- * `StepArtifacts`. Every artifact file is checked against its content digest. Only
- * complete newline-terminated journals are accepted: run this while no controller runs.
- */
-export function readRunEvidence({ root, runId }, { readFile }) {
-  const contributionId = /^(ztc-[a-f0-9]{16})-run-1$/u.exec(runId)?.[1];
-  if (!contributionId) throw new CheckError('invalid_run_id');
-  const dir = path.join(root, contributionId, 'control', 'steps');
+/** A complete newline-terminated JSONL journal (a controller writing it shows as incomplete). */
+function readJournal(readFile, root, relative, label) {
   let bytes;
   try {
-    bytes = readFile(path.join(dir, 'events.jsonl'));
-  } catch {
-    throw new CheckError('step_journal_unreadable');
+    bytes = readFile(path.join(root, relative));
+  } catch (error) {
+    throw new CheckError(`${label}_unreadable: ${relative} (${error?.code ?? 'error'})`);
   }
-  const text = strictUtf8(bytes, 'step_journal_invalid');
-  if (!text || !text.endsWith('\n')) throw new CheckError('step_journal_incomplete');
-  const keys = new Map();
-  for (const line of text.slice(0, -1).split('\n')) {
-    const row = strictJson(line, 'step_journal_invalid');
+  const text = strictUtf8(bytes, `${label}_invalid: ${relative}`);
+  if (!text || !text.endsWith('\n')) throw new CheckError(`${label}_incomplete: ${relative}`);
+  return text
+    .slice(0, -1)
+    .split('\n')
+    .map((line) => strictJson(line, `${label}_invalid: ${relative}`));
+}
+
+/**
+ * Run evidence, read with the same row rules as `StepArtifacts`
+ * (`<root>/<contribution>/control/steps/`) and the PR tracker's first `track` record
+ * (`<root>/<contribution>/track/events.jsonl`). Each artifact file is checked against its
+ * content digest. The latest value of a key is its last row, as in `StepArtifacts`.
+ * Only complete journals are accepted: run this while no controller runs.
+ */
+export function readRunEvidence({ root, runId }, { readFile }) {
+  const contributionId = RUN_ID_PATTERN.exec(runId)?.[1];
+  if (!contributionId) throw new CheckError('invalid_run_id');
+  const stepsDir = path.join(contributionId, 'control', 'steps');
+  const latestDigest = new Map();
+  const receiptDigests = [];
+  for (const row of readJournal(
+    readFile,
+    root,
+    path.join(stepsDir, 'events.jsonl'),
+    'step_journal'
+  )) {
     if (
-      !isRecord(row) ||
-      Object.keys(row).length !== 5 ||
+      !hasExactKeys(row, JOURNAL_ROW_KEYS) ||
       row.type !== 'artifact' ||
       row.runId !== runId ||
       row.version !== 1 ||
@@ -142,40 +180,60 @@ export function readRunEvidence({ root, runId }, { readFile }) {
       typeof row.digest !== 'string' ||
       !/^[a-f0-9]{64}$/u.test(row.digest)
     )
-      throw new CheckError('step_journal_invalid');
-    const digests = keys.get(row.key) ?? [];
-    if (!digests.includes(row.digest)) digests.push(row.digest);
-    keys.set(row.key, digests);
+      throw new CheckError('step_journal_invalid: unexpected row');
+    latestDigest.set(row.key, row.digest);
+    if (row.key === 'receipt' && !receiptDigests.includes(row.digest))
+      receiptDigests.push(row.digest);
   }
   const load = (digest) => {
+    const relative = path.join(stepsDir, `${digest}.json`);
     let value;
     try {
-      value = readFile(path.join(dir, `${digest}.json`));
-    } catch {
-      throw new CheckError('step_artifact_unreadable');
+      value = readFile(path.join(root, relative));
+    } catch (error) {
+      throw new CheckError(`step_artifact_unreadable: ${relative} (${error?.code ?? 'error'})`);
     }
-    if (sha256(value) !== digest) throw new CheckError('step_artifact_digest_mismatch');
-    return strictJson(strictUtf8(value, 'step_artifact_invalid'), 'step_artifact_invalid');
+    if (sha256(value) !== digest)
+      throw new CheckError(`step_artifact_digest_mismatch: ${relative}`);
+    return strictJson(
+      strictUtf8(value, `step_artifact_invalid: ${relative}`),
+      `step_artifact_invalid: ${relative}`
+    );
   };
-  const latest = (key) => {
-    const digest = keys.get(key)?.at(-1);
-    return digest === undefined ? undefined : load(digest);
+  const latest = (key) => (latestDigest.has(key) ? load(latestDigest.get(key)) : undefined);
+  const trackJournal = path.join(contributionId, 'track', 'events.jsonl');
+  // Read lazily: before submission the tracker does not exist yet.
+  const trackedPr = () => {
+    const first = readJournal(readFile, root, trackJournal, 'track_journal')[0];
+    if (
+      !isRecord(first) ||
+      first.type !== 'track' ||
+      first.contributionId !== contributionId ||
+      !isRecord(first.pr) ||
+      typeof first.pr.marker !== 'string' ||
+      typeof first.pr.url !== 'string' ||
+      !Number.isSafeInteger(first.pr.number)
+    )
+      throw new CheckError(`track_journal_invalid: ${trackJournal}`);
+    return first.pr;
   };
   return {
     contributionId,
     runId,
-    branch: `ztfc/${contributionId}`,
-    receipts: (keys.get('receipt') ?? []).map(load),
+    branch: `${BRANCH_PREFIX}${contributionId}`,
+    receipts: receiptDigests.map(load),
     publication: latest('publication'),
-    trackedPr: latest('tracked_pr'),
+    trackedPrNumber: latest('tracked_pr')?.number,
+    trackedPr,
   };
 }
 
 /** Offline receipt-v2 integrity plus trust in the given controller key. Expiry is not
- * checked: a receipt is valid for 15 minutes of shipping, and this runs afterwards. */
+ * checked: a receipt is valid for 15 minutes of shipping, and this runs afterwards.
+ * Mirrors `receiptIntegrity` (src/receipt/integrity.ts), which the package does not export,
+ * and additionally refuses any key but the controller's. */
 export function verifyReceiptEnvelope(envelope, controllerKey, { zt, core }) {
-  if (!isRecord(envelope) || Object.keys(envelope).sort().join(',') !== 'digest,receipt,signature')
-    throw new CheckError('receipt_envelope_invalid');
+  if (!hasExactKeys(envelope, ENVELOPE_KEYS)) throw new CheckError('receipt_envelope_invalid');
   let receipt;
   try {
     receipt = zt.parseReceipt(envelope.receipt);
@@ -212,14 +270,16 @@ export function verifyReceiptEnvelope(envelope, controllerKey, { zt, core }) {
   return receipt;
 }
 
-/** GET-only GitHub REST client. Anything but 200 with a JSON body is a refusal. */
+/** GET-only GitHub REST client. Anything but 200 with a JSON body is a refusal, named by
+ * the request label so two reads in one check stay distinguishable. */
 export function githubReader({ fetch, token }) {
-  return async (pathname) => {
+  return async (label, pathname) => {
     let response;
     try {
       response = await fetch(`${API}${pathname}`, {
         method: 'GET',
         redirect: 'error',
+        signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
         headers: {
           accept: 'application/vnd.github+json',
           'x-github-api-version': '2022-11-28',
@@ -227,32 +287,36 @@ export function githubReader({ fetch, token }) {
           ...(token ? { authorization: `Bearer ${token}` } : {}),
         },
       });
-    } catch {
-      throw new CheckError('github_unreachable');
+    } catch (error) {
+      throw new CheckError(
+        error?.name === 'TimeoutError' ? `github_timeout: ${label}` : `github_unreachable: ${label}`
+      );
     }
-    if (response.status !== 200) throw new CheckError(`github_http_${response.status}`);
-    const body = strictJson(await response.text(), 'github_invalid_json');
-    return { body, link: response.headers?.get?.('link') ?? null };
+    const header = (name) => response.headers?.get?.(name) ?? null;
+    if (response.status !== 200) {
+      if ([403, 429].includes(response.status) && header('x-ratelimit-remaining') === '0')
+        throw new CheckError(`github_rate_limited: ${label} (set ${TOKEN_ENV})`);
+      throw new CheckError(`github_http_${response.status}: ${label}`);
+    }
+    const body = strictJson(await response.text(), `github_invalid_json: ${label}`);
+    return { body, link: header('link') };
   };
 }
 
-const repoPath = (fullName) =>
-  `/repos/${fullName
-    .split('/')
-    .map((part) => encodeURIComponent(part))
-    .join('/')}`;
-
-/** `untrustedText(value, n, false)` followed by `escapeHtml`, as `buildPrContent` renders a
- * command; any text the renderer would alter differently simply fails to match. */
+/** `untrustedText(value, n, false)` then `escapeHtml`, as `buildPrContent` renders a command
+ * (src/github/text.ts, not exported). Any drift fails the check closed, never open. */
 export function renderedCommand(command) {
   const plain = command
+    .normalize('NFKC')
+    .replace(/\p{Cf}/gu, '')
     .replace(/\r\n?/gu, '\n')
     // biome-ignore lint/suspicious/noControlCharactersInRegex: mirror the renderer's control-character strip.
     .replace(/[\u0000-\u0008\u000b-\u001f\u007f\u2028\u2029]/gu, '')
     .replace(/\s+/gu, ' ')
     .trim()
     .replace(/<!--/gu, '&lt;!--')
-    .replace(/--!?>/gu, '--&gt;');
+    .replace(/--!?>/gu, '--&gt;')
+    .replace(SUCCESS_CLAIM, '[untrusted success claim]');
   return plain.replace(
     /[&<>"'`\r\n]/gu,
     (c) =>
@@ -273,14 +337,15 @@ export function commandLine(c) {
   return `- <code>${renderedCommand(c.command)}</code>${c.required ? '' : ' (optional)'}: ${c.status}; exit=${c.exitStatus}; suites=${c.suites}`;
 }
 
-/** Checks the PR body against the retained receipts. Returns the receipt it names. */
-export function checkPrBody(body, { contributionId, receipts }, zt) {
+/** Checks the PR body against the tracked marker and the retained receipts. Returns the
+ * receipt whose verification section the body carries. */
+export function checkPrBody(body, { marker, receipts }, zt) {
   if (typeof body !== 'string' || !body) throw new CheckError('pr_body_missing');
   const markers = zt.findHandoffMarkers(body);
   if (markers.length !== 1) throw new CheckError(`pr_marker_count_${markers.length}`);
-  const marker = /contribution=([A-Za-z0-9_-]+) intent=[a-f0-9]{32} op=([a-z_]+)/u.exec(markers[0]);
-  if (marker?.[1] !== contributionId) throw new CheckError('pr_marker_other_contribution');
-  if (marker[2] !== 'pr_create') throw new CheckError('pr_marker_not_pr_create');
+  if (zt.markerOperation(markers[0]) !== 'pr_create')
+    throw new CheckError('pr_marker_not_pr_create');
+  if (!zt.hasOnlyMarker(body, marker)) throw new CheckError('pr_marker_not_tracked_marker');
   const lines = body.split(/\r\n|\n|\r/u);
   const disclosure = `This contribution used substantial LLM assistance, orchestrated with [ai-dossier](${zt.LLM_DISCLOSURE_URL}).`;
   const heading = lines.indexOf(DISCLOSURE_HEADING);
@@ -291,15 +356,15 @@ export function checkPrBody(body, { contributionId, receipts }, zt) {
     .filter(Boolean);
   if (named.length !== 1) throw new CheckError(`pr_verification_sections_${named.length}`);
   const receipt = receipts.find((r) => r.candidateSha === named[0]);
-  if (!receipt) throw new CheckError('pr_names_unverified_candidate');
+  if (!receipt) throw new CheckError(`pr_names_unverified_candidate: ${shortSha(named[0])}`);
   const missing = receipt.commands.filter((c) => !lines.includes(commandLine(c)));
   if (missing.length)
     throw new CheckError(`pr_commands_missing: ${missing.map((c) => c.id).join(',')}`);
   return receipt;
 }
 
-/** Runs every check; each returns PASS/FAIL with a short detail. Never throws. */
-export async function runChecks(input, deps) {
+/** Memoized evidence shared by the checks; each loader fails closed with a CheckError. */
+function evidenceLoaders(input, deps) {
   const { zt, core } = deps;
   const get = githubReader({ fetch: deps.fetch, token: deps.token });
   const memo = new Map();
@@ -307,17 +372,21 @@ export async function runChecks(input, deps) {
     if (!memo.has(key)) memo.set(key, Promise.resolve().then(fn));
     return memo.get(key);
   };
-
   const evidence = () => once('evidence', () => readRunEvidence(input, deps));
   const receipts = () =>
     once('receipts', async () => {
       const ev = await evidence();
       if (!ev.receipts.length) throw new CheckError('no_retained_receipt');
-      return ev.receipts.map((envelope) => {
-        const r = verifyReceiptEnvelope(envelope, input.controllerKey, { zt, core });
-        if (r.contributionId !== ev.contributionId || r.runId !== input.runId)
-          throw new CheckError('receipt_other_run');
-        return r;
+      return ev.receipts.map((envelope, index) => {
+        try {
+          const r = verifyReceiptEnvelope(envelope, input.controllerKey, { zt, core });
+          if (r.contributionId !== ev.contributionId || r.runId !== input.runId)
+            throw new CheckError('receipt_other_run');
+          return r;
+        } catch (error) {
+          if (!(error instanceof CheckError)) throw error;
+          throw new CheckError(`${error.code} (receipt ${index + 1} of ${ev.receipts.length})`);
+        }
       });
     });
   const candidates = () =>
@@ -342,128 +411,137 @@ export async function runChecks(input, deps) {
         defaultBranch: pick('defaultBranch'),
       };
     });
-  const pulls = () =>
-    once('pulls', async () => {
+  const pr = () =>
+    once('pr', async () => {
       const ev = await evidence();
       const { defaultBranch } = await signed();
-      const forkOwner = input.fork.split('/')[0];
       const query = new URLSearchParams({
         state: 'all',
-        head: `${forkOwner}:${ev.branch}`,
+        head: `${input.fork.split('/')[0]}:${ev.branch}`,
         base: defaultBranch,
         per_page: '100',
       });
-      const { body, link } = await get(`${repoPath(input.upstream)}/pulls?${query}`);
-      if (!Array.isArray(body)) throw new CheckError('pull_list_invalid');
+      const { body: list, link } = await get(
+        'pull list',
+        `${repoPath(input.upstream)}/pulls?${query}`
+      );
+      if (!Array.isArray(list)) throw new CheckError('pull_list_invalid');
       if (link && /rel="next"/u.test(link)) throw new CheckError('pull_list_paginated');
-      return body;
-    });
-  const pr = () =>
-    once('pr', async () => {
-      const list = await pulls();
       if (list.length !== 1) throw new CheckError(`pull_count_${list.length}`);
       const number = list[0]?.number;
-      if (!Number.isSafeInteger(number) || number < 1) throw new CheckError('pull_list_invalid');
-      const { body } = await get(`${repoPath(input.upstream)}/pulls/${number}`);
+      if (!Number.isSafeInteger(number) || number < 1) throw new CheckError('pull_number_invalid');
+      const { body } = await get('pull detail', `${repoPath(input.upstream)}/pulls/${number}`);
       if (!isRecord(body) || body.number !== number) throw new CheckError('pull_detail_invalid');
       return body;
     });
+  return { get, evidence, receipts, candidates, signed, pr };
+}
 
-  const check = async (id, title, fn) => {
-    try {
-      return { id, title, pass: true, detail: await fn() };
-    } catch (error) {
-      return {
-        id,
-        title,
-        pass: false,
-        detail: error instanceof CheckError ? error.code : 'unexpected_error',
-      };
-    }
-  };
+async function runCheck(id, title, fn) {
+  try {
+    return { id, title, pass: true, detail: await fn() };
+  } catch (error) {
+    const detail =
+      error instanceof CheckError
+        ? error.code
+        : `unexpected_error: ${String(error?.name ?? 'Error')}: ${String(error?.message ?? error).slice(0, 200)}`;
+    return { id, title, pass: false, detail };
+  }
+}
 
+/** Runs every check; each returns PASS/FAIL with a short detail. Never throws. */
+export async function runChecks(input, deps) {
+  const { get, evidence, receipts, candidates, signed, pr } = evidenceLoaders(input, deps);
   return [
-    await check('receipts', 'receipts verify with the controller key', async () => {
+    await runCheck('receipts', 'receipts verify with the controller key', async () => {
       const all = await receipts();
       return `${all.length} receipt(s), ${(await candidates()).length} verified candidate(s)`;
     }),
-    await check('identity', 'repository IDs match the signed receipt', async () => {
+    await runCheck('identity', 'repository IDs match the signed receipt', async () => {
       const ids = await signed();
-      const upstream = (await get(repoPath(input.upstream))).body;
-      const fork = (await get(repoPath(input.fork))).body;
+      const upstream = (await get('upstream repository', repoPath(input.upstream))).body;
+      const fork = (await get('fork repository', repoPath(input.fork))).body;
       if (!isRecord(upstream) || upstream.id !== ids.upstreamId)
         throw new CheckError('upstream_id_mismatch');
       if (!isRecord(fork) || fork.id !== ids.forkId) throw new CheckError('fork_id_mismatch');
       if (fork.fork !== true || !isRecord(fork.parent) || fork.parent.id !== ids.upstreamId)
         throw new CheckError('fork_parent_mismatch');
-      if (lower(fork.owner?.login) !== lower(ids.contributor))
+      if (!sameLogin(fork.owner?.login, ids.contributor))
         throw new CheckError('fork_owner_not_contributor');
-      return `upstream ${ids.upstreamId}, fork ${ids.forkId}`;
+      // Names only: the outcome record is public and carries no numeric IDs.
+      return `${input.upstream} and ${input.fork} match the signed IDs`;
     }),
-    await check('fork-branch', 'fork branch SHA equals the verified candidate', async () => {
+    await runCheck('fork-branch', 'fork branch SHA equals the verified candidate', async () => {
       const ev = await evidence();
-      const latest = (await candidates()).at(-1);
-      const branchPath = ev.branch
-        .split('/')
-        .map((part) => encodeURIComponent(part))
-        .join('/');
-      const { body } = await get(`${repoPath(input.fork)}/git/ref/heads/${branchPath}`);
+      const list = await candidates();
+      const latest = list.at(-1);
+      const { body } = await get(
+        'fork branch',
+        `${repoPath(input.fork)}/git/ref/heads/${encodePath(ev.branch)}`
+      );
       if (!isRecord(body) || body.ref !== `refs/heads/${ev.branch}`)
         throw new CheckError('fork_ref_ambiguous');
-      if (body.object?.type !== 'commit' || !isSha(body.object.sha))
+      const sha = body.object?.sha;
+      if (body.object?.type !== 'commit' || typeof sha !== 'string' || !/^[a-f0-9]{40}$/u.test(sha))
         throw new CheckError('fork_ref_invalid');
-      if (body.object.sha !== latest)
-        throw new CheckError(`fork_sha_${body.object.sha.slice(0, 12)}`);
+      if (sha !== latest)
+        throw new CheckError(
+          `fork_sha_mismatch: ${shortSha(sha)} expected ${shortSha(latest)}${list.includes(sha) ? ' (an earlier verified candidate)' : ''}`
+        );
       return `${ev.branch} = ${latest}`;
     }),
-    await check('single-pr', 'exactly one PR for head and base (state=all)', async () => {
+    await runCheck('single-pr', 'exactly one PR for head and base (state=all)', async () => {
       const ev = await evidence();
       const ids = await signed();
       const detail = await pr();
-      if (
-        lower(detail.head?.repo?.full_name) !== lower(input.fork) ||
-        detail.head?.ref !== ev.branch
-      )
+      if (!sameLogin(detail.head?.repo?.full_name, input.fork) || detail.head?.ref !== ev.branch)
         throw new CheckError('pull_head_mismatch');
       if (
-        lower(detail.base?.repo?.full_name) !== lower(input.upstream) ||
+        !sameLogin(detail.base?.repo?.full_name, input.upstream) ||
         detail.base?.ref !== ids.defaultBranch
       )
         throw new CheckError('pull_base_mismatch');
-      if (lower(detail.user?.login) !== lower(ids.contributor))
+      if (!sameLogin(detail.user?.login, ids.contributor))
         throw new CheckError('pull_author_not_contributor');
       const recorded = ev.publication?.url ?? null;
-      if (recorded === null && ev.trackedPr?.number === undefined)
+      if (recorded === null && ev.trackedPrNumber === undefined)
         throw new CheckError('pull_not_recorded_by_run');
       if (recorded !== null && recorded !== detail.html_url)
         throw new CheckError('pull_url_mismatch');
-      if (ev.trackedPr && ev.trackedPr.number !== detail.number)
+      if (ev.trackedPrNumber !== undefined && ev.trackedPrNumber !== detail.number)
         throw new CheckError('pull_number_mismatch');
       return `${detail.html_url} (${detail.state})`;
     }),
-    await check('pr-body', 'PR body has the marker, disclosure and commands', async () => {
+    await runCheck('pr-body', 'PR body has the marker, disclosure and commands', async () => {
       const ev = await evidence();
+      const detail = await pr();
+      const tracked = ev.trackedPr();
       const named = checkPrBody(
-        (await pr()).body,
-        { contributionId: ev.contributionId, receipts: await receipts() },
-        zt
+        detail.body,
+        { marker: tracked.marker, receipts: await receipts() },
+        deps.zt
       );
-      return `${named.commands.length} command(s) for ${named.candidateSha.slice(0, 12)}`;
+      const head = detail.head?.sha;
+      return `${named.commands.length} command(s) for ${shortSha(named.candidateSha)}${named.candidateSha === head ? '' : `; head is ${shortSha(head)} (body not updated after the revision)`}`;
     }),
-    input.afterRevision
-      ? await check('pr-head', 'PR head is the second verified candidate', async () => {
-          const list = await candidates();
-          const head = (await pr()).head?.sha;
-          if (list.length < 2) throw new CheckError('no_second_verified_candidate');
-          if (head !== list.at(-1)) throw new CheckError('pull_head_not_latest_verified');
-          if (head === list[0]) throw new CheckError('pull_head_unchanged');
-          return `${list[0].slice(0, 12)} -> ${head}`;
-        })
-      : await check('pr-head', 'PR head is the verified candidate', async () => {
-          const head = (await pr()).head?.sha;
-          if (head !== (await candidates()).at(-1)) throw new CheckError('pull_head_not_verified');
-          return head;
-        }),
+    await runCheck(
+      'pr-head',
+      input.afterRevision
+        ? 'PR head is a new verified candidate after the revision'
+        : 'PR head is the verified candidate',
+      async () => {
+        const list = await candidates();
+        const head = (await pr()).head?.sha;
+        if (head !== list.at(-1))
+          throw new CheckError(
+            `pull_head_not_latest_verified: ${shortSha(head)} expected ${shortSha(list.at(-1))}`
+          );
+        if (!input.afterRevision) return head;
+        if (list.length < 2) throw new CheckError('no_second_verified_candidate');
+        if (head === list[0]) throw new CheckError('pull_head_unchanged');
+        return `${shortSha(list[0])} -> ${head}`;
+      }
+    ),
   ];
 }
 
@@ -519,7 +597,9 @@ export async function main(argv, deps) {
       'controller_key_unreadable'
     ).trim();
   } catch (error) {
-    err(`error: ${error instanceof CheckError ? error.code : 'controller_key_unreadable'}`);
+    err(
+      `error: ${error instanceof CheckError ? error.code : `controller_key_unreadable (${error?.code ?? 'error'})`}`
+    );
     return 2;
   }
   if (/PRIVATE KEY/u.test(controllerKey) || !packages.core.isSupportedPublicKey(controllerKey)) {
@@ -536,7 +616,11 @@ export async function main(argv, deps) {
   else {
     out(`zt-acceptance-check ${opts.runId}${opts.afterRevision ? ' (after revision)' : ''}`);
     out(formatTable(results));
-    out(passed ? 'ALL CHECKS PASSED' : 'ACCEPTANCE CHECK FAILED');
+    out(
+      passed
+        ? 'ALL CHECKS PASSED'
+        : 'ACCEPTANCE CHECK FAILED (rows with the same detail share one root cause)'
+    );
   }
   return passed ? 0 : 1;
 }

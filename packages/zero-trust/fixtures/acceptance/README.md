@@ -20,10 +20,19 @@ source does not announce the bug.
 `CONTRIBUTING.md` is phrased for the deterministic policy floor in `src/policy/`, which can only
 make an answer stricter:
 
-- The floor reads every unit (sentence) that mentions a policy topic. A unit that also contains a
-  negation (`not`, `no`, `never`, …) or a requirement word (`must`, `required`, `needs`, `before`,
-  `first`, …) counts as a restriction for that topic. `No assignment is needed` therefore reads
-  as "assignment required".
+- Only `CONTRIBUTING`-type files, AI-policy files, PR templates and the `README.md` sections under
+  a heading containing "Contribut" are read (`src/policy/discover.ts`, `regions.ts`). The floor
+  then checks every sentence that mentions a policy topic (`src/policy/rules.ts`):
+  - A negation (`not`, `no`, `never`, `cannot`, `prohibited`, …) restricts every topic it shares a
+    sentence with. `No assignment is needed` therefore reads as "assignment required".
+  - A bare requirement word (`must`, `required`, `needs`, `before`, `first`, …) restricts
+    assignment and draft sentences.
+  - AI is restricted by `disclose`/`declare` or `approval`/`permission`/`consent` together with a
+    requirement word.
+  - Direct PRs are restricted by `discuss`/`contact`/`open an issue` with `first`/`before`/`prior`,
+    or a requirement word with `approval`/`permission`/`consent`.
+  - Templates are restricted by `unchanged`/`fixed`/`keep`/`leave`; baseline failures only by a
+    negation.
 - Any mention of `draft` makes the floor require a draft PR, and any mention of `template`,
   `receipt block` or `extra sections` forbids the receipt block.
 - The only restriction in this file is the deliberate AI-disclosure requirement

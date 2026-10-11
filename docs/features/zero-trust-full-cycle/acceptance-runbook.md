@@ -21,7 +21,9 @@ address, account ID, path and secret-store name out of the outcome record.
 
 Commands below run from `packages/zero-trust` unless stated otherwise. `<repo>` is your checkout
 of this repository. `<state-dir>` is the run's private state directory, and the run store is
-`<state-dir>/runs`. The [user guide](../../guides/zero-trust-contributions.md) explains every
+`<state-dir>/runs`. Use **absolute paths** for `<state-dir>`, `<profile-dir>`, the proxy
+endpoints file, the signer key and the controller public key: `zt-run` resolves relative paths
+from `packages/zero-trust`, while the check script runs from `<repo>`. The [user guide](../../guides/zero-trust-contributions.md) explains every
 field and state in more depth.
 
 ## 1. Prerequisites
@@ -79,8 +81,9 @@ fs.writeFileSync(process.argv[2], JSON.stringify(file, null, 2) + "\n", { mode: 
 chmod 600 <proxy-endpoints.json>
 ```
 
-The file must hold exactly `endpoints` and `target`, with an IPv4 `target.host`; anything else
-stops `start` with `invalid_proxy_file` after authorization.
+The file must hold exactly `endpoints` and `target`, with an IPv4 `target.host`. Anything else
+stops `start` after authorization and author confirmation with `error: operation_failed`
+(exit 2); the internal diagnostic is `invalid_proxy_file`.
 
 ### 1.3 GitHub App
 
@@ -109,6 +112,7 @@ extra repositories.
 ### 1.4 Signer key and secrets
 
 ```sh
+umask 077
 openssl genpkey -algorithm ed25519 -out <signer-key.pem>
 chmod 600 <signer-key.pem>
 openssl pkey -in <signer-key.pem> -pubout -out <controller-public.pem>
@@ -116,12 +120,13 @@ openssl pkey -in <signer-key.pem> -pubout -out <controller-public.pem>
 
 The public key is the controller key the check script verifies receipts against. Export the
 secrets into the shell that runs `zt-run`, under names of your choice. Do not write them into the
-config or any file it names:
+config or any file it names, and never type a secret inline on a command line, where it lands in
+shell history:
 
 ```sh
 export ZT_APP_PRIVATE_KEY="$(cat <app-private-key.pem>)"
-export ZT_APP_CLIENT_SECRET='<client secret>'
-export ZT_MODEL_KEY='<model API key>'
+read -rs ZT_APP_CLIENT_SECRET && export ZT_APP_CLIENT_SECRET   # paste, then Enter
+read -rs ZT_MODEL_KEY && export ZT_MODEL_KEY                   # paste, then Enter
 ```
 
 The model key variable must not be `GH_TOKEN`, `GITHUB_TOKEN`, `GITHUB_CLIENT_SECRET`, or start
@@ -152,8 +157,9 @@ git push origin main
 ```
 
 Keep `LICENSE` and `.gitignore` (`node_modules/`). Then open the bug issue as the maintainer
-account, labelled `bug` (an unlabelled issue still passes; a `question`/`enhancement` label
-without `bug` makes it ineligible):
+account, labelled `bug`. An unlabelled issue still passes; an `enhancement`, `feature`,
+`question`, `discussion` or `documentation` label without `bug`, `defect` or `regression` makes
+the gate hand off with `not_a_bug`:
 
 ```sh
 gh issue create --repo imboard-ai/ztfc-upstream-fixture \
@@ -224,8 +230,8 @@ run `zt-run` in):
   },
   "budget": {
     "currency": "USD",
-    "ceilingMinor": 500,
-    "cleanupAllowanceMinor": 50,
+    "ceilingMinor": 250,
+    "cleanupAllowanceMinor": 25,
     "tokenLimit": 2000000,
     "activeMinutes": 120
   },
@@ -245,14 +251,16 @@ run `zt-run` in):
 
 Budget notes:
 
-- `ceilingMinor: 500` is a $5.00 ceiling **per budget session**. The initial run is session 1;
-  `resume --revise` opens session 2 with the same ceiling. The demonstration's worst case is
-  therefore $10.00. Use `250` if $5.00 must cover both.
+- The ceiling applies **per budget session**. The initial run is session 1 and
+  `resume --revise` opens session 2 with the same ceiling, so `ceilingMinor: 250` keeps the whole
+  demonstration at or below $5.00 (2 × $2.50). Work is refused once it would cross
+  `ceilingMinor − cleanupAllowanceMinor` ($2.25 here); the remaining $0.25 per session is kept for
+  VM teardown.
 - Every model call reserves its worst case before it runs: the request size in bytes counted as
   input tokens plus the output cap (16,384 tokens for planning and implementation calls, 1,024
   for typed decisions), times the token price. A reservation that would cross the ceiling is
   refused, so a very expensive model can stop the run even though the fixture is tiny. A model at or below about $3 per million tokens leaves ample
-  headroom at $5.
+  headroom at $2.25 per session.
 - The `local-qemu` rate is required; without it the first VM allocation fails with `missing_rate`.
 - Set `checkpoints` to `["patch"]` if you want to read `artifacts/candidate.diff` before
   verification. The run then stops in `paused_user`; approve the digest that `status` prints with
@@ -274,7 +282,9 @@ node scripts/zt-run.mjs start --config run-config.json --root <state-dir>/runs
 
 1. It prints `authorization_url: "https://github.com/login/oauth/authorize?…"`. Open it in a
    browser **logged in as `ydhidden`** and authorize the App. If the browser is on another
-   machine, forward the loopback port named in the URL's `redirect_uri` first.
+   machine, forward the loopback port named in the URL's `redirect_uri` to the **same** port
+   number first (`ssh -L <port>:127.0.0.1:<port> <kvm-host>`): the callback only accepts the
+   exact `127.0.0.1:<port>` host.
 2. It prints `author_identity: {…}`. Check `login` is `ydhidden` and `email` is the
    `<id>+ydhidden@users.noreply.github.com` address, then type `yes`. Without a terminal (for
    example piping into `tee`), pass `--confirm-author` instead; the identity is then accepted as
@@ -360,7 +370,9 @@ revision. The check script accepts a body that names any verified candidate of t
 
 ## 5. Check script
 
-From `<repo>`, with no controller running against the store:
+From `<repo>`, with no controller running against the store: the last `zt-run` command has
+exited and `status` shows the stop you expect (`submitted`, or `submitted`/`awaiting_review`
+after the revision).
 
 ```sh
 ZT_ACCEPTANCE_LIVE=1 node scripts/zt-acceptance-check.mjs \
@@ -371,7 +383,7 @@ ZT_ACCEPTANCE_LIVE=1 node scripts/zt-acceptance-check.mjs \
 ```
 
 It refuses to run without `ZT_ACCEPTANCE_LIVE=1`. It is read-only: it reads the run store's
-step-artifact journal (`<contribution-id>/control/steps/`) without opening the store, and it
+step-artifact and PR-tracker journals (`<contribution-id>/control/steps/`, `<contribution-id>/track/`) without opening the store, and it
 makes only `GET` requests to the GitHub API, anonymously by default. Set
 `ZT_ACCEPTANCE_READ_TOKEN` to a read-only token if the anonymous rate limit gets in the way.
 
@@ -381,12 +393,29 @@ makes only `GET` requests to the GitHub API, anonymously by default. Set
 | `identity` | The upstream and fork repository IDs equal the signed IDs, the fork's parent is the upstream, and the fork belongs to the contributor |
 | `fork-branch` | `ztfc/<contribution-id>` on the fork points at the latest verified candidate |
 | `single-pr` | Exactly one PR exists for that head and base with `state=all`, by the contributor, and it is the one the run recorded |
-| `pr-body` | The body has exactly one `pr_create` marker for this contribution, the LLM disclosure, and the receipt's exact command lines |
-| `pr-head` | The PR head is the latest verified candidate; with `--after-revision`, it is the second verified candidate and differs from the first |
+| `pr-body` | The body carries exactly the marker the run's PR tracker recorded (`op=pr_create`), the LLM disclosure, and the exact command lines of a verified receipt; after the revision the detail notes when the body still describes the first candidate |
+| `pr-head` | The PR head is the latest verified candidate; with `--after-revision`, at least two verified candidates exist and the head also differs from the first |
 
-It prints one PASS/FAIL row per check and exits 0 only when all pass (1 on any failure, 2 when it
-refuses to run). Any unreadable, truncated, paginated or ambiguous answer is a FAIL. `--json`
-prints the same result as one object.
+It prints one PASS/FAIL row per check and exits 0 only when all pass, 1 on any failure, and 2
+when it refuses to run (no `ZT_ACCEPTANCE_LIVE=1`, bad arguments, an unreadable or private key,
+packages not built, a malformed token). Any unreadable, truncated, paginated or ambiguous answer
+is a FAIL, and rows with the same detail share one root cause. `--json` prints the same result as
+one object.
+
+| FAIL detail | Likely cause | Action |
+|---|---|---|
+| `step_journal_incomplete`, `step_artifact_digest_mismatch`, `track_journal_incomplete` | A controller is still writing the store | Wait for it to exit, rerun |
+| `step_journal_unreadable`, `track_journal_unreadable` | Wrong `--root`/`--run`, a relative path, or no PR tracked yet | Use absolute paths; `resume` after submitting |
+| `receipt_signed_by_other_key` | Wrong `--controller-key` | Pass the public key of the config's `signerKeyFile` |
+| `github_rate_limited`, `github_http_403`/`429` | Anonymous rate limit | Set `ZT_ACCEPTANCE_READ_TOKEN`, rerun |
+| `github_http_404: <request>` | Wrong `--upstream`/`--fork`, or the branch is gone | Check the names |
+| `fork_sha_mismatch … (an earlier verified candidate)` | The revision push is not confirmed yet | `resume`, then rerun |
+| `pull_count_0`, `pull_not_recorded_by_run` | PR not created yet, or `resume` not run after creating it | Create the PR, `resume` |
+| `pull_count_2` and up, `pr_marker_*`, `pr_commands_missing`, `pr_disclosure_missing` | Duplicate PR, or the body was edited | Defect or operator error: record it |
+| `unexpected_error: …` | A bug in the check script or a stale package build | `make build-zero-trust`, rerun; otherwise record it |
+
+Anything that is not a wait-and-rerun case is a finding: save the `--json` output and file a
+sub-issue of #1002.
 
 ## 6. Record the outcome
 
@@ -396,10 +425,10 @@ Capture, for `docs/features/zero-trust-full-cycle/decisions/acceptance-demo.md`:
 - The base SHA, both verified candidate SHAs and the PR URL.
 - Estimated and observed costs: `node scripts/zt-run.mjs metrics --root <state-dir>/runs --json`
   and the `estimatedSpend` of each session.
-- Both check-script outputs.
+- Both check-script outputs. They print repository names and SHAs only, never numeric IDs.
 - Any defect, filed as a sub-issue of #1002 and linked from the record.
 
-`export --run <run-id> --out <file>` writes the portable bundle, but its `receipts`,
+`node scripts/zt-run.mjs export --root <state-dir>/runs --run <run-id> --out <file>` writes the portable bundle, but its `receipts`,
 `verification`, `disclosure` and `policyCitations` stay empty for a live run: the composed
 controller keeps receipts as step artifacts and never writes the `receipt-evidence.json`,
 `verification-evidence.json` or `portfolio-evidence.json` records that export reads. Use the
