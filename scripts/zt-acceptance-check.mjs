@@ -47,8 +47,6 @@ const RUN_ID_PATTERN = /^(ztc-[a-f0-9]{16})-run-1$/u;
 const BRANCH_PREFIX = 'ztfc/';
 const JOURNAL_ROW_KEYS = 'digest,key,runId,type,version';
 const ENVELOPE_KEYS = 'digest,receipt,signature';
-/** Mirrors `SUCCESS_CLAIM` in packages/zero-trust/src/github/text.ts. */
-const SUCCESS_CLAIM = /all\s*tests\s*passed/giu;
 
 export const USAGE = `Usage: ${LIVE_FLAG}=1 node scripts/zt-acceptance-check.mjs --root <stateDir>/runs --run <runId> --upstream <owner/repo> --fork <owner/repo> --controller-key <public-key-file> [--after-revision] [--json]
 
@@ -303,38 +301,13 @@ export function githubReader({ fetch, token }) {
   };
 }
 
-/** `untrustedText(value, n, false)` then `escapeHtml`, as `buildPrContent` renders a command
- * (src/github/text.ts, not exported). Any drift fails the check closed, never open. */
-export function renderedCommand(command) {
-  const plain = command
-    .normalize('NFKC')
-    .replace(/\p{Cf}/gu, '')
-    .replace(/\r\n?/gu, '\n')
-    // biome-ignore lint/suspicious/noControlCharactersInRegex: mirror the renderer's control-character strip.
-    .replace(/[\u0000-\u0008\u000b-\u001f\u007f\u2028\u2029]/gu, '')
-    .replace(/\s+/gu, ' ')
-    .trim()
-    .replace(/<!--/gu, '&lt;!--')
-    .replace(/--!?>/gu, '--&gt;')
-    .replace(SUCCESS_CLAIM, '[untrusted success claim]');
-  return plain.replace(
-    /[&<>"'`\r\n]/gu,
-    (c) =>
-      ({
-        '&': '&amp;',
-        '<': '&lt;',
-        '>': '&gt;',
-        '"': '&quot;',
-        "'": '&#39;',
-        '`': '&#96;',
-        '\r': '&#13;',
-        '\n': '&#10;',
-      })[c]
-  );
-}
-
-export function commandLine(c) {
-  return `- <code>${renderedCommand(c.command)}</code>${c.required ? '' : ' (optional)'}: ${c.status}; exit=${c.exitStatus}; suites=${c.suites}`;
+/** The package's own Verification-line renderer; text it refuses counts as missing. */
+function renderedLine(zt, c) {
+  try {
+    return zt.prCommandLine(c);
+  } catch {
+    return undefined;
+  }
 }
 
 /** Checks the PR body against the tracked marker and the retained receipts. Returns the
@@ -357,7 +330,10 @@ export function checkPrBody(body, { marker, receipts }, zt) {
   if (named.length !== 1) throw new CheckError(`pr_verification_sections_${named.length}`);
   const receipt = receipts.find((r) => r.candidateSha === named[0]);
   if (!receipt) throw new CheckError(`pr_names_unverified_candidate: ${shortSha(named[0])}`);
-  const missing = receipt.commands.filter((c) => !lines.includes(commandLine(c)));
+  const missing = receipt.commands.filter((c) => {
+    const line = renderedLine(zt, c);
+    return line === undefined || !lines.includes(line);
+  });
   if (missing.length)
     throw new CheckError(`pr_commands_missing: ${missing.map((c) => c.id).join(',')}`);
   return receipt;

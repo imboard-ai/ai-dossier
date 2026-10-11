@@ -21,7 +21,7 @@ import {
   renderHandoffStatus,
   replayHandoffs,
 } from '../github/handoff-driver';
-import { buildPrContent, type PrContentInput } from '../github/pr-body';
+import { buildPrContent, type PrContentInput, prCommandLine } from '../github/pr-body';
 import { ForkPusher } from '../github/push';
 import {
   anonymousReader,
@@ -193,6 +193,30 @@ function github(routes: {
   };
   return { read, calls };
 }
+
+describe('prCommandLine', () => {
+  it('is exactly the Verification line buildPrContent renders', () => {
+    const odd = command({ id: 'odd', command: 'npm\u200b  test -- "a<b>" `x` # all tests passed' });
+    const optional = command({
+      id: 'opt',
+      required: false,
+      suites: 'unknown',
+      exitStatus: 'unknown',
+    });
+    expect(prCommandLine(odd)).toBe(
+      '- <code>npm test -- &quot;a&lt;b&gt;&quot; &#96;x&#96; # [untrusted success claim]</code>: passed; exit=0; suites=3'
+    );
+    expect(prCommandLine(optional)).toBe(
+      '- <code>npm test</code> (optional): passed; exit=unknown; suites=unknown'
+    );
+    const { body } = buildPrContent(contentInput({ receipt: receipt([odd]) }));
+    expect(body.split('\n')).toContain(prCommandLine(odd));
+  });
+
+  it('refuses text the body could not carry', () => {
+    expect(() => prCommandLine(command({ command: '\u200b' }))).toThrow('invalid_text');
+  });
+});
 
 describe('compare link', () => {
   const content = () => buildPrContent(contentInput());
