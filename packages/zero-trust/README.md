@@ -1,5 +1,14 @@
 # @ai-dossier/zero-trust
 
+## Running a contribution
+
+To propose a fix for an upstream issue with this package, follow the user guide:
+[Zero-trust contributions](../../docs/guides/zero-trust-contributions.md). It covers the
+prerequisites and one-time setup, every `RunConfig` field, the six-step journey with the
+`zt-run` commands, every run state and hand-off, the controls, costs, retention, export and
+metrics, honest provenance for portfolio use, what maintainers receive, and the security model.
+The rest of this README is the implementer's spec of record.
+
 ## Trusted mid-run changes
 
 The contributor can edit a paused candidate with
