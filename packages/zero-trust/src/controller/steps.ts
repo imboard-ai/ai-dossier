@@ -78,6 +78,7 @@ import {
   clearStopNotice,
   driftHandoffNotice,
   freshnessNotice,
+  gateHandoffNotice,
   isAlteredEvidence,
   recordStopNotice,
 } from './stop-notice';
@@ -449,8 +450,13 @@ export function createSteps(
   };
   const steps: PhaseSteps = {
     async gate(c) {
+      clearStopNotice(artifacts(c));
+      const handOff = (...reasons: string[]) => {
+        recordStopNotice(artifacts(c), c.run, gateHandoffNotice(reasons), false);
+        return { kind: 'hand_off' as const };
+      };
       const e = await assessIssue(services.read, c.store.config.upstream, c.run.contributor);
-      if (e.kind === 'unknown') return { kind: 'hand_off' };
+      if (e.kind === 'unknown') return handOff('issue_unknown');
       const baseSha = await resolveBase(services.read, {
         ...c.store.config.upstream,
         defaultBranch: e.facts.defaultBranch,
@@ -459,9 +465,9 @@ export function createSteps(
         ...c.store.config.upstream,
         ref: baseSha,
       });
-      if (files.kind === 'unknown') return { kind: 'hand_off' };
+      if (files.kind === 'unknown') return handOff('policy_unknown');
       const templates = files.files.filter((file) => /pull_request_template/iu.test(file.path));
-      if (templates.length > 1) return { kind: 'hand_off' };
+      if (templates.length > 1) return handOff('multiple_templates');
       // Restrictions remain a deterministic floor even if paid assessment cannot complete.
       const floor = classifyPolicy(files.files);
       const p =
@@ -482,7 +488,9 @@ export function createSteps(
         decision.kind === 'ineligible' ||
         decision.kind === 'hand_off'
       )
-        return { kind: decision.kind };
+        return decision.kind === 'hand_off'
+          ? handOff(...decision.reasons)
+          : { kind: decision.kind };
       c.store.recordUpstreamRepositoryId(e.facts.repositoryId);
       const lines = files.files.flatMap((file) =>
         policyRegions(file).map((r) => r.lines.map((l) => l.text).join(' '))
@@ -498,7 +506,7 @@ export function createSteps(
         ) &&
         c.store.config.authorApproval?.name.toLowerCase() === c.run.contributor.toLowerCase()
       )
-        return { kind: 'hand_off' };
+        return handOff('real_name_required');
       const issue = await services.read(
         `/repos/${c.store.config.upstream.owner}/${c.store.config.upstream.repo}/issues/${c.store.config.upstream.issue}`
       );
@@ -508,7 +516,7 @@ export function createSteps(
         typeof text?.title !== 'string' ||
         (text.body !== null && typeof text.body !== 'string')
       )
-        return { kind: 'hand_off' };
+        return handOff('issue_unreadable');
       const prior = artifacts(c).get<GateRecord>('gate');
       const currentDigest = policyDigest(p, files.files);
       artifacts(c).put('gate', {

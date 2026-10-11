@@ -47,6 +47,7 @@ import { applyUserPatch, changeCheckpoints, changeModelProfile } from '../edits'
 import { readOutcomeBudget, readOutcomeTrack } from '../outcome-records';
 import { RunStore } from '../run-store';
 import { StepArtifacts } from '../steps';
+import { STOP_NOTICE_KEY, stopNoticeAction } from '../stop-notice';
 import { loadVerification } from '../verification-record';
 import { createController } from '../wiring';
 
@@ -2193,6 +2194,9 @@ describe('createController real composition', () => {
     const h = rig({ realNameOnlyLogin: true, wrappedPolicy });
     const run = await h.controller.start(h.config);
     expect(run.state).toBe('gating');
+    const a = h.artifacts(run.runId);
+    expect(a.get<{ reason: string }>(STOP_NOTICE_KEY).reason).toBe('real_name_required');
+    a.close();
     expect(h.vm.calls).toEqual([]);
     expect(h.fake.oauthCalls).toEqual([]);
   });
@@ -2202,6 +2206,8 @@ describe('createController real composition', () => {
     expect(run.state).toBe('gating');
     const a = h.artifacts(run.runId);
     expect(a.store.upstreamRepositoryId).toBeUndefined();
+    // The hand-off leaves the run in gating; the notice is its only record (#1179).
+    expect(stopNoticeAction(a.get(STOP_NOTICE_KEY), a.store.run)).toContain('(policy_unknown)');
     a.close();
     // Recovery needs no fork check before the upstream is bound; gating reruns and hands off.
     const resumed = (await h.authorize(h.controller.resume(run.runId))) as { state: string };
