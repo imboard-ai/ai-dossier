@@ -2,6 +2,7 @@
 
 [![npm version](https://img.shields.io/npm/v/@ai-dossier/mcp-server)](https://www.npmjs.com/package/@ai-dossier/mcp-server)
 [![npm downloads](https://img.shields.io/npm/dm/@ai-dossier/mcp-server)](https://www.npmjs.com/package/@ai-dossier/mcp-server)
+[![npm provenance](https://img.shields.io/badge/npm-provenance%20%28SLSA%29-brightgreen?logo=npm)](https://www.npmjs.com/package/@ai-dossier/mcp-server#provenance)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](https://github.com/imboard-ai/ai-dossier/blob/main/LICENSE)
 
 **Use one portable AI-agent skill across Claude Code, Codex, OpenCode, and MCP-compatible workflows.**

@@ -6,6 +6,7 @@
 [![Examples](https://github.com/imboard-ai/ai-dossier/actions/workflows/test-examples.yml/badge.svg)](https://github.com/imboard-ai/ai-dossier/actions/workflows/test-examples.yml)
 [![npm version](https://img.shields.io/npm/v/@ai-dossier/cli)](https://www.npmjs.com/package/@ai-dossier/cli)
 [![npm downloads](https://img.shields.io/npm/dm/@ai-dossier/cli)](https://www.npmjs.com/package/@ai-dossier/cli)
+[![npm provenance](https://img.shields.io/badge/npm-provenance%20%28SLSA%29-brightgreen?logo=npm)](https://www.npmjs.com/package/@ai-dossier/cli#provenance)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![Spec](https://img.shields.io/badge/Dossier%20Spec-v1.0-blue)](docs/reference/README.md)
 [![MCP Ready](https://img.shields.io/badge/MCP-Ready-brightgreen)](mcp-server)
