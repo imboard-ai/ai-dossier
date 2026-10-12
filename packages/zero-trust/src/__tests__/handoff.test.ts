@@ -28,6 +28,7 @@ import {
   type GitHubRead,
   reconcileComment,
   reconcilePr,
+  tokenReader,
 } from '../github/reconcile';
 import { assertContentPolicy } from '../github/text';
 import type { IntentInput } from '../intents';
@@ -518,6 +519,24 @@ describe('reconciliation reads', () => {
       (async () => new Response('not json', { status: 502 })) as never
     );
     expect(await broken('/repos/x/y')).toEqual({ status: 502, body: null });
+  });
+
+  it('token reader adds only a bearer header to the same fixed GETs', async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({}), { status: 200 }));
+    const read = tokenReader('github_pat_readonly', fetchImpl as unknown as typeof fetch);
+    expect(await read('/repos/up/proj')).toEqual({ status: 200, body: {} });
+    const [url, init] = fetchImpl.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('https://api.github.com/repos/up/proj');
+    expect(init.method).toBe('GET');
+    expect(init.redirect).toBe('error');
+    expect((init.headers as Record<string, string>).authorization).toBe(
+      'Bearer github_pat_readonly'
+    );
+    await expect(read('/user')).rejects.toThrow();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    // A configured but missing token fails closed instead of falling back to anonymous.
+    for (const bad of ['', 'two words', 'line\nbreak'])
+      expect(() => tokenReader(bad)).toThrow('read_token_unavailable');
   });
 
   it('lists by head + base + state=all, never trusting a duplicate-PR refusal', async () => {

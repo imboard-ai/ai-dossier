@@ -77,6 +77,9 @@ export interface RunConfig {
     readonly privateKeyEnv: string;
     readonly clientSecretEnv: string;
   };
+  /** Optional env var holding a read-only token for upstream GitHub reads. Absent: anonymous
+   * reads (60/hour per IP). The token is sent only on controller GETs, never to a VM. */
+  readonly githubReadTokenEnv?: string;
   readonly retentionDays: number;
   readonly resumeRunId?: string;
 }
@@ -226,6 +229,7 @@ export function validateStoredRunConfig(raw: unknown): RunConfig {
       'limits',
       'signerKeyFile',
       'githubApp',
+      'githubReadTokenEnv',
       'retentionDays',
       'resumeRunId',
     ],
@@ -354,6 +358,9 @@ export function validateStoredRunConfig(raw: unknown): RunConfig {
     limits,
     signerKeyFile,
     githubApp,
+    ...(r.githubReadTokenEnv === undefined
+      ? {}
+      : { githubReadTokenEnv: env(r.githubReadTokenEnv) }),
     retentionDays,
     ...(resumeRunId === undefined ? {} : { resumeRunId }),
   };

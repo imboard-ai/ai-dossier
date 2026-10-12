@@ -220,6 +220,8 @@ describe('validateRunConfig', () => {
     ['githubApp.slug', 'invalid slug', 'invalid_github_app'],
     ['githubApp.privateKeyEnv', 'sk-proj-secret', 'secret_detected'],
     ['githubApp.clientSecretEnv', 'bad-name', 'invalid_env_name'],
+    ['githubReadTokenEnv', 'bad-name', 'invalid_env_name'],
+    ['githubReadTokenEnv', 'ghp_plantedsecret', 'secret_detected'],
     ['signerKeyFile', '', 'invalid_signer_key'],
     ['executionProfile.stateDir', 'ghp_secret', 'secret_detected'],
   ];
@@ -274,6 +276,13 @@ describe('validateRunConfig', () => {
     cycle.self = cycle;
     expect(() => assertSecretFree(cycle)).not.toThrow();
     expect(() => assertSecretFree(new Uint8Array([1]))).toThrow(SecretRedactionError);
+  });
+  it('accepts an optional read-token env name and omits it when absent', () => {
+    const { raw } = configFixture();
+    expect(validateRunConfig({ ...raw, githubReadTokenEnv: 'ZT_READ_TOKEN' })).toMatchObject({
+      githubReadTokenEnv: 'ZT_READ_TOKEN',
+    });
+    expect('githubReadTokenEnv' in validateRunConfig(raw)).toBe(false);
   });
   it('accepts lowered limits, checkpoints, optional repair omission and resume ID', () => {
     const { raw } = configFixture();

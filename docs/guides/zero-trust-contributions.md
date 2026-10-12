@@ -162,6 +162,7 @@ cd packages/zero-trust
    export ZT_APP_PRIVATE_KEY="$(cat <app-private-key.pem>)"
    export ZT_APP_CLIENT_SECRET='<client secret>'
    export ZT_MODEL_KEY='<model API key>'
+   export ZT_GITHUB_READ_TOKEN='<read-only token>'   # optional; see githubReadTokenEnv
    ```
 
    The model key variable must not be named `GH_TOKEN`, `GITHUB_TOKEN`, `GITHUB_CLIENT_SECRET` or
@@ -241,6 +242,7 @@ A complete example (replace every `<…>`):
     "privateKeyEnv": "ZT_APP_PRIVATE_KEY",
     "clientSecretEnv": "ZT_APP_CLIENT_SECRET"
   },
+  "githubReadTokenEnv": "ZT_GITHUB_READ_TOKEN",
   "retentionDays": 30
 }
 ```
@@ -259,6 +261,7 @@ A complete example (replace every `<…>`):
 | `limits` | no | VM and time limits. Each value may only **lower** the default. See below. |
 | `signerKeyFile` | yes | Path to the Ed25519 private key that signs receipts. Must be a regular file you own, mode `0600`, one hard link, at most 16 KiB. |
 | `githubApp` | yes | Your GitHub App. See below. |
+| `githubReadTokenEnv` | no, but recommended | Name of the environment variable holding a read-only GitHub token for reading the upstream. Without it every read is anonymous, and GitHub allows only 60 anonymous API reads per hour per IP address: one run makes dozens, so a second run in the same hour can stall at the gate. Create a fine-grained personal access token with **Public repositories (read-only)** access and no permissions. The token is sent only on the controller's fixed `GET` reads, never to the VM, the model or any write. If the field is set but the variable is empty, the run refuses to start (`read_token_unavailable`) rather than falling back to anonymous reads. |
 | `retentionDays` | no | Days to keep run artifacts after last activity. Default `30`, between 1 and 3650. |
 | `resumeRunId` | no | Exists in the stored schema, but `zt-run start` refuses a config that sets it (`invalid_resume_run_id`). To continue a run, use `zt-run resume --run <id>`. |
 
