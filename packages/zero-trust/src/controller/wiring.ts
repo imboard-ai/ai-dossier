@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Ed25519Signer, type Signer } from '@ai-dossier/core';
-import { BudgetLedger } from '../budget';
+import { BudgetLedger, conservativeHoldObservation } from '../budget';
 import type { BudgetEstimate, BudgetObservation } from '../budget-types';
 import { resolveBase } from '../canonical/acquire';
 import { assertDirectoryAncestors, readPrivate, replacePrivate } from '../durable-fs';
@@ -1518,7 +1518,7 @@ export function createController(
           path.join(store.storeDirectory('budget'), 'ledger.json'),
           store.contributionId
         ),
-      reconcileHold: async () => null,
+      reconcileHold: async (hold) => conservativeHoldObservation(hold),
       reconcileCleanup: async (vmId, c) => {
         const remaining = await localVm(c).listByRun(c.run.runId);
         return remaining.some((v) => v.vmId === vmId) ? null : 'local-qemu-unbilled-guest-absent';

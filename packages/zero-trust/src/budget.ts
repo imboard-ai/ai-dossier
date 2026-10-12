@@ -693,3 +693,16 @@ export class BudgetLedger {
     }
   }
 }
+
+/** Startup reconciliation for a hold whose outcome a crashed or failed process never
+ * recorded (model timeout, provider error, VM create/destroy failure). Charging the full
+ * estimate is the conservative bound: the reservation was sized as the most the action
+ * may spend. Leaving it `reserved` would refuse every later phase of the run (#1186). */
+export function conservativeHoldObservation(hold: BudgetReservation): BudgetObservation {
+  return {
+    money: structuredClone(hold.estimate.money),
+    tokens: hold.estimate.tokens,
+    timeMs: hold.estimate.timeMs,
+    source: 'reconciled_estimate',
+  };
+}
