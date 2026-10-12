@@ -130,7 +130,7 @@ export type ControllerTrackOutcome =
 export interface PhaseContext {
   /** The operator explicitly requested a revision (`resume --revise`). */
   readonly revise: boolean;
-  /** Logins the operator named (`resume --reviewer`) whose PR remarks count as maintainer
+  /** Logins the operator named (`resume --reviewers`) whose PR remarks count as maintainer
    * feedback although GitHub does not show them as maintainers to this run (#1198). */
   readonly reviewers: readonly string[];
   readonly observeRun: (run: RunRecord) => Promise<void>;

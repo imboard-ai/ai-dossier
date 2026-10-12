@@ -40,6 +40,7 @@ import { MAX_BODY_LENGTH } from '../dist/github/handoff.js';
 const FEEDBACK_NOT_ADMITTED =
   'This revision handed off: the maintainer feedback was judged out of scope or ambiguous, so nothing was implemented or pushed (the typed verdict is retained). Address the feedback yourself on the pull request, or cancel the run.';
 
+import { isGitHubLogin } from '../dist/github-login.js';
 import { parseJournalEvents } from '../dist/journal.js';
 import { lockDescriptor, StoreLockedError } from '../dist/lock.js';
 import { aggregate, contributionOutcome, recordAdoption } from '../dist/metrics/outcomes.js';
@@ -329,6 +330,8 @@ export async function createCommands({ root, createController, onAuthorizationUr
         await stopStoredRun(root, runId, 'Incident root fence');
         return status(runId);
       }
+      // Refuse a malformed login before any profile or checkpoint change is saved.
+      if (reviewers?.some((login) => !isGitHubLogin(login))) refuse('invalid_reviewer');
       if (modelProfile !== undefined || checkpoints !== undefined)
         withStore(runId, false, (store) => {
           checkRoot(store.config);

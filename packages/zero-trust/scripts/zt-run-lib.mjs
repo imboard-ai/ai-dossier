@@ -269,7 +269,7 @@ export async function main(argv, { createController, out, err, confirmAuthor } =
       case 'resume':
         status = await controller.resume(opts.run, {
           revise: Boolean(opts.revise),
-          ...(opts.reviewers ? { reviewers: opts.reviewers.split(',') } : {}),
+          ...(opts.reviewers !== undefined ? { reviewers: opts.reviewers.split(',') } : {}),
           ...(opts['model-profile']
             ? {
                 modelProfile: JSON.parse(
