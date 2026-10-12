@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { setTimeout as realDelay } from 'node:timers/promises';
 import { describe, expect, it, vi } from 'vitest';
-import { BudgetLedger } from '../budget';
+import { BudgetLedger, conservativeHoldObservation } from '../budget';
 import { TrustedGit } from '../canonical/trusted-git';
 import { TIME } from '../controller/__tests__/composition-fixture';
 import { approveBudgetCeiling } from '../controller/budget-extension';
@@ -520,7 +520,13 @@ describe('gate 4 lifecycle', () => {
     expect(await h.vm.listByRun(id)).toEqual([]);
     const b = h.artifacts(id);
     const after = readOutcomeBudget(b.store);
-    expect(after.reservations.find((row) => row.id === hold?.id)).toEqual(hold);
+    // Recovery cannot know what the dead process spent, so it charges the full estimate
+    // (#1186) rather than leaving a hold that refuses every later phase.
+    expect(after.reservations.find((row) => row.id === hold?.id)).toEqual({
+      ...hold,
+      status: 'settled',
+      observed: conservativeHoldObservation(hold),
+    });
     expect(after.sessions).toEqual(before.sessions);
     expect(
       after.reservations

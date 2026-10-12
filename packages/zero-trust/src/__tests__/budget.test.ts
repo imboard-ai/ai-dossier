@@ -3,7 +3,13 @@ import fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { BudgetLedger, budgetTotals, estimateBudget, requireBudgetRates } from '../budget';
+import {
+  BudgetLedger,
+  budgetTotals,
+  conservativeHoldObservation,
+  estimateBudget,
+  requireBudgetRates,
+} from '../budget';
 import {
   BudgetError,
   type BudgetEstimate,
@@ -58,6 +64,17 @@ describe('durable budget admission (operator, S1; scenarios 8/9/19/20)', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('an unreconciled hold settles at its full estimate, never stays reserved (#1186)', () => {
+    const hold = ledger.reserve('initial', estimate(30));
+    const before = budgetTotals(ledger.snapshot());
+    ledger.settle(hold.id, conservativeHoldObservation(hold));
+    const row = ledger.snapshot().reservations.find((r) => r.id === hold.id);
+    expect(row).toMatchObject({ status: 'settled', observed: { source: 'reconciled_estimate' } });
+    expect(row?.observed?.money).toEqual(hold.estimate.money);
+    // Charged conservatively: nothing the hold could have spent is forgotten.
+    expect(budgetTotals(ledger.snapshot())).toEqual(before);
   });
 
   it('rejects missing startup pricing without creating a ledger', () => {
