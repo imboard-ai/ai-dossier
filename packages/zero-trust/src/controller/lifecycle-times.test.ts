@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createRun, ReasonCode, transitionRun } from '../state';
-import { lifecycleTimes, publicationWaitTime } from './lifecycle-times';
+import { lifecycleTimes, openWaitUntil, publicationWaitTime } from './lifecycle-times';
 
 describe('shared lifecycle interval policy', () => {
   const start = '2026-10-05T00:00:00.000Z';
@@ -53,5 +53,27 @@ describe('publication wait accounting', () => {
     [event('begin', 's1', 4000)],
   ])('refuses contradictory/torn publication intervals', (...events) => {
     expect(() => publicationWaitTime(events, 's1', 3000)).toThrow('invalid_journal');
+  });
+  it('an open wait on a run stopped outside gating/shipping freezes at the stop (#1184)', () => {
+    const start = Date.parse('2026-10-05T00:00:00.000Z');
+    const parked = createRun(
+      { runId: 'r', upstreamIssue: 'https://github.com/owner/repo/issues/1', contributor: 'user' },
+      new Date(start).toISOString()
+    );
+    const events = [event('begin', 's1', start + 1000)];
+    // Still parked at the gate: the wait keeps accruing.
+    expect(
+      publicationWaitTime(events, 's1', start + 9000, 'r', openWaitUntil(parked, start + 9000))
+    ).toBe(8000);
+    // kill-all stops the run without a closing row; active time froze at the stop.
+    const killed = transitionRun(
+      parked,
+      ReasonCode.UserCancelled,
+      new Date(start + 5000).toISOString()
+    );
+    const now = start + 3_600_000;
+    const wait = publicationWaitTime(events, 's1', now, 'r', openWaitUntil(killed, now));
+    expect(wait).toBe(4000);
+    expect(wait).toBeLessThanOrEqual(lifecycleTimes(killed, now).activeMs);
   });
 });

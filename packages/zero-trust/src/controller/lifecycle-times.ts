@@ -51,7 +51,8 @@ export interface OpenPublicationWait {
 }
 /** Validates one durable `publication_wait` row (shape, time, begin/end pairing) against
  * the wait still open before it. The controller's journal replay and the status projection
- * share this so neither accepts a row the other rejects. Throws `invalid_journal`. */
+ * share this so neither accepts a row the other rejects. Throws `invalid_journal`.
+ * A gate hand-off opens the same wait while the run is parked for the operator (#1184). */
 export function nextPublicationWait(
   open: OpenPublicationWait | undefined,
   event: Record<string, unknown>,
@@ -76,12 +77,20 @@ export function nextPublicationWait(
   return { closed: { sessionId: open.sessionId, ms: at - open.at } };
 }
 
+/** When a still-open wait stops accruing: a run stopped outside `gating`/`shipping`
+ * (kill-all, incident stop) never journals the closing row, and its active time froze at
+ * the stop, so the open wait must freeze there too. */
+export function openWaitUntil(run: RunRecord, now: number): number {
+  return run.state === 'gating' || run.state === 'shipping' ? now : Date.parse(run.updatedAt);
+}
+
 /** Read-only projection of durable publication waits for selected-session status. */
 export function publicationWaitTime(
   events: readonly unknown[],
   sessionId: string,
   now: number,
-  runId?: string
+  runId?: string,
+  openUntil = now
 ): number {
   let open: OpenPublicationWait | undefined;
   let total = 0;
@@ -92,7 +101,7 @@ export function publicationWaitTime(
     if (next.closed?.sessionId === sessionId) total += next.closed.ms;
     open = next.open;
   }
-  if (open?.sessionId === sessionId) total += now - open.at;
+  if (open?.sessionId === sessionId) total += Math.max(0, Math.min(now, openUntil) - open.at);
   if (!Number.isSafeInteger(total) || total < 0) throw new Error('invalid_journal');
   return total;
 }
