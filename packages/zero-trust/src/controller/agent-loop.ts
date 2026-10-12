@@ -15,11 +15,18 @@ import {
 } from '../model/adapter';
 import { BudgetExhaustedError, meteredComplete } from '../model/metered';
 import { assertNoSecrets, assertSecretFree, REDACTED, redactedExcerpt } from '../redaction';
+import { isRecord } from '../state';
 import { BrokerError, type VmAdapter, type VmHandle } from '../vm/adapter';
 import { invalidateProvisionedVm } from '../vm/workspace-lifecycle';
 import { abortProvisionedVm, assertProvisionedVm, leaseProvisionedVm } from './evidence-runner';
 import type { OutputCollector } from './output-collector';
-import { AGENT_SYSTEM, type AgentPhase, agentTools, untrustedFrame } from './prompts';
+import {
+  AGENT_ACTION_TOOLS,
+  AGENT_SYSTEM,
+  type AgentPhase,
+  agentTools,
+  untrustedFrame,
+} from './prompts';
 import { WorkspaceOverlay } from './workspace-overlay';
 
 export const DEFAULT_PLANNING_TURNS = 15;
@@ -367,15 +374,22 @@ async function loop(
       await record(turn, 'model', result);
       assertProvisionedVm(ctx.adapter, ctx.vm);
       if (remaining() <= 0) return { kind: 'budget_exhausted', reason: 'active_time' };
-      if (result.kind !== 'tool_calls' || result.calls.length !== 1)
+      if (result.kind !== 'tool_calls' || result.calls.length !== 1) {
+        // Do not persist the refused reply: a resume must ask the model again.
+        save(turn, null);
         return { kind: 'hand_off', reason: 'model_invalid_response' };
+      }
       const call = result.calls[0];
       // Detached JSON only: later producer mutation cannot change admission or history.
       let proposal: unknown;
       let reply: unknown;
       try {
         proposal = JSON.parse(JSON.stringify(call.arguments));
-        if (call.name !== 'propose_action') throw new AuthorityError('unknown_action');
+        if (AGENT_ACTION_TOOLS.includes(call.name)) {
+          // One tool per action (#1195): the tool name is the kind.
+          if (!isRecord(proposal) || 'kind' in proposal) throw new AuthorityError('invalid_field');
+          proposal = { ...proposal, kind: call.name };
+        } else if (call.name !== 'propose_action') throw new AuthorityError('unknown_action');
         if (typeof call.id !== 'string' || !call.id || call.id.length > 256)
           throw new AuthorityError('invalid_field');
         try {

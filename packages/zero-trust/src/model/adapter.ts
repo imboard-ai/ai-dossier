@@ -121,7 +121,10 @@ export function modelRequestBody(id: string, request: ModelRequest): string {
   return JSON.stringify({
     model: id,
     messages: [{ role: 'system', content: request.system }, ...request.messages],
-    ...(request.tools.length ? { tools: request.tools } : {}),
+    // Every tool turn admits exactly one call; text-only or parallel replies hand off (#1195).
+    ...(request.tools.length
+      ? { tools: request.tools, tool_choice: 'required', parallel_tool_calls: false }
+      : {}),
     max_tokens: request.maxOutputTokens,
     stream: false,
     ...(request.logprobs === undefined ? {} : { logprobs: request.logprobs }),

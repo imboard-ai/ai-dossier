@@ -1089,9 +1089,14 @@ overlay: WorkspaceOverlay, meta: CandidateMetadata }`. Either phase can return
 `{ kind: 'hand_off', reason }`, `{ kind: 'budget_exhausted', reason: 'budget' |
 'active_time' }`, or `{ kind: 'turns_exhausted' }`. Defaults are
 `DEFAULT_PLANNING_TURNS = 15` and `DEFAULT_IMPLEMENTATION_TURNS = 60`. Each model
-response counts one turn and must contain exactly one `propose_action` tool call;
-text-only, malformed, empty or multiple-call answers hand off as
-`model_invalid_response`. No model-specific branches or weaker adapter fallback exist.
+response counts one turn and must contain exactly one action tool call. Each action is
+its own flat tool (`worker_exec`, `hand_off`, `submit_plan`, `worker_write_file`,
+`candidate_ready`; the tool name is the kind), because OpenAI refuses a top-level
+`oneOf`. Tool requests send `tool_choice: "required"` and `parallel_tool_calls: false`.
+A legacy `propose_action { kind, … }` call is still admitted for persisted continuations.
+Text-only, malformed, empty or multiple-call answers hand off as
+`model_invalid_response`, and the refused reply is not kept for replay on resume. No
+model-specific branches or weaker adapter fallback exist.
 
 `admitModelAction` adds `submit_plan { text }` (UTF-8 `MAX_PLAN_BYTES = 8192`) and
 `candidate_ready { title, cause, scope, limitations }` (title ≤256 UTF-16 code units,

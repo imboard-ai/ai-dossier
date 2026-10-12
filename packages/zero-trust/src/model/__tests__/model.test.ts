@@ -286,10 +286,28 @@ describe('OpenAI-compatible untrusted responses and transport', () => {
     });
     expect(JSON.parse(init.body as string)).toMatchObject({
       tools: request.tools,
+      tool_choice: 'required',
+      parallel_tool_calls: false,
       max_tokens: 100,
       stream: false,
     });
     expect(JSON.stringify({ model, result, body: init.body })).not.toContain('rotated-key-value');
+  });
+  it('accepts a forced tool call reported with finish_reason "stop" (#1195)', async () => {
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(response(recorded({ tool_calls: [tool()] }, 'stop')));
+    expect(await adapter(fetcher).complete(request)).toMatchObject({
+      kind: 'tool_calls',
+      calls: [{ name: 'worker_exec' }],
+    });
+  });
+  it('sends no tool_choice or parallel_tool_calls without tools', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response(recorded()));
+    await adapter(fetcher).complete({ ...request, tools: [] });
+    const body = JSON.parse((fetcher.mock.calls[0] as [string, RequestInit])[1].body as string);
+    expect(body).not.toHaveProperty('tool_choice');
+    expect(body).not.toHaveProperty('parallel_tool_calls');
   });
   it('accepts text-only and a 64 KiB argument exactly', async () => {
     expect(
