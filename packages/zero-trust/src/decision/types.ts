@@ -74,6 +74,11 @@ export interface DecisionBudget {
   sessionId: string;
   rates: BudgetRate[];
 }
+export type CitationMode = 'normalized' | 'verbatim';
+/** One-based line coordinates shared by the model prompt and citation checks. */
+export function decisionSourceLines(text: string, mode: CitationMode): string[] {
+  return text.split(mode === 'verbatim' ? /\r\n|\n|\r/u : /\r\n|[\n\r\u0085\u2028\u2029]/u);
+}
 /** Trusted controller implementation. Raw answers remain untrusted, even externally. */
 export interface DecisionProvider {
   readonly id: string;
@@ -82,7 +87,13 @@ export interface DecisionProvider {
   /** Non-secret configuration/schema/framing fingerprint; never returned in verdicts. */
   readonly cacheIdentity?: string;
   readonly adapter: ModelAdapter;
-  request(question: TypedQuestion, inputs: readonly DecisionInput[], pass: number): ModelRequest;
+  /** citationMode fixes the line coordinates the prompt must number (decisionSourceLines). */
+  request(
+    question: TypedQuestion,
+    inputs: readonly DecisionInput[],
+    pass: number,
+    citationMode?: CitationMode
+  ): ModelRequest;
   decode(result: ModelResult): unknown;
 }
 export interface DecisionCache {
@@ -103,7 +114,7 @@ export interface DecisionDeps {
   passes?: number;
   signal?: AbortSignal;
   /** Strict consumers preserve raw quotes and CR/LF file line coordinates. */
-  citationMode?: 'normalized' | 'verbatim';
+  citationMode?: CitationMode;
 }
 export class InvalidDecisionError extends Error {
   constructor(readonly code: 'configuration' | 'inputs') {

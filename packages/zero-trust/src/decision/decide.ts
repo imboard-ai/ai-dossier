@@ -14,6 +14,7 @@ import {
   type DecisionInput,
   type DecisionReason,
   type DecisionValue,
+  decisionSourceLines,
   InvalidDecisionError,
   MAX_DECISION_CITATIONS,
   MAX_DECISION_INPUT_BYTES,
@@ -302,8 +303,8 @@ export async function decide(
     inputs.map((i) => [
       i.sourceId,
       verbatim
-        ? i.text.split(/\r\n|\n|\r/u)
-        : i.text.split(/\r\n|[\n\r\u0085\u2028\u2029]/u).map(whitespace),
+        ? decisionSourceLines(i.text, citationMode)
+        : decisionSourceLines(i.text, citationMode).map(whitespace),
     ])
   );
   try {
@@ -406,9 +407,9 @@ export async function decide(
     try {
       let request: ReturnType<typeof provider.request>;
       try {
-        request = synchronousResult(provider.request(question, inputs, pass)) as ReturnType<
-          typeof provider.request
-        >;
+        request = synchronousResult(
+          provider.request(question, inputs, pass, citationMode)
+        ) as ReturnType<typeof provider.request>;
       } catch {
         return escalate('configuration');
       }
