@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AGENT_SYSTEM, agentTools, untrustedFrame } from './prompts';
+import { AGENT_ACTION_TOOLS, AGENT_SYSTEM, agentTools, untrustedFrame } from './prompts';
 
 describe('controller-authored prompts', () => {
   it('frames hostile delimiters as JSON string data without changing the system text', () => {
@@ -21,23 +21,24 @@ describe('controller-authored prompts', () => {
     'implementing',
   ] as const)('offers closed stage-specific proposals for %s', (phase) => {
     const tools = agentTools(phase);
-    expect(tools).toHaveLength(1);
-    expect(tools[0].function.parameters).toMatchObject({ type: 'object' });
-    const schema = tools[0].function.parameters as {
-      oneOf: {
-        additionalProperties: boolean;
-        required: string[];
-        properties: { kind: { const: string } };
-      }[];
-    };
-    expect(schema.oneOf.map((a) => a.properties.kind.const)).toEqual(
+    // One flat tool per action: OpenAI refuses top-level oneOf/anyOf (#1195).
+    expect(tools.map((t) => t.function.name)).toEqual(
       phase === 'planning'
         ? ['worker_exec', 'hand_off', 'submit_plan']
         : ['worker_exec', 'hand_off', 'worker_write_file', 'candidate_ready']
     );
-    expect(
-      schema.oneOf.every((a) => a.additionalProperties === false && a.required.includes('kind'))
-    ).toBe(true);
+    for (const tool of tools) {
+      const schema = tool.function.parameters as Record<string, unknown> & {
+        required: string[];
+        properties: Record<string, unknown>;
+      };
+      expect(schema).toMatchObject({ type: 'object', additionalProperties: false });
+      for (const key of ['oneOf', 'anyOf', 'allOf', 'enum', 'const', 'not'])
+        expect(schema).not.toHaveProperty(key);
+      expect(schema.required).toEqual(Object.keys(schema.properties));
+      expect(schema.properties).not.toHaveProperty('kind');
+      expect(AGENT_ACTION_TOOLS).toContain(tool.function.name);
+    }
     expect(JSON.stringify(tools)).not.toContain('request_publication');
   });
 });

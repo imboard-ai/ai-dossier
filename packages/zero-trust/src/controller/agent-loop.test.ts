@@ -21,6 +21,7 @@ import { createRun } from '../state';
 import { DEFAULT_LIMITS } from '../vm/adapter';
 import {
   ActiveTimeBudget,
+  type AgentContinuation,
   type AgentLoopContext,
   DEFAULT_IMPLEMENTATION_TURNS,
   DEFAULT_PLANNING_TURNS,
@@ -30,6 +31,7 @@ import {
 } from './agent-loop';
 import { provisionWorkspace, releaseWorkspace, runPlanned } from './evidence-runner';
 import { OutputCollector } from './output-collector';
+import { AGENT_ACTION_TOOLS } from './prompts';
 
 const TIME = '2026-10-08T00:00:00.000Z';
 const BASE = exportSource(path.join(__dirname, '../../fixtures/ecosystem/npm/base'));
@@ -62,10 +64,24 @@ afterEach(() => {
   vi.unstubAllEnvs();
   for (const dir of temps.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
-function call(arguments_: unknown, id = 'action-1', name = 'propose_action'): ModelResult {
+/** Known action kinds use their own tool (#1195); anything else exercises `propose_action`. */
+function call(arguments_: unknown, id = 'action-1', name?: string): ModelResult {
+  let tool = name ?? 'propose_action';
+  let args = arguments_;
+  if (
+    name === undefined &&
+    args !== null &&
+    typeof args === 'object' &&
+    !Array.isArray(args) &&
+    AGENT_ACTION_TOOLS.includes(String((args as { kind?: unknown }).kind))
+  ) {
+    const { kind, ...rest } = args as { kind: string };
+    tool = kind;
+    args = rest;
+  }
   return {
     kind: 'tool_calls',
-    calls: [{ id, name, arguments: arguments_ }],
+    calls: [{ id, name: tool, arguments: args }],
     usage: { inputTokens: 10, outputTokens: 10 },
   };
 }
@@ -438,7 +454,19 @@ describe('provider-neutral admitted controller loop', () => {
     },
   ] as ModelResult[])('unreadable or ambiguous answer %# is a hand-off, never candidate', async (response) => {
     const { ctx, adapter } = await setup([response]);
-    expect(await runPlanning(ctx)).toEqual({ kind: 'hand_off', reason: 'model_invalid_response' });
+    const saved: AgentContinuation[] = [];
+    expect(
+      await runPlanning({ ...ctx, saveContinuation: (snapshot) => saved.push(snapshot) })
+    ).toEqual({ kind: 'hand_off', reason: 'model_invalid_response' });
+    expect(adapter.calls).toEqual([]);
+    // The refused reply is never left pending: a resume asks the model again (#1195).
+    expect(saved.at(-1)?.pending).toBeNull();
+  });
+  it('a per-action tool call carrying its own kind is refused (#1195)', async () => {
+    const { ctx, adapter } = await setup([
+      call({ kind: 'submit_plan', text: PLAN.text }, 'action-1', 'submit_plan'),
+    ]);
+    expect((await runPlanning({ ...ctx, maxTurns: 1 })).kind).not.toBe('plan');
     expect(adapter.calls).toEqual([]);
   });
   it('unknown tool names are authority rejections', async () => {
@@ -901,8 +929,18 @@ describe('provider-neutral admitted controller loop', () => {
     const { ctx, adapter } = await setup([]);
     const fetcher = vi.fn<typeof fetch>().mockImplementation(async (_url, request) => {
       const body = JSON.parse(request?.body as string);
-      expect(body.tools[0].function.parameters.type).toBe('object');
-      expect(body.tools[0].function.parameters.oneOf.length).toBeGreaterThan(0);
+      // OpenAI refuses a top-level oneOf/anyOf/allOf/enum/const/not (#1195).
+      for (const tool of body.tools) {
+        expect(tool.function.parameters.type).toBe('object');
+        for (const key of ['oneOf', 'anyOf', 'allOf', 'enum', 'const', 'not'])
+          expect(tool.function.parameters).not.toHaveProperty(key);
+      }
+      expect(body.tools.map((t: { function: { name: string } }) => t.function.name)).toEqual([
+        'worker_exec',
+        'hand_off',
+        'submit_plan',
+      ]);
+      expect(body).toMatchObject({ tool_choice: 'required', parallel_tool_calls: false });
       return new Response(
         JSON.stringify({
           choices: [
@@ -915,8 +953,8 @@ describe('provider-neutral admitted controller loop', () => {
                     id: 'call-1',
                     type: 'function',
                     function: {
-                      name: 'propose_action',
-                      arguments: JSON.stringify({ kind: 'submit_plan', text: PLAN.text }),
+                      name: 'submit_plan',
+                      arguments: JSON.stringify({ text: PLAN.text }),
                     },
                   },
                 ],

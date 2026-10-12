@@ -74,7 +74,8 @@ function parse(raw: unknown, request: ModelRequest, reported: ModelUsage | null)
   const choice = raw.choices[0];
   const message = choice.message as Record<string, unknown>;
   if (
-    choice.finish_reason === 'tool_calls' &&
+    // Forced tool choice may report finish_reason "stop" with tool calls.
+    (choice.finish_reason === 'tool_calls' || choice.finish_reason === 'stop') &&
     Array.isArray(message.tool_calls) &&
     message.tool_calls.length > 0
   ) {

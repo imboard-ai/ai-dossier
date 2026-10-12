@@ -267,6 +267,14 @@ describe('admitModelAction — admitted actions are controller-bound', () => {
     scope: 'Scope',
     limitations: ['No deletion'],
   };
+  it.each([
+    ['title', ''],
+    ['cause', '   '],
+    ['scope', '\u200b\n'],
+    ['limitations', ['\t']],
+  ])('refuses blank candidate %s that the PR body would reject on every ship (#1195)', (field, value) => {
+    expect(admitCode({ ...meta, [field]: value })).toBe('invalid_field');
+  });
   it('admits a byte-bounded plan and bounded candidate metadata with detached limitations', () => {
     expect(admitModelAction({ kind: 'submit_plan', text: 'é'.repeat(4096) }, BINDING)).toEqual({
       kind: 'submit_plan',
