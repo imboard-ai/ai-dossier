@@ -81,6 +81,16 @@ function byteText(value: unknown, max: number): string {
   return result;
 }
 
+/** PR-bound candidate prose must survive the PR body's normalization (NFKC, format and
+ * control characters stripped, trimmed): an empty value would otherwise be admitted here
+ * and fail shipping on every resume. */
+function visibleText(value: unknown, max: number, bytes = false): string {
+  const result = bytes ? byteText(value, max) : text(value, max);
+  if (!result.normalize('NFKC').replace(/[\p{Cf}\p{Cc}\s]/gu, ''))
+    throw new AuthorityError('invalid_field');
+  return result;
+}
+
 /** Shared controller write policy for authority admission and direct overlay consumers. */
 export function admitWorkspaceWrite(
   file: unknown,
@@ -154,10 +164,10 @@ export function admitModelAction(proposal: unknown, binding: AuthorityBinding): 
         throw new AuthorityError('invalid_field');
       return {
         kind,
-        title: text(raw.title, MAX_TITLE_CHARS),
-        cause: byteText(raw.cause, MAX_CANDIDATE_TEXT_BYTES),
-        scope: byteText(raw.scope, MAX_CANDIDATE_TEXT_BYTES),
-        limitations: limitations.map((item) => text(item, 500)),
+        title: visibleText(raw.title, MAX_TITLE_CHARS),
+        cause: visibleText(raw.cause, MAX_CANDIDATE_TEXT_BYTES, true),
+        scope: visibleText(raw.scope, MAX_CANDIDATE_TEXT_BYTES, true),
+        limitations: limitations.map((item) => visibleText(item, 500)),
       };
     }
     case 'hand_off':
