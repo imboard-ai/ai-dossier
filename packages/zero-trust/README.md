@@ -1618,7 +1618,7 @@ derives active time and monetary facts from controller history and the budget le
 returns a detached `RunConfig` with parsed `upstream: { owner, repo, issue }`.
 The exact GitHub issue URL and contributor login are validated; unknown keys at
 every configuration object level fail closed. Environment fields name variables
-(`apiKeyEnv`, `privateKeyEnv`, `clientSecretEnv`), never their values. Every string,
+(`apiKeyEnv`, `privateKeyEnv`, `clientSecretEnv`, `githubReadTokenEnv`), never their values. Every string,
 including unknown keys, is scanned before serialization. `RunConfigError.code`
 is a fixed, non-echoing reason such as `secret_detected`, `missing_rate`,
 `invalid_limits` or `unsupported_environment`.
@@ -1636,6 +1636,7 @@ The input shape is:
 | `limits` | Optional lowered `vcpus`, `memoryMiB`, `diskGiB`, `commandTimeoutMs`, `activeMinutes` |
 | `signerKeyFile` | Ed25519 receipt-key path |
 | `githubApp` | `{ appId, clientId, slug, privateKeyEnv, clientSecretEnv }`; positive numeric App ID, client ID and valid App slug; credentials are variable names |
+| `githubReadTokenEnv` | Optional variable name of a read-only token for upstream `GET`s (`tokenReader`); absent means anonymous reads (60/hour per IP); set but empty refuses with `read_token_unavailable` |
 | `retentionDays`, `resumeRunId` | Optional retention and supported `ztc-<16 hex>-run-1` resume ID |
 
 Malformed approval gives `invalid_author_approval`. `approvedAt` accepts canonical

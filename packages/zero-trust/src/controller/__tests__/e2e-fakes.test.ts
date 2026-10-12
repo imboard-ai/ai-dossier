@@ -2214,6 +2214,13 @@ describe('createController real composition', () => {
     expect(resumed.state).toBe('gating');
     expect(h.vm.calls).toEqual([]);
   }, 60000);
+  it('fails closed when a configured read-token env var is empty, never reading anonymously', () => {
+    const h = rig();
+    delete process.env.ZT_TEST_UNSET_READ_TOKEN;
+    expect(() =>
+      createController({ ...h.config, githubReadTokenEnv: 'ZT_TEST_UNSET_READ_TOKEN' })
+    ).toThrow('read_token_unavailable');
+  });
   it('refuses missing author approval and closed override violations before creating a run', () => {
     const h = rig();
     expect(() => createController({ ...h.config, authorApproval: undefined })).toThrow(

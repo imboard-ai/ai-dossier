@@ -21,7 +21,7 @@ import { type ForkBranch, readForkBranch } from '../github/fork-ref';
 import { bodyDigest, handoffMarker, prTitle } from '../github/handoff';
 import { type HandoffAdmission, HandoffDriver } from '../github/handoff-driver';
 import { ForkPusher, type ForkPusherOptions } from '../github/push';
-import { anonymousReader, type GitHubRead } from '../github/reconcile';
+import { anonymousReader, type GitHubRead, tokenReader } from '../github/reconcile';
 import { OUTSTANDING, TokenJournal, TokenVault } from '../github/token-journal';
 import { PrTracker, TrackError, trackFromHandoff } from '../github/track';
 import { IntentDriver, WriteBlockedError, WriteRefusedError } from '../intents';
@@ -468,7 +468,12 @@ export function createController(
   if (!config.authorApproval) throw new AuthorApprovalError('author_approval_missing');
   const now = overrides.now ?? (() => new Date());
   const fetcher = overrides.fetch ?? fetch;
-  const read = policyReader(overrides.read ?? anonymousReader(fetcher));
+  const read = policyReader(
+    overrides.read ??
+      (config.githubReadTokenEnv
+        ? tokenReader(process.env[config.githubReadTokenEnv] ?? '', fetcher)
+        : anonymousReader(fetcher))
+  );
   const signer = overrides.signer ?? new Ed25519Signer(config.signerKeyFile);
   const root = path.join(config.executionProfile.stateDir, 'runs');
   // Closed proxy configuration. Command builders validate URLs; the VM broker validates

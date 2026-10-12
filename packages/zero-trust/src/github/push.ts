@@ -89,7 +89,7 @@ export type PushLedgerStore = TokenStore;
 
 export interface ForkPusherOptions {
   readonly broker: Pick<ForkCredentialBroker, 'withForkPush'>;
-  /** Credential-free reader (`anonymousReader`). */
+  /** Upstream/fork GET reader (`anonymousReader`, or `tokenReader` with a read-only token). */
   readonly read: GitHubRead;
   readonly fork: ForkRef;
   readonly ledger: PushLedgerStore;

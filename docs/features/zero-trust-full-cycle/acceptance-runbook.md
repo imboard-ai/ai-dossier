@@ -127,6 +127,7 @@ shell history:
 export ZT_APP_PRIVATE_KEY="$(cat <app-private-key.pem>)"
 read -rs ZT_APP_CLIENT_SECRET && export ZT_APP_CLIENT_SECRET   # paste, then Enter
 read -rs ZT_MODEL_KEY && export ZT_MODEL_KEY                   # paste, then Enter
+read -rs ZT_GITHUB_READ_TOKEN && export ZT_GITHUB_READ_TOKEN   # read-only token; avoids the 60/hour anonymous limit
 ```
 
 The model key variable must not be `GH_TOKEN`, `GITHUB_TOKEN`, `GITHUB_CLIENT_SECRET`, or start
@@ -245,6 +246,7 @@ run `zt-run` in):
     "privateKeyEnv": "ZT_APP_PRIVATE_KEY",
     "clientSecretEnv": "ZT_APP_CLIENT_SECRET"
   },
+  "githubReadTokenEnv": "ZT_GITHUB_READ_TOKEN",
   "retentionDays": 30
 }
 ```

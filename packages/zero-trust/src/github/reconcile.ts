@@ -23,6 +23,21 @@ const MAX_COMMENT_PAGES = 30;
 
 /** Anonymous reader: public upstream reads need no credential, so none is ever sent. */
 export function anonymousReader(fetchImpl: typeof fetch = fetch): GitHubRead {
+  return repositoryReader(fetchImpl, {});
+}
+
+/** Same fixed GETs with a read-only token, only for the 60/hour anonymous limit per IP.
+ * The operator supplies a token without write permission; it never leaves the controller. */
+export function tokenReader(token: string, fetchImpl: typeof fetch = fetch): GitHubRead {
+  if (typeof token !== 'string' || !/^[\x21-\x7e]{1,512}$/u.test(token))
+    throw new Error('read_token_unavailable');
+  return repositoryReader(fetchImpl, { authorization: `Bearer ${token}` });
+}
+
+function repositoryReader(
+  fetchImpl: typeof fetch,
+  credential: { readonly authorization?: string }
+): GitHubRead {
   return async (path) => {
     if (!path.startsWith('/repos/')) throw new Error('Only repository reads are allowed');
     const response = await fetchImpl(`${GITHUB_API}${path}`, {
@@ -32,6 +47,7 @@ export function anonymousReader(fetchImpl: typeof fetch = fetch): GitHubRead {
         accept: 'application/vnd.github+json',
         'x-github-api-version': '2022-11-28',
         'user-agent': 'ai-dossier-zero-trust',
+        ...credential,
       },
     });
     let body: unknown = null;
