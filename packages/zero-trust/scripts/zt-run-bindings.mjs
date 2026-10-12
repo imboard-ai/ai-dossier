@@ -18,7 +18,7 @@ import {
   latestSourceEdit,
   sourceEditCount,
 } from '../dist/controller/edits.js';
-import { publicationWaitTime } from '../dist/controller/lifecycle-times.js';
+import { openWaitUntil, publicationWaitTime } from '../dist/controller/lifecycle-times.js';
 import {
   readOutcomeBudget,
   readOutcomeHandoffs,
@@ -235,7 +235,8 @@ export async function createCommands({ root, createController, onAuthorizationUr
                 parseJournalEvents(readPrivate(file)),
                 sessionId,
                 statusNow.getTime(),
-                store.runId
+                store.runId,
+                openWaitUntil(run, statusNow.getTime())
               );
             } catch (error) {
               if (error?.code === 'ENOENT') return 0;

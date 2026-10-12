@@ -1728,7 +1728,9 @@ verifying, shipping and revising intervals, including the current active interva
 within the selected budget session; waits, pauses, submitted/outcome/terminal
 intervals are excluded. `publicationWaitTime` projects the controller journal's
 durable publication-wait intervals; supplying `publicationWaitMs` excludes those
-idle shipping intervals too (the CLI and core do this). Estimated spend
+idle shipping intervals, and the time a run sits parked after a gate hand-off, too (the
+CLI and core do this). An open wait on a run stopped outside gating/shipping stops
+accruing at the stop (`openWaitUntil`). Estimated spend
 is the selected budget session's conservative spent plus reserved **minor units**;
 remaining is the ceiling less that total, floored at zero. It reports the latest
 transition reason and prioritizes pending `handoffStatus`, credential-free

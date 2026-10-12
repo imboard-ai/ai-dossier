@@ -43,6 +43,7 @@ import { latestSourceEdit, sourceEditCount } from './edits';
 import {
   nextPublicationWait,
   type OpenPublicationWait,
+  openWaitUntil,
   publicationWaitTime,
 } from './lifecycle-times';
 import { RunStore } from './run-store';
@@ -1095,7 +1096,8 @@ export class RunController {
         this.journal?.read() ?? [],
         this.sessionId(),
         observedAt.getTime(),
-        this.held.runId
+        this.held.runId,
+        openWaitUntil(this.held.run, observedAt.getTime())
       ),
     });
     if (
