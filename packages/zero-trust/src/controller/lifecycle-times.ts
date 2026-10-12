@@ -51,7 +51,8 @@ export interface OpenPublicationWait {
 }
 /** Validates one durable `publication_wait` row (shape, time, begin/end pairing) against
  * the wait still open before it. The controller's journal replay and the status projection
- * share this so neither accepts a row the other rejects. Throws `invalid_journal`. */
+ * share this so neither accepts a row the other rejects. Throws `invalid_journal`.
+ * A gate hand-off opens the same wait while the run is parked for the operator (#1184). */
 export function nextPublicationWait(
   open: OpenPublicationWait | undefined,
   event: Record<string, unknown>,

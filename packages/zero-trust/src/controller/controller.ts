@@ -1107,6 +1107,8 @@ export class RunController {
         .reservations.some((hold) => hold.status === 'reserved' && this.oldHolds.has(hold.id))
     )
       return stopped(this.held.run.state) ? { kind: 'waiting' } : { kind: 'hand_off' };
+    // Time parked after a gate hand-off waits on the operator, not the run (#1184).
+    if (phase === 'gate') this.finishPublicationWait();
     let result: Outcome;
     const lease = Symbol();
     const allocations = new Set<Promise<VmHandle>>();
@@ -1147,7 +1149,11 @@ export class RunController {
       });
       this.cached.set(key, result);
     }
-    if (phase === 'ship' && result.kind === 'waiting' && !this.publicationWait) {
+    if (
+      ((phase === 'ship' && result.kind === 'waiting') ||
+        (phase === 'gate' && result.kind === 'hand_off')) &&
+      !this.publicationWait
+    ) {
       const at = this.deps.now().toISOString();
       const sessionId = this.sessionId();
       this.appendPublicationWait('begin', sessionId, at);

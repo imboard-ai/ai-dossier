@@ -283,6 +283,16 @@ describe('RunController', () => {
     expect(reconcileCleanup).toHaveBeenCalledWith('interrupted-guest', expect.anything());
     expect(endRun).toHaveBeenCalled();
   });
+  it('time parked after a gate hand-off is not active time (#1184)', async () => {
+    const h = rig();
+    h.steps.scripts.gate = [{ kind: 'hand_off' }];
+    const run = await h.controller.start(h.config);
+    expect(run.state).toBe('gating');
+    // Parked far beyond the 120-minute active budget waiting on the operator.
+    h.setTime(new Date(Date.parse(TIME) + 6 * 3_600_000).toISOString());
+    expect((await h.controller.resume(run.runId)).state).toBe('submitted');
+    expect(h.steps.calls.filter((call) => call === 'gate')).toHaveLength(2);
+  });
   it('runs direct proceed to submitted, persists and fans out every transition', async () => {
     const h = rig();
     const run = await h.controller.start(h.config);
