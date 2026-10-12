@@ -263,10 +263,17 @@ const admitAll = (): RevisionAdmission & { calls: string[] } => {
 const trackJournal = (dir = temp('zt-track-')): Journal => journal(dir);
 function tracker(
   up: Upstream,
-  options: { admission?: RevisionAdmission; run?: RunRecord; j?: Journal; bodies?: string } = {}
+  options: {
+    admission?: RevisionAdmission;
+    run?: RunRecord;
+    j?: Journal;
+    bodies?: string;
+    reviewers?: string[];
+  } = {}
 ) {
   const deps: TrackDeps = {
     read: up.read,
+    ...(options.reviewers ? { reviewers: options.reviewers } : {}),
     retainedIdentity: { upstreamRepositoryId: 1, forkRepositoryId: FORK_ID },
     admission: options.admission ?? admitAll(),
     bodyDirectory: options.bodies ?? temp('zt-track-bodies-'),
@@ -706,6 +713,35 @@ describe('maintainer feedback', () => {
     const { t } = tracker(held);
     expect(await t.beginRevision()).toMatchObject({ kind: 'unknown', detail: 'feedback' });
     expect(t.snapshot().run.state).toBe('awaiting_review');
+  });
+
+  it('a maintainer GitHub shows as CONTRIBUTOR is named in status and admitted only when the contributor names them (#1198)', async () => {
+    const up = new Upstream();
+    up.reviewComments = [
+      remark(11, undefined, maintainer('Hidden-Lead', 'CONTRIBUTOR')),
+      remark(12, undefined, maintainer(OWNER, 'CONTRIBUTOR')),
+      {
+        ...remark(13, undefined, maintainer('ci[bot]', 'NONE')),
+        user: { login: 'ci[bot]', type: 'Bot' },
+      },
+    ];
+    const plain = tracker(up).t;
+    const seen = await plain.resume();
+    expect(seen.status.feedback).toBe(0);
+    expect(seen.status.nextPermittedAction).toContain(
+      'Remarks from Hidden-Lead are not maintainer feedback'
+    );
+    expect(seen.status.nextPermittedAction).toContain('--reviewers');
+    expect(seen.status.nextPermittedAction).not.toContain(OWNER);
+    expect(await plain.beginRevision()).toMatchObject({ kind: 'nothing_to_revise' });
+    const named = tracker(up, { reviewers: ['hidden-lead'] }).t;
+    const resumed = await named.resume();
+    expect(resumed.status.feedback).toBe(1);
+    expect(resumed.status.nextPermittedAction).not.toContain('Remarks from');
+    const begun = await named.beginRevision();
+    expect(begun.kind === 'revising' && begun.feedback.map((f) => [f.id, f.author])).toEqual([
+      ['review_comment:11', 'Hidden-Lead'],
+    ]);
   });
 
   it('a remark pointing outside the tracked PR makes the listing untrusted', async () => {

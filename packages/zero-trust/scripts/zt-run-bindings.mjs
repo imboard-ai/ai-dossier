@@ -322,7 +322,7 @@ export async function createCommands({ root, createController, onAuthorizationUr
       });
       return status(runId);
     },
-    async resume(runId, { revise, modelProfile, checkpoints } = {}) {
+    async resume(runId, { revise, reviewers, modelProfile, checkpoints } = {}) {
       if (incidentRequested(root)) {
         const held = RunStore.open(root, runId, { cleanup: true });
         held.close();
@@ -341,6 +341,7 @@ export async function createCommands({ root, createController, onAuthorizationUr
       // Pending publication must reach read-back before any OAuth preflight.
       const run = await createController(config, { onAuthorizationUrl }).resume(runId, {
         revise: Boolean(revise),
+        ...(reviewers ? { reviewers } : {}),
       });
       return status(run.runId);
     },

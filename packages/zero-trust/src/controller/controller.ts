@@ -5,6 +5,7 @@ import type { BudgetEstimate, BudgetObservation, BudgetReservation } from '../bu
 import { readPrivate } from '../durable-fs';
 import { applyVerification } from '../ecosystem/classify';
 import { WITHDRAWAL_REASONS, type WithdrawalReason } from '../github/track';
+import { isGitHubLogin } from '../github-login';
 import { Journal } from '../journal';
 import { canonicalJson } from '../receipt/schema';
 import { assertSecretFree } from '../redaction';
@@ -129,6 +130,9 @@ export type ControllerTrackOutcome =
 export interface PhaseContext {
   /** The operator explicitly requested a revision (`resume --revise`). */
   readonly revise: boolean;
+  /** Logins the operator named (`resume --reviewer`) whose PR remarks count as maintainer
+   * feedback although GitHub does not show them as maintainers to this run (#1198). */
+  readonly reviewers: readonly string[];
   readonly observeRun: (run: RunRecord) => Promise<void>;
   readonly store: RunStore;
   readonly run: RunRecord;
@@ -228,6 +232,7 @@ export class ControllerError extends Error {
       | 'not_running'
       | 'invalid_outcome'
       | 'revision_unavailable'
+      | 'invalid_reviewer'
       | 'invalid_journal'
       | 'step_failed'
       | 'admission_closed'
@@ -386,6 +391,7 @@ export class RunController {
   private controlReconciledKind?: 'pause' | 'cancel';
   /** The operator passed `--revise`: this invocation may admit a new revision. */
   private revise = false;
+  private reviewers: readonly string[] = [];
   private actionResult?: TrackerActionResult;
   private publicationWait?: OpenPublicationWait;
   constructor(private readonly deps: ControllerDependencies) {}
@@ -406,13 +412,21 @@ export class RunController {
   }
   resume(
     runId: string,
-    options: { readonly revise?: boolean; readonly action?: TrackerActionRequest } = {}
+    options: {
+      readonly revise?: boolean;
+      readonly reviewers?: readonly string[];
+      readonly action?: TrackerActionRequest;
+    } = {}
   ): Promise<RunRecord> {
     const revise = options.revise === true;
+    const reviewers = Object.freeze([...(options.reviewers ?? [])]);
+    if (reviewers.some((login) => !isGitHubLogin(login)))
+      throw new ControllerError('invalid_reviewer');
     const action = options.action ? structuredClone(options.action) : undefined;
     if (action) assertTrackerAction(action);
     return this.launch(async () => {
       this.revise = revise;
+      this.reviewers = reviewers;
       this.store = this.deps.recovery.openStore(this.deps.root, runId);
       // Only a published PR (or a revision already in progress) can be revised.
       if (revise && !isTrackerPhase(this.store.run))
@@ -584,6 +598,7 @@ export class RunController {
     this.controlReconciled = undefined;
     this.controlReconciledKind = undefined;
     this.revise = false;
+    this.reviewers = [];
     this.actionResult = undefined;
     this.publicationWait = undefined;
     const watcher = setInterval(() => {
@@ -808,6 +823,7 @@ export class RunController {
     const signal = this.abort.signal;
     return {
       revise: this.revise,
+      reviewers: this.reviewers,
       observeRun: async (run) => {
         // Completed producer observations remain evidence after admission closes.
         // New revision resources/sessions still require an open stop fence.

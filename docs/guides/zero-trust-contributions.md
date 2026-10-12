@@ -517,7 +517,7 @@ Artifact paths are relative to the run's directory in the run store (`<state-dir
 | Cancel | `cancel --run <id> --reason <text>` | Allowed in any non-terminal state except `blocked_cleanup`. Destroys VMs and revokes credentials. In a waiting state (paused, awaiting you or a maintainer, submitted) the request is queued: run `resume` to apply it; until then `status` shows `cancel_requested`. A submitted pull request cannot be recalled; the cancelled status gives you a prepared close comment to post yourself. |
 | Edit | `edit --run <id> --patch <file.diff>` | Only while paused from `implementing` or `verifying`. A text Git diff (at most 10 MiB); binary patches, symlinks and unsafe paths are refused. Every accepted edit needs fresh review and verification, and the pull request says **"Includes contributor edits"**. Refused while paused from `shipping` (`edit_after_verification`). |
 | Model change | `resume --run <id> --model-profile <file.json>` | Only while `paused_user`. The file (at most 1 MiB) holds a `modelProfile` object only. Budget history stays; later calls use the new prices under the same session. |
-| Revisions | `resume --run <id> --revise` | After maintainer feedback on a submitted pull request. Opens a new budget session under the same contribution, re-admits policy and permission, implements in a fresh VM, verifies, and pushes to the same branch. Refused without a pull request (`revision_unavailable`). |
+| Revisions | `resume --run <id> --revise` | After maintainer feedback on a submitted pull request. Opens a new budget session under the same contribution, re-admits policy and permission, implements in a fresh VM, verifies, and pushes to the same branch. Refused without a pull request (`revision_unavailable`). Only remarks GitHub shows as from a maintainer count; a maintainer whose org membership is private looks like any other account, and `status` names whose remarks were left out. Add `--reviewers <login,...>` to count remarks from accounts you know are maintainers. |
 | Edit the pull request | `pr-edit --run <id> --title <text> --body-file <file>` | Only during a live revision. Title at most 256 characters; body file private (`0600`), at most 65,536 bytes, keeping the marker. Prints a link and instructions; you make the edit on GitHub; a later `resume` confirms it. |
 | Withdraw | `withdraw --run <id> --reason <maintainer_request\|user_instruction> --explanation <text>` | Not during a revision. Explanation at most 2,000 characters. Prints the pull request link and a prepared close comment; you post it and close the pull request; the run records `declined` when it observes the close. Nothing is deleted. |
 | Drop a pending action | `cancel-action --run <id>` | Removes a pending local `pr-edit` or `withdraw` without touching GitHub. A different action while one is pending is refused (`action_pending`). |
@@ -562,7 +562,7 @@ delete files under `<stateDir>/.start-guards` while controllers may be running.
 Errors print as `error: <code>` and never include provider messages or secrets. Common codes:
 `invalid_config`, `unknown_key`, `missing_rate`, `invalid_limits`, `invalid_signer_key`,
 `author_confirmation_required`, `checkpoint_stale`, `checkpoint_closed`, `nothing_to_pause`,
-`cleanup_required`, `action_pending`, `action_unavailable`, `revision_unavailable`,
+`cleanup_required`, `action_pending`, `action_unavailable`, `revision_unavailable`, `invalid_reviewer`,
 `snapshot_expired`, `incident_active`, `store_locked`.
 
 ## Costs and budgets
@@ -714,7 +714,7 @@ Every command needs `--root <stateDir>/runs`. This table summarizes `node script
 | Command | Arguments |
 |---|---|
 | `start` | `--config <file.json>` [`--confirm-author`] [`--author-name <name>`] [`--author-email <email>`] |
-| `resume` | `--run <id>` [`--revise`] [`--model-profile <file.json>`] [`--checkpoints plan,patch,verification\|none`] |
+| `resume` | `--run <id>` [`--revise`] [`--reviewers <login,...>`] [`--model-profile <file.json>`] [`--checkpoints plan,patch,verification\|none`] |
 | `edit` | `--run <id>` `--patch <file.diff>` |
 | `pr-edit` | `--run <id>` `--title <text>` `--body-file <file>` |
 | `withdraw` | `--run <id>` `--reason <maintainer_request\|user_instruction>` `--explanation <text>` |

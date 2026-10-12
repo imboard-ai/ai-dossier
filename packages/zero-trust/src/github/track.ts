@@ -8,6 +8,7 @@
 import path from 'node:path';
 import { isTrackerContinuation } from '../controller/tracker-continuation';
 import { writePrivateFile } from '../durable-fs';
+import { isGitHubLogin } from '../github-login';
 import { type IntentInput, isAdmitted, WriteBlockedError } from '../intents';
 import type { Journal } from '../journal';
 import { type CommandEvidence, canonicalJson } from '../receipt/schema';
@@ -107,6 +108,8 @@ export type PrTrack =
       readonly ci?: CiState;
       /** Open PRs only; null when the remarks could not be read. */
       readonly feedback?: readonly FeedbackItem[] | null;
+      /** Open PRs only: other accounts whose remarks were not admitted as feedback. */
+      readonly ignoredAuthors?: readonly string[];
     }
   | { readonly kind: 'gone'; readonly reason: GoneReason }
   /** `detail` is secret-free: which read failed and its HTTP status. */
@@ -223,11 +226,24 @@ const FEEDBACK_SOURCES = Object.freeze([
   ['comment', 'issues', 'comments'],
 ] as const);
 
+/** Who counts as a maintainer beyond GitHub's association, and where to note the rest. */
+export interface FeedbackAuthors {
+  /** Logins the contributor named as reviewers. GitHub reports MEMBER only to viewers who
+   * can see the membership, so a maintainer with private org membership reads as
+   * CONTRIBUTOR to this run (#1198). */
+  readonly trusted?: readonly string[];
+  /** Collects the other non-bot authors of remarks that carry text, except `self`. */
+  readonly ignored?: Set<string>;
+  /** The PR author: their own remarks are neither feedback nor worth a notice. */
+  readonly self?: string;
+}
+
 /** One remark as GitHub lists it; null when malformed, undefined when not feedback. */
 function feedbackItem(
   kind: (typeof FEEDBACK_SOURCES)[number][0],
   raw: unknown,
-  prUrl: string
+  prUrl: string,
+  authors: FeedbackAuthors = {}
 ): FeedbackItem | null | undefined {
   if (!isRecord(raw)) return null;
   // A pending review is not visible yet; a deleted account (no user) cannot be a maintainer.
@@ -244,13 +260,20 @@ function feedbackItem(
   )
     return null;
   const body = (raw.body as string | null) ?? '';
+  // Approvals and empty comment-only reviews carry nothing to address.
   if (
     raw.user.type === 'Bot' ||
-    !(MAINTAINER_ASSOCIATIONS as readonly unknown[]).includes(raw.author_association) ||
-    // Approvals and empty comment-only reviews carry nothing to address.
     (kind === 'review' && raw.state !== 'CHANGES_REQUESTED' && !body.trim())
   )
     return undefined;
+  if (
+    !(MAINTAINER_ASSOCIATIONS as readonly unknown[]).includes(raw.author_association) &&
+    !authors.trusted?.some((login) => sameLogin(login, author))
+  ) {
+    if (isGitHubLogin(author) && !(authors.self && sameLogin(authors.self, author)))
+      authors.ignored?.add(author);
+    return undefined;
+  }
   // Checked after the author filter: an oversized remark from anyone else must not make
   // the whole listing unreadable, while truncated maintainer feedback is never used.
   if (body.length > MAX_FEEDBACK_BODY) return null;
@@ -268,7 +291,8 @@ function feedbackItem(
  * a listing is unreadable or an entry is malformed. */
 export async function observeFeedback(
   read: GitHubRead,
-  pr: Pick<TrackedPr, 'binding' | 'number' | 'url'>
+  pr: Pick<TrackedPr, 'binding' | 'number' | 'url'>,
+  authors: FeedbackAuthors = {}
 ): Promise<FeedbackItem[] | null> {
   const repo = repoPath(prBinding(pr.binding));
   const items: FeedbackItem[] = [];
@@ -280,7 +304,7 @@ export async function observeFeedback(
     );
     if (!listed) return null;
     for (const raw of listed) {
-      const item = feedbackItem(kind, raw, pr.url);
+      const item = feedbackItem(kind, raw, pr.url, authors);
       if (item === null) return null;
       if (item) items.push(item);
     }
@@ -294,7 +318,8 @@ export async function observePr(
   read: GitHubRead,
   pr: TrackedPr,
   replacementAuthor?: string,
-  retainedIdentity?: { upstreamRepositoryId: number; forkRepositoryId: number }
+  retainedIdentity?: { upstreamRepositoryId: number; forkRepositoryId: number },
+  reviewers: readonly string[] = []
 ): Promise<PrTrack> {
   const b = prBinding(pr.binding);
   const authority = retainedIdentity ? { ...retainedIdentity } : undefined;
@@ -371,11 +396,22 @@ export async function observePr(
   }
   if (branchSha === null) return { kind: 'gone', reason: 'branch_deleted' };
   if (facts.state === 'closed') return Object.freeze({ ...facts, branchSha });
+  const ignored = new Set<string>();
   const [ci, feedback] = await Promise.all([
     observeCi(read, b, facts.headSha),
-    observeFeedback(read, pr),
+    observeFeedback(read, pr, {
+      trusted: reviewers,
+      ignored,
+      ...(facts.author ? { self: facts.author } : {}),
+    }),
   ]);
-  return Object.freeze({ ...facts, branchSha, ci, feedback });
+  return Object.freeze({
+    ...facts,
+    branchSha,
+    ci,
+    feedback,
+    ignoredAuthors: Object.freeze([...ignored].sort()),
+  });
 }
 
 export type UpstreamOutcome = 'awaiting_review' | 'merged' | 'declined' | 'blocked' | 'unknown';
@@ -514,6 +550,8 @@ export interface TrackDeps {
   /** Controller-owned directory for prepared texts the contributor pastes. */
   readonly bodyDirectory: string;
   readonly now: () => string;
+  /** Logins whose remarks count as maintainer feedback (`resume --reviewers`, #1198). */
+  readonly reviewers?: readonly string[];
 }
 
 export const ACTION_KINDS = Object.freeze(['edit', 'withdraw', 'reopen'] as const);
@@ -587,6 +625,7 @@ interface Seen {
   readonly headSha: string;
   readonly branchSha: string | null;
   readonly actionable: number | null;
+  readonly ignored: readonly string[];
 }
 
 /** The run's tracking facts and what the contributor does next. */
@@ -1040,6 +1079,14 @@ function assertVisibleBody(body: string, marker: string): void {
     throw new HandoffError('hidden_content');
 }
 
+/** #1198: say whose remarks were left out, so a maintainer GitHub hides is not lost. */
+function ignoredText(ignored: readonly string[] | undefined): string {
+  if (!ignored?.length) return '';
+  const shown = ignored.slice(0, 5).join(', ');
+  const more = ignored.length > 5 ? ` and ${ignored.length - 5} more` : '';
+  return ` Remarks from ${shown}${more} are not maintainer feedback: GitHub does not show these accounts as maintainers to this run (private org membership looks the same). If one is a maintainer, resume with --revise --reviewers <login>.`;
+}
+
 const drivenJournals = new WeakSet<Journal>();
 /** One read: the PR as observed, or an ambiguous re-detection a person must settle. */
 type Read = PrTrack | { kind: 'handoff'; reason: AmbiguityReason };
@@ -1155,7 +1202,7 @@ export class PrTracker {
         const feedback = n
           ? `${n} maintainer review item(s) are not addressed at ${s.verifiedSha}; resume with a revision to address them.`
           : 'Waiting for maintainer review; no compute runs until you resume.';
-        return `${feedback} ${checks}`;
+        return `${feedback} ${checks}${ignoredText(seen?.ignored)}`;
       }
       case 'revising':
       case 'verifying':
@@ -1237,7 +1284,13 @@ export class PrTracker {
   /** One read of the tracked PR, following a replacement PR when the tracked one is closed
    * (AC6). Records only a rebind; every other decision is the caller's. */
   private async observe(): Promise<Read> {
-    let track = await observePr(this.deps.read, this.state.pr);
+    let track = await observePr(
+      this.deps.read,
+      this.state.pr,
+      undefined,
+      undefined,
+      this.deps.reviewers
+    );
     const closed = track.kind === 'observed' && track.state === 'closed' && !track.merged;
     // A pending withdrawal asked for exactly this close, and a revision follows its own PR.
     if (closed && this.state.action?.kind !== 'withdraw' && !this.state.revision) {
@@ -1251,7 +1304,8 @@ export class PrTracker {
           this.deps.read,
           to,
           this.state.run.contributor,
-          this.retainedIdentity
+          this.retainedIdentity,
+          this.deps.reviewers
         );
         if (track.kind !== 'observed') return track;
         if (!hasOnlyMarker(track.body ?? '', from.marker))
@@ -1283,6 +1337,7 @@ export class PrTracker {
             actionable: track.feedback
               ? actionableFeedback(this.state, track.feedback).length
               : null,
+            ignored: track.ignoredAuthors ?? [],
           };
     return track;
   }

@@ -277,6 +277,9 @@ test('edit reads exact bounded patch bytes and resume passes model/checkpoint in
       profileFile,
       '--checkpoints',
       'plan,patch',
+      '--revise',
+      '--reviewers',
+      'lead,second-lead',
     ],
     {
       resume: (...args) => {
@@ -288,7 +291,12 @@ test('edit reads exact bounded patch bytes and resume passes model/checkpoint in
   assert.equal(resumed.code, 0);
   assert.deepEqual(calls[1], [
     run,
-    { revise: false, modelProfile: h.raw.modelProfile, checkpoints: ['plan', 'patch'] },
+    {
+      revise: true,
+      reviewers: ['lead', 'second-lead'],
+      modelProfile: h.raw.modelProfile,
+      checkpoints: ['plan', 'patch'],
+    },
   ]);
   const malformed = await invoke([
     'edit',

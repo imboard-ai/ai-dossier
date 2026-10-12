@@ -1055,6 +1055,7 @@ export function createController(
         retainRevisionFeedback: (feedback) => artifacts(c).put('feedback', feedback),
         bodyDirectory: c.store.storeDirectory('bodies'),
         now: () => now().toISOString(),
+        reviewers: c.reviewers,
         retainedIdentity: {
           upstreamRepositoryId: c.store.upstreamRepositoryId as number,
           forkRepositoryId: artifacts(c).require<ForkReady>('fork').repositoryId,
