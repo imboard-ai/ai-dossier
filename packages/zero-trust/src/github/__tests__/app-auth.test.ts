@@ -135,6 +135,50 @@ describe('fetchGitHubHttp timeout', () => {
   });
 });
 
+describe('token format', () => {
+  it('accepts the stateless ghs_<app id>_<JWT> installation token GitHub issues since 2026-04', async () => {
+    const part = (n: number) => 'aB3-_'.repeat(n);
+    const value = `ghs_5211724_${part(8)}.${part(75)}.${part(17)}`;
+    expect(value.length).toBeGreaterThan(500);
+    const http = async () => ({
+      status: 201,
+      json: {
+        token: value,
+        expires_at: '2026-10-06T13:00:00Z',
+        permissions: { contents: 'write' },
+        repositories: [{ id: FORK_ID }],
+        repository_selection: 'selected',
+      },
+    });
+    const app = appCredentialsFromEnv(env);
+    const issued = await mintInstallationToken(http, app, INSTALLATION_ID, FORK_ID, now);
+    expect(issued.kind === 'issued' && issued.token.value).toBe(value);
+  });
+
+  it('still refuses whitespace, header and config metacharacters', async () => {
+    const app = appCredentialsFromEnv(env);
+    for (const value of [
+      'ghs_abc def0123456789abcdefgh',
+      'ghs_abc\r\nX-Injected:01234567',
+      'ghs_abc=def"0123456789abcd',
+    ])
+      expect(
+        (
+          await mintInstallationToken(
+            async () => ({
+              status: 201,
+              json: { token: value, expires_at: '2026-10-06T13:00:00Z' },
+            }),
+            app,
+            INSTALLATION_ID,
+            FORK_ID,
+            now
+          )
+        ).kind
+      ).toBe('malformed');
+  });
+});
+
 describe('recorded-response fake matches the gate-3 probe evidence', () => {
   // Redacted live evidence; the fake must reproduce each recorded status code.
   const evidence = fs

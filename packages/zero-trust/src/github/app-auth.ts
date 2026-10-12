@@ -17,8 +17,10 @@ export const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 export const INSTALLATION_TOKEN_PREFIX = 'ghs_';
 export const USER_TOKEN_PREFIX = 'ghu_';
-/** Token values go into headers and git config: allow only GitHub's token alphabet. */
-export const TOKEN_FORMAT = /^gh[su]_[A-Za-z0-9_]{20,255}$/u;
+/** Token values go into headers and git config: allow only GitHub's token alphabet. Since
+ * 2026-04 installation tokens are `ghs_<app id>_<JWT>`, about 520 characters with dots and
+ * base64url, so the alphabet includes `.` and `-` and the length leaves room to grow. */
+export const TOKEN_FORMAT = /^gh[su]_[A-Za-z0-9_.-]{20,4096}$/u;
 
 export class GitHubAuthError extends Error {
   constructor() {
