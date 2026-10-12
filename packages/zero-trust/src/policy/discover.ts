@@ -154,7 +154,8 @@ export async function discoverPolicy(
       validatePolicyFiles(files);
     }
     for (const path of POLICY_PATHS) await getFile(path);
-    const listing = await read(`${prefix}${POLICY_TEMPLATE_DIRECTORY}/${suffix}`);
+    // No trailing slash: GitHub redirects `dir/?ref=` and the reader refuses redirects.
+    const listing = await read(`${prefix}${POLICY_TEMPLATE_DIRECTORY}${suffix}`);
     if (listing.status === 404) return { kind: 'known', files: Object.freeze(files) };
     if (
       listing.status !== 200 ||

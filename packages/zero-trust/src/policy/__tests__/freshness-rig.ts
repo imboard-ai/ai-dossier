@@ -45,7 +45,7 @@ export async function freshnessRig() {
     object: { type: 'commit', sha: FRESH_HEAD },
   });
   const contentPath = (path: string) => `${FRESH_PREFIX}/contents/${path}?ref=${FRESH_HEAD}`;
-  for (const path of [...POLICY_PATHS, `${POLICY_TEMPLATE_DIRECTORY}/`])
+  for (const path of [...POLICY_PATHS, POLICY_TEMPLATE_DIRECTORY])
     set(contentPath(path), null, 404);
   const files: PolicyFile[] = [];
   const policy: PolicyAssessment = {

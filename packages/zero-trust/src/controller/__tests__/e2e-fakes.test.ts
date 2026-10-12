@@ -111,6 +111,7 @@ function rig(
     revisionDivergeOnMint?: boolean;
     revisionDrift?: boolean;
     upstreamReplaced?: boolean;
+    policyUnavailable?: boolean;
   } = {}
 ) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zt-composition-'));
@@ -317,6 +318,11 @@ function rig(
         body: { ref: 'refs/heads/main', object: { type: 'commit', sha: BASE_COMMIT.baseSha } },
       };
     if (options.restrictPolicy && planCalls > 0) policy = 'AI contributions are banned.';
+    // GitHub redirects a slash-terminated contents path; the reader refuses redirects.
+    if (p.startsWith('/repos/upstream/fixture/contents/') && p.includes('/?'))
+      return { status: 302, body: null };
+    if (p.startsWith('/repos/upstream/fixture/contents/') && options.policyUnavailable)
+      return { status: 500, body: null };
     if (p.startsWith('/repos/upstream/fixture/contents/'))
       return p.startsWith('/repos/upstream/fixture/contents/CONTRIBUTING.md?')
         ? {
@@ -2190,6 +2196,18 @@ describe('createController real composition', () => {
     expect(h.vm.calls).toEqual([]);
     expect(h.fake.oauthCalls).toEqual([]);
   });
+  it('resumes a run handed off before gating bound the upstream (#1115 live run)', async () => {
+    const h = rig({ policyUnavailable: true });
+    const run = await h.controller.start(h.config);
+    expect(run.state).toBe('gating');
+    const a = h.artifacts(run.runId);
+    expect(a.store.upstreamRepositoryId).toBeUndefined();
+    a.close();
+    // Recovery needs no fork check before the upstream is bound; gating reruns and hands off.
+    const resumed = (await h.authorize(h.controller.resume(run.runId))) as { state: string };
+    expect(resumed.state).toBe('gating');
+    expect(h.vm.calls).toEqual([]);
+  }, 60000);
   it('refuses missing author approval and closed override violations before creating a run', () => {
     const h = rig();
     expect(() => createController({ ...h.config, authorApproval: undefined })).toThrow(

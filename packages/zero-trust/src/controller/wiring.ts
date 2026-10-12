@@ -1533,6 +1533,8 @@ export function createController(
             // Explicit observation and link issuance need no paid computation or OAuth.
             if (TRACKING_STATES.includes(c.run.state)) return;
             if (prerequisiteWaitOrigin(c.run) && !artifacts(c).get('fork')) return;
+            // Before gating binds the upstream no fork check or credential can exist.
+            if (c.store.upstreamRepositoryId === undefined && !artifacts(c).get('fork')) return;
             await identity(c);
             await recoverShipping(c);
           }
