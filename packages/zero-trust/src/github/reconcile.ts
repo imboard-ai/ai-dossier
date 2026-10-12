@@ -29,7 +29,7 @@ export function anonymousReader(fetchImpl: typeof fetch = fetch): GitHubRead {
 /** Same fixed GETs with a read-only token, only for the 60/hour anonymous limit per IP.
  * The operator supplies a token without write permission; it never leaves the controller. */
 export function tokenReader(token: string, fetchImpl: typeof fetch = fetch): GitHubRead {
-  if (typeof token !== 'string' || !/^[\x21-\x7e]{1,512}$/u.test(token))
+  if (typeof token !== 'string' || !/^[\x21-\x7e]{1,4096}$/u.test(token))
     throw new Error('read_token_unavailable');
   return repositoryReader(fetchImpl, { authorization: `Bearer ${token}` });
 }
