@@ -4,6 +4,7 @@ import {
   clearStopNotice,
   driftHandoffNotice,
   freshnessNotice,
+  gateHandoffNotice,
   isAlteredEvidence,
   recordStopNotice,
   STOP_NOTICE_KEY,
@@ -94,5 +95,21 @@ describe('stop notices', () => {
     expect(isAlteredEvidence(new VerificationRecordError('evidence_mismatch'))).toBe(true);
     expect(isAlteredEvidence(new VerificationRecordError('unavailable'))).toBe(false);
     expect(isAlteredEvidence(new Error('invalid_record'))).toBe(false);
+  });
+  it('records a gate hand-off in gating with closed reasons only', () => {
+    const notice = gateHandoffNotice(['ai_unclear', 'ownership_unclear', 'ai_unclear']);
+    expect(notice).toMatchObject({ state: 'gating', reason: 'ai_unclear,ownership_unclear' });
+    expect(notice.nextPermittedAction).toContain('(ai_unclear,ownership_unclear)');
+    expect(gateHandoffNotice(['<script>ghp_x']).reason).toBe('unknown_input');
+    expect(gateHandoffNotice([]).reason).toBe('unknown_input');
+    const store = new Map<string, unknown>();
+    const artifacts = {
+      get: <T>(key: string) => store.get(key) as T | undefined,
+      put: (key: string, value: unknown) => void store.set(key, value),
+    };
+    recordStopNotice(artifacts, { history: [] }, notice, false);
+    expect(stopNoticeAction(store.get(STOP_NOTICE_KEY), { state: 'gating', history: [] })).toBe(
+      notice.nextPermittedAction
+    );
   });
 });

@@ -8,7 +8,7 @@ import type { DriftHandoffReason } from './drift';
 import { VerificationRecordError } from './verification-record';
 
 export interface StopNotice {
-  readonly state: 'paused_user' | 'awaiting_contributor' | 'blocked';
+  readonly state: 'paused_user' | 'awaiting_contributor' | 'blocked' | 'gating';
   /** The run history length once the stop is recorded. */
   readonly historyLength: number;
   readonly reason: string;
@@ -69,6 +69,39 @@ const DRIFT_HANDOFF_ACTIONS: Readonly<Record<DriftHandoffReason, string>> = Obje
 
 export function driftHandoffNotice(reason: DriftHandoffReason): Omit<StopNotice, 'historyLength'> {
   return { state: 'paused_user', reason, nextPermittedAction: DRIFT_HANDOFF_ACTIONS[reason] };
+}
+
+/** Why the gate handed off. Closed set: the policy decision's own codes plus the checks
+ * the gate step makes before and after it. */
+export const GATE_HANDOFF_REASONS = Object.freeze([
+  'issue_unknown',
+  'policy_unknown',
+  'multiple_templates',
+  'ai_unclear',
+  'ownership_unclear',
+  'ban_citation_missing',
+  'unknown_input',
+  'real_name_required',
+  'issue_unreadable',
+] as const);
+export type GateHandoffReason = (typeof GATE_HANDOFF_REASONS)[number];
+
+/** A gate hand-off leaves the run in `gating`; the notice is its only record. Unknown
+ * decision codes collapse to `unknown_input`, so no untrusted text reaches status. */
+export function gateHandoffNotice(reasons: readonly string[]): Omit<StopNotice, 'historyLength'> {
+  const closed = [
+    ...new Set(
+      reasons.map((r) =>
+        (GATE_HANDOFF_REASONS as readonly string[]).includes(r) ? r : 'unknown_input'
+      )
+    ),
+  ];
+  const reason = closed.length ? closed.join(',') : 'unknown_input';
+  return {
+    state: 'gating',
+    reason,
+    nextPermittedAction: `Handed off at the gate (${reason}). Nothing was written and no model work started. Check the upstream issue and contribution policy, then resume explicitly or contribute manually.`,
+  };
 }
 
 /** Permission freshness (PRD §5.9): revocation, closure or a policy change blocks. */
