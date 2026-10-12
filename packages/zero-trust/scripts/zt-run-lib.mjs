@@ -13,7 +13,10 @@ export const COMMANDS = Object.freeze({
     required: ['config', 'root'],
     optional: ['confirm-author', 'author-name', 'author-email'],
   },
-  resume: { required: ['root', 'run'], optional: ['revise', 'model-profile', 'checkpoints'] },
+  resume: {
+    required: ['root', 'run'],
+    optional: ['revise', 'reviewers', 'model-profile', 'checkpoints'],
+  },
   edit: { required: ['root', 'run', 'patch'], optional: [] },
   'pr-edit': { required: ['root', 'run', 'title', 'body-file'], optional: [] },
   withdraw: { required: ['root', 'run', 'reason', 'explanation'], optional: [] },
@@ -33,7 +36,7 @@ export const COMMANDS = Object.freeze({
 const BOOLEAN = new Set(['confirm-author', 'revise', 'json', 'apply']);
 export const USAGE =
   'Usage: zt-run <start|resume|edit|pr-edit|withdraw|cancel-action|status|pause|cancel|approve|reject|authorize|kill-all|metrics|adoption|sweep|export> --root <dir> [command options]';
-const HELP = `${USAGE}\nstart --config <file.json> [--confirm-author] [--author-name <name>] [--author-email <email>]\nresume --run <id> [--revise] [--model-profile <file.json>] [--checkpoints plan,patch|none]\nedit --run <id> --patch <file.diff>\npr-edit --run <id> --title <text> --body-file <file>\nwithdraw --run <id> --reason <${WITHDRAWAL_REASONS.join('|')}> --explanation <text>\ncancel-action --run <id>\nstatus --run <id> [--json]\npause --run <id> --reason <text>\ncancel --run <id> --reason <text>\napprove --run <id> --checkpoint <plan|patch|verification> --digest <sha256>\nreject --run <id> --checkpoint <plan|patch|verification> --digest <sha256> --reason <text>\nauthorize --run <id>\nkill-all --reason <text>\nmetrics [--json]\nadoption --run <id> --note <text>\nsweep [--apply]\nexport --run <id> --out <file>`;
+const HELP = `${USAGE}\nstart --config <file.json> [--confirm-author] [--author-name <name>] [--author-email <email>]\nresume --run <id> [--revise] [--reviewers <login,...>] [--model-profile <file.json>] [--checkpoints plan,patch|none]\nedit --run <id> --patch <file.diff>\npr-edit --run <id> --title <text> --body-file <file>\nwithdraw --run <id> --reason <${WITHDRAWAL_REASONS.join('|')}> --explanation <text>\ncancel-action --run <id>\nstatus --run <id> [--json]\npause --run <id> --reason <text>\ncancel --run <id> --reason <text>\napprove --run <id> --checkpoint <plan|patch|verification> --digest <sha256>\nreject --run <id> --checkpoint <plan|patch|verification> --digest <sha256> --reason <text>\nauthorize --run <id>\nkill-all --reason <text>\nmetrics [--json]\nadoption --run <id> --note <text>\nsweep [--apply]\nexport --run <id> --out <file>`;
 const ERROR_CODES = new Set([
   'invalid_patch',
   'edit_not_paused',
@@ -71,6 +74,7 @@ const ERROR_CODES = new Set([
   'author_email_unverified',
   'author_identity_unavailable',
   'revision_unavailable',
+  'invalid_reviewer',
   'action_unavailable',
   'action_pending',
   'root_mismatch',
@@ -265,6 +269,7 @@ export async function main(argv, { createController, out, err, confirmAuthor } =
       case 'resume':
         status = await controller.resume(opts.run, {
           revise: Boolean(opts.revise),
+          ...(opts.reviewers !== undefined ? { reviewers: opts.reviewers.split(',') } : {}),
           ...(opts['model-profile']
             ? {
                 modelProfile: JSON.parse(

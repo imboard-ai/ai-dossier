@@ -297,7 +297,7 @@ environment references, never literal configuration values.
 | Command | Required command-specific arguments | Optional arguments |
 |---|---|---|
 | `start` | `--config <file.json>` | `--confirm-author`, `--author-name <name>`, `--author-email <email>` |
-| `resume` | `--run <id>` | `--revise` (explicit verified revision, new retained-spend session), `--model-profile <file.json>`, `--checkpoints plan,patch,verification\|none` |
+| `resume` | `--run <id>` | `--revise` (explicit verified revision, new retained-spend session), `--reviewers <login,...>` (count these accounts' PR remarks as maintainer feedback), `--model-profile <file.json>`, `--checkpoints plan,patch,verification\|none` |
 | `edit` | `--run <id> --patch <file.diff>` | Trusted source edit while paused from implementing/verifying |
 | `pr-edit` | `--run <id> --title <text> --body-file <file>` | |
 | `withdraw` | `--run <id> --reason <maintainer_request\|user_instruction> --explanation <text>` | |
@@ -322,7 +322,11 @@ characters, `--explanation` at most 2000, and the body file at most 65536 bytes.
 re-request returns the same pending action; a different request while one is pending
 is refused with `action_pending` (run `cancel-action` first), and an action the run's
 state does not admit with `action_unavailable`. `resume --revise` on a run with no
-published pull request is refused with `revision_unavailable`.
+published pull request is refused with `revision_unavailable`. GitHub shows a
+maintainer whose org membership is private as `CONTRIBUTOR` to this run, so their
+remarks are not counted; the awaiting-review status names the accounts whose remarks
+were left out, and `resume --revise --reviewers <login,...>` admits remarks from the
+named accounts for that invocation (`invalid_reviewer` for a malformed login).
 
 Every command also requires `--root <dir>`. Unknown, repeated, missing and
 cross-command flags, positional arguments and malformed identifiers are refused.
@@ -627,7 +631,7 @@ executes `{ kind: 'edit', title, body }`, `{ kind: 'withdraw', reason, explanati
 or `{ kind: 'cancel-action' }` and returns `TrackerActionResult { kind: 'edit' |
 'withdraw' | 'reopen' | 'cancel-action', link, instructions, title?, bodyFile? }`;
 without it `prAction` refuses `invalid_outcome`, and a stop request that preempts the
-call refuses `admission_closed`. `resume(runId, { revise: true })` refuses
+call refuses `admission_closed`. `resume(runId, { revise: true, reviewers? })` refuses
 `revision_unavailable` unless the run is tracking a published PR or already inside a
 revision. The optional `RecoveryHooks.revisionWaiting(context)` reports an
 unconfirmed revision push; resume then only observes and admits no new work.
@@ -2621,8 +2625,8 @@ other drivers' `observeRun`; a restart may hand it an older copy of the run.
   record nothing; none means `declined`. Re-detection is skipped while a withdrawal
   or a revision is pending. The duplicate-PR 422 is never relied on.
 - **Revisions.** `beginRevision()` reads the PR and keeps maintainer feedback
-  (`MAINTAINER_ASSOCIATIONS`: OWNER, MEMBER, COLLABORATOR) that is not by the
-  contributor or a bot, carries no ai-dossier marker, is not an empty approval, and
+  (`MAINTAINER_ASSOCIATIONS`: OWNER, MEMBER, COLLABORATOR, or a login the contributor
+  named with `resume --reviewers`) that is not by the contributor or a bot, carries no ai-dossier marker, is not an empty approval, and
   was not addressed by a confirmed revision (an edited item is new). It rechecks
   freshness (`RevisionAdmission`: AI policy, issue, assignment, competing fixes and
   permission; contributor; fork binding) and moves the run to `revising`. A probe

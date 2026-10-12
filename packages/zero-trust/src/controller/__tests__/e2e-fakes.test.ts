@@ -690,7 +690,7 @@ function rig(
     identityUnavailable() {
       options.userUnavailable = true;
     },
-    feedback(body = 'Please clarify the duration units in the fix.') {
+    feedback(body = 'Please clarify the duration units in the fix.', association = 'MEMBER') {
       revisionMode = true;
       implementTurn = 0;
       feedback = [
@@ -698,7 +698,7 @@ function rig(
           id: 11,
           html_url: 'https://github.com/upstream/fixture/pull/8#issuecomment-11',
           user: { login: 'maintainer', type: 'User' },
-          author_association: 'MEMBER',
+          author_association: association,
           updated_at: new Date(clock).toISOString(),
           body,
         },
@@ -798,6 +798,32 @@ describe('createController real composition', () => {
     h.advanceClock();
     return started.runId;
   }
+  it('revises for a maintainer GitHub shows as CONTRIBUTOR only when resume names them (#1198)', async () => {
+    const h = rig();
+    const id = await published(h);
+    h.feedback(undefined, 'CONTRIBUTOR');
+    expect(() => h.controller.resume(id, { revise: true, reviewers: ['bad login'] })).toThrow(
+      'invalid_reviewer'
+    );
+    const calls = h.modelCalls();
+    const ignored = (await h.authorize(h.controller.resume(id, { revise: true }))) as {
+      state: string;
+    };
+    expect(ignored.state).toBe('awaiting_review');
+    expect(h.modelCalls()).toBe(calls);
+    expect(
+      (
+        (await h.authorize(
+          h.controller.resume(id, { revise: true, reviewers: ['Maintainer'] })
+        )) as { state: string }
+      ).state
+    ).toBe('submitted');
+    const a = h.artifacts(id);
+    const candidate = a.get<{ record: { candidateSha: string } }>('candidate');
+    expect((h.pr()?.head as { sha: string }).sha).toBe(candidate.record.candidateSha);
+    a.close();
+  }, 60000);
+
   it('observes only, then revises the same PR with a retained-spend session and verified CAS', async () => {
     const h = rig();
     const id = await published(h);
