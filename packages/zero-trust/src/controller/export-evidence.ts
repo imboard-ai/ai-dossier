@@ -14,17 +14,39 @@ import type { CommandRecord } from './evidence-runner';
 import type { RunStore } from './run-store';
 
 const MAX_BYTES = RECORD_BYTES;
+export type ExportEvidenceErrorCode =
+  | 'invalid_export_evidence'
+  | 'export_evidence_limit'
+  | 'export_evidence_unavailable';
+/** The pusher preserves error names in its safe deferred-authorization diagnostic.
+ * Encode only a closed controller code, never a filesystem/provider message. */
+export class ExportEvidenceError extends Error {
+  constructor(readonly code: ExportEvidenceErrorCode) {
+    super(code);
+    this.name = `ExportEvidenceError_${code}`;
+  }
+}
 function existing(file: string): unknown | undefined {
   try {
     const bytes = optionalBytes(path.dirname(file), path.basename(file), MAX_BYTES);
     return bytes === null ? undefined : jsonRecord(bytes, MAX_BYTES);
   } catch {
-    throw new Error('invalid_export_evidence');
+    throw new ExportEvidenceError('invalid_export_evidence');
   }
 }
 function publish(file: string, value: unknown): void {
   assertSecretFree(value);
-  replacePrivate(file, Buffer.from(`${canonicalJson(value, MAX_BYTES - 1)}\n`));
+  let bytes: Buffer;
+  try {
+    bytes = Buffer.from(`${canonicalJson(value, MAX_BYTES - 1)}\n`);
+  } catch {
+    throw new ExportEvidenceError('export_evidence_limit');
+  }
+  try {
+    replacePrivate(file, bytes);
+  } catch {
+    throw new ExportEvidenceError('export_evidence_unavailable');
+  }
 }
 
 export function retainReceipt(store: RunStore, receipt: SignedReceipt): void {
@@ -32,16 +54,16 @@ export function retainReceipt(store: RunStore, receipt: SignedReceipt): void {
     const file = path.join(root, 'receipt-evidence.json');
     const previous = existing(file);
     if (previous !== undefined && !Array.isArray(previous))
-      throw new Error('invalid_export_evidence');
+      throw new ExportEvidenceError('invalid_export_evidence');
     const receipts = (previous ?? []) as unknown[];
     const checked = [...receipts, receipt].map((r) =>
       offlineReceipt(r, store.run, store.contributionId)
     );
     if (checked.some((r) => r.receipt.upstreamRepositoryId !== store.upstreamRepositoryId))
-      throw new Error('invalid_export_evidence');
+      throw new ExportEvidenceError('invalid_export_evidence');
     const unique = [...new Map(checked.map((r) => [r.digest, r])).values()];
     // Export permits 128 verification entries, including the independent source.
-    if (unique.length > 127) throw new Error('export_evidence_limit');
+    if (unique.length > 127) throw new ExportEvidenceError('export_evidence_limit');
     publish(file, unique);
   });
 }
