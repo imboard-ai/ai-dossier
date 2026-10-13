@@ -3440,6 +3440,12 @@ hand-offs. `ForkCredentialBroker` has a typed operation API and no generic token
   token last. Revoking the user token ends its refresh chain, so the journal records that
   the next run needs a new contributor authorization. Revoking or rotating a parent
   never counts as revoking a child.
+  Normal run-token cleanup does **not** confirm removal of the contributor's App
+  authorization. Terminal and `blocked_cleanup` controller status (human and JSON)
+  retain the existing next action and also direct the contributor to GitHub **Settings →
+  Applications → Authorized GitHub Apps**: revoke this run's App if it is still listed,
+  then confirm it no longer appears. After the last live user token is revoked, the
+  grant API cannot delete it with that token; a 404 is not proof of grant deletion.
 - `killAll()` closes admission, waits for in-flight mints, and deletes the contributor's
   grant with an unexpired, unrevoked user-chain token *before* revoking anything else.
   It then revokes installation tokens. A 404 from the grant endpoint means "not

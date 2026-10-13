@@ -131,6 +131,7 @@ search for first.
 
 | Symptom (grep this) | What went wrong | Fix | PR |
 |---|---|---|---|
+| Cancelled `zt-run status` omits `Authorized GitHub Apps` after publication, or `blocked_cleanup` loses its reconciliation instruction | App-revocation guidance was appended during assembly, then a CLI publication/control/stop-notice override replaced the whole action. Tracker precedence could separately replace the cleanup default. Assembler-only tests missed the final CLI output. | Finalize guidance after every caller's action selection with the same idempotent pure helper; restore the cleanup instruction alongside tracker/control text. Test actual binding human/JSON output for published cancellation and corrupt control evidence, and challenge zero-effect assertions with injected calls in disposable fixtures. | PR #1208 (#1182) |
 | A typed feedback disagreement becomes `invalid_step_artifact`, or a real CAS refusal becomes `driver_failed` after its block is durable | StepArtifacts intentionally stores safe-integer numeric values, but a typed verdict can contain fractional confidence. IntentDriver also latches observations after a durable block, even when the caller is passing the identical blocked history back. | Retain the exact verdict as secret-scanned JSON text, and allow only an already-journaled identical blocked intent history to satisfy synchronization. Never swallow a missing/different history or a persistence failure. Keep real bare-fork CAS and uncertain-decision E2E cases. | #1111 |
 
 ## Budget admission traps
