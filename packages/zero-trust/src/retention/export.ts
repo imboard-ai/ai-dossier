@@ -292,18 +292,24 @@ export function validateContributionExport(input: unknown): ContributionExport {
       : [];
     for (const original of endpoints) {
       const target = run.upstreamIssue.replace('https://github.com/', '').replace('/issues/', '#');
+      // Live shipping targets the upstream pulls endpoint; retain the legacy
+      // issue-target convention for existing offline evidence. Both are bound
+      // to this run's upstream, never a caller-supplied target.
+      const shippingTarget = run.upstreamIssue.replace(/\/issues\/[1-9][0-9]*$/u, '/pulls');
       const applicable = input.receipts;
       if (
         (applicable.length > 0 &&
-          !applicable.some(
-            ({ receipt }) =>
-              original.marker ===
-              handoffMarker({
-                contributionId,
-                target,
-                operationKind: 'pr_create',
-                candidateSha: receipt.candidateSha,
-              })
+          !applicable.some(({ receipt }) =>
+            [target, shippingTarget].some(
+              (boundTarget) =>
+                original.marker ===
+                handoffMarker({
+                  contributionId,
+                  target: boundTarget,
+                  operationKind: 'pr_create',
+                  candidateSha: receipt.candidateSha,
+                })
+            )
           )) ||
         applicable.some(
           ({ receipt }) =>

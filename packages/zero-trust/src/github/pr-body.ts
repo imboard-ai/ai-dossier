@@ -15,6 +15,17 @@ import {
 
 export const LLM_DISCLOSURE_URL = 'https://github.com/imboard-ai/ai-dossier';
 
+/** Shared verbatim by PR content and the controller's portable evidence. */
+export function prDisclosure(candidateSha: string): string {
+  if (typeof candidateSha !== 'string' || !/^[a-f0-9]{40}$/u.test(candidateSha))
+    throw new HandoffError('invalid_evidence');
+  return (
+    `This contribution used substantial LLM assistance, orchestrated with [ai-dossier](${LLM_DISCLOSURE_URL}). ` +
+    `Verification results below apply to commit \`${candidateSha}\`. ` +
+    'I reviewed this pull request before submitting it from my own account.'
+  );
+}
+
 export type RegressionEvidence =
   | {
       readonly command: string;
@@ -104,9 +115,7 @@ export function buildPrContent(input: PrContentInput): PrContent {
     quoted(untrustedText(input.scope, 4000)),
     '',
     '## LLM disclosure',
-    `This contribution used substantial LLM assistance, orchestrated with [ai-dossier](${LLM_DISCLOSURE_URL}). ` +
-      `Verification results below apply to commit \`${sha}\`. ` +
-      'I reviewed this pull request before submitting it from my own account.',
+    prDisclosure(sha),
     '',
     '## Verification',
     `Commands run against \`${sha}\` (status, exit status, test suites counted):`,

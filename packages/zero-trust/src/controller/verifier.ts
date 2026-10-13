@@ -83,6 +83,8 @@ export interface VerifierDeps {
   readonly lifecycle: RunLifecycle;
   /** Deadline for boundary quiescence and drain (`finishBoundary`). */
   readonly boundaryTimeoutMs?: number;
+  /** Durable export projection, before verification completion becomes observable. */
+  readonly retainEvidence?: (candidateSha: string, records: readonly CommandRecord[]) => void;
 }
 
 export interface VerifyInput {
@@ -337,6 +339,7 @@ async function verifyInFreshVm(
   const commands = tests.map((r) => r.evidence);
   const verdict = verificationVerdict(vm.records, regression, commands);
   const now = lifecycle.now().toISOString();
+  deps.retainEvidence?.(input.candidateSha, tests);
   const record = publishVerification(deps.artifactsDir, {
     runId: deps.runId,
     candidateSha: input.candidateSha,

@@ -67,6 +67,7 @@ import {
   type TrackerActionResult,
 } from './controller';
 import { ProvisioningFailedError } from './evidence-runner';
+import { retainPortfolio, retainReceipt } from './export-evidence';
 import { readOutcomeBudget } from './outcome-records';
 import { RunStore } from './run-store';
 import {
@@ -955,6 +956,7 @@ export function createController(
       })(intent);
       controller.assertAdmission();
       receipt = authorization.receipt;
+      retainReceipt(c.store, receipt);
       artifacts(c).put('receipt', receipt);
       return authorization;
     });
@@ -1208,6 +1210,7 @@ export function createController(
           'baseline'
         );
         const handoff = openHandoff(c, await shippingAdmission(c), 'shipping');
+        retainPortfolio(c.store, record.candidateSha, g.policy.citations);
         const result = await handoff.issuePr({
           binding: {
             upstream: config.upstream,
