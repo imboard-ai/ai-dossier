@@ -195,7 +195,7 @@ export interface ControllerDependencies {
     context: PhaseContext,
     reason: import('./stop-notice').ControllerRefusalReason | null,
     transitionPending: boolean
-  ) => void;
+  ) => void | Promise<void>;
   readonly trackerAction?: (
     context: PhaseContext,
     request: TrackerActionRequest
@@ -1138,11 +1138,25 @@ export class RunController {
             ? 'hold_unsettled'
             : null;
     const transitionPending = this.held.run.state !== 'gating' && !stopped(this.held.run.state);
-    this.deps.recordControllerStop?.(
-      this.context(),
-      refusal,
-      refusal !== null && transitionPending
-    );
+    try {
+      await this.deps.recordControllerStop?.(
+        this.context(),
+        refusal,
+        refusal !== null && transitionPending
+      );
+    } catch (error) {
+      // A diagnostic write is part of admission, never a reason to release a live
+      // guest. Preserve cleanup accounting/fences and propagate the original failure.
+      this.abort.abort();
+      try {
+        await this.cleanup();
+      } catch {
+        // cleanup retains its durable blocked_cleanup/accounting fence. The
+        // notice persistence failure remains the invocation's primary error.
+      }
+      throw error;
+    }
+    this.assertAdmission();
     if (refusal) return stopped(this.held.run.state) ? { kind: 'waiting' } : { kind: 'hand_off' };
     // Time parked after a gate hand-off waits on the operator, not the run (#1184).
     if (phase === 'gate') this.finishPublicationWait();
