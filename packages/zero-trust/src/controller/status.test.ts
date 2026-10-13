@@ -50,6 +50,45 @@ const parts = () => ({
   sessionId: `${id}-run-1-s1`,
 });
 describe('assembleStatus', () => {
+  it('shows manual grant revocation without erasing terminal tracker or blocked cleanup actions', () => {
+    const path = 'Settings → Applications → Authorized GitHub Apps';
+    for (const state of ['cancelled', 'merged', 'declined', 'blocked_cleanup'] as const) {
+      let run = initial();
+      if (state === 'merged' || state === 'declined') {
+        for (const reason of [
+          ReasonCode.GatePassed,
+          ReasonCode.PlanApproved,
+          ReasonCode.CandidateReady,
+          ReasonCode.VerificationPassed,
+          ReasonCode.ContributorHandoff,
+          ReasonCode.PublicationObserved,
+          state === 'merged' ? ReasonCode.ObservedUpstreamMerge : ReasonCode.UpstreamDeclined,
+        ])
+          run = transitionRun(run, reason, at(1));
+      } else
+        run = transitionRun(
+          run,
+          state === 'cancelled' ? ReasonCode.UserCancelled : ReasonCode.CleanupFailed,
+          at(1)
+        );
+      const action = 'Keep the existing cleanup or prepared PR close instruction.';
+      const status = assembleStatus({
+        ...parts(),
+        run,
+        tracker: { state, nextPermittedAction: action },
+        authorizationRequired: { nextPermittedAction: 'authorize' },
+      });
+      expect(status.nextPermittedAction).toContain(action);
+      expect(status.nextPermittedAction).toContain(path);
+      expect(status.nextPermittedAction).toContain('if it is still listed');
+      expect(status.nextPermittedAction).toContain('does not confirm removal');
+      expect(renderHuman(status)).toContain(path);
+      expect(JSON.parse(renderJson(status)).nextPermittedAction).toBe(status.nextPermittedAction);
+    }
+    expect(assembleStatus(parts()).nextPermittedAction).not.toContain(path);
+    const paused = transitionRun(initial(), ReasonCode.UserPaused, at(1));
+    expect(assembleStatus({ ...parts(), run: paused }).nextPermittedAction).not.toContain(path);
+  });
   it('reports durable reauthorization while retaining cleanup and terminal precedence', () => {
     const authorizationRequired = { nextPermittedAction: 'authorize' };
     const paused = transitionRun(initial(), ReasonCode.UserPaused, at(1));
@@ -134,7 +173,8 @@ describe('assembleStatus', () => {
       estimatedSpend: { amount: 45, currency: 'USD' },
       budgetRemaining: { amount: 55, currency: 'USD' },
       reasonCode: ReasonCode.UserCancelled,
-      nextPermittedAction: 'No further execution; the run was cancelled.',
+      nextPermittedAction:
+        'No further execution; the run was cancelled. Run-token cleanup does not confirm removal of the GitHub App authorization. To revoke it fully, open GitHub Settings → Applications → Authorized GitHub Apps and revoke this run’s App if it is still listed. Confirm the App no longer appears there.',
     });
     expect(JSON.parse(renderJson(status))).toEqual(status);
     for (const key of Object.keys(status)) expect(renderHuman(status)).toContain(`${key}:`);

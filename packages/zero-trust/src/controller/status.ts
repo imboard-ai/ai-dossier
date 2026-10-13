@@ -9,11 +9,16 @@ import {
   restoreRun,
   sameRunRecord,
   sessionStartedAt,
+  TERMINAL_STATES,
 } from '../state';
 import { InvalidStatusError, renderJson, type StatusRecord } from '../status';
 import type { AuthorApproval } from './config';
 import { contributionIdOf } from './ids';
 import { lifecycleTimes } from './lifecycle-times';
+
+/** Run-token revocation does not prove the contributor's App grant was deleted. */
+const MANUAL_APP_REVOCATION =
+  'Run-token cleanup does not confirm removal of the GitHub App authorization. To revoke it fully, open GitHub Settings → Applications → Authorized GitHub Apps and revoke this run’s App if it is still listed. Confirm the App no longer appears there.';
 export const DEFAULT_STATE_ACTIONS: Readonly<Record<RunState, string>> = Object.freeze({
   gating: 'Inspect eligibility and contribution policies.',
   awaiting_maintainer: 'Resume explicitly to check the maintainer invitation.',
@@ -143,6 +148,11 @@ export function assembleStatus(parts: StatusParts): StatusRecord {
     !['blocked_cleanup', 'blocked', 'cancelled', 'failed', 'merged', 'declined'].includes(run.state)
   )
     status = { ...status, nextPermittedAction: 'authorize' };
+  if (TERMINAL_STATES.includes(run.state) || run.state === 'blocked_cleanup')
+    status = {
+      ...status,
+      nextPermittedAction: `${status.nextPermittedAction} ${MANUAL_APP_REVOCATION}`,
+    };
   // Validate every emitted fact through the same whitelist used by both renderers.
   renderJson(status);
   return status;

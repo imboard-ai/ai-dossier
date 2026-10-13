@@ -473,5 +473,9 @@ public repository names.
    body `{"access_token": "<live user token from this grant>"}`. It answers 404 once no token from
    the grant is live, which is the normal state after cancel, so the settings page is the
    dependable route. Confirm the App no longer appears there.
+   Terminal and `blocked_cleanup` `zt-run status` output (including `--json`) includes
+   this settings path alongside the existing next action. Run-token cleanup alone
+   does not confirm that the App authorization was removed; follow any remaining
+   credential/VM cleanup instructions as well.
 5. Delete the App's client secret and private key if the App is not needed again, and remove the
    exported variables from the shell.
