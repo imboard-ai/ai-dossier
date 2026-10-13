@@ -545,7 +545,7 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
     );
 
   it.runIf(FULL)(
-    'rejects a lockfile hash mismatch: provisioning fails and is unsupported_environment',
+    'rejects a lockfile hash mismatch: provisioning pauses for explicit correction',
     async () => {
       for (const manager of MANAGERS) {
         const repo = buildCommits(manager);
@@ -603,7 +603,7 @@ describe.skipIf(!ENABLED)('package proxy gate (real VM)', () => {
             reason: after.history.at(-1)?.reasonCode,
             cacheCheck: audit.map((d) => (d.allowed ? 'allowed' : d.reason)),
           });
-          expect(after.history.at(-1)?.reasonCode).toBe(R.UnsupportedEnvironment);
+          expect(after.history.at(-1)?.reasonCode).toBe(R.UserPaused);
           expect(audit.some((d) => !d.allowed && d.reason === 'hash_mismatch')).toBe(true);
         } finally {
           fs.rmSync(repo.dir, { recursive: true, force: true });

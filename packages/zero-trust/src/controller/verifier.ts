@@ -295,7 +295,8 @@ async function verifyInFreshVm(
   deps: VerifierDeps,
   input: VerifyInput,
   manifest: SourceManifest,
-  plan: CommandPlan
+  plan: CommandPlan,
+  claim: () => void
 ): Promise<VerificationOutcome> {
   const { lifecycle } = deps;
   const unavailable = (reason: BoundaryUnavailableReason): VerificationOutcome => {
@@ -310,7 +311,8 @@ async function verifyInFreshVm(
       { ...deps, collector },
       manifest,
       plan,
-      finishProbe(deps, session, collector)
+      finishProbe(deps, session, collector),
+      claim
     );
   } catch (error) {
     try {
@@ -372,12 +374,9 @@ async function verifyInFreshVm(
   };
 }
 
-/** Verifies `input.candidateSha` independently (see the module comment). Throws
- * `VerifierInputError` or `EvidencePlanError` before any work on a bad request. Once the
- * candidate is claimed, any failure that has not already moved the run (a
- * `ProvisioningFailedError` moved it to `unsupported`, a `VmCleanupError` to
- * `blocked_cleanup`) blocks it before the error propagates: a candidate is verified at
- * most once. */
+/** Verifies `input.candidateSha` independently. Provisioning precedes the once-only
+ * claim so a known provisioning-only failure can be corrected and explicitly resumed.
+ * After the durable claim, an interrupted verification remains fail-closed. */
 export async function verifyCandidate(
   verifier: VerifierDeps,
   input: VerifyInput
@@ -411,23 +410,27 @@ export async function verifyCandidate(
     return { kind: 'identity_mismatch', reason: rebuilt.reason, run: block(lifecycle) };
   }
 
+  let claimed = false;
+  const claim = () => {
+    try {
+      beginVerification(deps.artifactsDir, input.candidateSha);
+      claimed = true;
+    } catch (error) {
+      if (error instanceof VerificationRecordError && error.code === 'record_exists')
+        throw new VerifierInputError('already_verified');
+      throw error;
+    }
+  };
   try {
-    beginVerification(deps.artifactsDir, input.candidateSha);
-  } catch (error) {
-    if (error instanceof VerificationRecordError && error.code === 'record_exists')
-      throw new VerifierInputError('already_verified');
-    throw error;
-  }
-  try {
-    return await verifyInFreshVm(deps, input, rebuilt.manifest, plan);
+    return await verifyInFreshVm(deps, input, rebuilt.manifest, plan, claim);
   } catch (error) {
     journal(deps, input.candidateSha, {
       type: 'verification_aborted',
       cause: error instanceof Error ? error.name : typeof error,
     });
-    // `unsupported` (ProvisioningFailedError) and `blocked_cleanup` (VmCleanupError) were
-    // already observed; the original failure wins over a failed block.
-    if (!observed)
+    // Before the claim no verification command can have run. Existing attempt markers
+    // are never removed; a cleanup block already observed always wins.
+    if (claimed && !observed)
       try {
         block(lifecycle);
       } catch {}

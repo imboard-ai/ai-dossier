@@ -153,16 +153,13 @@ export function applyVerification(
   return transitionRun(run, ReasonCode.ExecutionFailed, timestamp);
 }
 
-/** Applies the provisioning verdict. Provisioning installs only locked, prebuilt,
- * proxy-served artifacts, so any failure (an unavailable or sdist-only dependency, a
- * hash the proxy refused, a timeout) is `unsupported_environment` (PRD §5.5), never a
- * repair and never a broader network. A pass leaves the run unchanged. */
+/** A failed provisioning command cannot prove an unsupported environment: the mirror
+ * or operator's proxy may be unavailable. Pause for explicit correction, never a model
+ * repair or broader network. Genuine environment refusals are classified separately. */
 export function applyProvisioning(
   run: RunRecord,
   verdict: CommandStatus,
   timestamp: string
 ): RunRecord {
-  return verdict === 'passed'
-    ? run
-    : transitionRun(run, ReasonCode.UnsupportedEnvironment, timestamp);
+  return verdict === 'passed' ? run : transitionRun(run, ReasonCode.UserPaused, timestamp);
 }

@@ -22,7 +22,7 @@ import { bodyDigest, handoffMarker, prTitle } from '../github/handoff';
 import { type HandoffAdmission, HandoffDriver } from '../github/handoff-driver';
 import { ForkPusher, type ForkPusherOptions } from '../github/push';
 import { anonymousReader, type GitHubRead, tokenReader } from '../github/reconcile';
-import { OUTSTANDING, TokenJournal, TokenVault } from '../github/token-journal';
+import { TokenJournal, TokenVault, UNRESOLVED } from '../github/token-journal';
 import { PrTracker, TrackError, trackFromHandoff } from '../github/track';
 import { IntentDriver, WriteBlockedError, WriteRefusedError } from '../intents';
 import { Journal } from '../journal';
@@ -69,6 +69,7 @@ import {
 import { ProvisioningFailedError } from './evidence-runner';
 import { retainPortfolio, retainReceipt } from './export-evidence';
 import { readOutcomeBudget } from './outcome-records';
+import { ProxyCaError, preflightProxyCa } from './proxy-preflight';
 import { RunStore } from './run-store';
 import {
   makeAuthorize,
@@ -78,7 +79,12 @@ import {
   shippingIntent,
 } from './shipping';
 import { createSteps, type GateRecord, gateFreshness, policyReader, StepArtifacts } from './steps';
-import { clearStopNotice, recordStopNotice, writeBlockedNotice } from './stop-notice';
+import {
+  clearStopNotice,
+  provisioningNotice,
+  recordStopNotice,
+  writeBlockedNotice,
+} from './stop-notice';
 import { loadVerification } from './verification-record';
 
 /** Only physical edges. Never inject a phase, gate, author, ledger or verifier. */
@@ -390,8 +396,10 @@ export async function stopStoredRun(
     try {
       await stopResources(incidentVm, runId, async () => {
         const tokens = journal('tokens');
-        const ledger = new TokenJournal(tokens).state;
-        if (![...ledger.tokens.values()].some((t) => OUTSTANDING.includes(t.status))) return;
+        const tokenJournal = new TokenJournal(tokens);
+        tokenJournal.settleExpired(now().toISOString());
+        const ledger = tokenJournal.state;
+        if (![...ledger.tokens.values()].some((t) => UNRESOLVED.includes(t.status))) return;
         const fork = new StepArtifacts(journal('control', 'steps'), runId).require<ForkReady>(
           'fork'
         );
@@ -405,8 +413,8 @@ export async function stopStoredRun(
           },
           now: () => now().getTime(),
         });
-        const report = await broker.killAll();
-        if (!report.complete) throw new Error('cleanup_incomplete');
+        await broker.killAll();
+        if (broker.settleExpired()) throw new Error('cleanup_incomplete');
       });
     } catch {
       failed = true;
@@ -554,7 +562,13 @@ export function createController(
   if (!proxy || typeof proxy !== 'object' || Array.isArray(proxy))
     throw new Error('invalid_proxy_file');
   const p = proxy as Record<string, unknown>;
-  if (Object.keys(p).sort().join(',') !== 'endpoints,target') throw new Error('invalid_proxy_file');
+  if (
+    Object.keys(p).some((key) => !['endpoints', 'target', 'caCertificateFile'].includes(key)) ||
+    ('caCertificateFile' in p &&
+      (typeof p.caCertificateFile !== 'string' || !path.isAbsolute(p.caCertificateFile)))
+  )
+    throw new Error('invalid_proxy_file');
+  const caCertificateFile = p.caCertificateFile as string | undefined;
   const endpoints = p.endpoints as { npmRegistry: string; pypiIndex: string };
   const proxyTarget = p.target as { host: string; port: number };
   if (
@@ -715,6 +729,7 @@ export function createController(
     };
     const a: VmAdapter = {
       create: async (spec) => {
+        if (spec.phase === 'provisioning') preflightProxyCa(caCertificateFile, now());
         return c.createVm({ scope: spec.scope, phase: spec.phase, proxyTarget: spec.proxyTarget });
       },
       exec: (...args) => guard(() => raw.exec(...args)),
@@ -797,9 +812,13 @@ export function createController(
   const cleanupCredentials = async (c: PhaseContext) => {
     const fork = artifacts(c).get<ForkReady>('fork');
     if (!fork) return;
-    const retained = new TokenJournal(journal(c, 'tokens')).state;
-    if (![...retained.tokens.values()].some((token) => OUTSTANDING.includes(token.status))) return;
-    broker ??= openBroker(c, fork);
+    if (!broker) {
+      const retained = new TokenJournal(journal(c, 'tokens'));
+      retained.settleExpired(now().toISOString());
+      if (![...retained.state.tokens.values()].some((token) => UNRESOLVED.includes(token.status)))
+        return;
+      broker = openBroker(c, fork);
+    }
     const result = await broker.recover();
     if (result.report) throw new Error('cleanup_incomplete');
   };
@@ -1407,17 +1426,33 @@ export function createController(
     const invoke = steps[phase].bind(steps);
     const wrapped = async (c: PhaseContext) => {
       try {
+        if (['acquire', 'plan', 'implement', 'verify'].includes(phase))
+          clearStopNotice(artifacts(c));
         if (artifacts(c).get('authorization_required')) requireAuthorization(c);
         return await invoke(c);
       } catch (error) {
         if (error instanceof AuthorizationRequired) return { kind: 'hand_off' };
         if (error instanceof PrerequisiteError)
           return { kind: phase === 'gate' ? error.kind : 'hand_off' };
-        if (
-          error instanceof UnsupportedEnvironmentError ||
-          error instanceof ProvisioningFailedError
-        )
-          return { kind: 'unsupported' };
+        if (error instanceof UnsupportedEnvironmentError) return { kind: 'unsupported' };
+        if (error instanceof ProxyCaError || error instanceof ProvisioningFailedError) {
+          const reason = error instanceof ProxyCaError ? error.code : 'provisioning_failed';
+          const notice = provisioningNotice(reason);
+          const failed =
+            error instanceof ProvisioningFailedError
+              ? error.records.find((record) => record.id === error.failedAt)
+              : undefined;
+          artifacts(c).put('diagnostic', {
+            runId: c.run.runId,
+            phase,
+            operation: 'workspace_provisioning',
+            code: reason,
+            next: notice.nextPermittedAction,
+            ...(failed ? { failedAt: failed.id, status: failed.status, log: failed.log } : {}),
+          });
+          recordStopNotice(artifacts(c), c.store.run, notice, c.store.run.state !== 'paused_user');
+          return { kind: 'hand_off' };
+        }
         if (error instanceof VmCleanupError) {
           if (
             !TERMINAL_STATES.includes(c.store.run.state) &&
