@@ -3466,7 +3466,9 @@ hand-offs. `ForkCredentialBroker` has a typed operation API and no generic token
   is revoked one by one, and `complete` is false: a token of the grant the broker does
   not hold may still be live.
 - `resolveByOperator(tokenId)` journals that the owner confirmed by hand that a token is
-  dead. `settleExpired()` settles unresolved tokens whose *journaled* native `expiresAt`
+  dead. The supported CLI is `zt-run resolve --root <dir> --run <id> --token <id> --confirm-dead`;
+  revoke user refresh authority in GitHub settings before acknowledging it.
+  `settleExpired()` settles unresolved installation tokens whose *journaled* `expiresAt`
   has passed; a token with no recorded expiry is never settled by time. Both return
   what is still unresolved, so the controller can complete cleanup.
 - `onJournalFailed` reports a journal write failure (disk, permissions) separately from
@@ -3482,7 +3484,11 @@ an in-memory fake (`__tests__/github-fake.ts`), so CI makes no GitHub calls.
 
 An installation token whose value was lost in a full process crash cannot be revoked
 through any GitHub API. The run stays in `blocked_cleanup` until `resolveByOperator`
-or, when the mint response was journaled, `settleExpired` after its native expiry.
+or `settleExpired` after a journaled installation expiry. Uncertain installation
+mints record a conservative one-hour bound from response/failure observation;
+`kill-all` retries settle it after that bound. Legacy unbounded requests and user
+refresh chains require operator resolution. Cleanup also verifies every remaining
+VM and accounting obligation before leaving `blocked_cleanup`.
 
 ## Verified fork push (#1066)
 

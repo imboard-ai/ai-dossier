@@ -31,6 +31,7 @@ import {
   type ForkPushVia,
   HELD,
   hasTokenFor,
+  INSTALLATION_TOKEN_LIFETIME_MS,
   isUserChain,
   OUTSTANDING,
   type RevokeStage,
@@ -318,6 +319,7 @@ export class ForkCredentialBroker {
 
   /** Must run before any admission: revokes every journaled token without a recorded revocation. */
   async recover(): Promise<RecoveryResult> {
+    this.settleExpired();
     const lostUserChain: TokenRecord[] = [];
     for (const token of this.outstanding()) {
       if (this.vault.has(token.id)) {
@@ -579,7 +581,18 @@ export class ForkCredentialBroker {
   }
 
   private uncertainMint(tokenId: string, status: number): never {
-    this.record({ v: 1, type: 'token_mint_uncertain', id: tokenId, status });
+    // Start at response/failure observation, not request start: a delayed response
+    // must not shorten the maximum lifetime of a token GitHub may have issued.
+    const observed = this.now();
+    this.record({
+      v: 1,
+      type: 'token_mint_uncertain',
+      id: tokenId,
+      status,
+      ...(this.ledger.tokens.get(tokenId)?.kind === 'installation'
+        ? { at: this.iso(observed), expiresAt: this.iso(observed + INSTALLATION_TOKEN_LIFETIME_MS) }
+        : {}),
+    });
     const report = this.unresolved();
     if (report) this.blockCleanup(report);
     throw new CredentialBrokerError('mint_uncertain');
@@ -893,12 +906,13 @@ export class ForkCredentialBroker {
     return this.unresolved();
   }
 
-  /** Settles unresolved tokens whose JOURNALED native expiry has passed. A token
-   * without a recorded `expiresAt` is never settled by time. */
+  /** Settles installation obligations with a passed durable expiry. User refresh
+   * authority and legacy unbounded requests always require explicit resolution. */
   settleExpired(): CleanupReport | undefined {
     const now = this.now();
     for (const token of this.tokens())
       if (
+        token.kind === 'installation' &&
         UNRESOLVED.includes(token.status) &&
         token.expiresAt !== null &&
         Date.parse(token.expiresAt) <= now

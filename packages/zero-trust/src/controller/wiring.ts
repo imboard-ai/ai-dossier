@@ -22,7 +22,7 @@ import { bodyDigest, handoffMarker, prTitle } from '../github/handoff';
 import { type HandoffAdmission, HandoffDriver } from '../github/handoff-driver';
 import { ForkPusher, type ForkPusherOptions } from '../github/push';
 import { anonymousReader, type GitHubRead, tokenReader } from '../github/reconcile';
-import { OUTSTANDING, TokenJournal, TokenVault } from '../github/token-journal';
+import { TokenJournal, TokenVault, UNRESOLVED } from '../github/token-journal';
 import { PrTracker, TrackError, trackFromHandoff } from '../github/track';
 import { IntentDriver, WriteBlockedError, WriteRefusedError } from '../intents';
 import { Journal } from '../journal';
@@ -320,8 +320,10 @@ export async function stopStoredRun(
     try {
       await stopResources(incidentVm, runId, async () => {
         const tokens = journal('tokens');
-        const ledger = new TokenJournal(tokens).state;
-        if (![...ledger.tokens.values()].some((t) => OUTSTANDING.includes(t.status))) return;
+        const tokenJournal = new TokenJournal(tokens);
+        tokenJournal.settleExpired(now().toISOString());
+        const ledger = tokenJournal.state;
+        if (![...ledger.tokens.values()].some((t) => UNRESOLVED.includes(t.status))) return;
         const fork = new StepArtifacts(journal('control', 'steps'), runId).require<ForkReady>(
           'fork'
         );
@@ -335,8 +337,8 @@ export async function stopStoredRun(
           },
           now: () => now().getTime(),
         });
-        const report = await broker.killAll();
-        if (!report.complete) throw new Error('cleanup_incomplete');
+        await broker.killAll();
+        if (broker.settleExpired()) throw new Error('cleanup_incomplete');
       });
     } catch {
       failed = true;
@@ -726,8 +728,10 @@ export function createController(
   const cleanupCredentials = async (c: PhaseContext) => {
     const fork = artifacts(c).get<ForkReady>('fork');
     if (!fork) return;
-    const retained = new TokenJournal(journal(c, 'tokens')).state;
-    if (![...retained.tokens.values()].some((token) => OUTSTANDING.includes(token.status))) return;
+    const retained = new TokenJournal(journal(c, 'tokens'));
+    retained.settleExpired(now().toISOString());
+    if (![...retained.state.tokens.values()].some((token) => UNRESOLVED.includes(token.status)))
+      return;
     broker ??= openBroker(c, fork);
     const result = await broker.recover();
     if (result.report) throw new Error('cleanup_incomplete');
