@@ -196,7 +196,7 @@ function rig(checkpoints: ('plan' | 'patch' | 'verification')[] = []) {
       c: PhaseContext,
       reason: import('./stop-notice').ControllerRefusalReason | null,
       pending: boolean
-    ) => {
+    ): void | Promise<void> => {
       const journal = new Journal(path.join(c.store.storeDirectory('control'), 'steps'));
       try {
         const artifacts = new StepArtifacts(journal, c.run.runId);
@@ -555,7 +555,55 @@ describe('RunController', () => {
     expect((await h.controller.resume(run.runId)).state).toBe('submitted');
     expect(notice(h, run.runId).retained).toBeNull();
   });
-  it('propagates refusal persistence failure before admitting phase work', async () => {
+  it.each([
+    false,
+    true,
+  ])('joins cleanup before propagating notice persistence failure (retirement=%s)', async (retirement) => {
+    const h = rig();
+    h.steps.scripts.acquire = [
+      async (c) => {
+        await c.createVm({ scope: 'container' });
+        if (!retirement) h.setTime('2026-10-08T02:00:00.000Z');
+        return { kind: 'acquired' };
+      },
+    ];
+    h.deps.recordControllerStop = async (c, reason) => {
+      if (reason || (retirement && h.steps.calls.includes('acquire'))) {
+        await Promise.resolve();
+        // Callback context has no allocation lease.
+        await expect(c.createVm({ scope: 'container' })).rejects.toMatchObject({
+          code: 'admission_closed',
+        });
+        throw new Error('notice persistence failed');
+      }
+    };
+    const destroy = vi.spyOn(h.vm, 'destroy');
+    await expect(h.controller.start(h.config)).rejects.toThrow('notice persistence failed');
+    expect(h.steps.calls).not.toContain('plan');
+    expect(destroy).toHaveBeenCalledTimes(1);
+    expect(await h.vm.listByRun(h.controller.snapshot().runId)).toEqual([]);
+  });
+  it('retains blocked_cleanup when notice persistence and guest destruction both fail', async () => {
+    const h = rig();
+    h.steps.scripts.acquire = [
+      async (c) => {
+        await c.createVm({ scope: 'container' });
+        h.setTime('2026-10-08T02:00:00.000Z');
+        return { kind: 'acquired' };
+      },
+    ];
+    h.deps.recordControllerStop = async (_c, reason) => {
+      if (reason) throw new Error('notice persistence failed');
+    };
+    const destroy = vi.spyOn(h.vm, 'destroy').mockRejectedValue(new Error('destroy failed'));
+    await expect(h.controller.start(h.config)).rejects.toThrow('notice persistence failed');
+    expect(destroy).toHaveBeenCalledTimes(3);
+    const store = open(h, h.controller.snapshot().runId);
+    expect(store.run.state).toBe('blocked_cleanup');
+    store.close();
+    expect(h.steps.calls).not.toContain('plan');
+  });
+  it('awaits asynchronous notice persistence before returning a refusal', async () => {
     const h = rig();
     h.steps.scripts.acquire = [
       async () => {
@@ -563,11 +611,33 @@ describe('RunController', () => {
         return { kind: 'acquired' };
       },
     ];
-    h.deps.recordControllerStop = (_c, reason) => {
-      if (reason) throw new Error('notice persistence failed');
+    let release!: () => void;
+    let entered!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const record = h.deps.recordControllerStop;
+    h.deps.recordControllerStop = async (c, reason, pending) => {
+      if (reason) {
+        entered();
+        await barrier;
+      }
+      await record(c, reason, pending);
     };
-    await expect(h.controller.start(h.config)).rejects.toThrow('notice persistence failed');
+    let completed = false;
+    const pending = h.controller.start(h.config).then((run) => {
+      completed = true;
+      return run;
+    });
+    await ready;
+    expect(completed).toBe(false);
     expect(h.steps.calls).not.toContain('plan');
+    release();
+    const run = await pending;
+    expect(notice(h, run.runId).action).toContain('active_time_exhausted');
   });
   it('recovery completes before any step, and recovery failure admits none', async () => {
     const h = rig();

@@ -52,7 +52,7 @@ const CONTROLLER_REFUSAL_ACTIONS: Readonly<Record<ControllerRefusalReason, strin
     active_time_exhausted:
       'No further phase work was admitted: active_time_exhausted. The active-time limit cannot be extended for this run. Cancel it or start a new run with an appropriate limit.',
     budget_exhausted:
-      'No further phase work was admitted: budget_exhausted. Inspect the retained budget limits. A paused run can explicitly extend its monetary ceiling before resuming; token and time limits require a new run. Otherwise cancel the run.',
+      'No further phase work was admitted: budget_exhausted. Inspect the retained budget limits and start a new run with an appropriate budget. To cancel this run, request cancel then explicitly resume to apply it.',
     hold_unsettled:
       'No further phase work was admitted: hold_unsettled. Inspect the retained budget reservations and reconcile their actual outcome before explicitly resuming, or cancel the run. Extending the budget does not settle an unknown hold.',
   }
