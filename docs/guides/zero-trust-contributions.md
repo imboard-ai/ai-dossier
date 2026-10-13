@@ -138,6 +138,29 @@ cd packages/zero-trust
    Mirror/provisioning failures pause and retain a bounded, redacted failure excerpt in the
    diagnostic; genuine unsupported ecosystem/profile/host refusals remain terminal.
 
+   **Read the provisioning diagnostic.** After the run has paused, this read-only example
+   selects the latest diagnostic for the run from the step journal and verifies the retained
+   artifact digest. `<contribution-id>` is the run ID without its trailing `-run-1`, not the
+   full run ID. No journal recovery, OAuth, VM or model operation runs:
+
+   ```sh
+   node -e '
+   const fs = require("node:fs"), path = require("node:path"), crypto = require("node:crypto");
+   const dir = process.argv[1], runId = process.argv[2];
+   const rows = fs.readFileSync(path.join(dir, "events.jsonl"), "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
+   const row = rows.filter(r => r.type === "artifact" && r.runId === runId && r.key === "diagnostic").at(-1);
+   if (!row || !/^[a-f0-9]{64}$/.test(row.digest)) throw new Error("diagnostic unavailable");
+   const bytes = fs.readFileSync(path.join(dir, `${row.digest}.json`));
+   if (crypto.createHash("sha256").update(bytes).digest("hex") !== row.digest) throw new Error("diagnostic digest mismatch");
+   const d = JSON.parse(bytes);
+   console.log(JSON.stringify({ phase: d.phase, code: d.code, failedAt: d.failedAt, status: d.status, excerpt: d.log?.excerpt, next: d.next }, null, 2));
+   ' <state-dir>/runs/<contribution-id>/control/steps <run-id>
+   ```
+
+   The excerpt is bounded and credential-redacted; CA preflight notices have no command
+   excerpt because allocation was refused before a command ran. The latest diagnostic is
+   retained historical evidence and may describe an earlier pause after a successful resume.
+
    **Never point `up --out` at `<proxy-endpoints.json>`.** Its raw stack output has a different
    format and overwrites the derived run endpoints file, making `start` fail with `operation_failed`.
 

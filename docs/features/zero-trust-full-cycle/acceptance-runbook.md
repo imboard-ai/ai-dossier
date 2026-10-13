@@ -95,6 +95,8 @@ consumed model/VM work. Run `zt-proxy down`
 then `zt-proxy up` with the same state directory and resume explicitly. A mirror/install failure
 also pauses, preserving its bounded redacted log excerpt in the diagnostic. Neither is evidence
 of a genuinely unsupported environment, nor permission for a broader network or automatic repair.
+Use the [read-only diagnostic retrieval example](../../guides/zero-trust-contributions.md#one-time-setup)
+to read `failedAt`, `status` and `log.excerpt` from the paused run's content-addressed step artifact.
 
 **Keep `<proxy-up.json>` separate from `<proxy-endpoints.json>`:** never use the run endpoints
 file as `up --out`. Raw stack output replaces the derived format and produces `operation_failed`.
