@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { BudgetState } from '../budget-types';
 import type { HandoffRecord } from '../github/handoff-driver';
 import { SecretRedactionError } from '../redaction';
@@ -50,6 +50,18 @@ const parts = () => ({
   sessionId: `${id}-run-1-s1`,
 });
 describe('assembleStatus', () => {
+  it('renders cancellation guidance without requesting authorization or deleting a grant', () => {
+    const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}'));
+    try {
+      const run = transitionRun(initial(), ReasonCode.UserCancelled, at(1));
+      const status = assembleStatus({ ...parts(), run });
+      expect(renderHuman(status)).toContain('Authorized GitHub Apps');
+      expect(renderJson(status)).toContain('Authorized GitHub Apps');
+      expect(fetch.mock.calls).toEqual([]);
+    } finally {
+      fetch.mockRestore();
+    }
+  });
   it('shows manual grant revocation without erasing terminal tracker or blocked cleanup actions', () => {
     const path = 'Settings → Applications → Authorized GitHub Apps';
     for (const state of ['cancelled', 'merged', 'declined', 'blocked_cleanup'] as const) {
