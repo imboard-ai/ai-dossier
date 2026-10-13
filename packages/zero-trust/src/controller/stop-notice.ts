@@ -79,7 +79,14 @@ export function controllerRefusalNotice(
   reason: ControllerRefusalReason,
   state: RunRecord['state']
 ): Omit<StopNotice, 'historyLength'> {
-  return { state, reason, nextPermittedAction: CONTROLLER_REFUSAL_ACTIONS[reason] };
+  return {
+    state,
+    reason,
+    nextPermittedAction:
+      state === 'blocked_cleanup'
+        ? `No further phase work was admitted: ${reason}. Cleanup remains incomplete. Inspect the retained cleanup evidence and explicitly resume to retry cleanup; cancellation is unavailable until cleanup is reconciled.`
+        : CONTROLLER_REFUSAL_ACTIONS[reason],
+  };
 }
 
 /** Admission must not retire a notice owned by a different phase producer. */
