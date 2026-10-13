@@ -335,16 +335,21 @@ node scripts/zt-run.mjs resume --root <state-dir>/runs --run <run-id>
 - `status` names the PR and its upstream CI (`none` is expected: the fixture has no workflows).
 - Exactly one PR exists for the head:
   `gh pr list --repo imboard-ai/ztfc-upstream-fixture --state all --head ztfc/<contribution-id>`.
+- Run plain `resume` once more. It starts the PR tracker and moves the run to `awaiting_review`.
+  The check's `pr-body` row reads the tracker journal, so it fails until then.
 - Run the check script (section 5) without `--after-revision`. It must pass.
 
 ### 4.4 Maintainer review
 
 As the **maintainer account** (an owner, member or collaborator of the upstream; not `ydhidden`),
 open the PR, choose **Files changed → Review changes → Request changes**, and submit a concrete,
-in-scope request that needs a code change. Pick one the candidate does not already satisfy, for
-example:
+in-scope request that needs a code change. Pick one the candidate does not already satisfy, and
+keep it inside the **approved plan** (`status` and `artifacts/plan.txt`). The feedback screen
+rejects changes outside the issue *or* the plan, and a rejection is final for that session.
+An edited review is not judged again. For example, if the candidate added a new test file:
 
-> Please also cover hours in the regression test: `toSeconds('1h')` should return 3600.
+> Please put the regression test inline with the existing test in `test/duration.test.js` instead
+> of adding a separate file, and delete the new file.
 
 Feedback that is unclear, outside the issue, or tries to change targets or authority is not
 admitted: the run stops in `paused_user` with no VM started. That is correct behaviour, not an
