@@ -65,6 +65,21 @@ export interface StatusParts {
     readonly forkName?: string;
   };
 }
+/** Reapply after a caller selects a more specific action; never duplicate the suffix. */
+export function withManualAppRevocation(status: StatusRecord): StatusRecord {
+  renderJson(status);
+  if (
+    (!TERMINAL_STATES.includes(status.state) && status.state !== 'blocked_cleanup') ||
+    status.nextPermittedAction.endsWith(MANUAL_APP_REVOCATION)
+  )
+    return status;
+  const result = {
+    ...status,
+    nextPermittedAction: `${status.nextPermittedAction} ${MANUAL_APP_REVOCATION}`,
+  };
+  renderJson(result);
+  return result;
+}
 /** Pure assembly, no reads/polling or external writes. Monetary amounts are minor units. */
 export function assembleStatus(parts: StatusParts): StatusRecord {
   const authorization = parts.authorizationRequired;
@@ -148,12 +163,6 @@ export function assembleStatus(parts: StatusParts): StatusRecord {
     !['blocked_cleanup', 'blocked', 'cancelled', 'failed', 'merged', 'declined'].includes(run.state)
   )
     status = { ...status, nextPermittedAction: 'authorize' };
-  if (TERMINAL_STATES.includes(run.state) || run.state === 'blocked_cleanup')
-    status = {
-      ...status,
-      nextPermittedAction: `${status.nextPermittedAction} ${MANUAL_APP_REVOCATION}`,
-    };
   // Validate every emitted fact through the same whitelist used by both renderers.
-  renderJson(status);
-  return status;
+  return withManualAppRevocation(status);
 }

@@ -10,7 +10,11 @@ import { BudgetLedger } from '../dist/budget.js';
 import { ScriptedRecovery } from '../dist/controller/__tests__/fake-steps.js';
 import { pauseAtCheckpoint } from '../dist/controller/checkpoints.js';
 import { validateRunConfig } from '../dist/controller/config.js';
-import { acknowledgeControl, readControlRequests } from '../dist/controller/control.js';
+import {
+  acknowledgeControl,
+  readControlRequests,
+  requestControl,
+} from '../dist/controller/control.js';
 import { RunController } from '../dist/controller/controller.js';
 import { RunStore } from '../dist/controller/run-store.js';
 import { StepArtifacts } from '../dist/controller/steps.js';
@@ -20,6 +24,7 @@ import { AppCredentials } from '../dist/github/app-auth.js';
 import { ForkCredentialBroker } from '../dist/github/broker.js';
 import { Journal } from '../dist/journal.js';
 import { ReasonCode, transitionRun } from '../dist/state.js';
+import { renderHuman, renderJson } from '../dist/status.js';
 import { createCommands } from './zt-run-bindings.mjs';
 import { main } from './zt-run-lib.mjs';
 
@@ -293,6 +298,43 @@ test('cancelled CLI status retains publication URL and contributor withdrawal in
   assert.equal(status.state, 'cancelled');
   assert.match(status.nextPermittedAction, /https:\/\/github.com\/owner\/repo\/pull\/2/);
   assert.match(status.nextPermittedAction, /prepared contributor comment/);
+  for (const output of [renderHuman(status), renderJson(status)]) {
+    assert.match(output, /Settings → Applications → Authorized GitHub Apps/);
+    assert.match(output, /does not confirm removal/);
+    assert.match(output, /prepared contributor comment/);
+    assert.equal(output.split('Settings → Applications → Authorized GitHub Apps').length, 2);
+  }
+  assert.deepEqual(commands.status(store.runId), status);
+});
+
+test('cleanup-blocked CLI status retains cleanup and revocation guidance despite corrupt control evidence', async () => {
+  const h = rig();
+  const store = h.seed();
+  const row = requestControl(store, { kind: 'cancel', reason: 'Stop' }, new Date());
+  store.persistRun(transitionRun(store.run, ReasonCode.CleanupFailed, new Date().toISOString()));
+  fs.writeFileSync(path.join(store.storeDirectory('control'), 'requests', `${row.id}.json`), '{');
+  store.close();
+  const construct = vi.fn(() => assert.fail('status cannot construct execution'));
+  const oauth = vi.fn(() => assert.fail('status cannot authorize'));
+  const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}'));
+  const commands = await createCommands({
+    root: h.root,
+    createController: construct,
+    onAuthorizationUrl: oauth,
+  });
+  const status = commands.status(store.runId);
+  assert.equal(status.state, 'blocked_cleanup');
+  assert.equal(status.phase, 'invalid_control');
+  for (const output of [renderHuman(status), renderJson(status)]) {
+    assert.match(output, /Reconcile remaining resources and credentials/);
+    assert.match(output, /corrupt or unknown/);
+    assert.match(output, /Settings → Applications → Authorized GitHub Apps/);
+    assert.equal(output.split('Settings → Applications → Authorized GitHub Apps').length, 2);
+  }
+  assert.equal(fetch.mock.calls.length, 0);
+  assert.equal(oauth.mock.calls.length, 0);
+  assert.equal(construct.mock.calls.length, 0);
+  assert.deepEqual(h.counts(), { revoked: 0, userReads: 0 });
 });
 
 test('status shows a stop notice only for the exact stop it explains', async () => {
