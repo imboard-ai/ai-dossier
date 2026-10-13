@@ -180,7 +180,7 @@ The package proxy permits constrained package downloads, not arbitrary requests 
 - **Node:** npm projects with `package-lock.json`; versioned profiles selected from supported runtime versions using project declarations. Missing/conflicting requirements hand off. No pnpm/Yarn adapter in MVP.
 - **Python:** pip projects with hash-pinned fully resolved requirements, or uv projects with a supported `uv.lock` and frozen installation. Plain unconstrained requirements are unsupported in MVP. Native dependencies require approved prebuilt toolchains or cached public build inputs.
 - Supported runtime versions and image digests are declared in a versioned profile manifest, recorded per run, and verified before execution. Unsupported requested versions are not silently substituted.
-- Unavailable dependencies or public-internet integration tests result in `unsupported_environment`; never broaden access to complete the fix.
+- Dependency provisioning failures pause for explicit operator correction with a diagnostic; mirror/CA outages alone do not prove an unsupported environment (#1194). Genuine unsupported ecosystem/profile/host refusals and public-internet integration requirements remain `unsupported_environment`; never broaden access to complete the fix.
 
 #### 5.6 Reproduce, implement, and verify
 

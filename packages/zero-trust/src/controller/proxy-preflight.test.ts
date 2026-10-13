@@ -1,9 +1,9 @@
-import { execFileSync } from 'node:child_process';
 import { X509Certificate } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { createProxyCaFixture } from './__tests__/proxy-ca-fixture';
 import { preflightProxyCa } from './proxy-preflight';
 
 describe('controller proxy CA preflight', () => {
@@ -12,28 +12,7 @@ describe('controller proxy CA preflight', () => {
   let ca: X509Certificate;
   beforeAll(() => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), 'zt-ca-preflight-'));
-    file = path.join(root, 'ca.crt');
-    execFileSync(
-      'openssl',
-      [
-        'req',
-        '-x509',
-        '-newkey',
-        'rsa:2048',
-        '-nodes',
-        '-days',
-        '1',
-        '-subj',
-        '/CN=fixture-proxy',
-        '-addext',
-        'basicConstraints=critical,CA:TRUE',
-        '-keyout',
-        path.join(root, 'ca.key'),
-        '-out',
-        file,
-      ],
-      { stdio: 'ignore' }
-    );
+    file = createProxyCaFixture(root);
     ca = new X509Certificate(fs.readFileSync(file));
   });
   afterAll(() => fs.rmSync(root, { recursive: true, force: true }));

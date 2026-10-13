@@ -1348,9 +1348,6 @@ export function createController(
         if (['acquire', 'plan', 'implement', 'verify'].includes(phase))
           clearStopNotice(artifacts(c));
         if (artifacts(c).get('authorization_required')) requireAuthorization(c);
-        // Verification claims its once-only attempt before allocating; refuse a known
-        // bad CA before that claim, and recheck at the physical allocation boundary.
-        if (phase === 'verify') preflightProxyCa(caCertificateFile, now());
         return await invoke(c);
       } catch (error) {
         if (error instanceof AuthorizationRequired) return { kind: 'hand_off' };

@@ -577,12 +577,14 @@ export interface WorkspaceRun<T> {
 
 /** One fresh VM: `provisionWorkspace(manifest)`, the plan's verification commands in
  * order, then `beforeRelease`, then the bounded teardown. A failure journals where it
- * happened, releases the VM and rethrows. */
+ * happened, releases the VM and rethrows. `beforeVerification` durably claims a verifier's
+ * once-only attempt after successful provisioning, before any verification command. */
 export async function runWorkspace<T = undefined>(
   options: WorkspaceOptions,
   manifest: SourceManifest,
   plan: CommandPlan,
-  beforeRelease?: BeforeRelease<T>
+  beforeRelease?: BeforeRelease<T>,
+  beforeVerification?: () => void
 ): Promise<WorkspaceRun<T>> {
   const { adapter, lifecycle } = options;
   const workspace = await provisionWorkspace({ ...options, manifest, plan });
@@ -590,6 +592,7 @@ export async function runWorkspace<T = undefined>(
   const progress: Progress = { stage: 'verification' };
   let result: T | undefined;
   try {
+    beforeVerification?.();
     for (const command of plan.verification) {
       progress.commandId = command.id;
       records.push(await runPlanned(adapter, workspace, command, options.collector, options));
