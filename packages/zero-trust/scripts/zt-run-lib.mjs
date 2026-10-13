@@ -254,16 +254,20 @@ export async function main(argv, { createController, out, err, confirmAuthor } =
     switch (command) {
       case 'start': {
         if (!opts['confirm-author'] && !confirmAuthor) refuse('author_confirmation_required');
-        const author = await controller.prepareAuthor(config, {
-          name: opts['author-name'],
-          email: opts['author-email'],
-        });
-        // Reuse the closed config approval validator before displaying or persisting.
-        const approved = validateRunConfig({ ...runConfigInput(config), authorApproval: author });
-        out(`author_identity: ${JSON.stringify(approved.authorApproval)}`);
-        if (!opts['confirm-author'] && (await confirmAuthor(approved.authorApproval)) !== true)
-          refuse('author_confirmation_declined');
-        status = await controller.start(approved);
+        try {
+          const author = await controller.prepareAuthor(config, {
+            name: opts['author-name'],
+            email: opts['author-email'],
+          });
+          // Reuse the closed config approval validator before displaying or persisting.
+          const approved = validateRunConfig({ ...runConfigInput(config), authorApproval: author });
+          out(`author_identity: ${JSON.stringify(approved.authorApproval)}`);
+          if (!opts['confirm-author'] && (await confirmAuthor(approved.authorApproval)) !== true)
+            refuse('author_confirmation_declined');
+          status = await controller.start(approved);
+        } finally {
+          await controller.discardAuthor?.(config);
+        }
         break;
       }
       case 'resume':

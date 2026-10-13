@@ -31,7 +31,7 @@ import { STOP_NOTICE_KEY, stopNoticeAction } from '../dist/controller/stop-notic
 import {
   fenceIncident,
   incidentRequested,
-  prepareAuthor,
+  prepareAuthorSession,
   stopStoredRun,
 } from '../dist/controller/wiring.js';
 import { assertDirectoryAncestors, privateDir, readPrivate } from '../dist/durable-fs.js';
@@ -289,30 +289,43 @@ export async function createCommands({ root, createController, onAuthorizationUr
       true
     );
   return {
+    async discardAuthor(config) {
+      const key = authorKey(config);
+      const session = pendingAuthors.get(key);
+      await session?.dispose();
+      pendingAuthors.delete(key);
+    },
     async prepareAuthor(config, { name, email } = {}) {
       checkRoot(config);
       if (incidentRequested(root)) refuse('incident_active');
       if (config.resumeRunId) refuse('invalid_resume_run_id');
-      const approval = await prepareAuthor(config, { name, email }, { onAuthorizationUrl });
+      const key = authorKey(config);
+      await pendingAuthors.get(key)?.dispose();
+      pendingAuthors.delete(key);
+      const session = await prepareAuthorSession(config, { name, email }, { onAuthorizationUrl });
       // A config-supplied approval cannot masquerade as fresh authenticated consent.
-      pendingAuthors.set(authorKey(config), approval);
-      return approval;
+      pendingAuthors.set(key, session);
+      return session.approval;
     },
     async start(config) {
-      checkRoot(config);
-      if (incidentRequested(root)) refuse('incident_active');
-      if (config.resumeRunId) refuse('invalid_resume_run_id');
       const key = authorKey(config);
-      const approval = pendingAuthors.get(key);
-      if (!approval) refuse('author_approval_missing');
-      pendingAuthors.delete(key);
-      const approved = { ...config, authorApproval: approval };
-      const guard = acquireStart(approved);
+      const session = pendingAuthors.get(key);
+      let guard;
       try {
-        const run = await createController(approved, { onAuthorizationUrl }).start(approved);
+        checkRoot(config);
+        if (incidentRequested(root)) refuse('incident_active');
+        if (config.resumeRunId) refuse('invalid_resume_run_id');
+        if (!session) refuse('author_approval_missing');
+        const approved = { ...config, authorApproval: session.approval };
+        guard = acquireStart(approved);
+        const run = await createController(approved, { onAuthorizationUrl }, session).start(
+          approved
+        );
         return status(run.runId);
       } finally {
-        fs.closeSync(guard);
+        if (guard !== undefined) fs.closeSync(guard);
+        await session?.dispose();
+        pendingAuthors.delete(key);
       }
     },
     edit(runId, bytes) {

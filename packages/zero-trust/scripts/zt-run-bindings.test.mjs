@@ -9,7 +9,7 @@ import { FakeVmAdapter } from '../dist/__tests__/fake-vm.js';
 import { BudgetLedger } from '../dist/budget.js';
 import { ScriptedRecovery } from '../dist/controller/__tests__/fake-steps.js';
 import { pauseAtCheckpoint } from '../dist/controller/checkpoints.js';
-import { validateRunConfig } from '../dist/controller/config.js';
+import { runConfigInput, validateRunConfig } from '../dist/controller/config.js';
 import {
   acknowledgeControl,
   readControlRequests,
@@ -399,8 +399,13 @@ test('status explains a revision paused because its feedback was not admitted', 
 test('start overrides file-supplied approval only with fresh OAuth consent; status opens the readOnly store API', async () => {
   const h = rig();
   const calls = [];
-  const factory = (config, edges) => ({
+  const factory = (config, edges, session) => ({
     start: async (next) => {
+      assert.equal(
+        typeof session?.adopt,
+        'function',
+        'start must hand the identity authorization to its credential owner'
+      );
       assert.equal(config, next);
       assert.equal(edges.onAuthorizationUrl, h.onAuthorizationUrl);
       calls.push(config);
@@ -430,6 +435,42 @@ test('start overrides file-supplied approval only with fresh OAuth consent; stat
   await Promise.all(h.callbacks);
 });
 
+test('declined confirmation and failed construction revoke the process-local author token', async () => {
+  const h = rig();
+  const commands = await createCommands({
+    root: h.root,
+    onAuthorizationUrl: h.onAuthorizationUrl,
+    createController: () => assert.fail('declined confirmation cannot construct execution'),
+  });
+  const configFile = path.join(h.dir, 'start-config.json');
+  fs.writeFileSync(configFile, JSON.stringify(runConfigInput(h.config)), { mode: 0o600 });
+  const output = [];
+  assert.equal(
+    await main(['start', '--config', configFile, '--root', h.root], {
+      createController: () => commands,
+      out: (line) => output.push(line),
+      err: (line) => output.push(line),
+      confirmAuthor: () => false,
+    }),
+    2
+  );
+  assert.deepEqual(h.counts(), { revoked: 1, userReads: 1 }, output.join('\n'));
+  assert.equal(fs.existsSync(h.root), false);
+  assert.ok(!output.join('\n').includes(`ghu_${'a'.repeat(30)}`));
+  const failed = await createCommands({
+    root: h.root,
+    onAuthorizationUrl: h.onAuthorizationUrl,
+    createController: () => {
+      throw new Error('construction_refused');
+    },
+  });
+  await failed.prepareAuthor(h.config);
+  await assert.rejects(failed.start(h.config), /construction_refused/);
+  await failed.discardAuthor(h.config);
+  assert.deepEqual(h.counts(), { revoked: 2, userReads: 2 });
+  await Promise.all(h.callbacks);
+});
+
 test('resume delegates identity admission to the locked controller without a CLI OAuth preflight', async () => {
   const h = rig();
   const calls = [];
@@ -444,6 +485,7 @@ test('resume delegates identity admission to the locked controller without a CLI
     }),
   });
   const approval = await commands.prepareAuthor(h.config);
+  await commands.discardAuthor(h.config);
   const store = h.seed({ ...h.config, authorApproval: approval });
   const runId = store.runId;
   store.close();
@@ -473,6 +515,7 @@ test('shipping resume reaches the controller with an unavailable OAuth UI', asyn
     createController,
   });
   const approval = await setup.prepareAuthor(h.config);
+  await setup.discardAuthor(h.config);
   const store = h.seed({ ...h.config, authorApproval: approval });
   const runId = store.runId;
   for (const reason of [
@@ -602,6 +645,7 @@ test('explicit authorize emits its actual loopback OAuth URL and verifies record
     onAuthorizationUrl: h.onAuthorizationUrl,
   });
   const approval = await commands.prepareAuthor(h.config);
+  await commands.discardAuthor(h.config);
   const store = h.seed({ ...h.config, authorApproval: approval });
   const runId = store.runId;
   store.close();

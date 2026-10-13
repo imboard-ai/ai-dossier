@@ -5,7 +5,8 @@
  * Credential module, controller-only. A new run token is used for `GET /user`, so that
  * only the run's contributor's token ever reaches the broker (#1064); every later use
  * goes through the broker. Pre-start consent instead reads `/user` and any requested
- * verified email, then revokes its one-shot token without fabricating a fork or run.
+ * verified email, then revokes its one-shot token or retains it in a disposable
+ * process-local session for adoption by the real fork-bound broker.
  * The refresh token lives in this object's
  * private memory. Neither, nor the authorization code, is ever persisted, logged or
  * returned. */
@@ -196,6 +197,7 @@ export class ContributorAuthorization {
   #refresh: string | undefined;
   #refreshing: Promise<RefreshOutcome> | undefined;
   #boundUserId: number | undefined;
+  #prepared: { pair: IssuedPair; approval: string } | undefined;
   /** complete, bindLogin and refresh change the same state: one at a time. */
   #tail: Promise<unknown> = Promise.resolve();
   private readonly now: () => number;
@@ -221,7 +223,8 @@ export class ContributorAuthorization {
    * this one-shot identity read and revoked on every exit, including invalid overrides. */
   async completeAuthor(
     callback: CallbackParams,
-    overrides: { readonly name?: string; readonly email?: string; readonly userId?: number } = {}
+    overrides: { readonly name?: string; readonly email?: string; readonly userId?: number } = {},
+    retain = false
   ): Promise<{
     userId: number;
     login: string;
@@ -233,7 +236,9 @@ export class ContributorAuthorization {
     const pending = this.#pending;
     this.#pending = undefined;
     return this.serial(async () => {
+      if (this.#prepared) throw new ContributorAuthError('invalid_options');
       const pair = await this.exchangeCallback(pending, callback);
+      let retained = false;
       try {
         const response = await this.options.http({
           method: 'GET',
@@ -301,14 +306,57 @@ export class ContributorAuthorization {
         };
         assertSecretFree(approval);
         try {
-          return validateAuthorApproval(approval, this.options.contributor);
+          const validated = validateAuthorApproval(approval, this.options.contributor);
+          if (retain) {
+            this.#prepared = { pair, approval: JSON.stringify(validated) };
+            retained = true;
+          }
+          return validated;
         } catch {
           throw new ContributorAuthError('invalid_author_approval');
         }
       } finally {
-        // biome-ignore lint/correctness/noUnsafeFinally: A possibly live orphan token takes precedence over identity success or refusal.
-        if (!(await this.discard(pair.access))) throw new ContributorAuthError('revoke_failed');
+        if (!retained && !(await this.discard(pair.access))) {
+          // biome-ignore lint/correctness/noUnsafeFinally: A possibly live orphan token takes precedence over identity success or refusal.
+          throw new ContributorAuthError('revoke_failed');
+        }
       }
+    });
+  }
+
+  /** Transfer exactly the validated consent once, after the new broker's recovery.
+   * No token is returned or placed in approval/configuration objects. */
+  adoptAuthor(
+    broker: ForkCredentialBroker,
+    run: RunRecord,
+    approval: Parameters<typeof validateAuthorApproval>[0]
+  ): Promise<ContributorAuthorization> {
+    return this.serial(async () => {
+      const held = this.#prepared;
+      const validated = validateAuthorApproval(approval, this.options.contributor);
+      if (
+        !held ||
+        held.approval !== JSON.stringify(validated) ||
+        !sameLogin(run.contributor, validated.login) ||
+        broker.status().admissions !== 'open'
+      )
+        throw new ContributorAuthError('author_approval_mismatch');
+      const next = new ContributorAuthorization({ ...this.options, broker });
+      await this.hold(held.pair, (value, expiresAt) => broker.registerUserToken(value, expiresAt));
+      this.#prepared = undefined;
+      next.#refresh = held.pair.refresh;
+      next.#boundUserId = validated.userId;
+      return next;
+    });
+  }
+
+  /** Explicit owner cleanup for a declined, refused, replaced or unused session. */
+  discardAuthor(): Promise<void> {
+    return this.serial(async () => {
+      const held = this.#prepared;
+      if (!held) return;
+      if (!(await this.discard(held.pair.access))) throw new ContributorAuthError('revoke_failed');
+      this.#prepared = undefined;
     });
   }
 
