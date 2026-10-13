@@ -197,7 +197,7 @@ export class ContributorAuthorization {
   #refresh: string | undefined;
   #refreshing: Promise<RefreshOutcome> | undefined;
   #boundUserId: number | undefined;
-  #prepared: { pair: IssuedPair; approval: string } | undefined;
+  #prepared: { pair: IssuedPair; approval: string | null } | undefined;
   /** complete, bindLogin and refresh change the same state: one at a time. */
   #tail: Promise<unknown> = Promise.resolve();
   private readonly now: () => number;
@@ -240,6 +240,9 @@ export class ContributorAuthorization {
       if (this.#prepared || (retain && overrides.userId !== undefined))
         throw new ContributorAuthError('invalid_options');
       const pair = await this.exchangeCallback(pending, callback);
+      // Retained flow owns the pair before any identity/email read can fail.
+      // Adoption remains fenced until validated approval replaces null.
+      if (retain) this.#prepared = { pair, approval: null };
       let retained = false;
       try {
         const response = await this.options.http({
@@ -318,7 +321,8 @@ export class ContributorAuthorization {
           throw new ContributorAuthError('invalid_author_approval');
         }
       } finally {
-        if (!retained && !(await this.discard(pair.access))) {
+        if (!retained && retain) await this.disposePrepared();
+        else if (!retained && !(await this.discard(pair.access))) {
           // biome-ignore lint/correctness/noUnsafeFinally: A possibly live orphan token takes precedence over identity success or refusal.
           throw new ContributorAuthError('revoke_failed');
         }
@@ -354,36 +358,38 @@ export class ContributorAuthorization {
 
   /** Explicit owner cleanup for a declined, refused, replaced or unused session. */
   discardAuthor(): Promise<void> {
-    return this.serial(async () => {
-      // Access expiry (including expiry during DELETE) does not end the refresh
-      // chain. On 404, observe/rotate that exact pair before declaring it dead.
-      for (let attempt = 0; attempt < 2; attempt++) {
-        const held = this.#prepared;
-        if (!held) return;
-        const status = await deleteToken(
-          this.options.http,
-          this.options.app,
-          'user',
-          held.pair.access
-        ).catch(() => 0);
-        if (status === 204) {
-          this.#prepared = undefined;
-          return;
-        }
-        if (status !== 404) throw new ContributorAuthError('revoke_failed');
-        const pair = await this.exchange({
-          grant_type: 'refresh_token',
-          refresh_token: held.pair.refresh,
-        });
-        if (pair === 'bad_refresh_token') {
-          this.#prepared = undefined;
-          return;
-        }
-        if (typeof pair === 'string') throw new ContributorAuthError('revoke_failed');
-        this.#prepared = { pair, approval: held.approval };
+    return this.serial(() => this.disposePrepared());
+  }
+
+  private async disposePrepared(): Promise<void> {
+    // Access expiry (including expiry during DELETE) does not end the refresh
+    // chain. On 404, observe/rotate that exact pair before declaring it dead.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const held = this.#prepared;
+      if (!held) return;
+      const status = await deleteToken(
+        this.options.http,
+        this.options.app,
+        'user',
+        held.pair.access
+      ).catch(() => 0);
+      if (status === 204) {
+        this.#prepared = undefined;
+        return;
       }
-      throw new ContributorAuthError('revoke_failed');
-    });
+      if (status !== 404) throw new ContributorAuthError('revoke_failed');
+      const pair = await this.exchange({
+        grant_type: 'refresh_token',
+        refresh_token: held.pair.refresh,
+      });
+      if (pair === 'bad_refresh_token') {
+        this.#prepared = undefined;
+        return;
+      }
+      if (typeof pair === 'string') throw new ContributorAuthError('revoke_failed');
+      this.#prepared = { pair, approval: held.approval };
+    }
+    throw new ContributorAuthError('revoke_failed');
   }
 
   /** Starts the web flow: a fresh CSPRNG `state` and PKCE verifier, kept in memory only.

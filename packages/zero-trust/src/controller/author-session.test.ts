@@ -29,6 +29,28 @@ async function prepare(h: ReturnType<typeof rig>) {
 }
 
 describe('one process author authorization', () => {
+  it('mismatched account refusal still ends a refresh chain when access expires during failed validation cleanup', async () => {
+    const h = rig();
+    h.fake.userId += 1;
+    h.fake.login = 'different';
+    h.fake.override(`DELETE /applications/${CLIENT_ID}/token`, { status: 404, json: null });
+    await expect(prepare(h)).rejects.toMatchObject({ code: 'author_approval_mismatch' });
+    expect(h.fake.oauthCalls.filter((call) => call.grant_type === 'refresh_token')).toHaveLength(1);
+    expect([...h.fake.tokens.values()].every((token) => !token.live)).toBe(true);
+    for (const refresh of h.fake.refreshTokens.keys()) {
+      expect(
+        (
+          await h.fake.oauth({
+            client_id: CLIENT_ID,
+            client_secret: CLIENT_SECRET,
+            grant_type: 'refresh_token',
+            refresh_token: refresh,
+          })
+        ).json
+      ).toEqual({ error: 'bad_refresh_token' });
+    }
+  });
+
   it.each([
     'before-disposal',
     'during-delete',
