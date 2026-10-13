@@ -262,6 +262,7 @@ function reduceToken(ledger: TokenLedger, raw: unknown): TokenLedger {
         const expiresAt = at(event.expiresAt);
         if (
           current.kind !== 'installation' ||
+          event.status !== 201 ||
           Date.parse(observed) < Date.parse(current.requestedAt) ||
           Date.parse(expiresAt) !== Date.parse(observed) + INSTALLATION_TOKEN_LIFETIME_MS
         )

@@ -239,7 +239,7 @@ fresh work. Lost credential values remain a `blocked_cleanup` obligation rather
 than invented revocation. OAuth access expiry **does not** kill a refresh chain:
 the fixture genuinely elapses both independently recorded provider lifetimes,
 and audits access liveness, `refreshAlive` and refresh-token liveness. Production
-broker recovery does not automatically settle native expiry to hide secret loss.
+broker recovery does not settle user-chain access expiry to hide secret loss.
 
 `node scripts/zt-run.mjs pause|cancel --root <stateDir>/runs --run <id> --reason <text>`
 returns immediately after the stop-only request is durably fsynced. It neither waits
@@ -3406,11 +3406,11 @@ Under the hybrid hand-off ([decision record](../../docs/features/zero-trust-full
 the broker performs fork pushes only. Upstream comments and PRs are contributor
 hand-offs. `ForkCredentialBroker` has a typed operation API and no generic token call:
 
-- `recover()` must run first. It revokes every journaled token without a recorded
-  revocation before any admission. Values held in process memory (`TokenVault`) are
+- `recover()` must run first. It settles passed journaled installation expiry, then
+  revokes remaining journaled tokens before any admission. Values held in process memory (`TokenVault`) are
   revoked one by one. User-chain tokens whose values were lost are ended by deleting
   the grant with a live user token. An installation token whose value was lost cannot be
-  revoked through any API, so the broker enters `blocked_cleanup` and reports its id and
+  revoked through any API; while it remains unresolved the broker enters `blocked_cleanup` and reports its id and
   native expiry for the operator. It never records that token as revoked. Recovery over a
   journal whose run already ended returns `admitted: false`.
 - `registerUserToken(value, expiresAt)` holds the contributor's unscoped user token
@@ -3486,9 +3486,9 @@ an in-memory fake (`__tests__/github-fake.ts`), so CI makes no GitHub calls.
 An installation token whose value was lost in a full process crash cannot be revoked
 through any GitHub API. The run stays in `blocked_cleanup` until `resolveByOperator`
 or `settleExpired` after a journaled installation expiry. Uncertain installation
-mints with completed responses record a conservative one-hour bound from response observation;
+mints with malformed successful responses record a conservative one-hour bound from response observation;
 `kill-all` retries settle it after that bound. Legacy unbounded requests and user
-refresh chains and transport-uncertain mints require operator resolution. Cleanup also verifies every remaining
+refresh chains, 5xx responses and transport-uncertain mints require operator resolution. Cleanup also verifies every remaining
 VM and accounting obligation before leaving `blocked_cleanup`.
 
 ## Verified fork push (#1066)

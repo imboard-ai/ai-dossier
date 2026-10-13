@@ -1187,7 +1187,7 @@ describe('lead follow-ups: target binding, operator settlement, diagnostics', ()
   });
 
   it.each([
-    201, 503,
+    201,
   ])('uncertain installation mint %s settles only at the observed bound after restart', async (status) => {
     const first = await ready({
       http: async () => {
@@ -1213,9 +1213,11 @@ describe('lead follow-ups: target binding, operator settlement, diagnostics', ()
     expect(second.broker.status().admissions).toBe('cleanup_blocked');
   });
 
-  it('transport uncertainty stays unbounded even after a delayed server could mint', async () => {
+  it.each([
+    0, 503, 504,
+  ])('uncertain failure %s stays unbounded even after a delayed server could mint', async (status) => {
     const r = await ready();
-    r.fake.override('POST /app/installations', 'throw');
+    r.fake.override('POST /app/installations', status === 0 ? 'throw' : { status, json: null });
     await expect(
       r.broker.mintForkPush(intentOf(r.intents), { repositoryId: FORK_ID })
     ).rejects.toEqual(refusal('mint_uncertain'));
@@ -1273,6 +1275,15 @@ describe('lead follow-ups: target binding, operator settlement, diagnostics', ()
     });
     expect([...replayTokens(events).tokens.values()][0]?.expiresAt).toBeNull();
     const uncertain = events.find((e) => e.type === 'token_mint_uncertain');
+    const expiry = new Date(Date.parse(timestamp) + 3600_000).toISOString();
+    for (const status of [0, 503, 504])
+      expect(() =>
+        replayTokens(
+          events.map((e) =>
+            e === uncertain ? { ...e, status, at: timestamp, expiresAt: expiry } : e
+          )
+        )
+      ).toThrow();
     expect(() =>
       replayTokens(
         events.map((e) => (e === uncertain ? { ...e, at: timestamp, expiresAt: timestamp } : e))

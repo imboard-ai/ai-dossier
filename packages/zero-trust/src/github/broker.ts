@@ -317,7 +317,7 @@ export class ForkCredentialBroker {
     if (!this.recovered) throw new CredentialBrokerError('not_recovered');
   }
 
-  /** Must run before any admission: revokes every journaled token without a recorded revocation. */
+  /** Before admission, settle passed installation expiry and revoke remaining held tokens. */
   async recover(): Promise<RecoveryResult> {
     this.settleExpired();
     const lostUserChain: TokenRecord[] = [];
@@ -589,7 +589,7 @@ export class ForkCredentialBroker {
       type: 'token_mint_uncertain',
       id: tokenId,
       status,
-      ...(status !== NO_RESPONSE && this.ledger.tokens.get(tokenId)?.kind === 'installation'
+      ...(status === 201 && this.ledger.tokens.get(tokenId)?.kind === 'installation'
         ? { at: this.iso(observed), expiresAt: this.iso(observed + INSTALLATION_TOKEN_LIFETIME_MS) }
         : {}),
     });
