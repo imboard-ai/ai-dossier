@@ -117,7 +117,8 @@ cd packages/zero-trust
        "npmRegistry": "<worker-relay-url>/",
        "pypiIndex": "<worker-relay-url>/index/"
      },
-     "target": { "host": "<mirror-ipv4-from-zt-proxy-up>", "port": 4873 }
+      "target": { "host": "<mirror-ipv4-from-zt-proxy-up>", "port": 4873 },
+      "caCertificateFile": "<absolute-proxy-state-dir>/ca-public/ca.crt"
    }
    ```
 
@@ -126,7 +127,42 @@ cd packages/zero-trust
    ecosystem as `zt-proxy up` printed it (`npm` or `pypi`, with its port). `target.host` must be
    the IPv4 address it printed; host names are refused. The file is at most 16 KiB. Stop the proxy with
    `node scripts/zt-proxy.mjs down --state-dir <proxy-state-dir>`. Details:
-   [package-proxy decision record](../features/zero-trust-full-cycle/decisions/package-proxy.md).
+    [package-proxy decision record](../features/zero-trust-full-cycle/decisions/package-proxy.md).
+
+   The Squid inspection CA lasts **24 hours** from `up`. Supply `caCertificateFile` as an
+   absolute path to its public certificate; it is checked before every provisioning VM allocation.
+   An expired CA pauses the run with `proxy_ca_expired`. Restart with `zt-proxy down` then
+   `zt-proxy up` using the same state directory, and resume explicitly. Missing, malformed or
+   not-yet-valid certificates also pause with an actionable notice. Legacy external proxies
+   without TLS interception may omit this field; their certificate lifetime cannot be checked.
+   Mirror/provisioning failures pause and retain a bounded, redacted failure excerpt in the
+   diagnostic; genuine unsupported ecosystem/profile/host refusals remain terminal.
+
+   **Read the provisioning diagnostic.** After the run has paused, this read-only example
+   selects the latest diagnostic for the run from the step journal and verifies the retained
+   artifact digest. `<contribution-id>` is the run ID without its trailing `-run-1`, not the
+   full run ID. No journal recovery, OAuth, VM or model operation runs:
+
+   ```sh
+   node -e '
+   const fs = require("node:fs"), path = require("node:path"), crypto = require("node:crypto");
+   const dir = process.argv[1], runId = process.argv[2];
+   const rows = fs.readFileSync(path.join(dir, "events.jsonl"), "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
+   const row = rows.filter(r => r.type === "artifact" && r.runId === runId && r.key === "diagnostic").at(-1);
+   if (!row || !/^[a-f0-9]{64}$/.test(row.digest)) throw new Error("diagnostic unavailable");
+   const bytes = fs.readFileSync(path.join(dir, `${row.digest}.json`));
+   if (crypto.createHash("sha256").update(bytes).digest("hex") !== row.digest) throw new Error("diagnostic digest mismatch");
+   const d = JSON.parse(bytes);
+   console.log(JSON.stringify({ phase: d.phase, code: d.code, failedAt: d.failedAt, status: d.status, excerpt: d.log?.excerpt, next: d.next }, null, 2));
+   ' <state-dir>/runs/<contribution-id>/control/steps <run-id>
+   ```
+
+   The excerpt is bounded and credential-redacted; CA preflight notices have no command
+   excerpt because allocation was refused before a command ran. The latest diagnostic is
+   retained historical evidence and may describe an earlier pause after a successful resume.
+
+   **Never point `up --out` at `<proxy-endpoints.json>`.** Its raw stack output has a different
+   format and overwrites the derived run endpoints file, making `start` fail with `operation_failed`.
 
 3. **Create the GitHub App.** In your GitHub account settings, create a GitHub App:
    - Repository permissions: **Contents: read and write**, **Metadata: read**. Nothing else. An

@@ -450,7 +450,8 @@ settled from observed local elapsed time. Include a pinned zero-price
 `local-qemu` / `millisecond` rate in `modelProfile.rates` for this unbilled local
 provider. An interrupted charge remains unknown, never replaced with an estimate.
 
-`proxyEndpointsFile` is an owned private regular JSON file (0600), with exactly:
+`proxyEndpointsFile` is an owned private regular JSON file (0600). It requires `endpoints`
+and `target`; the supplied TLS-intercepting Squid setup also supplies controller-only CA metadata:
 
 ```json
 {
@@ -458,7 +459,8 @@ provider. An interrupted charge remains unknown, never replaced with an estimate
     "npmRegistry": "<worker-relay-url>/",
     "pypiIndex": "<worker-relay-url>/index/"
   },
-  "target": { "host": "<physical-mirror-ipv4>", "port": 4873 }
+  "target": { "host": "<physical-mirror-ipv4>", "port": 4873 },
+  "caCertificateFile": "<absolute-proxy-state-dir>/ca-public/ca.crt"
 }
 ```
 
@@ -468,6 +470,11 @@ See the package-proxy setup section below. `target.host` and `target.port` ident
 the controller-reachable physical mirror and are deployment-specific; repository
 or model text cannot change them. Invalid or malformed proxy files produce only
 the non-echoing `invalid_proxy_file` diagnostic.
+The CA lasts 24 hours and is checked before every provisioning allocation. Expiry pauses
+with `proxy_ca_expired`; restart the proxy with `down` then `up`, and resume explicitly.
+Legacy non-intercepting proxies may omit `caCertificateFile`, in which case no CA check is
+possible. See [proxy setup and recovery](../../docs/guides/zero-trust-contributions.md#one-time-setup).
+Keep raw `up --out` output separate from this derived endpoints file.
 GitHub App secrets are read only when constructing the credential session from
 the environment names in config; the Ed25519 signer uses `signerKeyFile`.
 
@@ -998,19 +1005,23 @@ Order of work, each step fail-closed:
    rebuilds the commit from it. A `CanonicalError`, or a rebuilt SHA other than
    `candidateSha`, returns `{ kind: 'identity_mismatch', reason }` and moves the run to
    `blocked` (`policy_blocked`), before `prepareBoundary` and before any VM is created.
-4. `beginVerification` claims the candidate (an exclusive marker; a concurrent claim is
-   `already_verified`). `prepareBoundary(artifactsDir)`, then `runWorkspace` (#1095)
+4. `prepareBoundary(artifactsDir)`, then `runWorkspace` (#1095)
    creates a new VM and uploads exactly the files of that validated, reconstructed
-   manifest. The implementation VM is never reused. `verificationPlan(profileRecord,
+   manifest and provisions it. Only after provisioning succeeds, `beginVerification`
+   claims the candidate (an exclusive marker; a concurrent claim is `already_verified`).
+   A refused claim releases the workspace without executing verification. The implementation
+   VM is never reused. `verificationPlan(profileRecord,
    endpoints, regressionTargets, planOptions?)` runs the suite's verification commands,
    then the regression targets' test command (id suffix `REGRESSION_COMMAND_SUFFIX`,
    `-regression`), all with `network: 'none'`. While the VM is still live,
    `probeBoundary` (a probe that throws leaves failed evidence in its closed session)
    and `await finishBoundary` with the same output collector; then the bounded teardown
    and `session.cleanup()`. From the claim on, any failure that has not already moved
-   the run (`ProvisioningFailedError` to `unsupported`, `VmCleanupError` to
-   `blocked_cleanup`) blocks it before the error propagates, and is journaled
+   the run (`VmCleanupError` to `blocked_cleanup`) blocks it before the error propagates,
+   and is journaled
    (`verification_aborted`, error class only).
+   Provisioning-only failures precede the claim and pause for explicit correction/resume;
+   they never authorize a second execution of an already-claimed verification attempt.
 5. If `finishBoundary` throws (secret-shaped guest output, collector truncation, an
    unpublishable artifact), its artifact cannot be read back, or the canaries cannot be
    removed, nothing authoritative exists: no record, the run goes to `blocked` and the
@@ -3228,7 +3239,7 @@ Design, evidence and verdict:
   treat timeouts, unreadable reports and zero suites as `inconclusive` (as are report case
   counts that contradict the exit status: exit 0 with a failing or no executed case, or a
   non-zero exit with no failing case), map provisioning
-  failures to `unsupported_environment`, and enforce the two-repair cap from run history
+   failures to `paused_user` for explicit operator correction, and enforce the two-repair cap from run history
   (`assertRepairAllowed`). `classifyCommand` adds the rule for setup steps without a
   report (exit 0 passes, other exits fail, a timeout or signal is `inconclusive`);
   `commandEvidence` (status from `classifyCommand`) and `overallStatus` build receipt evidence.
@@ -3262,9 +3273,11 @@ functions against the real adapter, so the real-VM suite exercises this code.
   `network_not_allowed` (`ProvisioningNotClosedError` if it is accepted; any other error
   propagates). The returned `ProvisionedWorkspace` records that code as
   `phaseSwitch.refusedWith`. A provisioning command that does not pass destroys the VM,
-  then makes `lifecycle.run` `unsupported_environment` through `applyProvisioning`, passes
+   then makes `lifecycle.run` `paused_user` through `applyProvisioning`, passes
   it to `lifecycle.observeRun` and throws `ProvisioningFailedError` with that run, the
-  records and the failed command id.
+   records and the failed command id. The composition retains the failed command's bounded,
+   redacted log excerpt in its diagnostic. Genuine unsupported ecosystem/profile/host refusals
+   remain terminal; a failed mirror/install command alone cannot establish that refusal.
 - `runPlanned(adapter, workspace, command, collector, options?)` runs one verification
   command and returns a `CommandRecord`. It accepts only a workspace `provisionWorkspace`
   returned and that was not released (`EvidencePlanError('workspace_unproven')`
@@ -3297,15 +3310,15 @@ functions against the real adapter, so the real-VM suite exercises this code.
   directory in, the candidate). `detail` names a command id and phase or a test-file
   index, never repository text.
 - `RunLifecycle` is `{ run, now, observeRun, journal?, retryDelayMs?, sleep? }`. The runner
-  changes the run only on a failure, and every changed run (`unsupported_environment`,
+   changes the run only on a failure, and every changed run (`paused_user`,
   `blocked_cleanup`) reaches `observeRun` before the throw.
 - Teardown on every path: each workspace VM is released through `teardownVm`, including
   when a command, an upload or the phase switch throws; `journal` then gets an
   `evidence_workspace_aborted` event with the stage, the command id and the error class.
   Three failed deletions make the run `blocked_cleanup` and throw `VmCleanupError`, with
   `cause` set to the failure that led to the teardown (for a failed provisioning,
-  `{ failedAt, records }`). A blocked cleanup wins over a provisioning failure because
-  `unsupported` has no cleanup edge. A `create` that throws returns no handle; the
+   `{ failedAt, records }`). A blocked cleanup wins over a recoverable provisioning pause:
+   explicit resume must not leave uncertain guests behind. A `create` that throws returns no handle; the
   adapter cleans up after its own failed create.
 - Logs: `logArtifact(stdout, stderr, outputTruncated)` makes each command's `LogArtifact`:
   the SHA-256 of the whole log, a tail excerpt of at most `MAX_LOG_EXCERPT_CHARS` (4096)

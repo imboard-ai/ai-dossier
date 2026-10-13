@@ -447,14 +447,14 @@ describe('verifyCandidate: refusals and failures', () => {
     );
   });
 
-  it('a provisioning failure makes the run unsupported, after teardown', async () => {
+  it('a provisioning failure pauses the run, after teardown', async () => {
     const adapter = new VerifierFakeVm(fixtureScript);
     adapter.on(['npm', 'ci', '--ignore-scripts', '--no-fund'], { exitCode: 1 });
     const h = harness(adapter);
     await expect(verifyCandidate(h.deps(), candidateInput())).rejects.toBeInstanceOf(
       ProvisioningFailedError
     );
-    expect(h.observed.map((r) => r.state)).toEqual(['unsupported']);
+    expect(h.observed.map((r) => r.state)).toEqual(['paused_user']);
     expect(adapter.liveVms()).toEqual([]);
   });
 

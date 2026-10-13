@@ -202,8 +202,11 @@ outside the repository and installed from the mirror; the hashes still come from
 - `--only-binary` (pip, uv) and `UV_NO_BUILD=1` mean no sdist build (arbitrary code) runs during
   provisioning. Detection rejects uv packages with no wheel (`binary_unavailable`). pip
   locks do not say which files exist, so for pip a sdist-only dependency fails
-  provisioning, and `applyProvisioning` turns any provisioning failure into
-  `unsupported_environment` (§5.5), never a repair or a broader network.
+   provisioning. Updated by #1194: `applyProvisioning` pauses failed provisioning for explicit
+   operator correction, never a model repair or a broader network. A mirror failure does not
+   prove an unsupported environment; genuine ecosystem/profile/host refusals remain terminal.
+   Historical proof results below retain the classification emitted at the time; #1194
+   supersedes their terminal provisioning classification.
 - Verification commands also get offline environment settings (`npm_config_offline`,
   `PIP_NO_INDEX`, `UV_OFFLINE`, empty proxy variables). These are belt and braces; the
   real guarantee is the VM's network policy.

@@ -135,10 +135,10 @@ describe('applyProvisioning', () => {
     'failed',
     'inconclusive',
     'skipped',
-  ] as const)('a %s provisioning (e.g. an sdist-only dependency) is unsupported_environment', (verdict) => {
+  ] as const)('a %s provisioning pauses for explicit operator correction', (verdict) => {
     const run = applyProvisioning(verifying(), verdict, time);
-    expect(run.state).toBe('unsupported');
-    expect(run.history.at(-1)?.reasonCode).toBe(R.UnsupportedEnvironment);
+    expect(run.state).toBe('paused_user');
+    expect(run.history.at(-1)?.reasonCode).toBe(R.UserPaused);
   });
 
   it('a passing provisioning leaves the run unchanged', () => {
