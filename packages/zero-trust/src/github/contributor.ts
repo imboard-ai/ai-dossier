@@ -225,7 +225,8 @@ export class ContributorAuthorization {
   async completeAuthor(
     callback: CallbackParams,
     overrides: { readonly name?: string; readonly email?: string; readonly userId?: number } = {},
-    retain = false
+    retain = false,
+    signal?: AbortSignal
   ): Promise<{
     userId: number;
     login: string;
@@ -245,11 +246,7 @@ export class ContributorAuthorization {
       if (retain) this.#prepared = { pair, approval: null };
       let retained = false;
       try {
-        const response = await this.options.http({
-          method: 'GET',
-          path: '/user',
-          authorization: bearer(pair.access),
-        });
+        const response = await this.authorRead('/user', pair.access, signal);
         const who = identity(response);
         if (!who || who === 'unauthorized')
           throw new ContributorAuthError('contributor_authorization_unavailable');
@@ -277,11 +274,11 @@ export class ContributorAuthorization {
         if (email !== noreply) {
           let verified = false;
           for (let page = 1; page <= 10; page++) {
-            const emails = await this.options.http({
-              method: 'GET',
-              path: `/user/emails?per_page=100&page=${page}`,
-              authorization: bearer(pair.access),
-            });
+            const emails = await this.authorRead(
+              `/user/emails?per_page=100&page=${page}`,
+              pair.access,
+              signal
+            );
             if (
               emails.status !== 200 ||
               !Array.isArray(emails.json) ||
@@ -310,6 +307,7 @@ export class ContributorAuthorization {
           approvedAt: new Date(this.now()).toISOString(),
         };
         assertSecretFree(approval);
+        signal?.throwIfAborted();
         try {
           const validated = validateAuthorApproval(approval, this.options.contributor);
           if (retain) {
@@ -327,6 +325,23 @@ export class ContributorAuthorization {
           throw new ContributorAuthError('revoke_failed');
         }
       }
+    });
+  }
+
+  /** Only identity reads may be abandoned. Token exchange and revocation must
+   * be joined so a late issued pair still has a cleanup owner. */
+  private authorRead(path: string, access: string, signal?: AbortSignal): Promise<GitHubResponse> {
+    signal?.throwIfAborted();
+    return new Promise((resolve, reject) => {
+      const aborted = () => reject(new ContributorAuthError('authorization_denied'));
+      signal?.addEventListener('abort', aborted, { once: true });
+      Promise.resolve()
+        .then(() => {
+          signal?.throwIfAborted();
+          return this.options.http({ method: 'GET', path, authorization: bearer(access) });
+        })
+        .then(resolve, reject)
+        .finally(() => signal?.removeEventListener('abort', aborted));
     });
   }
 

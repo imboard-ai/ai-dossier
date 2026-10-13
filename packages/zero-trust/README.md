@@ -419,6 +419,10 @@ No production environment-variable test override exists. Credential-bound
 and `stopStoredRun(root, runId, reason,
 edges?)` remain in wiring, outside the public index. `onAuthorizationUrl` is a
 production UI callback for immediate loopback URL display, not phase injection.
+`beginAuthorPreparation` supplies the facade's owner before OAuth starts: its `ready`
+promise yields the same session, while `dispose()` interrupts callback/identity waits,
+joins a potentially issued token exchange and revokes any resulting pair. Token
+exchange/revocation are never abandoned in favor of an untracked late outcome.
 The composed controller also exposes `authorize(runId)` for explicit account
 authorization without phase execution.
 

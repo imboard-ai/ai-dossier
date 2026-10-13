@@ -190,11 +190,37 @@ export async function prepareAuthorSession(
   return prepareConsent(input, identity, edges, true);
 }
 
+/** Register this owner before awaiting ready. Disposal closes the callback and
+ * identity waits, joins a possibly-issued exchange, then ends its exact pair. */
+export function beginAuthorPreparation(
+  input: RunConfig,
+  identity: { readonly name?: string; readonly email?: string } = {},
+  edges: Pick<ControllerOverrides, 'fetch' | 'now' | 'onAuthorizationUrl'> = {}
+) {
+  if (Object.keys(identity).some((key) => !['name', 'email'].includes(key)))
+    throw new ContributorAuthError('invalid_options');
+  const abort = new AbortController();
+  let auth: ContributorAuthorization | undefined;
+  const ready = prepareConsent(input, identity, edges, true, abort.signal, (owner) => {
+    auth = owner;
+  });
+  return Object.freeze({
+    ready,
+    dispose: async () => {
+      abort.abort();
+      await ready.catch(() => undefined);
+      await auth?.discardAuthor();
+    },
+  });
+}
+
 async function prepareConsent(
   input: RunConfig,
   identity: { readonly name?: string; readonly email?: string; readonly userId?: number } = {},
   edges: Pick<ControllerOverrides, 'fetch' | 'now' | 'onAuthorizationUrl'> = {},
-  retain = false
+  retain = false,
+  signal?: AbortSignal,
+  own?: (auth: ContributorAuthorization) => void
 ) {
   const config = validateRunConfig(runConfigInput(input));
   const fetcher = edges.fetch ?? fetch;
@@ -206,13 +232,17 @@ async function prepareConsent(
     appSlug: config.githubApp.slug,
     now: () => (edges.now?.() ?? new Date()).getTime(),
   });
+  own?.(auth);
   const receiver = await listenLoopback({ isExpected: (state) => auth.matchesPending(state) });
+  const aborted = () => receiver.close();
+  signal?.addEventListener('abort', aborted, { once: true });
   try {
+    signal?.throwIfAborted();
     const url = auth.begin(receiver.redirectUri).url;
     if (!edges.onAuthorizationUrl) throw new Error('authorization_ui_unavailable');
     edges.onAuthorizationUrl(url);
     try {
-      const approval = await auth.completeAuthor(await receiver.callback, identity, retain);
+      const approval = await auth.completeAuthor(await receiver.callback, identity, retain, signal);
       const approvedConfig = validateRunConfig({
         ...runConfigInput(config),
         authorApproval: approval,
@@ -234,6 +264,7 @@ async function prepareConsent(
     }
   } finally {
     receiver.close();
+    signal?.removeEventListener('abort', aborted);
   }
 }
 

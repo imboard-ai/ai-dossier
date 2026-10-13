@@ -512,18 +512,36 @@ test('overlapping author operations cannot overwrite or revoke an active process
   await Promise.all(h.callbacks);
 });
 
-test.each([
-  'SIGINT',
-  'SIGTERM',
-])('pre-broker %s waits for credential revocation before process exit', async (signal) => {
+test.each(
+  ['SIGINT', 'SIGTERM'].flatMap((signal) =>
+    ['confirmation', 'user', 'email', 'exchange', 'callback'].map((stage) => ({ signal, stage }))
+  )
+)('pre-broker $signal at $stage joins credential cleanup before process exit', async ({
+  signal,
+  stage,
+}) => {
   const h = rig();
   const code = `
     const nativeFetch = globalThis.fetch;
+    const stage = ${JSON.stringify(stage)};
     const { createCommands } = await import(${JSON.stringify(new URL('./zt-run-bindings.mjs', import.meta.url).href)});
     globalThis.fetch = async (input, init) => {
       const url = new URL(String(input));
-      if (url.pathname === '/login/oauth/access_token') return new Response(JSON.stringify({ access_token: 'ghu_'+'a'.repeat(30), refresh_token: 'ghr_'+'b'.repeat(30), expires_in: 3600 }));
-      if (url.pathname === '/user') return new Response(JSON.stringify({ id: 12, login: 'contributor', name: 'Verified Name' }));
+      if (url.pathname === '/login/oauth/access_token') {
+        process.stdout.write('ISSUED\\n');
+        if (stage === 'exchange') {
+          process.stdout.write('AUTHOR_READY\\n');
+          await new Promise(r => setTimeout(r, 100));
+        }
+        return new Response(JSON.stringify({ access_token: 'ghu_'+'a'.repeat(30), refresh_token: 'ghr_'+'b'.repeat(30), expires_in: 3600 }));
+      }
+      if (url.pathname === '/user' || url.pathname === '/user/emails') {
+        if ((stage === 'user' && url.pathname === '/user') || (stage === 'email' && url.pathname === '/user/emails')) {
+          process.stdout.write('AUTHOR_READY\\n');
+          return new Promise(() => {});
+        }
+        return new Response(JSON.stringify(url.pathname === '/user' ? { id: 12, login: 'contributor', name: 'Verified Name' } : [{ email: 'verified@example.org', verified: true }]));
+      }
       if (url.pathname === '/applications/fixture/token' && init.method === 'DELETE') {
         await new Promise(r => setTimeout(r, 50));
         process.stdout.write('REVOKED\\n');
@@ -532,15 +550,16 @@ test.each([
       throw new Error('unexpected_request');
     };
     const commands = await createCommands({ root: ${JSON.stringify(h.root)}, createController: () => { throw new Error('no execution'); }, onAuthorizationUrl: value => {
+      if (stage === 'callback') { process.stdout.write('AUTHOR_READY\\n'); return; }
       const page = new URL(value);
       const redirect = new URL(page.searchParams.get('redirect_uri'));
       redirect.searchParams.set('state', page.searchParams.get('state'));
       redirect.searchParams.set('code', 'approved');
       void nativeFetch(redirect);
     } });
-    await commands.prepareAuthor(${JSON.stringify(h.config)});
-    process.stdout.write('AUTHOR_READY\\n');
-    setInterval(() => {}, 1000);
+    setInterval(() => {}, 1000); // Physical transport/TTY liveness while scripted reads await.
+    await commands.prepareAuthor(${JSON.stringify(h.config)}, stage === 'email' ? { email: 'verified@example.org' } : {}).catch(() => {});
+    if (stage === 'confirmation') process.stdout.write('AUTHOR_READY\\n');
   `;
   const child = spawn(process.execPath, ['--input-type=module', '-e', code], {
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -568,7 +587,13 @@ test.each([
       });
     });
     assert.deepEqual(exit, { status: signal === 'SIGINT' ? 130 : 143, killedBy: null }, errors);
-    assert.match(output, /AUTHOR_READY\nREVOKED\n/);
+    if (stage === 'callback') {
+      assert.ok(!output.includes('ISSUED'));
+      assert.ok(!output.includes('REVOKED'));
+    } else {
+      assert.match(output, /ISSUED\n/);
+      assert.match(output, /AUTHOR_READY\nREVOKED\n/);
+    }
     assert.equal(fs.existsSync(h.root), false);
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');

@@ -29,9 +29,9 @@ import { assembleStatus, withManualAppRevocation } from '../dist/controller/stat
 import { StepArtifacts } from '../dist/controller/steps.js';
 import { STOP_NOTICE_KEY, stopNoticeAction } from '../dist/controller/stop-notice.js';
 import {
+  beginAuthorPreparation,
   fenceIncident,
   incidentRequested,
-  prepareAuthorSession,
   stopStoredRun,
 } from '../dist/controller/wiring.js';
 import { assertDirectoryAncestors, privateDir, readPrivate } from '../dist/durable-fs.js';
@@ -84,6 +84,14 @@ export async function createCommands({ root, createController, onAuthorizationUr
       process.removeListener('SIGTERM', terminated);
     }
   };
+  const trackOwner = (owner) => {
+    if (!authorOwners.size) {
+      process.on('SIGINT', interrupted);
+      process.on('SIGTERM', terminated);
+    }
+    authorOwners.add(owner);
+    return owner;
+  };
   const ownSession = (session) => {
     const owner = Object.freeze({
       approval: session.approval,
@@ -98,12 +106,7 @@ export async function createCommands({ root, createController, onAuthorizationUr
         return contributor;
       },
     });
-    if (!authorOwners.size) {
-      process.on('SIGINT', interrupted);
-      process.on('SIGTERM', terminated);
-    }
-    authorOwners.add(owner);
-    return owner;
+    return trackOwner(owner);
   };
   const authorKey = (config) => {
     const { authorApproval: _approval, ...input } = runConfigInput(config);
@@ -365,9 +368,20 @@ export async function createCommands({ root, createController, onAuthorizationUr
         if (config.resumeRunId) refuse('invalid_resume_run_id');
         await pendingAuthors.get(key)?.dispose();
         pendingAuthors.delete(key);
-        const session = ownSession(
-          await prepareAuthorSession(config, { name, email }, { onAuthorizationUrl })
+        const preparation = trackOwner(
+          beginAuthorPreparation(config, { name, email }, { onAuthorizationUrl })
         );
+        let session;
+        try {
+          const prepared = await preparation.ready;
+          if (stoppingAuthors) refuse('admission_closed');
+          session = ownSession(prepared);
+          releaseOwner(preparation); // Atomic move: never a gap in cleanup ownership.
+        } catch (error) {
+          await preparation.dispose();
+          releaseOwner(preparation);
+          throw error;
+        }
         // A config-supplied approval cannot masquerade as fresh authenticated consent.
         pendingAuthors.set(key, session);
         return session.approval;
