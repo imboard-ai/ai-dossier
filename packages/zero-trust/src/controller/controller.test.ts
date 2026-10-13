@@ -639,6 +639,29 @@ describe('RunController', () => {
     const run = await pending;
     expect(notice(h, run.runId).action).toContain('active_time_exhausted');
   });
+  it('binds a refusal to the final cleanup-blocked stop and its permitted retry action', async () => {
+    const h = rig();
+    h.steps.scripts.acquire = [
+      async (c) => {
+        await c.createVm({ scope: 'container' });
+        h.setTime('2026-10-08T02:00:00.000Z');
+        return { kind: 'acquired' };
+      },
+    ];
+    const destroy = vi.spyOn(h.vm, 'destroy').mockRejectedValue(new Error('destroy failed'));
+    const run = await h.controller.start(h.config);
+    expect(run.state).toBe('blocked_cleanup');
+    expect(destroy.mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(h.steps.calls).toEqual(['gate', 'acquire']);
+    const retained = notice(h, run.runId);
+    expect(retained.retained).toMatchObject({
+      state: 'blocked_cleanup',
+      historyLength: run.history.length,
+      reason: 'active_time_exhausted',
+    });
+    expect(retained.action).toContain('explicitly resume to retry cleanup');
+    expect(retained.action).toContain('cancellation is unavailable');
+  });
   it('recovery completes before any step, and recovery failure admits none', async () => {
     const h = rig();
     h.steps.scripts.gate = [{ kind: 'request_permission' }];

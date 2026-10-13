@@ -403,6 +403,7 @@ export class RunController {
   private reviewers: readonly string[] = [];
   private actionResult?: TrackerActionResult;
   private publicationWait?: OpenPublicationWait;
+  private controllerStopReason?: import('./stop-notice').ControllerRefusalReason;
   constructor(private readonly deps: ControllerDependencies) {}
   snapshot(): RunRecord {
     if (!this.last) throw new ControllerError('not_running');
@@ -610,6 +611,7 @@ export class RunController {
     this.reviewers = [];
     this.actionResult = undefined;
     this.publicationWait = undefined;
+    this.controllerStopReason = undefined;
     const watcher = setInterval(() => {
       this.observeIncident();
       this.observeControl();
@@ -1157,7 +1159,10 @@ export class RunController {
       throw error;
     }
     this.assertAdmission();
-    if (refusal) return stopped(this.held.run.state) ? { kind: 'waiting' } : { kind: 'hand_off' };
+    if (refusal) {
+      this.controllerStopReason = refusal;
+      return stopped(this.held.run.state) ? { kind: 'waiting' } : { kind: 'hand_off' };
+    }
     // Time parked after a gate hand-off waits on the operator, not the run (#1184).
     if (phase === 'gate') this.finishPublicationWait();
     let result: Outcome;
@@ -1222,7 +1227,15 @@ export class RunController {
         await this.persist(
           transitionRun(this.held.run, ReasonCode.UserPaused, this.deps.now().toISOString())
         );
-      await this.cleanup();
+      try {
+        await this.cleanup();
+      } finally {
+        // Teardown may add a blocked_cleanup transition. Bind only this refusal
+        // again to the final durable stop, rather than leaving its predicted pause stale.
+        const reason = this.controllerStopReason;
+        this.controllerStopReason = undefined;
+        if (reason) await this.deps.recordControllerStop?.(this.context(), reason, false);
+      }
       return false;
     }
     if (result.kind === 'verified') {
