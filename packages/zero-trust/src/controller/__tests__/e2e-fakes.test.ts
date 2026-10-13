@@ -39,11 +39,13 @@ import { discoverPolicy } from '../../policy/discover';
 import { assessIssue } from '../../policy/eligibility';
 import * as receipts from '../../receipt/issue';
 import { ReceiptNonceStore } from '../../receipt/nonces';
+import { exportContribution } from '../../retention/export';
 import { ReasonCode, transitionRun } from '../../state';
 import { approveCheckpoint } from '../checkpoints';
 import { validateRunConfig } from '../config';
 import { readControlRequests, requestControl } from '../control';
 import { applyUserPatch, changeCheckpoints, changeModelProfile } from '../edits';
+import { retainPortfolio, retainReceipt } from '../export-evidence';
 import { readOutcomeBudget, readOutcomeHandoffs, readOutcomeTrack } from '../outcome-records';
 import { RunStore } from '../run-store';
 import { StepArtifacts } from '../steps';
@@ -800,6 +802,114 @@ describe('createController real composition', () => {
     h.advanceClock();
     return started.runId;
   }
+  it('exports live submitted evidence without fixture-seeded sources (#1181)', async () => {
+    const h = rig();
+    const id = await published(h);
+    const a = h.artifacts(id);
+    try {
+      const candidate = a.get<{ record: { candidateSha: string } }>('candidate');
+      const out = path.join(path.dirname(a.store.directory), 'live-export.json');
+      const bundle = exportContribution(a.store, out);
+      expect(bundle.run.state).toBe('submitted');
+      expect(bundle.receipts.length).toBeGreaterThan(0);
+      expect(
+        bundle.receipts.every((r) => r.receipt.candidateSha === candidate.record.candidateSha)
+      ).toBe(true);
+      expect(bundle.verification?.length).toBeGreaterThan(1);
+      expect(
+        bundle.verification?.every(
+          (v) =>
+            v.candidateSha === candidate.record.candidateSha && v.verified && v.commands.length > 0
+        )
+      ).toBe(true);
+      expect(bundle.disclosure).toContain(candidate.record.candidateSha);
+      expect(h.pr()?.body).toContain(bundle.disclosure);
+      expect(bundle.policyCitations?.length).toBeGreaterThan(0);
+      expect(bundle.policyCitations).toEqual(
+        a.get<{ policy: { citations: unknown[] } }>('gate').policy.citations
+      );
+      expect(JSON.parse(fs.readFileSync(out, 'utf8'))).toEqual(bundle);
+      for (const name of [
+        'receipt-evidence.json',
+        'verification-evidence.json',
+        'portfolio-evidence.json',
+      ])
+        expect(fs.statSync(path.join(a.store.directory, name)).mode & 0o777).toBe(0o600);
+    } finally {
+      a.close();
+    }
+  }, 60000);
+  it('retains receipts idempotently and refuses corrupt, oversized and linked export sources (#1181)', async () => {
+    const h = rig();
+    const id = await published(h);
+    const a = h.artifacts(id);
+    try {
+      const receipt = a.get<receipts.SignedReceipt>('receipt');
+      const file = path.join(a.store.directory, 'receipt-evidence.json');
+      const before = fs.readFileSync(file);
+      retainReceipt(a.store, receipt);
+      expect(fs.readFileSync(file)).toEqual(before);
+      for (const bytes of [Buffer.from('{broken'), Buffer.alloc(1024 * 1024 + 1, 32)]) {
+        fs.writeFileSync(file, bytes);
+        expect(() => retainReceipt(a.store, receipt)).toThrow('invalid_export_evidence');
+        expect(fs.readFileSync(file)).toEqual(bytes);
+      }
+      fs.writeFileSync(file, before);
+      const foreign = path.join(path.dirname(a.store.directory), 'foreign.json');
+      fs.writeFileSync(foreign, before, { mode: 0o600 });
+      fs.unlinkSync(file);
+      fs.symlinkSync(foreign, file);
+      expect(() => retainReceipt(a.store, receipt)).toThrow('invalid_export_evidence');
+      expect(fs.readFileSync(foreign)).toEqual(before);
+      const portfolio = path.join(a.store.directory, 'portfolio-evidence.json');
+      const oldPortfolio = fs.readFileSync(portfolio);
+      const hidden = Buffer.from(
+        `{"runId":${JSON.stringify(id)},"disclosure":"ghp_hidden","disclosure":"safe","policyCitations":[]}`
+      );
+      fs.writeFileSync(portfolio, hidden);
+      expect(() => retainPortfolio(a.store, receipt.receipt.candidateSha, [])).toThrow(
+        'invalid_export_evidence'
+      );
+      expect(fs.readFileSync(portfolio)).toEqual(hidden);
+      fs.writeFileSync(portfolio, oldPortfolio);
+      expect(() =>
+        retainPortfolio(a.store, receipt.receipt.candidateSha, [
+          { path: 'README.md', line: 1, ruleId: 'ai', excerpt: `ghp_${'x'.repeat(36)}` },
+        ])
+      ).toThrow();
+      expect(fs.readFileSync(portfolio)).toEqual(oldPortfolio);
+    } finally {
+      a.close();
+    }
+  }, 60000);
+  it('exports the freshly verified revision while retaining the earlier signed receipt (#1181)', async () => {
+    const h = rig();
+    const id = await published(h);
+    const initial = h.artifacts(id);
+    const first = initial.get<receipts.SignedReceipt>('receipt');
+    initial.close();
+    h.feedback();
+    expect(
+      ((await h.authorize(h.controller.resume(id, { revise: true }))) as { state: string }).state
+    ).toBe('submitted');
+    const a = h.artifacts(id);
+    try {
+      const candidate = a.get<{ record: { candidateSha: string } }>('candidate');
+      const bundle = exportContribution(
+        a.store,
+        path.join(path.dirname(a.store.directory), 'revision-export.json')
+      );
+      expect(bundle.receipts.some((r) => r.digest === first.digest)).toBe(true);
+      expect(
+        bundle.receipts.some((r) => r.receipt.candidateSha === candidate.record.candidateSha)
+      ).toBe(true);
+      expect(bundle.verification?.at(-1)?.candidateSha).toBe(candidate.record.candidateSha);
+      expect(candidate.record.candidateSha).not.toBe(first.receipt.candidateSha);
+      expect(bundle.disclosure).toContain(candidate.record.candidateSha);
+    } finally {
+      a.close();
+    }
+  }, 60000);
   it('records one hand-off transition when the driver and controller read a moving clock (#1203)', async () => {
     const h = rig({ tickingClock: true });
     const started = (await h.authorize(h.controller.start(h.config))) as {

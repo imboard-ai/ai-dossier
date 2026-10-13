@@ -2244,6 +2244,17 @@ artifacts for authority, invents records, or auto-persists returned evidence:
 | `verification-evidence.json` | `{ runId, candidateSha, records }`; `records` are 1–128 actual verification-phase `CommandRecord` values returned by the evidence runner, with unique command IDs. Each `evidence` must match id, argv, status, supervised exit code, suite count and log digest. Status is reclassified using the producer's classifier, with timeout/signal, report counts (including supervised `skipped`) and capture mode checked. Missing skipped counts in legacy records fail closed; they never default to zero. All-skipped reports remain inconclusive. Truncated output cannot establish success. Only receipt-style metadata is exported, with `verified` calculated by `evidenceVerified`. Omit the optional source to represent absent verification; a present empty command array is invalid. |
 | `portfolio-evidence.json` | `{ runId, disclosure, policyCitations }`; a present file requires a disclosure string and citations array, at most 128 actual policy assessment citations (`path`, positive `line`, `ruleId`, `excerpt`). Only a missing file yields null disclosure/citations. Missing fields in a present file fail closed; prose and defaults cannot replace them. |
 
+Live controller composition writes these sources under the run's lifetime guard,
+with bounded, secret-checked atomic 0600 writes and directory fsync. Independent
+verification retains the actual supervised command records before publishing its
+completion; shipping retains each distinct signed receipt before returning push
+authorization; PR preparation retains the renderer's exact candidate-bound LLM
+disclosure and the gate's policy citations before issuing the contributor link.
+Receipts survive retries and revisions (127 distinct envelopes maximum, leaving
+room for the independent verification entry); the independent source and portfolio
+describe the latest produced candidate. Absent legacy sources remain unknown;
+recovery never invents command counts from a claimed verdict.
+
 Every selected JSON record is bounded to 1 MiB before allocation and must be valid
 UTF-8. Metadata and pinned regular no-follow inode checks precede reads; bounded
 reads detect growth and replacement. Journals are capped at 16 MiB, 10,000 records,

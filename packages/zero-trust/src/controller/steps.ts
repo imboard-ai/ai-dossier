@@ -70,6 +70,7 @@ import {
   releaseWorkspace,
   type WorkspaceEvidence,
 } from './evidence-runner';
+import { retainVerification } from './export-evidence';
 import { assessRevisionFeedback } from './feedback';
 import { OutputCollector } from './output-collector';
 import type { ShippingAuthorizeDeps } from './shipping';
@@ -865,7 +866,11 @@ export function createSteps(
       await approval(c);
       const held = candidate(c);
       const result = await verifyCandidate(
-        { ...workspace(c), endpoints: services.endpoints },
+        {
+          ...workspace(c),
+          endpoints: services.endpoints,
+          retainEvidence: (sha, records) => retainVerification(c.store, sha, records),
+        },
         {
           candidateSha: held.record.candidateSha,
           manifest: held.manifest,

@@ -67,6 +67,7 @@ import {
   type TrackerActionResult,
 } from './controller';
 import { ProvisioningFailedError } from './evidence-runner';
+import { retainPortfolio, retainReceipt } from './export-evidence';
 import { readOutcomeBudget } from './outcome-records';
 import { RunStore } from './run-store';
 import {
@@ -955,6 +956,7 @@ export function createController(
       })(intent);
       controller.assertAdmission();
       receipt = authorization.receipt;
+      retainReceipt(c.store, receipt);
       artifacts(c).put('receipt', receipt);
       return authorization;
     });
@@ -1154,6 +1156,11 @@ export function createController(
         await buildShipping(c, deps);
         if (!intents || !shipping) throw new Error('shipping_unavailable');
         if (artifacts(c).get('publication')) {
+          retainPortfolio(
+            c.store,
+            deps.bindings.candidateSha,
+            artifacts(c).require<GateRecord>('gate').policy.citations
+          );
           const t = await openTracker(c);
           const result = await t.shipRevision({
             candidateSha: deps.bindings.candidateSha,
@@ -1208,6 +1215,7 @@ export function createController(
           'baseline'
         );
         const handoff = openHandoff(c, await shippingAdmission(c), 'shipping');
+        retainPortfolio(c.store, record.candidateSha, g.policy.citations);
         const result = await handoff.issuePr({
           binding: {
             upstream: config.upstream,
