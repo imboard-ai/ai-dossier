@@ -14,7 +14,8 @@ export function parseVerification(raw: unknown, runId: string) {
     raw.records.length > 128
   )
     refuse();
-  const commands = raw.records.map((record) => {
+  const records = raw.records;
+  const commands = records.map((record) => {
     if (
       !isRecord(record) ||
       !isRecord(record.log) ||
@@ -77,7 +78,18 @@ export function parseVerification(raw: unknown, runId: string) {
       refuse();
     return record.evidence;
   });
-  const validated = parseCommandEvidence(commands);
+  // Validate every supervised record, even setup commands that cannot establish
+  // test success. Successful non-report setup does not count as a test; failed,
+  // uncertain or truncated setup must remain visible and prevent attribution.
+  parseCommandEvidence(commands);
+  const projected = commands.filter((_, index) => {
+    const record = records[index];
+    return (
+      record.captureReport || record.exitCode !== 0 || record.timedOut || record.log.outputTruncated
+    );
+  });
+  // A setup-only source remains inconclusive, never an empty successful test set.
+  const validated = parseCommandEvidence(projected.length ? projected : commands);
   return {
     receiptDigest: null,
     candidateSha: raw.candidateSha,

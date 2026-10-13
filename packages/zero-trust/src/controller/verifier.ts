@@ -339,7 +339,7 @@ async function verifyInFreshVm(
   const commands = tests.map((r) => r.evidence);
   const verdict = verificationVerdict(vm.records, regression, commands);
   const now = lifecycle.now().toISOString();
-  deps.retainEvidence?.(input.candidateSha, tests);
+  deps.retainEvidence?.(input.candidateSha, vm.records);
   const record = publishVerification(deps.artifactsDir, {
     runId: deps.runId,
     candidateSha: input.candidateSha,

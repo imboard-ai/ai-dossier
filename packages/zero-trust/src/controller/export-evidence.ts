@@ -1,29 +1,24 @@
 /** Controller-owned export sources. Publish before completion/authorization, under
  * the run's lifetime guard; no worker path or credential store enters this boundary. */
 import path from 'node:path';
-import { readPrivate, replacePrivate } from '../durable-fs';
+import { replacePrivate } from '../durable-fs';
 import { prDisclosure } from '../github/pr-body';
 import type { SignedReceipt } from '../receipt/issue';
 import { canonicalJson } from '../receipt/schema';
 import { assertSecretFree } from '../redaction';
+import { jsonRecord, optionalBytes, RECORD_BYTES } from '../retention/files';
 import { offlineReceipt } from '../retention/offline-receipt';
 import { parsePortfolio } from '../retention/portfolio';
 import { parseVerification } from '../retention/verification';
 import type { CommandRecord } from './evidence-runner';
 import type { RunStore } from './run-store';
 
-const MAX_BYTES = 1024 * 1024;
+const MAX_BYTES = RECORD_BYTES;
 function existing(file: string): unknown | undefined {
   try {
-    const bytes = readPrivate(file, (stat) => {
-      if (stat.size > MAX_BYTES || stat.uid !== process.getuid?.())
-        throw new Error('invalid_export_evidence');
-    });
-    const value: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
-    assertSecretFree(value);
-    return value;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    const bytes = optionalBytes(path.dirname(file), path.basename(file), MAX_BYTES);
+    return bytes === null ? undefined : jsonRecord(bytes, MAX_BYTES);
+  } catch {
     throw new Error('invalid_export_evidence');
   }
 }

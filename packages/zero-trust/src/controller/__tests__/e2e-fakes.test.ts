@@ -863,6 +863,15 @@ describe('createController real composition', () => {
       expect(fs.readFileSync(foreign)).toEqual(before);
       const portfolio = path.join(a.store.directory, 'portfolio-evidence.json');
       const oldPortfolio = fs.readFileSync(portfolio);
+      const hidden = Buffer.from(
+        `{"runId":${JSON.stringify(id)},"disclosure":"ghp_hidden","disclosure":"safe","policyCitations":[]}`
+      );
+      fs.writeFileSync(portfolio, hidden);
+      expect(() => retainPortfolio(a.store, receipt.receipt.candidateSha, [])).toThrow(
+        'invalid_export_evidence'
+      );
+      expect(fs.readFileSync(portfolio)).toEqual(hidden);
+      fs.writeFileSync(portfolio, oldPortfolio);
       expect(() =>
         retainPortfolio(a.store, receipt.receipt.candidateSha, [
           { path: 'README.md', line: 1, ruleId: 'ai', excerpt: `ghp_${'x'.repeat(36)}` },
@@ -895,6 +904,8 @@ describe('createController real composition', () => {
         bundle.receipts.some((r) => r.receipt.candidateSha === candidate.record.candidateSha)
       ).toBe(true);
       expect(bundle.verification?.at(-1)?.candidateSha).toBe(candidate.record.candidateSha);
+      expect(candidate.record.candidateSha).not.toBe(first.receipt.candidateSha);
+      expect(bundle.disclosure).toContain(candidate.record.candidateSha);
     } finally {
       a.close();
     }

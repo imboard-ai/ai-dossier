@@ -1156,6 +1156,11 @@ export function createController(
         await buildShipping(c, deps);
         if (!intents || !shipping) throw new Error('shipping_unavailable');
         if (artifacts(c).get('publication')) {
+          retainPortfolio(
+            c.store,
+            deps.bindings.candidateSha,
+            artifacts(c).require<GateRecord>('gate').policy.citations
+          );
           const t = await openTracker(c);
           const result = await t.shipRevision({
             candidateSha: deps.bindings.candidateSha,
