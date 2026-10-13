@@ -1386,7 +1386,7 @@ keeping `awaiting_maintainer`. There is no weaker permission fallback.
 ## Deterministic scope and test-integrity review (#1097)
 
 `reviewCandidate({ baseManifest, candidateManifest, baseDiscovery,
-candidateDiscovery, limits? })` is a pure, synchronous API returning
+candidateDiscovery, preservedDiscovery?, limits? })` is a pure, synchronous API returning
 `{ verdict: 'pass' | 'hand_off', findings: { code, path?, detail }[] }`.
 Both manifests are `SourceManifest` values and are revalidated into immutable
 snapshots. Both discovery values must be `JunitSummary | null` from
@@ -1397,7 +1397,7 @@ decreased suite or test counts produce `discovery_reduced`. Successful summaries
 do not suppress patch findings or authorize shipping.
 
 Every finding hands off. Codes are `test_deleted` (also renames/file-to-directory
-replacements), `test_disabled`, `assertions_reduced`, `discovery_reduced`,
+replacements), `test_removed`, `existing_tests_failed`, `test_disabled`, `assertions_reduced`, `discovery_reduced`,
 `discovery_unknown`, `config_changed`, `generated_or_binary`, `patch_too_large`,
 `promotional`, and `invalid_input` (invalid/unreadable manifests, limits or
 secret-shaped paths). Diagnostics are fixed text; file contents and thrown errors
@@ -1409,6 +1409,26 @@ Test paths include any `test/`, `tests/`, `__tests__/` component, `*.test.*`,
 `it.skip`, `describe.skip`, `test.skip`, `xit`, `xdescribe`, `.only`, `it.todo`,
 pytest skip/skipif/xfail decorators and skip calls, and unittest skip/skipIf/skipUnless.
 Modified tests compare textual `expect(`, `assert` and `self.assert*` counts.
+
+**Original tests (#1205).** Count checks alone let a candidate delete one existing
+test and add two new ones. Two more checks close that gap:
+
+- *Title inventory.* Test cases with a literal title (`it(`/`test(`, with any
+  `.only`/`.skip`-style modifier, and Python `def test_*`) are counted across all
+  base and all candidate test files. A modified base test file holding a title that
+  now occurs fewer times in the candidate yields `test_removed`, so a rename is a
+  finding but moving a test to another file is not. Titles never leave the function.
+  Dynamically built titles are not inventoried.
+- *Original tests on the patched source.* When the candidate changed or removed a
+  base test file, the review step runs the same full-suite command in a fresh VM on
+  the candidate with those base files restored (`preservedTestsManifest`) and passes
+  the summary as `preservedDiscovery`. More failures than the baseline yields
+  `existing_tests_failed`; a malformed summary, or a restore the candidate's layout
+  cannot hold, yields `discovery_unknown`. With permitted baseline failures the
+  comparison is by count.
+
+An integrity hand-off pauses the run (`paused_user`) and records a stop notice
+naming the codes, so `zt-run status` shows why.
 The scanner permits whitespace (including Python explicit line continuations)
 between marker tokens and after decorator `@` (LF, CRLF and bare CR), and
 conservatively admits Python grouping parentheses and implicit-continuation

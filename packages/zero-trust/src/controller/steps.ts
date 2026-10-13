@@ -64,6 +64,7 @@ import { checkShippingBase } from './drift';
 import { latestSourceEdit, sourceEditCount } from './edits';
 import {
   baselineEvidence,
+  preservedTestsManifest,
   provisionWorkspace,
   type RunLifecycle,
   regressionEvidence,
@@ -81,6 +82,7 @@ import {
   gateHandoffNotice,
   isAlteredEvidence,
   recordStopNotice,
+  reviewHandoffNotice,
 } from './stop-notice';
 import { loadVerification, type VerificationRecord } from './verification-record';
 import { verificationPlan, verifyCandidate } from './verifier';
@@ -815,6 +817,7 @@ export function createSteps(
       }
     },
     async review(c) {
+      clearStopNotice(artifacts(c));
       const held = candidate(c);
       if (
         latestSourceEdit(c.store) &&
@@ -852,14 +855,51 @@ export function createSteps(
         plan: buildCommandPlan(profile(c).manager, services.endpoints),
       });
       artifacts(c).put('candidate_checks', suite);
+      // The base's own tests on the candidate source (#1205): a test the candidate changed
+      // or removed is restored, so weakening or deleting one cannot hide a behaviour change.
+      const candidateEntries = new Map(held.manifest.entries.map((e) => [e.path, e]));
+      const restored = base.manifest.entries
+        .filter(
+          (e) =>
+            isTestPath(e.path) &&
+            e.mode !== '040000' &&
+            candidateEntries.get(e.path)?.sha256 !== e.sha256
+        )
+        .map((e) => e.path);
+      let preservedDiscovery: ReturnType<typeof summary> | undefined;
+      if (restored.length) {
+        let manifest: SourceManifest | null = null;
+        try {
+          manifest = preservedTestsManifest(base.manifest, held.manifest, restored);
+        } catch {
+          // A restore the candidate's layout cannot hold is unknown evidence, never a pass.
+        }
+        if (manifest) {
+          const preserved = await baselineEvidence({
+            ...workspace(c),
+            manifest,
+            plan: buildCommandPlan(profile(c).manager, services.endpoints),
+          });
+          artifacts(c).put('preserved_checks', preserved);
+          preservedDiscovery = summary(preserved);
+        } else preservedDiscovery = null;
+      }
       const review = reviewCandidate({
         baseManifest: base.manifest,
         candidateManifest: held.manifest,
         baseDiscovery: summary(artifacts(c).require<WorkspaceEvidence>('baseline')),
         candidateDiscovery: summary(suite),
+        ...(preservedDiscovery === undefined ? {} : { preservedDiscovery }),
       });
       artifacts(c).put('review', review);
-      return { kind: review.verdict === 'pass' ? 'approved' : 'hand_off' };
+      if (review.verdict === 'pass') return { kind: 'approved' };
+      recordStopNotice(
+        artifacts(c),
+        c.run,
+        reviewHandoffNotice(review.findings.map((f) => f.code)),
+        true
+      );
+      return { kind: 'hand_off' };
     },
     async verify(c) {
       await approval(c);

@@ -115,6 +115,8 @@ function rig(
     revisionDrift?: boolean;
     upstreamReplaced?: boolean;
     policyUnavailable?: boolean;
+    /** The implementation also rewrites the base test file with this content (#1205). */
+    baseTest?: string;
   } = {}
 ) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'zt-composition-'));
@@ -517,11 +519,20 @@ function rig(
         const writes = CANDIDATE.entries.filter((e) =>
           ['test/regression.test.js', 'src/duration.js'].includes(e.path)
         );
+        if (options.baseTest !== undefined) {
+          const bytes = Buffer.from(options.baseTest);
+          writes.push({
+            path: 'test/duration.test.js',
+            mode: '100644',
+            bytes: bytes.toString('base64'),
+            sha256: createHash('sha256').update(bytes).digest('hex'),
+          });
+        }
         let e: (typeof CANDIDATE.entries)[number] | undefined;
         if (options.driftTouch && !touched) {
           touched = true;
           e = CANDIDATE.entries.find((entry) => entry.path === 'package.json');
-        } else e = writes[implementTurn++ % 3];
+        } else e = writes[implementTurn++ % (writes.length + 1)];
         arguments_ = e
           ? {
               kind: 'worker_write_file',
@@ -800,6 +811,48 @@ describe('createController real composition', () => {
     h.advanceClock();
     return started.runId;
   }
+  describe('original tests survive the candidate (#1205)', () => {
+    const header =
+      "const assert = require('node:assert/strict');\nconst test = require('node:test');\nconst { toSeconds } = require('../src/duration');\n\n";
+    const original = `${header}test('rejects text that is not a duration', () => {\n  assert.throws(() => toSeconds('soon'), TypeError);\n});\n`;
+    it('a candidate that replaces an existing test pauses at review with a notice, nothing pushed', async () => {
+      const h = rig({
+        baseTest: `${header}test('converts seconds and minutes', () => {\n  assert.equal(toSeconds('90s'), 90);\n});\n\ntest('throws error on invalid format', () => {\n  assert.throws(() => toSeconds('10x'), /Invalid/);\n});\n`,
+      });
+      const run = (await h.authorize(h.controller.start(h.config))) as {
+        runId: string;
+        state: string;
+      };
+      expect(run.state).toBe('paused_user');
+      const a = h.artifacts(run.runId);
+      const review = a.get<{ verdict: string; findings: { code: string; path?: string }[] }>(
+        'review'
+      );
+      expect(review?.verdict).toBe('hand_off');
+      expect(review?.findings).toContainEqual(
+        expect.objectContaining({ code: 'test_removed', path: 'test/duration.test.js' })
+      );
+      expect(a.get('preserved_checks')).toBeDefined();
+      expect(stopNoticeAction(a.get(STOP_NOTICE_KEY), a.store.run)).toContain('test_removed');
+      expect(a.get('verification')).toBeUndefined();
+      expect(h.fork.sha(`ztfc/${a.store.contributionId}`)).toBeNull();
+      a.close();
+    }, 60000);
+    it('a candidate that only appends to an existing test file still reaches the hand-off', async () => {
+      const h = rig({
+        baseTest: `${original}\ntest('converts minutes', () => {\n  assert.equal(toSeconds('2m'), 120);\n});\n`,
+      });
+      const run = (await h.authorize(h.controller.start(h.config))) as {
+        runId: string;
+        state: string;
+      };
+      expect(run.state).toBe('awaiting_contributor');
+      const a = h.artifacts(run.runId);
+      expect(a.get<{ verdict: string }>('review')?.verdict).toBe('pass');
+      expect(a.get('preserved_checks')).toBeDefined();
+      a.close();
+    }, 60000);
+  });
   it('records one hand-off transition when the driver and controller read a moving clock (#1203)', async () => {
     const h = rig({ tickingClock: true });
     const started = (await h.authorize(h.controller.start(h.config))) as {

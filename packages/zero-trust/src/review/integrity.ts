@@ -9,6 +9,8 @@ import { assertNoSecrets } from '../redaction';
 
 export type IntegrityCode =
   | 'test_deleted'
+  | 'test_removed'
+  | 'existing_tests_failed'
   | 'test_disabled'
   | 'assertions_reduced'
   | 'discovery_reduced'
@@ -38,6 +40,9 @@ export interface ReviewCandidateInput {
   /** Caller binds both summaries to the same full-suite command. */
   readonly baseDiscovery: JunitSummary | null;
   readonly candidateDiscovery: JunitSummary | null;
+  /** The same command on the candidate source with every base test file it changed or
+   * removed restored (#1205). Omitted when the candidate left all base test files alone. */
+  readonly preservedDiscovery?: JunitSummary | null;
   readonly limits?: Partial<IntegrityLimits>;
 }
 
@@ -46,6 +51,20 @@ const TEST =
 /** Shared path rules for scope integrity and regression overlay selection. */
 export function isTestPath(path: string): boolean {
   return TEST.test(path);
+}
+/** Test cases with a literal title: `it`/`test` calls (any `.only`/`.skip`/... modifier) and
+ * Python `def test_*`. Dynamic titles are not inventoried; the preserved run covers them. */
+const CASE =
+  /(?<![\w$.])(?:it|test)(?:\s*\.\s*[A-Za-z_$][\w$]*)?\s*\(\s*(?:'((?:\\.|[^'\\\r\n])*)'|"((?:\\.|[^"\\\r\n])*)"|`((?:\\.|[^`\\$])*)`)|^[ \t]*(?:async[ \t]+)?def[ \t]+(test\w*)[ \t]*\(/gmu;
+function caseTitles(value: string): string[] {
+  return [...value.matchAll(CASE)].map((m) => m.slice(1).find((t) => t !== undefined) as string);
+}
+function inventory(files: readonly (string | null)[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const value of files)
+    for (const title of value === null ? [] : caseTitles(value))
+      counts.set(title, (counts.get(title) ?? 0) + 1);
+  return counts;
 }
 const CONFIG =
   /(?:^|\/)(?:package\.json|package-lock\.json|pyproject\.toml|uv\.lock|requirements[^/]*\.txt|setup\.py|setup\.cfg|tox\.ini|pytest\.ini|conftest\.py|jest\.config\.[^/]*|vitest\.config\.[^/]*|\.mocharc[^/]*|Makefile|Dockerfile|\.gitattributes)$|(?:^|\/)(?:\.github|\.devcontainer)(?:\/|$)/u;
@@ -268,6 +287,7 @@ function result(findings: IntegrityFinding[]): IntegrityReview {
 export function reviewCandidate(input: ReviewCandidateInput): IntegrityReview {
   try {
     const { baseManifest, candidateManifest, baseDiscovery, candidateDiscovery, limits } = input;
+    const { preservedDiscovery } = input;
     if (limits !== undefined && (!limits || typeof limits !== 'object' || Array.isArray(limits)))
       return result([{ code: 'invalid_input', detail: 'Invalid review limits.' }]);
     const { maxFiles = 20, maxChangedLines = 1000 } = limits ?? {};
@@ -286,8 +306,18 @@ export function reviewCandidate(input: ReviewCandidateInput): IntegrityReview {
       add('discovery_unknown', 'Full-suite discovery is unknown or malformed.');
     else if (candidateCounts.suites < baseCounts.suites || candidateCounts.tests < baseCounts.tests)
       add('discovery_reduced', 'Full-suite suite or test count decreased.');
+    if (preservedDiscovery !== undefined) {
+      const preserved = summary(preservedDiscovery);
+      if (!preserved) add('discovery_unknown', 'Existing-test discovery is unknown or malformed.');
+      else if (baseCounts && preserved.failures > baseCounts.failures)
+        add('existing_tests_failed', 'Original tests fail on the candidate source.');
+    }
     const old = new Map(base.entries.map((entry) => [entry.path, entry]));
     const next = new Map(candidate.entries.map((entry) => [entry.path, entry]));
+    const tests = (entries: Map<string, SourceEntry>) =>
+      [...entries.values()].filter((e) => e.mode !== '040000' && TEST.test(e.path));
+    const candidateCases = inventory(tests(next).map(text));
+    const baseCases = inventory(tests(old).map(text));
     let changedFiles = 0;
     let changedLines = 0;
     // Bound quadratic work across the whole candidate, not separately per file.
@@ -317,6 +347,12 @@ export function reviewCandidate(input: ReviewCandidateInput): IntegrityReview {
           add('test_disabled', 'Test disabling, focus or todo marker added.', path);
         if (wasFile && candidateScreen.assertions < screen(before).assertions)
           add('assertions_reduced', 'Test assertion count decreased.', path);
+        // Titles may move between test files; only a net loss across the suite counts.
+        if (
+          wasFile &&
+          caseTitles(before).some((t) => (candidateCases.get(t) ?? 0) < (baseCases.get(t) ?? 0))
+        )
+          add('test_removed', 'Original test case removed or renamed.', path);
       } else if (isFile && /ai-dossier|imboard/u.test(changes.added))
         add('promotional', 'Promotional string added outside tests.', path);
     }

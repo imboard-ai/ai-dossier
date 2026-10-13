@@ -140,7 +140,7 @@ Defects filed as sub-issues of #1002 during the demo:
 | #1200 | New installation-token format blocks shipping | fixed |
 | #1202 | An uncertain token mint leaves the run in `blocked_cleanup` | open |
 | #1203 | Hand-off transition stamped twice | fixed |
-| #1205 | A candidate can delete an existing test and still pass | open |
+| #1205 | A candidate can delete an existing test and still pass | fixed (review inventories test titles and runs the original tests on the patched source) |
 
 Not filed as a product defect: the check script fails `pr-body` until the PR tracker has started,
 which happens on the `resume` after `submitted`. The runbook's stop B should say to run that second

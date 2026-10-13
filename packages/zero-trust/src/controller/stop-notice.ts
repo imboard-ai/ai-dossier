@@ -3,6 +3,7 @@
  * so a later, unrelated stop never displays it. All text is fixed: no untrusted bytes. */
 
 import type { WriteBlockReason } from '../intents';
+import type { IntegrityCode } from '../review/integrity';
 import type { RunRecord } from '../state';
 import type { DriftHandoffReason } from './drift';
 import { VerificationRecordError } from './verification-record';
@@ -101,6 +102,37 @@ export function gateHandoffNotice(reasons: readonly string[]): Omit<StopNotice, 
     state: 'gating',
     reason,
     nextPermittedAction: `Handed off at the gate (${reason}). Nothing was written and no model work started. Check the upstream issue and contribution policy, then resume explicitly or contribute manually.`,
+  };
+}
+
+const INTEGRITY_CODES: readonly IntegrityCode[] = Object.freeze([
+  'test_deleted',
+  'test_removed',
+  'existing_tests_failed',
+  'test_disabled',
+  'assertions_reduced',
+  'discovery_reduced',
+  'discovery_unknown',
+  'config_changed',
+  'generated_or_binary',
+  'patch_too_large',
+  'promotional',
+  'invalid_input',
+]);
+
+/** The deterministic integrity review refused the candidate (#1205). The run pauses with
+ * the candidate retained; the codes come from the closed `IntegrityCode` set. */
+export function reviewHandoffNotice(codes: readonly string[]): Omit<StopNotice, 'historyLength'> {
+  const closed = [
+    ...new Set(
+      codes.map((c) => ((INTEGRITY_CODES as readonly string[]).includes(c) ? c : 'invalid_input'))
+    ),
+  ];
+  const reason = closed.length ? closed.join(',') : 'invalid_input';
+  return {
+    state: 'paused_user',
+    reason,
+    nextPermittedAction: `Review refused the candidate (${reason}). Nothing was pushed; the candidate and its diff are retained for inspection. Start a new run or contribute manually.`,
   };
 }
 

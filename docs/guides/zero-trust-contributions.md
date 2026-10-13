@@ -399,8 +399,10 @@ controller-held source, runs frozen dependency setup through the package proxy, 
 relevant checks with no network. A regression test must fail on the base and pass on the candidate. A
 timeout, unreadable report or zero test suites is inconclusive, never a pass. At most two localized
 repair attempts follow a failure. A separate scope and test-integrity review flags unrelated
-changes, deleted or disabled tests, reduced assertions and build or test configuration changes,
-and hands off on anything it cannot justify. If you selected the `verification` checkpoint, the run
+changes, deleted, renamed or disabled tests, reduced assertions and build or test configuration
+changes, and hands off on anything it cannot justify. When the candidate changes an existing test
+file, the review also runs the upstream's original tests against the patched source; an original
+test that now fails pauses the run, and `zt-run status` names the reason. If you selected the `verification` checkpoint, the run
 pauses before shipping, for your approval of `artifacts/verification/<candidateSha>.json`.
 
 ### Step 5: shipping and the pull request hand-off

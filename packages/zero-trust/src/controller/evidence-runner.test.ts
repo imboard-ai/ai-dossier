@@ -25,6 +25,7 @@ import {
   MAX_LOG_EXCERPT_CHARS,
   ProvisioningFailedError,
   ProvisioningNotClosedError,
+  preservedTestsManifest,
   provisionWorkspace,
   REDACTED_EXCERPT,
   type RunLifecycle,
@@ -672,5 +673,33 @@ describe('reproductionManifest', () => {
       })
     ).rejects.toMatchObject({ code: 'no_regression_targets' });
     expect(adapter.calls).toEqual([]);
+  });
+});
+
+describe('preservedTestsManifest (#1205)', () => {
+  it('restores the base test files on the candidate, keeping its source and new tests', () => {
+    const baseTest = BASE.entries.find(
+      (e) => e.path !== REGRESSION_TEST && /^test\/.+\.js$/u.test(e.path)
+    );
+    if (!baseTest) throw new Error('fixture has no base test');
+    const dir = tempDir('zt-runner-preserve-');
+    fs.cpSync(path.join(NPM, 'base'), dir, { recursive: true });
+    for (const patch of ['regression.patch', 'fix.patch'])
+      spawnSync('git', ['apply', path.join(NPM, patch)], { cwd: dir });
+    fs.rmSync(path.join(dir, baseTest.path));
+    const candidate = exportSource(dir);
+    const manifest = preservedTestsManifest(BASE, candidate, [baseTest.path]);
+    const at = (m: SourceManifest, p: string) => m.entries.find((e) => e.path === p)?.sha256;
+    expect(at(manifest, baseTest.path)).toBe(baseTest.sha256);
+    expect(at(manifest, 'src/duration.js')).toBe(at(CANDIDATE, 'src/duration.js'));
+    expect(at(manifest, REGRESSION_TEST)).toBe(at(CANDIDATE, REGRESSION_TEST));
+  });
+
+  it('refuses no files, a path absent from the base, and a path that became a directory', () => {
+    expect(() => preservedTestsManifest(BASE, CANDIDATE, [])).toThrow(/no_test_files/);
+    expect(() => preservedTestsManifest(BASE, CANDIDATE, [REGRESSION_TEST])).toThrow(
+      /test_file_missing/
+    );
+    expect(() => preservedTestsManifest(BASE, CANDIDATE, ['test'])).toThrow(/test_file_missing/);
   });
 });

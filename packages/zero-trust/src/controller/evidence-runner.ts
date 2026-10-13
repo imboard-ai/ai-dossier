@@ -671,6 +671,33 @@ export function reproductionManifest(
   return createManifest([...entries.values()]);
 }
 
+/** The candidate with `testFiles` taken back from the base (plus any parent directories
+ * the candidate lacks): the original tests applied to patched code (#1205). The inverse of
+ * `reproductionManifest`; a path the candidate turned into a directory is refused. */
+export function preservedTestsManifest(
+  baseManifest: SourceManifest,
+  candidateManifest: SourceManifest,
+  testFiles: readonly string[]
+): SourceManifest {
+  if (testFiles.length === 0) throw new EvidencePlanError('no_test_files');
+  const base = new Map(validateManifest(baseManifest).entries.map((e) => [e.path, e]));
+  const candidate = validateManifest(candidateManifest);
+  const entries = new Map<string, SourceEntry>(candidate.entries.map((e) => [e.path, e]));
+  testFiles.forEach((file, index) => {
+    const entry = base.get(file);
+    if (
+      !entry ||
+      entry.mode === MANIFEST_DIRECTORY ||
+      entries.get(file)?.mode === MANIFEST_DIRECTORY
+    )
+      throw new EvidencePlanError('test_file_missing', `test file #${index}`);
+    for (const directory of parentPaths(file))
+      if (!entries.has(directory)) entries.set(directory, base.get(directory) as SourceEntry);
+    entries.set(file, entry);
+  });
+  return createManifest([...entries.values()]);
+}
+
 /** Regression proof (PRD §5.6 steps 2 and 4, scenario 6): the regression targets run on
  * the base plus only the test files (must be `failed`) and on the candidate (must be
  * `passed`), each in its own fresh VM. `not_reproduced` is a hand-off before patching. */
