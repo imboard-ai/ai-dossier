@@ -512,6 +512,69 @@ test('overlapping author operations cannot overwrite or revoke an active process
   await Promise.all(h.callbacks);
 });
 
+test.each([
+  'SIGINT',
+  'SIGTERM',
+])('pre-broker %s waits for credential revocation before process exit', async (signal) => {
+  const h = rig();
+  const code = `
+    const nativeFetch = globalThis.fetch;
+    const { createCommands } = await import(${JSON.stringify(new URL('./zt-run-bindings.mjs', import.meta.url).href)});
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/login/oauth/access_token') return new Response(JSON.stringify({ access_token: 'ghu_'+'a'.repeat(30), refresh_token: 'ghr_'+'b'.repeat(30), expires_in: 3600 }));
+      if (url.pathname === '/user') return new Response(JSON.stringify({ id: 12, login: 'contributor', name: 'Verified Name' }));
+      if (url.pathname === '/applications/fixture/token' && init.method === 'DELETE') {
+        await new Promise(r => setTimeout(r, 50));
+        process.stdout.write('REVOKED\\n');
+        return new Response(null, { status: 204 });
+      }
+      throw new Error('unexpected_request');
+    };
+    const commands = await createCommands({ root: ${JSON.stringify(h.root)}, createController: () => { throw new Error('no execution'); }, onAuthorizationUrl: value => {
+      const page = new URL(value);
+      const redirect = new URL(page.searchParams.get('redirect_uri'));
+      redirect.searchParams.set('state', page.searchParams.get('state'));
+      redirect.searchParams.set('code', 'approved');
+      void nativeFetch(redirect);
+    } });
+    await commands.prepareAuthor(${JSON.stringify(h.config)});
+    process.stdout.write('AUTHOR_READY\\n');
+    setInterval(() => {}, 1000);
+  `;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', code], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let output = '';
+  let errors = '';
+  let sent = false;
+  child.stderr.on('data', (bytes) => {
+    errors += bytes;
+  });
+  child.stdout.on('data', (bytes) => {
+    output += bytes;
+    if (!sent && output.includes('AUTHOR_READY')) {
+      sent = true;
+      child.kill(signal);
+    }
+  });
+  try {
+    const exit = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('signal cleanup timed out')), 10000);
+      child.once('error', reject);
+      child.once('exit', (status, killedBy) => {
+        clearTimeout(timer);
+        resolve({ status, killedBy });
+      });
+    });
+    assert.deepEqual(exit, { status: signal === 'SIGINT' ? 130 : 143, killedBy: null }, errors);
+    assert.match(output, /AUTHOR_READY\nREVOKED\n/);
+    assert.equal(fs.existsSync(h.root), false);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+  }
+});
+
 test('resume delegates identity admission to the locked controller without a CLI OAuth preflight', async () => {
   const h = rig();
   const calls = [];

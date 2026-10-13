@@ -466,6 +466,10 @@ try {
 The command facade holds each configuration's author operation exclusively before
 any await. Competing prepare/start/discard calls return `busy` without touching its
 credential owner. Failed disposal retains the session for an explicit cleanup retry.
+While the command facade owns an unadopted session, SIGINT/SIGTERM joins its
+revocation before exiting (130/143). Adoption/disposal removes these scoped handlers;
+the broker's existing durable recovery owns credentials after adoption. Failed signal
+cleanup prints a fixed manual App-revocation instruction rather than claiming success.
 
 The root validates closed config, creates the durable RunStore and BudgetLedger,
 preflights local QEMU before allocation, reads the private proxy endpoints file,
