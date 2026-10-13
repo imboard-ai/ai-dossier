@@ -53,60 +53,71 @@ function refuse(code) {
   throw Object.assign(new Error(code), { code });
 }
 
+// Signals terminate a process, not one command facade. All facades share the
+// same ephemeral cleanup barrier; no credential or shutdown state is durable.
+const authorOwners = new Set();
+let stoppingAuthors = false;
+const stopAuthors = async (signal) => {
+  if (stoppingAuthors) return;
+  stoppingAuthors = true;
+  // Before broker adoption there is no durable credential ledger. Join every
+  // process-local owner before honoring termination, including an active start.
+  const results = await Promise.allSettled([...authorOwners].map((owner) => owner.dispose()));
+  if (results.some((result) => result.status === 'rejected'))
+    process.stderr.write(
+      'error: revoke_failed; revoke the App authorization at https://github.com/settings/applications\n'
+    );
+  process.exit(signal === 'SIGINT' ? 130 : 143);
+};
+const interrupted = () => {
+  void stopAuthors('SIGINT');
+};
+const terminated = () => {
+  void stopAuthors('SIGTERM');
+};
+const releaseOwner = (owner) => {
+  authorOwners.delete(owner);
+  if (!authorOwners.size) {
+    process.removeListener('SIGINT', interrupted);
+    process.removeListener('SIGTERM', terminated);
+  }
+};
+const trackOwner = (owner) => {
+  if (!authorOwners.size) {
+    process.on('SIGINT', interrupted);
+    process.on('SIGTERM', terminated);
+  }
+  authorOwners.add(owner);
+  return owner;
+};
+const ownSession = (session) => {
+  const owner = Object.freeze({
+    approval: session.approval,
+    dispose: async () => {
+      await session.dispose();
+      releaseOwner(owner);
+    },
+    adopt: async (...args) => {
+      if (stoppingAuthors) refuse('admission_closed');
+      const contributor = await session.adopt(...args);
+      releaseOwner(owner); // Broker now owns durable cleanup and signal recovery.
+      return contributor;
+    },
+  });
+  return trackOwner(owner);
+};
+
 export async function createCommands({ root, createController, onAuthorizationUrl }) {
   root = path.resolve(root);
   const pendingAuthors = new Map();
+  const pendingPreparations = new Map();
   const authorOperations = new Set();
-  const authorOwners = new Set();
-  let stoppingAuthors = false;
-  const stopAuthors = async (signal) => {
-    if (stoppingAuthors) return;
-    stoppingAuthors = true;
-    // Before broker adoption there is no durable credential ledger. Join every
-    // process-local owner before honoring termination, including an active start.
-    const results = await Promise.allSettled([...authorOwners].map((owner) => owner.dispose()));
-    if (results.some((result) => result.status === 'rejected'))
-      process.stderr.write(
-        'error: revoke_failed; revoke the App authorization at https://github.com/settings/applications\n'
-      );
-    process.exit(signal === 'SIGINT' ? 130 : 143);
-  };
-  const interrupted = () => {
-    void stopAuthors('SIGINT');
-  };
-  const terminated = () => {
-    void stopAuthors('SIGTERM');
-  };
-  const releaseOwner = (owner) => {
-    authorOwners.delete(owner);
-    if (!authorOwners.size) {
-      process.removeListener('SIGINT', interrupted);
-      process.removeListener('SIGTERM', terminated);
-    }
-  };
-  const trackOwner = (owner) => {
-    if (!authorOwners.size) {
-      process.on('SIGINT', interrupted);
-      process.on('SIGTERM', terminated);
-    }
-    authorOwners.add(owner);
-    return owner;
-  };
-  const ownSession = (session) => {
-    const owner = Object.freeze({
-      approval: session.approval,
-      dispose: async () => {
-        await session.dispose();
-        releaseOwner(owner);
-      },
-      adopt: async (...args) => {
-        if (stoppingAuthors) refuse('admission_closed');
-        const contributor = await session.adopt(...args);
-        releaseOwner(owner); // Broker now owns durable cleanup and signal recovery.
-        return contributor;
-      },
-    });
-    return trackOwner(owner);
+  const disposePreparation = async (key) => {
+    const owner = pendingPreparations.get(key);
+    if (!owner) return;
+    await owner.dispose();
+    releaseOwner(owner);
+    pendingPreparations.delete(key);
   };
   const authorKey = (config) => {
     const { authorApproval: _approval, ...input } = runConfigInput(config);
@@ -356,6 +367,7 @@ export async function createCommands({ root, createController, onAuthorizationUr
   return {
     async discardAuthor(config) {
       return withAuthor(config, async (key) => {
+        await disposePreparation(key);
         const session = pendingAuthors.get(key);
         await session?.dispose();
         pendingAuthors.delete(key);
@@ -366,20 +378,22 @@ export async function createCommands({ root, createController, onAuthorizationUr
         checkRoot(config);
         if (incidentRequested(root)) refuse('incident_active');
         if (config.resumeRunId) refuse('invalid_resume_run_id');
+        await disposePreparation(key);
         await pendingAuthors.get(key)?.dispose();
         pendingAuthors.delete(key);
         const preparation = trackOwner(
           beginAuthorPreparation(config, { name, email }, { onAuthorizationUrl })
         );
+        pendingPreparations.set(key, preparation);
         let session;
         try {
           const prepared = await preparation.ready;
           if (stoppingAuthors) refuse('admission_closed');
           session = ownSession(prepared);
           releaseOwner(preparation); // Atomic move: never a gap in cleanup ownership.
+          pendingPreparations.delete(key);
         } catch (error) {
-          await preparation.dispose();
-          releaseOwner(preparation);
+          await disposePreparation(key);
           throw error;
         }
         // A config-supplied approval cannot masquerade as fresh authenticated consent.

@@ -512,9 +512,45 @@ test('overlapping author operations cannot overwrite or revoke an active process
   await Promise.all(h.callbacks);
 });
 
+test('failed preparation cleanup remains reachable by explicit discard before another authorization', async () => {
+  const h = rig();
+  const transport = globalThis.fetch;
+  let refuseDelete = true;
+  let deletes = 0;
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(String(input));
+    if (url.pathname === '/user') return new Response(JSON.stringify({}));
+    if (url.pathname === '/applications/fixture/token' && init.method === 'DELETE') {
+      deletes++;
+      if (refuseDelete) return new Response(null, { status: 503 });
+    }
+    return transport(input, init);
+  };
+  const listeners = process.listenerCount('SIGTERM');
+  const commands = await createCommands({
+    root: h.root,
+    createController,
+    onAuthorizationUrl: h.onAuthorizationUrl,
+  });
+  await assert.rejects(commands.prepareAuthor(h.config), { code: 'revoke_failed' });
+  const failed = deletes;
+  await assert.rejects(commands.prepareAuthor(h.config), { code: 'revoke_failed' });
+  assert.equal(h.callbacks.length, 1);
+  assert.ok(deletes > failed);
+  refuseDelete = false;
+  await commands.discardAuthor(h.config);
+  assert.equal(h.counts().revoked, 1);
+  assert.equal(process.listenerCount('SIGTERM'), listeners);
+  await commands.discardAuthor(h.config);
+  assert.equal(h.counts().revoked, 1);
+  await Promise.all(h.callbacks);
+});
+
 test.each(
   ['SIGINT', 'SIGTERM'].flatMap((signal) =>
-    ['confirmation', 'user', 'email', 'exchange', 'callback'].map((stage) => ({ signal, stage }))
+    ['confirmation', 'user', 'email', 'exchange', 'callback', 'facades', 'facades-fail'].map(
+      (stage) => ({ signal, stage })
+    )
   )
 )('pre-broker $signal at $stage joins credential cleanup before process exit', async ({
   signal,
@@ -524,16 +560,18 @@ test.each(
   const code = `
     const nativeFetch = globalThis.fetch;
     const stage = ${JSON.stringify(stage)};
+    let issued = 0;
     const { createCommands } = await import(${JSON.stringify(new URL('./zt-run-bindings.mjs', import.meta.url).href)});
     globalThis.fetch = async (input, init) => {
       const url = new URL(String(input));
       if (url.pathname === '/login/oauth/access_token') {
+        issued++;
         process.stdout.write('ISSUED\\n');
         if (stage === 'exchange') {
           process.stdout.write('AUTHOR_READY\\n');
           await new Promise(r => setTimeout(r, 100));
         }
-        return new Response(JSON.stringify({ access_token: 'ghu_'+'a'.repeat(30), refresh_token: 'ghr_'+'b'.repeat(30), expires_in: 3600 }));
+        return new Response(JSON.stringify({ access_token: 'ghu_'+'a'.repeat(29)+issued, refresh_token: 'ghr_'+'b'.repeat(29)+issued, expires_in: 3600 }));
       }
       if (url.pathname === '/user' || url.pathname === '/user/emails') {
         if ((stage === 'user' && url.pathname === '/user') || (stage === 'email' && url.pathname === '/user/emails')) {
@@ -543,23 +581,27 @@ test.each(
         return new Response(JSON.stringify(url.pathname === '/user' ? { id: 12, login: 'contributor', name: 'Verified Name' } : [{ email: 'verified@example.org', verified: true }]));
       }
       if (url.pathname === '/applications/fixture/token' && init.method === 'DELETE') {
-        await new Promise(r => setTimeout(r, 50));
+        const second = JSON.parse(init.body).access_token.endsWith('2');
+        await new Promise(r => setTimeout(r, second ? 500 : 50));
+        if (second && stage === 'facades-fail') return new Response(null, { status: 503 });
         process.stdout.write('REVOKED\\n');
         return new Response(null, { status: 204 });
       }
       throw new Error('unexpected_request');
     };
-    const commands = await createCommands({ root: ${JSON.stringify(h.root)}, createController: () => { throw new Error('no execution'); }, onAuthorizationUrl: value => {
+    const options = { root: ${JSON.stringify(h.root)}, createController: () => { throw new Error('no execution'); }, onAuthorizationUrl: value => {
       if (stage === 'callback') { process.stdout.write('AUTHOR_READY\\n'); return; }
       const page = new URL(value);
       const redirect = new URL(page.searchParams.get('redirect_uri'));
       redirect.searchParams.set('state', page.searchParams.get('state'));
       redirect.searchParams.set('code', 'approved');
       void nativeFetch(redirect);
-    } });
+    } };
+    const commands = await createCommands(options);
     setInterval(() => {}, 1000); // Physical transport/TTY liveness while scripted reads await.
     await commands.prepareAuthor(${JSON.stringify(h.config)}, stage === 'email' ? { email: 'verified@example.org' } : {}).catch(() => {});
-    if (stage === 'confirmation') process.stdout.write('AUTHOR_READY\\n');
+    if (stage.startsWith('facades')) await (await createCommands(options)).prepareAuthor({ ...${JSON.stringify(h.config)}, issueUrl: 'https://github.com/owner/repo/issues/2' });
+    if (stage === 'confirmation' || stage.startsWith('facades')) process.stdout.write('AUTHOR_READY\\n');
   `;
   const child = spawn(process.execPath, ['--input-type=module', '-e', code], {
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -593,6 +635,9 @@ test.each(
     } else {
       assert.match(output, /ISSUED\n/);
       assert.match(output, /AUTHOR_READY\nREVOKED\n/);
+      if (stage === 'facades') assert.equal(output.match(/REVOKED/g).length, 2);
+      if (stage === 'facades-fail')
+        assert.match(errors, /error: revoke_failed; revoke the App authorization/);
     }
     assert.equal(fs.existsSync(h.root), false);
   } finally {

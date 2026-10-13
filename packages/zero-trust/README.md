@@ -470,8 +470,10 @@ try {
 The command facade holds each configuration's author operation exclusively before
 any await. Competing prepare/start/discard calls return `busy` without touching its
 credential owner. Failed disposal retains the session for an explicit cleanup retry.
-While the command facade owns an unadopted session, SIGINT/SIGTERM joins its
-revocation before exiting (130/143). Adoption/disposal removes these scoped handlers;
+While any command facade owns a preparation or unadopted session, a shared process-local
+SIGINT/SIGTERM barrier joins all their revocations before exiting (130/143).
+Failed preparations remain keyed cleanup-only owners for explicit discard or a preparation
+retry; they cannot authorize a start. Adoption/disposal removes these scoped handlers;
 the broker's existing durable recovery owns credentials after adoption. Failed signal
 cleanup prints a fixed manual App-revocation instruction rather than claiming success.
 
