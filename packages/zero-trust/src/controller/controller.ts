@@ -314,6 +314,7 @@ const REASONS: Partial<Record<Outcome['kind'], ReasonCode>> = {
  * the same reason, a repeat observation must not append a duplicate transition. */
 const IDEMPOTENT_TRACK_OUTCOMES: readonly Outcome['kind'][] = [
   'contributor_handoff',
+  'engagement_observed',
   'revision',
   'submitted',
   'merged',
