@@ -364,8 +364,13 @@ Config-supplied author approval cannot substitute for this start-side consent.
 The identity is recorded once, bound into the config digest, and never replaced
 on resume. Another authenticated numeric account refuses with
 `author_approval_mismatch`. An authorization URL contains no access/refresh token.
-Pre-start and explicit-authorize credentials are revoked after identity checks;
-execution may request a separate authorization when it needs a fork credential.
+Start retains the validated access/refresh pair in an opaque process-local session
+through confirmation and gating, then transfers it once to the recovered fork-bound
+broker. Normal start therefore opens one authorization page. Decline, refusal,
+construction failure and unused-session disposal revoke the owned pair; expired
+access is refreshed without a new page to end its refresh chain. No token is durable.
+The one-shot `prepareAuthor` helper and explicit `authorize` still revoke after identity
+checks; fresh-process resume retains its existing authorization requirements.
 
 `status` performs observational reads without the writer lock, never creates or
 repairs files, and refuses incomplete/corrupt or concurrently changed evidence.
@@ -410,9 +415,14 @@ node scripts/zt-run.mjs export --root state/runs --run ztc-0123456789abcdef-run-
 The injected factory builds the command facade; the thin entry binds it to
 `createCommands` and the real `dist/controller/wiring.js:createController`.
 No production environment-variable test override exists. Credential-bound
-`prepareAuthor(config, identity?, edges?)` and `stopStoredRun(root, runId, reason,
+`prepareAuthor(config, identity?, edges?)`, `prepareAuthorSession(config, selection?, edges?)`
+and `stopStoredRun(root, runId, reason,
 edges?)` remain in wiring, outside the public index. `onAuthorizationUrl` is a
 production UI callback for immediate loopback URL display, not phase injection.
+`beginAuthorPreparation` supplies the facade's owner before OAuth starts: its `ready`
+promise yields the same session, while `dispose()` interrupts callback/identity waits,
+joins a potentially issued token exchange and revokes any resulting pair. Token
+exchange/revocation are never abandoned in favor of an untracked late outcome.
 The composed controller also exposes `authorize(runId)` for explicit account
 authorization without phase execution.
 
@@ -434,12 +444,38 @@ at recovery/credential admission boundaries; the watcher also interrupts waits.
 
 ## Controller composition (#1108)
 
-Scripts import `createController(config, overrides?)` directly from
+Scripts import `createController(config, overrides?, authorSession?)` directly from
 `src/controller/wiring.ts` (or its compiled `dist/controller/wiring.js`). This
 credential-bearing root is deliberately **not exported by the package index**.
 No other production source module may import it, including through type imports.
 `controller/steps.ts` is the credential-free glue between the real producers and
 the core `RunController` outcome unions.
+
+For a shared start authorization, `selection` accepts only `name` and `email`;
+account-only `{ userId }` checks belong to the non-retaining `prepareAuthor` helper.
+Keep the session separate from approval/configuration and always dispose an unused
+owner, including when controller construction fails:
+
+```ts
+const session = await prepareAuthorSession(config, {}, { onAuthorizationUrl });
+try {
+  const approved = { ...config, authorApproval: session.approval };
+  // Display/confirm session.approval before starting.
+  await createController(approved, { onAuthorizationUrl }, session).start(approved);
+} finally {
+  await session.dispose(); // No-op after successful adoption; broker owns cleanup.
+}
+```
+
+The command facade holds each configuration's author operation exclusively before
+any await. Competing prepare/start/discard calls return `busy` without touching its
+credential owner. Failed disposal retains the session for an explicit cleanup retry.
+While any command facade owns a preparation or unadopted session, a shared process-local
+SIGINT/SIGTERM barrier joins all their revocations before exiting (130/143).
+Failed preparations remain keyed cleanup-only owners for explicit discard or a preparation
+retry; they cannot authorize a start. Adoption/disposal removes these scoped handlers;
+the broker's existing durable recovery owns credentials after adoption. Failed signal
+cleanup prints a fixed manual App-revocation instruction rather than claiming success.
 
 The root validates closed config, creates the durable RunStore and BudgetLedger,
 preflights local QEMU before allocation, reads the private proxy endpoints file,

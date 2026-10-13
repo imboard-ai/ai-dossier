@@ -5,7 +5,8 @@
  * Credential module, controller-only. A new run token is used for `GET /user`, so that
  * only the run's contributor's token ever reaches the broker (#1064); every later use
  * goes through the broker. Pre-start consent instead reads `/user` and any requested
- * verified email, then revokes its one-shot token without fabricating a fork or run.
+ * verified email, then revokes its one-shot token or retains it in a disposable
+ * process-local session for adoption by the real fork-bound broker.
  * The refresh token lives in this object's
  * private memory. Neither, nor the authorization code, is ever persisted, logged or
  * returned. */
@@ -196,6 +197,7 @@ export class ContributorAuthorization {
   #refresh: string | undefined;
   #refreshing: Promise<RefreshOutcome> | undefined;
   #boundUserId: number | undefined;
+  #prepared: { pair: IssuedPair; approval: string | null } | undefined;
   /** complete, bindLogin and refresh change the same state: one at a time. */
   #tail: Promise<unknown> = Promise.resolve();
   private readonly now: () => number;
@@ -217,11 +219,14 @@ export class ContributorAuthorization {
     return this.options.broker;
   }
 
-  /** Pre-run consent has no fork or durable token ledger yet. The token is confined to
-   * this one-shot identity read and revoked on every exit, including invalid overrides. */
+  /** Pre-run consent has no fork or durable token ledger yet. By default its pair is
+   * revoked after the identity read. Retaining author selection requires explicit
+   * discardAuthor/adoptAuthor ownership; account-only checks are always one-shot. */
   async completeAuthor(
     callback: CallbackParams,
-    overrides: { readonly name?: string; readonly email?: string; readonly userId?: number } = {}
+    overrides: { readonly name?: string; readonly email?: string; readonly userId?: number } = {},
+    retain = false,
+    signal?: AbortSignal
   ): Promise<{
     userId: number;
     login: string;
@@ -233,13 +238,15 @@ export class ContributorAuthorization {
     const pending = this.#pending;
     this.#pending = undefined;
     return this.serial(async () => {
+      if (this.#prepared || (retain && overrides.userId !== undefined))
+        throw new ContributorAuthError('invalid_options');
       const pair = await this.exchangeCallback(pending, callback);
+      // Retained flow owns the pair before any identity/email read can fail.
+      // Adoption remains fenced until validated approval replaces null.
+      if (retain) this.#prepared = { pair, approval: null };
+      let retained = false;
       try {
-        const response = await this.options.http({
-          method: 'GET',
-          path: '/user',
-          authorization: bearer(pair.access),
-        });
+        const response = await this.authorRead('/user', pair.access, signal);
         const who = identity(response);
         if (!who || who === 'unauthorized')
           throw new ContributorAuthError('contributor_authorization_unavailable');
@@ -267,11 +274,11 @@ export class ContributorAuthorization {
         if (email !== noreply) {
           let verified = false;
           for (let page = 1; page <= 10; page++) {
-            const emails = await this.options.http({
-              method: 'GET',
-              path: `/user/emails?per_page=100&page=${page}`,
-              authorization: bearer(pair.access),
-            });
+            const emails = await this.authorRead(
+              `/user/emails?per_page=100&page=${page}`,
+              pair.access,
+              signal
+            );
             if (
               emails.status !== 200 ||
               !Array.isArray(emails.json) ||
@@ -300,16 +307,104 @@ export class ContributorAuthorization {
           approvedAt: new Date(this.now()).toISOString(),
         };
         assertSecretFree(approval);
+        signal?.throwIfAborted();
         try {
-          return validateAuthorApproval(approval, this.options.contributor);
+          const validated = validateAuthorApproval(approval, this.options.contributor);
+          if (retain) {
+            this.#prepared = { pair, approval: JSON.stringify(validated) };
+            retained = true;
+          }
+          return validated;
         } catch {
           throw new ContributorAuthError('invalid_author_approval');
         }
       } finally {
-        // biome-ignore lint/correctness/noUnsafeFinally: A possibly live orphan token takes precedence over identity success or refusal.
-        if (!(await this.discard(pair.access))) throw new ContributorAuthError('revoke_failed');
+        if (!retained && retain) await this.disposePrepared();
+        else if (!retained && !(await this.discard(pair.access))) {
+          // biome-ignore lint/correctness/noUnsafeFinally: A possibly live orphan token takes precedence over identity success or refusal.
+          throw new ContributorAuthError('revoke_failed');
+        }
       }
     });
+  }
+
+  /** Only identity reads may be abandoned. Token exchange and revocation must
+   * be joined so a late issued pair still has a cleanup owner. */
+  private authorRead(path: string, access: string, signal?: AbortSignal): Promise<GitHubResponse> {
+    signal?.throwIfAborted();
+    return new Promise((resolve, reject) => {
+      const aborted = () => reject(new ContributorAuthError('authorization_denied'));
+      signal?.addEventListener('abort', aborted, { once: true });
+      Promise.resolve()
+        .then(() => {
+          signal?.throwIfAborted();
+          return this.options.http({ method: 'GET', path, authorization: bearer(access) });
+        })
+        .then(resolve, reject)
+        .finally(() => signal?.removeEventListener('abort', aborted));
+    });
+  }
+
+  /** Transfer exactly the validated consent once, after the new broker's recovery.
+   * No token is returned or placed in approval/configuration objects. */
+  adoptAuthor(
+    broker: ForkCredentialBroker,
+    run: RunRecord,
+    approval: Parameters<typeof validateAuthorApproval>[0]
+  ): Promise<ContributorAuthorization> {
+    return this.serial(async () => {
+      const held = this.#prepared;
+      const validated = validateAuthorApproval(approval, this.options.contributor);
+      if (
+        !held ||
+        held.approval !== JSON.stringify(validated) ||
+        !sameLogin(run.contributor, validated.login) ||
+        broker.status().admissions !== 'open'
+      )
+        throw new ContributorAuthError('author_approval_mismatch');
+      const next = new ContributorAuthorization({ ...this.options, broker });
+      await this.hold(held.pair, (value, expiresAt) => broker.registerUserToken(value, expiresAt));
+      this.#prepared = undefined;
+      next.#refresh = held.pair.refresh;
+      next.#boundUserId = validated.userId;
+      return next;
+    });
+  }
+
+  /** Explicit owner cleanup for a declined, refused, replaced or unused session. */
+  discardAuthor(): Promise<void> {
+    return this.serial(() => this.disposePrepared());
+  }
+
+  private async disposePrepared(): Promise<void> {
+    // Access expiry (including expiry during DELETE) does not end the refresh
+    // chain. On 404, observe/rotate that exact pair before declaring it dead.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const held = this.#prepared;
+      if (!held) return;
+      const status = await deleteToken(
+        this.options.http,
+        this.options.app,
+        'user',
+        held.pair.access
+      ).catch(() => 0);
+      if (status === 204) {
+        this.#prepared = undefined;
+        return;
+      }
+      if (status !== 404) throw new ContributorAuthError('revoke_failed');
+      const pair = await this.exchange({
+        grant_type: 'refresh_token',
+        refresh_token: held.pair.refresh,
+      });
+      if (pair === 'bad_refresh_token') {
+        this.#prepared = undefined;
+        return;
+      }
+      if (typeof pair === 'string') throw new ContributorAuthError('revoke_failed');
+      this.#prepared = { pair, approval: held.approval };
+    }
+    throw new ContributorAuthError('revoke_failed');
   }
 
   /** Starts the web flow: a fresh CSPRNG `state` and PKCE verifier, kept in memory only.

@@ -177,6 +177,57 @@ export async function prepareAuthor(
   identity: { readonly name?: string; readonly email?: string; readonly userId?: number } = {},
   edges: Pick<ControllerOverrides, 'fetch' | 'now' | 'onAuthorizationUrl'> = {}
 ) {
+  const session = await prepareConsent(input, identity, edges, false);
+  try {
+    return session.approval;
+  } finally {
+    await session.dispose();
+  }
+}
+
+/** Opaque, process-local consent owner. Configuration and UI receive approval only. */
+export async function prepareAuthorSession(
+  input: RunConfig,
+  identity: { readonly name?: string; readonly email?: string } = {},
+  edges: Pick<ControllerOverrides, 'fetch' | 'now' | 'onAuthorizationUrl'> = {}
+) {
+  if (Object.keys(identity).some((key) => !['name', 'email'].includes(key)))
+    throw new ContributorAuthError('invalid_options');
+  return prepareConsent(input, identity, edges, true);
+}
+
+/** Register this owner before awaiting ready. Disposal closes the callback and
+ * identity waits, joins a possibly-issued exchange, then ends its exact pair. */
+export function beginAuthorPreparation(
+  input: RunConfig,
+  identity: { readonly name?: string; readonly email?: string } = {},
+  edges: Pick<ControllerOverrides, 'fetch' | 'now' | 'onAuthorizationUrl'> = {}
+) {
+  if (Object.keys(identity).some((key) => !['name', 'email'].includes(key)))
+    throw new ContributorAuthError('invalid_options');
+  const abort = new AbortController();
+  let auth: ContributorAuthorization | undefined;
+  const ready = prepareConsent(input, identity, edges, true, abort.signal, (owner) => {
+    auth = owner;
+  });
+  return Object.freeze({
+    ready,
+    dispose: async () => {
+      abort.abort();
+      await ready.catch(() => undefined);
+      await auth?.discardAuthor();
+    },
+  });
+}
+
+async function prepareConsent(
+  input: RunConfig,
+  identity: { readonly name?: string; readonly email?: string; readonly userId?: number } = {},
+  edges: Pick<ControllerOverrides, 'fetch' | 'now' | 'onAuthorizationUrl'> = {},
+  retain = false,
+  signal?: AbortSignal,
+  own?: (auth: ContributorAuthorization) => void
+) {
   const config = validateRunConfig(runConfigInput(input));
   const fetcher = edges.fetch ?? fetch;
   const auth = new ContributorAuthorization({
@@ -187,20 +238,39 @@ export async function prepareAuthor(
     appSlug: config.githubApp.slug,
     now: () => (edges.now?.() ?? new Date()).getTime(),
   });
+  own?.(auth);
   const receiver = await listenLoopback({ isExpected: (state) => auth.matchesPending(state) });
+  const aborted = () => receiver.close();
+  signal?.addEventListener('abort', aborted, { once: true });
   try {
+    signal?.throwIfAborted();
     const url = auth.begin(receiver.redirectUri).url;
     if (!edges.onAuthorizationUrl) throw new Error('authorization_ui_unavailable');
     edges.onAuthorizationUrl(url);
     try {
-      return await auth.completeAuthor(await receiver.callback, identity);
+      const approval = await auth.completeAuthor(await receiver.callback, identity, retain, signal);
+      const approvedConfig = validateRunConfig({
+        ...runConfigInput(config),
+        authorApproval: approval,
+      });
+      return Object.freeze({
+        approval,
+        dispose: () => auth.discardAuthor(),
+        adopt: (broker: ForkCredentialBroker, run: RunRecord, next: RunConfig) => {
+          if (!sameConfig(approvedConfig, next))
+            throw new AuthorApprovalError('author_approval_mismatch');
+          return auth.adoptAuthor(broker, run, next.authorApproval);
+        },
+      });
     } catch (error) {
+      await auth.discardAuthor();
       if (error instanceof ContributorAuthError && error.code === 'author_approval_mismatch')
         throw new AuthorApprovalError('author_approval_mismatch');
       throw error;
     }
   } finally {
     receiver.close();
+    signal?.removeEventListener('abort', aborted);
   }
 }
 
@@ -451,7 +521,8 @@ async function stopResources(
  * for the start script while start/resume is awaiting the contributor's browser. */
 export function createController(
   input: RunConfig,
-  overrides: ControllerOverrides = {}
+  overrides: ControllerOverrides = {},
+  authorSession?: Awaited<ReturnType<typeof prepareAuthorSession>>
 ): RunController & {
   readonly authorizationUrl: string | null;
   readonly nextPermittedAction: 'authorize' | null;
@@ -781,6 +852,10 @@ export function createController(
       now: () => now().getTime(),
     });
     await broker.recover();
+    if (authorSession) {
+      contributor = await authorSession.adopt(broker, c.store.run, c.store.config);
+      authorSession = undefined;
+    }
   };
   class AuthorizationRequired extends Error {}
   let authorizationRequired = false;
@@ -1665,25 +1740,30 @@ export function createController(
           if (!recovered.admitted && recovered.report) throw new Error('cleanup_incomplete');
         }
       } finally {
-        broker?.close();
-        for (const j of journals.values()) j.close();
-        journals.clear();
-        activeStore = undefined;
-        activeContext = undefined;
-        heldArtifacts = undefined;
-        broker = undefined;
-        contributor = undefined;
-        pusher = undefined;
-        intents = undefined;
-        handoff = undefined;
-        handoffMode = undefined;
-        tracker = undefined;
-        revisionObservationWaiting = false;
-        shipping = undefined;
-        receipt = undefined;
-        app = undefined;
-        models.clear();
-        if (!overrides.vm) rawVm = undefined;
+        try {
+          await authorSession?.dispose();
+          authorSession = undefined;
+        } finally {
+          broker?.close();
+          for (const j of journals.values()) j.close();
+          journals.clear();
+          activeStore = undefined;
+          activeContext = undefined;
+          heldArtifacts = undefined;
+          broker = undefined;
+          contributor = undefined;
+          pusher = undefined;
+          intents = undefined;
+          handoff = undefined;
+          handoffMode = undefined;
+          tracker = undefined;
+          revisionObservationWaiting = false;
+          shipping = undefined;
+          receipt = undefined;
+          app = undefined;
+          models.clear();
+          if (!overrides.vm) rawVm = undefined;
+        }
       }
     },
   });
