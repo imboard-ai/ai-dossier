@@ -94,15 +94,15 @@ export class EvidencePlanError extends Error {
   }
 }
 
-/** A provisioning command did not pass. The VM is already destroyed and `run` is the
- * `unsupported_environment` run (PRD §5.5), never a repair or a broader network. */
+/** A provisioning command did not pass. The VM is already destroyed and `run` is
+ * paused for operator correction, never an automatic repair or a broader network. */
 export class ProvisioningFailedError extends Error {
   constructor(
     readonly run: RunRecord,
     readonly records: readonly CommandRecord[],
     readonly failedAt: string
   ) {
-    super(`Provisioning failed at ${failedAt}: unsupported_environment`);
+    super(`Provisioning failed at ${failedAt}: provisioning_failed`);
     this.name = 'ProvisioningFailedError';
   }
 }
@@ -117,7 +117,7 @@ export class ProvisioningNotClosedError extends Error {
 }
 
 /** The run the evidence belongs to and where its state changes go. The runner changes
- * the run only on a failure (`unsupported_environment`, `blocked_cleanup`); every such
+ * the run only on a failure (`paused_user`, `blocked_cleanup`); every such
  * run reaches `observeRun` before the function throws. */
 export interface RunLifecycle {
   readonly run: RunRecord;
@@ -500,7 +500,7 @@ async function runProvisioning(
 /** Provisions a fresh VM from `manifest`: uploads exactly its files, runs the plan's
  * provisioning commands on the package proxy, ends provisioning and checks the proxy
  * network is gone. A provisioning command that does not pass makes the run
- * `unsupported_environment` (`ProvisioningFailedError`). On any failure the VM is
+ * pause for explicit correction (`ProvisioningFailedError`). On any failure the VM is
  * destroyed before the error is rethrown. */
 export async function provisionWorkspace(options: ProvisionOptions): Promise<ProvisionedWorkspace> {
   const { adapter, profileRecord, lifecycle } = options;
@@ -547,7 +547,7 @@ export async function provisionWorkspace(options: ProvisionOptions): Promise<Pro
     throw error;
   }
   const { records, failed } = provisioned;
-  // Teardown first: `unsupported` is terminal, so a blocked cleanup must win.
+  // Teardown first: blocked cleanup must win over a recoverable provisioning pause.
   await destroyVm(adapter, vm, lifecycle, { failedAt: failed.id, records });
   const run = applyProvisioning(lifecycle.run, failed.status, lifecycle.now().toISOString());
   lifecycle.observeRun(run);

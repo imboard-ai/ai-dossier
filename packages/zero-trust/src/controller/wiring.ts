@@ -69,6 +69,7 @@ import {
 import { ProvisioningFailedError } from './evidence-runner';
 import { retainPortfolio, retainReceipt } from './export-evidence';
 import { readOutcomeBudget } from './outcome-records';
+import { ProxyCaError, preflightProxyCa } from './proxy-preflight';
 import { RunStore } from './run-store';
 import {
   makeAuthorize,
@@ -78,7 +79,12 @@ import {
   shippingIntent,
 } from './shipping';
 import { createSteps, type GateRecord, gateFreshness, policyReader, StepArtifacts } from './steps';
-import { clearStopNotice, recordStopNotice, writeBlockedNotice } from './stop-notice';
+import {
+  clearStopNotice,
+  provisioningNotice,
+  recordStopNotice,
+  writeBlockedNotice,
+} from './stop-notice';
 import { loadVerification } from './verification-record';
 
 /** Only physical edges. Never inject a phase, gate, author, ledger or verifier. */
@@ -483,7 +489,13 @@ export function createController(
   if (!proxy || typeof proxy !== 'object' || Array.isArray(proxy))
     throw new Error('invalid_proxy_file');
   const p = proxy as Record<string, unknown>;
-  if (Object.keys(p).sort().join(',') !== 'endpoints,target') throw new Error('invalid_proxy_file');
+  if (
+    Object.keys(p).some((key) => !['endpoints', 'target', 'caCertificateFile'].includes(key)) ||
+    ('caCertificateFile' in p &&
+      (typeof p.caCertificateFile !== 'string' || !path.isAbsolute(p.caCertificateFile)))
+  )
+    throw new Error('invalid_proxy_file');
+  const caCertificateFile = p.caCertificateFile as string | undefined;
   const endpoints = p.endpoints as { npmRegistry: string; pypiIndex: string };
   const proxyTarget = p.target as { host: string; port: number };
   if (
@@ -644,6 +656,7 @@ export function createController(
     };
     const a: VmAdapter = {
       create: async (spec) => {
+        if (spec.phase === 'provisioning') preflightProxyCa(caCertificateFile, now());
         return c.createVm({ scope: spec.scope, phase: spec.phase, proxyTarget: spec.proxyTarget });
       },
       exec: (...args) => guard(() => raw.exec(...args)),
@@ -1332,17 +1345,36 @@ export function createController(
     const invoke = steps[phase].bind(steps);
     const wrapped = async (c: PhaseContext) => {
       try {
+        if (['acquire', 'plan', 'implement', 'verify'].includes(phase))
+          clearStopNotice(artifacts(c));
         if (artifacts(c).get('authorization_required')) requireAuthorization(c);
+        // Verification claims its once-only attempt before allocating; refuse a known
+        // bad CA before that claim, and recheck at the physical allocation boundary.
+        if (phase === 'verify') preflightProxyCa(caCertificateFile, now());
         return await invoke(c);
       } catch (error) {
         if (error instanceof AuthorizationRequired) return { kind: 'hand_off' };
         if (error instanceof PrerequisiteError)
           return { kind: phase === 'gate' ? error.kind : 'hand_off' };
-        if (
-          error instanceof UnsupportedEnvironmentError ||
-          error instanceof ProvisioningFailedError
-        )
-          return { kind: 'unsupported' };
+        if (error instanceof UnsupportedEnvironmentError) return { kind: 'unsupported' };
+        if (error instanceof ProxyCaError || error instanceof ProvisioningFailedError) {
+          const reason = error instanceof ProxyCaError ? error.code : 'provisioning_failed';
+          const notice = provisioningNotice(reason);
+          const failed =
+            error instanceof ProvisioningFailedError
+              ? error.records.find((record) => record.id === error.failedAt)
+              : undefined;
+          artifacts(c).put('diagnostic', {
+            runId: c.run.runId,
+            phase,
+            operation: 'workspace_provisioning',
+            code: reason,
+            next: notice.nextPermittedAction,
+            ...(failed ? { failedAt: failed.id, status: failed.status, log: failed.log } : {}),
+          });
+          recordStopNotice(artifacts(c), c.store.run, notice, c.store.run.state !== 'paused_user');
+          return { kind: 'hand_off' };
+        }
         if (error instanceof VmCleanupError) {
           if (
             !TERMINAL_STATES.includes(c.store.run.state) &&

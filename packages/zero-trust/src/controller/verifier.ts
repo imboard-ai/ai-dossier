@@ -375,7 +375,7 @@ async function verifyInFreshVm(
 /** Verifies `input.candidateSha` independently (see the module comment). Throws
  * `VerifierInputError` or `EvidencePlanError` before any work on a bad request. Once the
  * candidate is claimed, any failure that has not already moved the run (a
- * `ProvisioningFailedError` moved it to `unsupported`, a `VmCleanupError` to
+ * `ProvisioningFailedError` moved it to `paused_user`, a `VmCleanupError` to
  * `blocked_cleanup`) blocks it before the error propagates: a candidate is verified at
  * most once. */
 export async function verifyCandidate(
@@ -425,7 +425,7 @@ export async function verifyCandidate(
       type: 'verification_aborted',
       cause: error instanceof Error ? error.name : typeof error,
     });
-    // `unsupported` (ProvisioningFailedError) and `blocked_cleanup` (VmCleanupError) were
+    // `paused_user` (ProvisioningFailedError) and `blocked_cleanup` (VmCleanupError) were
     // already observed; the original failure wins over a failed block.
     if (!observed)
       try {

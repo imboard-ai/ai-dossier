@@ -117,7 +117,8 @@ cd packages/zero-trust
        "npmRegistry": "<worker-relay-url>/",
        "pypiIndex": "<worker-relay-url>/index/"
      },
-     "target": { "host": "<mirror-ipv4-from-zt-proxy-up>", "port": 4873 }
+      "target": { "host": "<mirror-ipv4-from-zt-proxy-up>", "port": 4873 },
+      "caCertificateFile": "<absolute-proxy-state-dir>/ca-public/ca.crt"
    }
    ```
 
@@ -126,7 +127,19 @@ cd packages/zero-trust
    ecosystem as `zt-proxy up` printed it (`npm` or `pypi`, with its port). `target.host` must be
    the IPv4 address it printed; host names are refused. The file is at most 16 KiB. Stop the proxy with
    `node scripts/zt-proxy.mjs down --state-dir <proxy-state-dir>`. Details:
-   [package-proxy decision record](../features/zero-trust-full-cycle/decisions/package-proxy.md).
+    [package-proxy decision record](../features/zero-trust-full-cycle/decisions/package-proxy.md).
+
+   The Squid inspection CA lasts **24 hours** from `up`. Supply `caCertificateFile` as an
+   absolute path to its public certificate; it is checked before every provisioning VM allocation.
+   An expired CA pauses the run with `proxy_ca_expired`. Restart with `zt-proxy down` then
+   `zt-proxy up` using the same state directory, and resume explicitly. Missing, malformed or
+   not-yet-valid certificates also pause with an actionable notice. Legacy external proxies
+   without TLS interception may omit this field; their certificate lifetime cannot be checked.
+   Mirror/provisioning failures pause and retain a bounded, redacted failure excerpt in the
+   diagnostic; genuine unsupported ecosystem/profile/host refusals remain terminal.
+
+   **Never point `up --out` at `<proxy-endpoints.json>`.** Its raw stack output has a different
+   format and overwrites the derived run endpoints file, making `start` fail with `operation_failed`.
 
 3. **Create the GitHub App.** In your GitHub account settings, create a GitHub App:
    - Repository permissions: **Contents: read and write**, **Metadata: read**. Nothing else. An
