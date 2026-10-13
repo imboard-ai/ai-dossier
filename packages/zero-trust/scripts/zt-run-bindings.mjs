@@ -25,11 +25,7 @@ import {
   readOutcomeTrack,
 } from '../dist/controller/outcome-records.js';
 import { RunStore } from '../dist/controller/run-store.js';
-import {
-  assembleStatus,
-  DEFAULT_STATE_ACTIONS,
-  withManualAppRevocation,
-} from '../dist/controller/status.js';
+import { assembleStatus, withManualAppRevocation } from '../dist/controller/status.js';
 import { StepArtifacts } from '../dist/controller/steps.js';
 import { STOP_NOTICE_KEY, stopNoticeAction } from '../dist/controller/stop-notice.js';
 import {
@@ -287,11 +283,6 @@ export async function createCommands({ root, createController, onAuthorizationUr
         }
         if (run.state === 'cancelled' && retained.publication)
           result.nextPermittedAction = `Submitted PR: ${retained.publication.url}. ${retained.withdrawal ?? 'The contributor may withdraw the submitted PR explicitly.'}`;
-        if (
-          run.state === 'blocked_cleanup' &&
-          !result.nextPermittedAction.includes(DEFAULT_STATE_ACTIONS.blocked_cleanup)
-        )
-          result.nextPermittedAction = `${DEFAULT_STATE_ACTIONS.blocked_cleanup} ${result.nextPermittedAction}`;
         store.validateEvidence();
         return withManualAppRevocation(result);
       },

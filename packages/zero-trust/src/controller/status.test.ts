@@ -83,7 +83,7 @@ describe('assembleStatus', () => {
           state === 'cancelled' ? ReasonCode.UserCancelled : ReasonCode.CleanupFailed,
           at(1)
         );
-      const action = 'Keep the existing cleanup or prepared PR close instruction.';
+      const action = 'Post the prepared contributor comment, then close the pull request.';
       const status = assembleStatus({
         ...parts(),
         run,
@@ -91,6 +91,10 @@ describe('assembleStatus', () => {
         authorizationRequired: { nextPermittedAction: 'authorize' },
       });
       expect(status.nextPermittedAction).toContain(action);
+      if (state === 'blocked_cleanup')
+        expect(status.nextPermittedAction).toContain(
+          'Reconcile remaining resources and credentials before closing cleanup.'
+        );
       expect(status.nextPermittedAction).toContain(path);
       expect(status.nextPermittedAction).toContain('if it is still listed');
       expect(status.nextPermittedAction).toContain('does not confirm removal');

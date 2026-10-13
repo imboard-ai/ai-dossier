@@ -69,6 +69,14 @@ export interface StatusParts {
 export function withManualAppRevocation(status: StatusRecord): StatusRecord {
   renderJson(status);
   if (
+    status.state === 'blocked_cleanup' &&
+    !status.nextPermittedAction.includes(DEFAULT_STATE_ACTIONS.blocked_cleanup)
+  )
+    status = {
+      ...status,
+      nextPermittedAction: `${DEFAULT_STATE_ACTIONS.blocked_cleanup} ${status.nextPermittedAction}`,
+    };
+  if (
     (!TERMINAL_STATES.includes(status.state) && status.state !== 'blocked_cleanup') ||
     status.nextPermittedAction.endsWith(MANUAL_APP_REVOCATION)
   )
