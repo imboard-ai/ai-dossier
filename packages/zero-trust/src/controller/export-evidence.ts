@@ -5,7 +5,7 @@ import { replacePrivate } from '../durable-fs';
 import { prDisclosure } from '../github/pr-body';
 import type { SignedReceipt } from '../receipt/issue';
 import { canonicalJson } from '../receipt/schema';
-import { assertSecretFree } from '../redaction';
+import { assertSecretFree, SecretRedactionError } from '../redaction';
 import { jsonRecord, optionalBytes, RECORD_BYTES } from '../retention/files';
 import { offlineReceipt } from '../retention/offline-receipt';
 import { parsePortfolio } from '../retention/portfolio';
@@ -24,6 +24,14 @@ export class ExportEvidenceError extends Error {
   constructor(readonly code: ExportEvidenceErrorCode) {
     super(code);
     this.name = `ExportEvidenceError_${code}`;
+  }
+}
+function validate<T>(work: () => T): T {
+  try {
+    return work();
+  } catch (error) {
+    if (error instanceof SecretRedactionError || error instanceof ExportEvidenceError) throw error;
+    throw new ExportEvidenceError('invalid_export_evidence');
   }
 }
 function existing(file: string): unknown | undefined {
@@ -56,8 +64,8 @@ export function retainReceipt(store: RunStore, receipt: SignedReceipt): void {
     if (previous !== undefined && !Array.isArray(previous))
       throw new ExportEvidenceError('invalid_export_evidence');
     const receipts = (previous ?? []) as unknown[];
-    const checked = [...receipts, receipt].map((r) =>
-      offlineReceipt(r, store.run, store.contributionId)
+    const checked = validate(() =>
+      [...receipts, receipt].map((r) => offlineReceipt(r, store.run, store.contributionId))
     );
     if (checked.some((r) => r.receipt.upstreamRepositoryId !== store.upstreamRepositoryId))
       throw new ExportEvidenceError('invalid_export_evidence');
@@ -76,12 +84,12 @@ export function retainVerification(
   store.withPinnedDirectory((root) => {
     const file = path.join(root, 'verification-evidence.json');
     const previous = existing(file);
-    if (previous !== undefined) parseVerification(previous, store.runId);
+    if (previous !== undefined) validate(() => parseVerification(previous, store.runId));
     // Preserve the actual supervised counts and statuses, including skipped/null.
     const value = JSON.parse(
       canonicalJson({ runId: store.runId, candidateSha, records }, MAX_BYTES)
     );
-    parseVerification(value, store.runId);
+    validate(() => parseVerification(value, store.runId));
     publish(file, value);
   });
 }
@@ -94,13 +102,13 @@ export function retainPortfolio(
   store.withPinnedDirectory((root) => {
     const file = path.join(root, 'portfolio-evidence.json');
     const previous = existing(file);
-    if (previous !== undefined) parsePortfolio(previous, store.runId);
+    if (previous !== undefined) validate(() => parsePortfolio(previous, store.runId));
     const value = {
       runId: store.runId,
       disclosure: prDisclosure(candidateSha),
       policyCitations,
     };
-    parsePortfolio(value, store.runId);
+    validate(() => parsePortfolio(value, store.runId));
     publish(file, value);
   });
 }
