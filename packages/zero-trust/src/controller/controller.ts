@@ -1219,15 +1219,15 @@ export class RunController {
   }
   private async apply(result: Outcome): Promise<boolean> {
     if (['hand_off', 'waiting'].includes(result.kind)) {
-      if (
-        result.kind === 'hand_off' &&
-        this.held.run.state !== 'gating' &&
-        !stopped(this.held.run.state)
-      )
-        await this.persist(
-          transitionRun(this.held.run, ReasonCode.UserPaused, this.deps.now().toISOString())
-        );
       try {
+        if (
+          result.kind === 'hand_off' &&
+          this.held.run.state !== 'gating' &&
+          !stopped(this.held.run.state)
+        )
+          await this.persist(
+            transitionRun(this.held.run, ReasonCode.UserPaused, this.deps.now().toISOString())
+          );
         await this.cleanup();
       } finally {
         // Teardown may add a blocked_cleanup transition. Bind only this refusal

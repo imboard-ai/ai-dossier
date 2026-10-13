@@ -662,6 +662,31 @@ describe('RunController', () => {
     expect(retained.action).toContain('explicitly resume to retry cleanup');
     expect(retained.action).toContain('cancellation is unavailable');
   });
+  it('binds the notice when pause persistence cleanup cannot enumerate guests', async () => {
+    const h = rig();
+    h.steps.scripts.acquire = [
+      async (c) => {
+        await c.createVm({ scope: 'container' });
+        h.setTime('2026-10-08T02:00:00.000Z');
+        vi.spyOn(h.vm, 'listByRun').mockRejectedValue(new Error('enumeration failed'));
+        return { kind: 'acquired' };
+      },
+    ];
+    await expect(h.controller.start(h.config)).rejects.toMatchObject({ code: 'recovery_failed' });
+    const id = h.controller.snapshot().runId;
+    const store = open(h, id);
+    const run = store.run;
+    store.close();
+    expect(run.state).toBe('blocked_cleanup');
+    const retained = notice(h, id);
+    expect(retained.retained).toMatchObject({
+      state: run.state,
+      historyLength: run.history.length,
+      reason: 'active_time_exhausted',
+    });
+    expect(retained.action).toContain('explicitly resume to retry cleanup');
+    expect(h.steps.calls).toEqual(['gate', 'acquire']);
+  });
   it('recovery completes before any step, and recovery failure admits none', async () => {
     const h = rig();
     h.steps.scripts.gate = [{ kind: 'request_permission' }];
