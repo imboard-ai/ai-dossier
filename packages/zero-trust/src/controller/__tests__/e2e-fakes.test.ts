@@ -2376,6 +2376,42 @@ describe('createController real composition', () => {
     expect(resumed.state).toBe('gating');
     expect(h.vm.calls).toEqual([]);
   }, 60000);
+  it('persists composed controller budget refusal before re-entering a gate producer (#1191)', async () => {
+    const h = rig({ policyUnavailable: true });
+    const run = await h.controller.start(h.config);
+    const a = h.artifacts(run.runId);
+    const ledger = new BudgetLedger(
+      path.join(a.store.storeDirectory('budget'), 'ledger.json'),
+      a.store.contributionId
+    );
+    const hold = ledger.reserve(a.store.budgetSessionId(1), {
+      money: { currency: 'USD', minor: 900 },
+      tokens: 0,
+      timeMs: 1,
+      rates: h.config.modelProfile.rates.filter((r) => r.resource === 'local-qemu'),
+    });
+    ledger.settle(hold.id, {
+      money: { currency: 'USD', minor: 1000 },
+      tokens: 0,
+      timeMs: 0,
+      source: 'fixture-spend',
+    });
+    a.close();
+    expect((await h.controller.resume(run.runId)).state).toBe('gating');
+    const reopened = h.artifacts(run.runId);
+    expect(reopened.get(STOP_NOTICE_KEY)).toMatchObject({
+      state: 'gating',
+      reason: 'budget_exhausted',
+      historyLength: run.history.length,
+    });
+    expect(stopNoticeAction(reopened.get(STOP_NOTICE_KEY), reopened.store.run)).toContain(
+      'budget_exhausted'
+    );
+    reopened.close();
+    expect(h.vm.calls).toEqual([]);
+    expect(h.modelCalls()).toBe(0);
+    expect(h.fake.oauthCalls).toEqual([]);
+  }, 30000);
   it('fails closed when a configured read-token env var is empty, never reading anonymously', () => {
     const h = rig();
     delete process.env.ZT_TEST_UNSET_READ_TOKEN;

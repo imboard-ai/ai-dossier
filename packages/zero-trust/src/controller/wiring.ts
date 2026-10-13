@@ -80,7 +80,9 @@ import {
 } from './shipping';
 import { createSteps, type GateRecord, gateFreshness, policyReader, StepArtifacts } from './steps';
 import {
+  clearControllerRefusalNotice,
   clearStopNotice,
+  controllerRefusalNotice,
   provisioningNotice,
   recordStopNotice,
   writeBlockedNotice,
@@ -1511,6 +1513,16 @@ export function createController(
     }
   };
   const controller: RunController = new RunController({
+    recordControllerStop: (c, reason, transitionPending) => {
+      if (reason)
+        recordStopNotice(
+          artifacts(c),
+          c.run,
+          controllerRefusalNotice(reason, transitionPending ? 'paused_user' : c.run.state),
+          transitionPending
+        );
+      else clearControllerRefusalNotice(artifacts(c));
+    },
     trackerAction: async (c, request) => {
       const t = await openTracker(c);
       let result: Awaited<ReturnType<PrTracker['cancelAction']>>;
