@@ -77,7 +77,13 @@ import {
   shippingIntent,
 } from './shipping';
 import { createSteps, type GateRecord, gateFreshness, policyReader, StepArtifacts } from './steps';
-import { clearStopNotice, recordStopNotice, writeBlockedNotice } from './stop-notice';
+import {
+  clearControllerRefusalNotice,
+  clearStopNotice,
+  controllerRefusalNotice,
+  recordStopNotice,
+  writeBlockedNotice,
+} from './stop-notice';
 import { loadVerification } from './verification-record';
 
 /** Only physical edges. Never inject a phase, gate, author, ledger or verifier. */
@@ -1393,6 +1399,16 @@ export function createController(
     }
   };
   const controller: RunController = new RunController({
+    recordControllerStop: (c, reason, transitionPending) => {
+      if (reason)
+        recordStopNotice(
+          artifacts(c),
+          c.run,
+          controllerRefusalNotice(reason, transitionPending ? 'paused_user' : c.run.state),
+          transitionPending
+        );
+      else clearControllerRefusalNotice(artifacts(c));
+    },
     trackerAction: async (c, request) => {
       const t = await openTracker(c);
       let result: Awaited<ReturnType<PrTracker['cancelAction']>>;

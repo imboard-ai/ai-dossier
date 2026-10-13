@@ -17,6 +17,14 @@ import { validateRunConfig } from './config';
 import { requestControl } from './control';
 import { ControllerError, type PhaseContext, RunController } from './controller';
 import { RunStore } from './run-store';
+import { StepArtifacts } from './steps';
+import {
+  clearControllerRefusalNotice,
+  controllerRefusalNotice,
+  recordStopNotice,
+  STOP_NOTICE_KEY,
+  stopNoticeAction,
+} from './stop-notice';
 import {
   publishVerification,
   type VerificationRecord,
@@ -184,6 +192,26 @@ function rig(checkpoints: ('plan' | 'patch' | 'verification')[] = []) {
   });
   let now = new Date(TIME);
   const deps = {
+    recordControllerStop: (
+      c: PhaseContext,
+      reason: import('./stop-notice').ControllerRefusalReason | null,
+      pending: boolean
+    ) => {
+      const journal = new Journal(path.join(c.store.storeDirectory('control'), 'steps'));
+      try {
+        const artifacts = new StepArtifacts(journal, c.run.runId);
+        if (reason)
+          recordStopNotice(
+            artifacts,
+            c.run,
+            controllerRefusalNotice(reason, pending ? 'paused_user' : c.run.state),
+            pending
+          );
+        else clearControllerRefusalNotice(artifacts);
+      } finally {
+        journal.close();
+      }
+    },
     root: path.join(root, 'runs'),
     steps,
     recovery,
@@ -212,6 +240,18 @@ function rig(checkpoints: ('plan' | 'patch' | 'verification')[] = []) {
 }
 function open(h: ReturnType<typeof rig>, runId: string) {
   return RunStore.open(h.deps.root, runId);
+}
+
+function notice(h: ReturnType<typeof rig>, runId: string) {
+  const store = open(h, runId);
+  const journal = new Journal(path.join(store.storeDirectory('control'), 'steps'));
+  try {
+    const retained = new StepArtifacts(journal, runId).get(STOP_NOTICE_KEY);
+    return { retained, action: stopNoticeAction(retained, store.run) };
+  } finally {
+    journal.close();
+    store.close();
+  }
 }
 
 describe('RunController', () => {
@@ -439,6 +479,7 @@ describe('RunController', () => {
     ).toBe(true);
     expect(() => budget.reserve(store.budgetSessionId(1), h.estimate)).toThrow('Reconcile');
     store.close();
+    expect(notice(h, id).action).toContain('hold_unsettled');
   });
   it('three destroy failures persist blocked_cleanup and deny all later work', async () => {
     const h = rig();
@@ -465,7 +506,67 @@ describe('RunController', () => {
         return { kind: 'acquired' };
       },
     ];
-    expect((await h.controller.start(h.config)).state).toBe('paused_user');
+    const run = await h.controller.start(h.config);
+    expect(run.state).toBe('paused_user');
+    expect(h.steps.calls).not.toContain('plan');
+    expect(notice(h, run.runId).retained).toMatchObject({
+      state: 'paused_user',
+      historyLength: run.history.length,
+      reason: 'active_time_exhausted',
+    });
+    expect(notice(h, run.runId).action).toContain('start a new run');
+  });
+  it('retains a gate budget refusal without a transition and retires it after extension', async () => {
+    const h = rig();
+    h.steps.scripts.gate = [{ kind: 'hand_off' }];
+    const run = await h.controller.start(h.config);
+    const store = open(h, run.runId);
+    const ledger = new BudgetLedger(
+      path.join(store.storeDirectory('budget'), 'ledger.json'),
+      store.contributionId
+    );
+    const sessionId = store.budgetSessionId(1);
+    const hold = ledger.reserve(sessionId, {
+      ...h.estimate,
+      money: { currency: 'USD', minor: 90 },
+    });
+    ledger.settle(hold.id, {
+      ...observation(hold.estimate),
+      money: { currency: 'USD', minor: 100 },
+    });
+    store.close();
+    expect((await h.controller.resume(run.runId)).history).toEqual(run.history);
+    expect(h.steps.calls).toEqual(['gate']);
+    expect(notice(h, run.runId).retained).toMatchObject({
+      state: 'gating',
+      historyLength: 0,
+      reason: 'budget_exhausted',
+    });
+    expect(notice(h, run.runId).action).toContain('budget_exhausted');
+    // Exercise the ledger's trusted extension, not an invented observation or hold release.
+    ledger.extendCeiling({
+      sessionId,
+      previousMinor: 100,
+      ceiling: { currency: 'USD', minor: 200 },
+      approvalId: 'fixture-extension',
+      approvedAt: TIME,
+      actor: 'user',
+    });
+    expect((await h.controller.resume(run.runId)).state).toBe('submitted');
+    expect(notice(h, run.runId).retained).toBeNull();
+  });
+  it('propagates refusal persistence failure before admitting phase work', async () => {
+    const h = rig();
+    h.steps.scripts.acquire = [
+      async () => {
+        h.setTime('2026-10-08T02:00:00.000Z');
+        return { kind: 'acquired' };
+      },
+    ];
+    h.deps.recordControllerStop = (_c, reason) => {
+      if (reason) throw new Error('notice persistence failed');
+    };
+    await expect(h.controller.start(h.config)).rejects.toThrow('notice persistence failed');
     expect(h.steps.calls).not.toContain('plan');
   });
   it('recovery completes before any step, and recovery failure admits none', async () => {

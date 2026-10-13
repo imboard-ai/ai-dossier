@@ -189,6 +189,13 @@ export interface RecoveryHooks {
   prepareCancellation?(context: PhaseContext): Promise<void>;
 }
 export interface ControllerDependencies {
+  /** Persist admission refusals through the composed run artifact store; null retires only
+   * this controller's prior refusal. Persistence failures must propagate. */
+  readonly recordControllerStop?: (
+    context: PhaseContext,
+    reason: import('./stop-notice').ControllerRefusalReason | null,
+    transitionPending: boolean
+  ) => void;
   readonly trackerAction?: (
     context: PhaseContext,
     request: TrackerActionRequest
@@ -1118,15 +1125,25 @@ export class RunController {
         openWaitUntil(this.held.run, observedAt.getTime())
       ),
     });
-    if (
-      (phase !== 'track' &&
-        status.activeTimeMs >= this.held.config.budget.activeMinutes * 60_000) ||
-      (phase !== 'track' && isBudgetSessionExhausted(this.budget.snapshot(), this.sessionId())) ||
-      this.budget
-        .snapshot()
-        .reservations.some((hold) => hold.status === 'reserved' && this.oldHolds.has(hold.id))
-    )
-      return stopped(this.held.run.state) ? { kind: 'waiting' } : { kind: 'hand_off' };
+    const refusal =
+      phase !== 'track' && status.activeTimeMs >= this.held.config.budget.activeMinutes * 60_000
+        ? 'active_time_exhausted'
+        : phase !== 'track' && isBudgetSessionExhausted(this.budget.snapshot(), this.sessionId())
+          ? 'budget_exhausted'
+          : this.budget
+                .snapshot()
+                .reservations.some(
+                  (hold) => hold.status === 'reserved' && this.oldHolds.has(hold.id)
+                )
+            ? 'hold_unsettled'
+            : null;
+    const transitionPending = this.held.run.state !== 'gating' && !stopped(this.held.run.state);
+    this.deps.recordControllerStop?.(
+      this.context(),
+      refusal,
+      refusal !== null && transitionPending
+    );
+    if (refusal) return stopped(this.held.run.state) ? { kind: 'waiting' } : { kind: 'hand_off' };
     // Time parked after a gate hand-off waits on the operator, not the run (#1184).
     if (phase === 'gate') this.finishPublicationWait();
     let result: Outcome;
