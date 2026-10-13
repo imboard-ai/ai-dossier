@@ -914,6 +914,7 @@ export function createController(
           assertAdmission: controller.assertAdmission.bind(controller),
           bodyDirectory: c.store.storeDirectory('bodies'),
           now: () => now().toISOString(),
+          remoteShaRetryMs: [1000, 2000, 4000],
         },
         { run: c.store.run, contributionId: c.store.contributionId }
       );

@@ -40,7 +40,8 @@ export const AUTHORIZE_URL = 'https://github.com/login/oauth/authorize';
 export const AUTHORIZATIONS_URL = 'https://github.com/settings/applications';
 /** GitHub authorization codes expire after ten minutes. */
 export const AUTHORIZATION_WINDOW_MS = 10 * 60 * 1000;
-const REFRESH_FORMAT = /^ghr_[A-Za-z0-9_]{20,255}$/u;
+// Same alphabet and headroom as TOKEN_FORMAT, in case refresh tokens follow the JWT format.
+const REFRESH_FORMAT = /^ghr_[A-Za-z0-9_.-]{20,4096}$/u;
 const PAGE_SIZE = 100;
 const MAX_REPOSITORY_PAGES = 10;
 /** Token-endpoint errors that a new authorization cannot fix: the App is misconfigured. */

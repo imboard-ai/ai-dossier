@@ -205,7 +205,11 @@ async function rig() {
   };
 }
 
-async function handoff(h: Awaited<ReturnType<typeof rig>>, receipt = h.authorization().receipt) {
+async function handoff(
+  h: Awaited<ReturnType<typeof rig>>,
+  receipt = h.authorization().receipt,
+  remoteShaRetryMs?: number[]
+) {
   const fake = new GitHubFake(h.deps.now);
   fake.publicResponses.set(
     `/repos/o/r/pulls?state=all&head=${encodeURIComponent(`${OWNER}:${BRANCH}`)}&base=main&per_page=100&page=1`,
@@ -228,7 +232,13 @@ async function handoff(h: Awaited<ReturnType<typeof rig>>, receipt = h.authoriza
   const bodyDirectory = temp('zt-shipping-bodies-');
   const driver = new HandoffDriver(
     rows,
-    { read: fake.read, admission, bodyDirectory, now: () => TIME },
+    {
+      read: fake.read,
+      admission,
+      bodyDirectory,
+      now: () => TIME,
+      ...(remoteShaRetryMs ? { remoteShaRetryMs } : {}),
+    },
     { run: h.store.run, contributionId: h.store.contributionId }
   );
   const content = prContentInput({
@@ -452,6 +462,18 @@ describe('persisted verification to real local shipping (#1105)', () => {
     expect(
       p.rows.read().filter((row) => (row as { type: string }).type === 'link_issued')
     ).toHaveLength(1);
+  });
+  it('re-reads a fork branch that lags the confirmed push before refusing the hand-off', async () => {
+    const h = await rig();
+    await h.driver.execute(h.input);
+    const p = await handoff(h, undefined, [0, 0]);
+    p.admissionDeps.remoteBranchSha
+      .mockRejectedValueOnce(new Error('not found yet'))
+      .mockResolvedValueOnce('0'.repeat(40));
+    await expect(p.driver.issuePr(p.request)).resolves.toMatchObject({
+      kind: 'awaiting_contributor',
+    });
+    expect(p.admissionDeps.remoteBranchSha.mock.calls.length).toBeGreaterThanOrEqual(3);
   });
   it('pushes the reconstructed candidate and issues a compare link only after verified read-back', async () => {
     const h = await rig();

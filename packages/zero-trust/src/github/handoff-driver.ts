@@ -71,6 +71,9 @@ export interface HandoffDeps {
   readonly now: () => string;
   /** Stop-only host fence immediately before issuing a contributor capability. */
   readonly assertAdmission?: () => void;
+  /** Waits before re-reading a fork branch that does not show the pushed SHA yet: GitHub's
+   * REST ref read can lag a push that `git ls-remote` already confirmed. Default none. */
+  readonly remoteShaRetryMs?: readonly number[];
 }
 
 /** Only a moved head is terminal; an ambiguous match waits for a person (see resume). */
@@ -553,7 +556,13 @@ export class HandoffDriver {
         await this.check('fork_binding', () => admission.forkBindingVerified());
         await this.check('receipt', () => admission.receiptValid(sha, digest));
         receiptReserved = true;
-        await this.check('remote_sha', async () => (await admission.remoteBranchSha()) === sha);
+        await this.check('remote_sha', async () => {
+          for (const wait of this.deps.remoteShaRetryMs ?? []) {
+            if ((await admission.remoteBranchSha().catch(() => null)) === sha) return true;
+            await new Promise((resolve) => setTimeout(resolve, wait));
+          }
+          return (await admission.remoteBranchSha()) === sha;
+        });
         // Never issue while any PR exists on this head/base, in any state.
         const existing = await reconcilePr(this.deps.read, binding, {
           marker: handoffMarker(intent),
