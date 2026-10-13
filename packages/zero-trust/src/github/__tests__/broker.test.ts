@@ -1167,17 +1167,128 @@ describe('lead follow-ups: target binding, operator settlement, diagnostics', ()
 
   it('never settles a token without a recorded expiry by time; the operator can', async () => {
     const first = await ready();
-    first.fake.override('POST /app/installations', 'throw');
+    const parent = first.broker.registerUserToken(first.fake.authorizeUser(), timestamp);
+    first.fake.override('POST /applications', 'throw');
     await first.broker
-      .mintForkPush(intentOf(first.intents), { repositoryId: FORK_ID })
+      .mintForkPush(intentOf(first.intents), { repositoryId: FORK_ID, via: 'user_scoped' })
       .catch(() => undefined);
     const events = first.store.journal.read() as { type: string; status?: number }[];
     expect(events.find((e) => e.type === 'token_mint_uncertain')).toMatchObject({ status: 0 });
     first.clock.ms += 365 * 24 * 3600_000;
     const pending = first.broker.settleExpired();
-    expect(pending?.outstanding).toHaveLength(1);
-    expect(first.broker.resolveByOperator(pending?.outstanding[0]?.id as string)).toBeUndefined();
+    expect(pending?.outstanding).toHaveLength(2);
+    first.broker.resolveByOperator(parent);
+    expect(
+      first.broker.resolveByOperator(
+        pending?.outstanding.find((t) => t.id !== parent)?.id as string
+      )
+    ).toBeUndefined();
     expect([...ledgerOf(first).tokens.values()][0]?.status).toBe('operator_resolved');
+  });
+
+  it.each([
+    201,
+  ])('uncertain installation mint %s settles only at the observed bound after restart', async (status) => {
+    const first = await ready({
+      http: async () => {
+        first.clock.ms += 2 * 3600_000;
+        return { status, json: { token: 'malformed' } };
+      },
+    });
+    await expect(
+      first.broker.mintForkPush(intentOf(first.intents), { repositoryId: FORK_ID })
+    ).rejects.toEqual(refusal('mint_uncertain'));
+    const token = [...ledgerOf(first).tokens.values()][0];
+    expect(token?.expiresAt).toBe(new Date(first.clock.ms + 3600_000).toISOString());
+    await first.broker.killAll();
+    expect([...ledgerOf(first).tokens.values()][0]?.status).toBe('unrevocable');
+    first.broker.close();
+    first.store.journal.close();
+    const second = rig({ dir: first.store.dir, fake: first.fake, clock: first.clock });
+    second.clock.ms = Date.parse(token?.expiresAt as string) - 1;
+    expect((await second.broker.recover()).report?.outstanding).toHaveLength(1);
+    second.clock.ms++;
+    expect(second.broker.settleExpired()).toBeUndefined();
+    expect(ledgerOf(second).tokens.get(token?.id as string)?.status).toBe('expired');
+    expect(second.broker.status().admissions).toBe('cleanup_blocked');
+  });
+
+  it.each([
+    0, 503, 504,
+  ])('uncertain failure %s stays unbounded even after a delayed server could mint', async (status) => {
+    const r = await ready();
+    r.fake.override('POST /app/installations', status === 0 ? 'throw' : { status, json: null });
+    await expect(
+      r.broker.mintForkPush(intentOf(r.intents), { repositoryId: FORK_ID })
+    ).rejects.toEqual(refusal('mint_uncertain'));
+    const token = [...ledgerOf(r).tokens.values()][0];
+    expect(token?.expiresAt).toBeNull();
+    r.clock.ms += 365 * 24 * 3600_000;
+    expect(r.broker.settleExpired()?.outstanding[0]?.id).toBe(token?.id);
+    expect(r.broker.resolveByOperator(token?.id as string)).toBeUndefined();
+  });
+
+  it('repeated cached recovery expires once and retains legacy user refresh authority', async () => {
+    const r = await ready();
+    const user = r.broker.registerUserToken(
+      r.fake.authorizeUser(),
+      new Date(r.clock.ms + 3600_000).toISOString()
+    );
+    const installation = await r.broker.mintForkPush(intentOf(r.intents), {
+      repositoryId: FORK_ID,
+    });
+    r.clock.ms += 3600_000;
+    r.store.journal.append({
+      v: 1,
+      type: 'token_expired',
+      id: user,
+      at: new Date(r.clock.ms).toISOString(),
+    });
+    r.broker.close();
+    r.store.journal.close();
+    const second = rig({ dir: r.store.dir, fake: r.fake, clock: r.clock });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      expect((await second.broker.recover()).report?.outstanding.map((t) => t.id)).toEqual([user]);
+      expect(ledgerOf(second).tokens.get(installation.tokenId)?.status).toBe('expired');
+    }
+    expect(
+      second.store.journal.read().filter((raw) => {
+        const e = raw as { type: string; id?: string };
+        return e.type === 'token_expired' && e.id === installation.tokenId;
+      })
+    ).toHaveLength(1);
+    expect(second.broker.resolveByOperator(user)).toBeUndefined();
+    expect(ledgerOf(second).tokens.get(user)?.status).toBe('operator_resolved');
+  });
+
+  it('legacy uncertain installation evidence stays unbounded and rejects forged early or user bounds', async () => {
+    const r = await ready();
+    r.fake.override('POST /app/installations', 'throw');
+    await r.broker
+      .mintForkPush(intentOf(r.intents), { repositoryId: FORK_ID })
+      .catch(() => undefined);
+    const events = r.store.journal.read().map((raw) => {
+      const e = raw as Record<string, unknown>;
+      if (e.type !== 'token_mint_uncertain') return e;
+      const { at: _at, expiresAt: _expiresAt, ...legacy } = e;
+      return legacy;
+    });
+    expect([...replayTokens(events).tokens.values()][0]?.expiresAt).toBeNull();
+    const uncertain = events.find((e) => e.type === 'token_mint_uncertain');
+    const expiry = new Date(Date.parse(timestamp) + 3600_000).toISOString();
+    for (const status of [0, 503, 504])
+      expect(() =>
+        replayTokens(
+          events.map((e) =>
+            e === uncertain ? { ...e, status, at: timestamp, expiresAt: expiry } : e
+          )
+        )
+      ).toThrow();
+    expect(() =>
+      replayTokens(
+        events.map((e) => (e === uncertain ? { ...e, at: timestamp, expiresAt: timestamp } : e))
+      )
+    ).toThrow();
   });
 
   it('journals why an overbroad token was revoked and how a run ended', async () => {

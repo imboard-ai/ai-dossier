@@ -586,6 +586,34 @@ your GitHub settings (Applications, Authorized GitHub Apps). Lift the VM kill sw
 remains. Never
 delete files under `<stateDir>/.start-guards` while controllers may be running.
 
+An uncertain installation-token mint with a completed successful response (malformed 201)
+records an expiry bound **one hour after the response is observed**, allowing
+for slow requests. Retry `kill-all` after that bound: it journals `token_expired` and
+reconciles cleanup. Before the bound it remains blocked. Legacy requests without a
+recorded bound never expire automatically. Transport failures and 5xx responses also stay unbounded:
+the server may still be processing the request after a disconnect or gateway timeout.
+User-chain access-token expiry also does
+not prove that its refresh authority is dead.
+
+For a lost user-chain token, revoke the entire App authorization in GitHub settings
+(Applications → Authorized GitHub Apps); checking only that access has expired is
+insufficient. For an unbounded installation request, confirm the token cannot still
+be valid (including any in-flight request) or revoke the installation. After checking
+by hand, acknowledge **one exact journaled token ID** from the run's private
+`tokens/events.jsonl` (`id`, not a credential value):
+
+```sh
+node scripts/zt-run.mjs resolve --root <state-dir>/runs --run <run-id> --token <token-id> --confirm-dead
+```
+
+This records `operator_resolved` under the run's lifetime lock, then retries normal
+resource cleanup. It needs no OAuth, model call or App credentials when all tokens
+are settled. Missing confirmation, unknown/already-settled IDs, other run IDs and
+active writer locks are refused. Repeat for each independently unresolved token.
+Other tokens, VM failures or accounting holds keep `blocked_cleanup`; only complete
+cleanup moves the run to `blocked`. No admission or incident fence is lifted. Exit 2
+is expected for either blocked state: inspect `status` to distinguish them.
+
 ### Exit codes and errors
 
 | Exit | Meaning |
@@ -762,6 +790,7 @@ Every command needs `--root <stateDir>/runs`. This table summarizes `node script
 | `reject` | `--run <id>` `--checkpoint <plan\|patch\|verification>` `--digest <sha256>` `--reason <text>` |
 | `authorize` | `--run <id>` |
 | `kill-all` | `--reason <text>` |
+| `resolve` | `--run <id>`, `--token <token-id>`, `--confirm-dead` |
 | `metrics` | [`--json`] |
 | `adoption` | `--run <id>` `--note <text>` |
 | `sweep` | [`--apply`] |

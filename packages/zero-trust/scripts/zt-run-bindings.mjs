@@ -36,6 +36,8 @@ import {
 } from '../dist/controller/wiring.js';
 import { assertDirectoryAncestors, privateDir, readPrivate } from '../dist/durable-fs.js';
 import { MAX_BODY_LENGTH } from '../dist/github/handoff.js';
+import { TokenJournal, UNRESOLVED } from '../dist/github/token-journal.js';
+import { Journal } from '../dist/journal.js';
 
 const FEEDBACK_NOT_ADMITTED =
   'This revision handed off: the maintainer feedback was judged out of scope or ambiguous, so nothing was implemented or pushed (the typed verdict is retained). Address the feedback yourself on the pull request, or cancel the run.';
@@ -349,6 +351,25 @@ export async function createCommands({ root, createController, onAuthorizationUr
       return status(run.runId);
     },
     status,
+    async resolve(runId, tokenId) {
+      const store = RunStore.open(root, runId, { cleanup: true });
+      let tokens;
+      try {
+        checkRoot(store.config);
+        if (store.run.state !== 'blocked_cleanup') refuse('cleanup_required');
+        tokens = new Journal(store.storeDirectory('tokens'));
+        const journal = new TokenJournal(tokens);
+        const token = journal.state.tokens.get(tokenId);
+        if (!token || !UNRESOLVED.includes(token.status)) refuse('invalid_input');
+        journal.resolveByOperator(tokenId, new Date().toISOString());
+      } finally {
+        tokens?.close();
+        store.close();
+      }
+      // Acknowledgement settles one credential, never independent VM/accounting obligations.
+      await stopStoredRun(root, runId, 'Operator confirmed credential dead');
+      return status(runId);
+    },
     async prAction(runId, request) {
       if (incidentRequested(root)) refuse('incident_active');
       const config = configFor(runId, true);

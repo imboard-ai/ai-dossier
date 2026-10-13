@@ -22,6 +22,7 @@ import { STOP_NOTICE_KEY } from '../dist/controller/stop-notice.js';
 import { createController, incidentRequested, stopStoredRun } from '../dist/controller/wiring.js';
 import { AppCredentials } from '../dist/github/app-auth.js';
 import { ForkCredentialBroker } from '../dist/github/broker.js';
+import { TokenJournal } from '../dist/github/token-journal.js';
 import { Journal } from '../dist/journal.js';
 import { ReasonCode, transitionRun } from '../dist/state.js';
 import { renderHuman, renderJson } from '../dist/status.js';
@@ -675,6 +676,151 @@ test('dormant kill-all does not claim value-lost credential revocation successfu
   store.close();
   const commands = await createCommands({ root: h.root, createController });
   assert.equal((await commands.killAll('Incident stop'))[0].state, 'blocked_cleanup');
+  assert.deepEqual(h.counts(), { revoked: 0, userReads: 0 });
+});
+
+test('resolve durably settles only the selected token without OAuth and retains independent obligations', async () => {
+  const h = rig();
+  const store = h.seed();
+  const runId = store.runId;
+  const budget = new BudgetLedger(
+    path.join(store.storeDirectory('budget'), 'ledger.json'),
+    store.contributionId
+  );
+  const hold = budget.reserve(
+    store.budgetSessionId(1),
+    {
+      money: { currency: 'USD', minor: 0 },
+      tokens: 1,
+      timeMs: 1,
+      rates: store.config.modelProfile.rates,
+    },
+    'work'
+  );
+  store.persistRun(transitionRun(store.run, ReasonCode.CleanupFailed, new Date().toISOString()));
+  const tokenIds = ['00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002'];
+  const tokens = new Journal(store.storeDirectory('tokens'));
+  const journal = new TokenJournal(tokens);
+  for (const id of tokenIds) {
+    journal.record({
+      v: 1,
+      type: 'token_requested',
+      id,
+      kind: 'user',
+      parentId: null,
+      intentKey: null,
+      attempt: null,
+      repositoryId: null,
+      at: new Date().toISOString(),
+      useBy: null,
+    });
+    journal.record({ v: 1, type: 'token_minted', id, expiresAt: '2020-01-01T00:00:00.000Z' });
+    journal.record({ v: 1, type: 'token_expired', id, at: new Date().toISOString() });
+  }
+  const tokenFile = path.join(store.storeDirectory('tokens'), 'events.jsonl');
+  tokens.close();
+  const steps = new Journal(path.join(store.storeDirectory('control'), 'steps'));
+  new StepArtifacts(steps, runId).put('fork', {
+    repositoryId: 22,
+    installationId: 33,
+    owner: 'contributor',
+  });
+  steps.close();
+  const commands = await createCommands({
+    root: h.root,
+    createController: () => assert.fail('no controller or OAuth'),
+  });
+  await assert.rejects(commands.resolve(runId, tokenIds[0]), { name: 'StoreLockedError' });
+  store.close();
+  const before = fs.readFileSync(tokenFile);
+  await assert.rejects(commands.resolve(runId, '00000000-0000-0000-0000-000000000003'), {
+    code: 'invalid_input',
+  });
+  assert.deepEqual(fs.readFileSync(tokenFile), before);
+  assert.equal((await commands.resolve(runId, tokenIds[0])).state, 'blocked_cleanup');
+  let events = fs.readFileSync(tokenFile, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(
+    events.filter((e) => e.type === 'operator_resolved').map((e) => e.id),
+    [tokenIds[0]]
+  );
+  assert.equal(
+    events.filter((e) => e.type === 'token_expired').length,
+    2,
+    'legacy access expiry does not generate new settlement evidence'
+  );
+  await assert.rejects(commands.resolve(runId, tokenIds[0]), { code: 'invalid_input' });
+  delete process.env.BINDING_APP_KEY;
+  delete process.env.BINDING_APP_SECRET;
+  assert.equal((await commands.resolve(runId, tokenIds[1])).state, 'blocked_cleanup');
+  budget.release(hold.id, 'Provider confirmed no charge');
+  assert.equal((await commands.killAll('Finish operator cleanup'))[0].state, 'blocked');
+  events = fs.readFileSync(tokenFile, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(
+    events.filter((e) => e.type === 'operator_resolved').map((e) => e.id),
+    tokenIds
+  );
+  assert.deepEqual(h.counts(), { revoked: 0, userReads: 0 });
+});
+
+test('kill-all settles uncertain installation expiry only at its durable bound after reopen', async () => {
+  const h = rig();
+  const store = h.seed();
+  const runId = store.runId;
+  store.persistRun(transitionRun(store.run, ReasonCode.CleanupFailed, new Date().toISOString()));
+  const tokens = new Journal(store.storeDirectory('tokens'));
+  const journal = new TokenJournal(tokens);
+  const id = '00000000-0000-0000-0000-000000000004';
+  const observed = new Date();
+  const expiry = new Date(observed.getTime() + 3600000);
+  journal.record({
+    v: 1,
+    type: 'token_requested',
+    id,
+    kind: 'installation',
+    parentId: null,
+    intentKey: 'push',
+    attempt: 1,
+    repositoryId: 22,
+    at: observed.toISOString(),
+    useBy: expiry.toISOString(),
+  });
+  journal.record({
+    v: 1,
+    type: 'token_mint_uncertain',
+    id,
+    status: 201,
+    at: observed.toISOString(),
+    expiresAt: expiry.toISOString(),
+  });
+  journal.record({ v: 1, type: 'token_unrevocable', id, at: observed.toISOString() });
+  const tokenFile = path.join(store.storeDirectory('tokens'), 'events.jsonl');
+  tokens.close();
+  const steps = new Journal(path.join(store.storeDirectory('control'), 'steps'));
+  new StepArtifacts(steps, runId).put('fork', {
+    repositoryId: 22,
+    installationId: 33,
+    owner: 'contributor',
+  });
+  steps.close();
+  store.close();
+  const vm = new FakeVmAdapter();
+  await stopStoredRun(h.root, runId, 'Retry cleanup', {
+    vm,
+    now: () => new Date(expiry.getTime() - 1),
+  });
+  const commands = await createCommands({
+    root: h.root,
+    createController: () => assert.fail('no OAuth'),
+  });
+  assert.equal(commands.status(runId).state, 'blocked_cleanup');
+  delete process.env.BINDING_APP_KEY;
+  delete process.env.BINDING_APP_SECRET;
+  await stopStoredRun(h.root, runId, 'Retry cleanup', { vm, now: () => expiry });
+  const reopened = RunStore.open(h.root, runId);
+  assert.equal(reopened.run.state, 'blocked');
+  reopened.close();
+  const events = fs.readFileSync(tokenFile, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(events.filter((e) => e.type === 'token_expired' && e.id === id).length, 1);
   assert.deepEqual(h.counts(), { revoked: 0, userReads: 0 });
 });
 

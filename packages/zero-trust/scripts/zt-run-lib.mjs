@@ -27,15 +27,16 @@ export const COMMANDS = Object.freeze({
   approve: { required: ['root', 'run', 'checkpoint', 'digest'], optional: [] },
   reject: { required: ['root', 'run', 'checkpoint', 'digest', 'reason'], optional: [] },
   authorize: { required: ['root', 'run'], optional: [] },
+  resolve: { required: ['root', 'run', 'token', 'confirm-dead'], optional: [] },
   'kill-all': { required: ['root', 'reason'], optional: [] },
   metrics: { required: ['root'], optional: ['json'] },
   adoption: { required: ['root', 'run', 'note'], optional: [] },
   sweep: { required: ['root'], optional: ['apply'] },
   export: { required: ['root', 'run', 'out'], optional: [] },
 });
-const BOOLEAN = new Set(['confirm-author', 'revise', 'json', 'apply']);
+const BOOLEAN = new Set(['confirm-author', 'confirm-dead', 'revise', 'json', 'apply']);
 export const USAGE =
-  'Usage: zt-run <start|resume|edit|pr-edit|withdraw|cancel-action|status|pause|cancel|approve|reject|authorize|kill-all|metrics|adoption|sweep|export> --root <dir> [command options]';
+  'Usage: zt-run <start|resume|edit|pr-edit|withdraw|cancel-action|status|pause|cancel|approve|reject|authorize|resolve|kill-all|metrics|adoption|sweep|export> --root <dir> [command options]';
 const HELP = `${USAGE}\nstart --config <file.json> [--confirm-author] [--author-name <name>] [--author-email <email>]\nresume --run <id> [--revise] [--reviewers <login,...>] [--model-profile <file.json>] [--checkpoints plan,patch|none]\nedit --run <id> --patch <file.diff>\npr-edit --run <id> --title <text> --body-file <file>\nwithdraw --run <id> --reason <${WITHDRAWAL_REASONS.join('|')}> --explanation <text>\ncancel-action --run <id>\nstatus --run <id> [--json]\npause --run <id> --reason <text>\ncancel --run <id> --reason <text>\napprove --run <id> --checkpoint <plan|patch|verification> --digest <sha256>\nreject --run <id> --checkpoint <plan|patch|verification> --digest <sha256> --reason <text>\nauthorize --run <id>\nkill-all --reason <text>\nmetrics [--json]\nadoption --run <id> --note <text>\nsweep [--apply]\nexport --run <id> --out <file>`;
 const ERROR_CODES = new Set([
   'invalid_patch',
@@ -156,6 +157,11 @@ function parse(argv) {
   if (Object.values(opts).some((v) => typeof v === 'string' && /[\u0000-\u001f\u007f]/u.test(v)))
     refuse('invalid_input');
   if (opts.run && !/^ztc-[a-f0-9]{16}-run-1$/u.test(opts.run)) refuse('invalid_input');
+  if (
+    opts.token &&
+    !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u.test(opts.token)
+  )
+    refuse('invalid_input');
   if (opts.checkpoint && !['plan', 'patch', 'verification'].includes(opts.checkpoint))
     refuse('invalid_input');
   if (opts.digest && !/^[a-f0-9]{64}$/u.test(opts.digest)) refuse('invalid_input');
@@ -240,7 +246,7 @@ export async function main(argv, { createController, out, err, confirmAuthor } =
   try {
     parsed = parse(argv);
     if (parsed.help) {
-      out(HELP);
+      out(`${HELP}\nresolve --run <id> --token <token-id> --confirm-dead`);
       return 0;
     }
     const { command, opts } = parsed;
@@ -345,6 +351,9 @@ export async function main(argv, { createController, out, err, confirmAuthor } =
         break;
       case 'authorize':
         status = await controller.authorize(opts.run);
+        break;
+      case 'resolve':
+        status = await controller.resolve(opts.run, opts.token);
         break;
       case 'adoption':
         status = await controller.adoption(opts.run, opts.note);
