@@ -450,7 +450,8 @@ settled from observed local elapsed time. Include a pinned zero-price
 `local-qemu` / `millisecond` rate in `modelProfile.rates` for this unbilled local
 provider. An interrupted charge remains unknown, never replaced with an estimate.
 
-`proxyEndpointsFile` is an owned private regular JSON file (0600), with exactly:
+`proxyEndpointsFile` is an owned private regular JSON file (0600). It requires `endpoints`
+and `target`; the supplied TLS-intercepting Squid setup also supplies controller-only CA metadata:
 
 ```json
 {
@@ -458,7 +459,8 @@ provider. An interrupted charge remains unknown, never replaced with an estimate
     "npmRegistry": "<worker-relay-url>/",
     "pypiIndex": "<worker-relay-url>/index/"
   },
-  "target": { "host": "<physical-mirror-ipv4>", "port": 4873 }
+  "target": { "host": "<physical-mirror-ipv4>", "port": 4873 },
+  "caCertificateFile": "<absolute-proxy-state-dir>/ca-public/ca.crt"
 }
 ```
 
@@ -468,6 +470,11 @@ See the package-proxy setup section below. `target.host` and `target.port` ident
 the controller-reachable physical mirror and are deployment-specific; repository
 or model text cannot change them. Invalid or malformed proxy files produce only
 the non-echoing `invalid_proxy_file` diagnostic.
+The CA lasts 24 hours and is checked before every provisioning allocation. Expiry pauses
+with `proxy_ca_expired`; restart the proxy with `down` then `up`, and resume explicitly.
+Legacy non-intercepting proxies may omit `caCertificateFile`, in which case no CA check is
+possible. See [proxy setup and recovery](../../docs/guides/zero-trust-contributions.md#one-time-setup).
+Keep raw `up --out` output separate from this derived endpoints file.
 GitHub App secrets are read only when constructing the credential session from
 the environment names in config; the Ed25519 signer uses `signerKeyFile`.
 
