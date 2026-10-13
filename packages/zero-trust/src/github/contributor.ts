@@ -219,8 +219,9 @@ export class ContributorAuthorization {
     return this.options.broker;
   }
 
-  /** Pre-run consent has no fork or durable token ledger yet. The token is confined to
-   * this one-shot identity read and revoked on every exit, including invalid overrides. */
+  /** Pre-run consent has no fork or durable token ledger yet. By default its pair is
+   * revoked after the identity read. Retaining author selection requires explicit
+   * discardAuthor/adoptAuthor ownership; account-only checks are always one-shot. */
   async completeAuthor(
     callback: CallbackParams,
     overrides: { readonly name?: string; readonly email?: string; readonly userId?: number } = {},
@@ -236,7 +237,8 @@ export class ContributorAuthorization {
     const pending = this.#pending;
     this.#pending = undefined;
     return this.serial(async () => {
-      if (this.#prepared) throw new ContributorAuthError('invalid_options');
+      if (this.#prepared || (retain && overrides.userId !== undefined))
+        throw new ContributorAuthError('invalid_options');
       const pair = await this.exchangeCallback(pending, callback);
       let retained = false;
       try {
@@ -353,10 +355,34 @@ export class ContributorAuthorization {
   /** Explicit owner cleanup for a declined, refused, replaced or unused session. */
   discardAuthor(): Promise<void> {
     return this.serial(async () => {
-      const held = this.#prepared;
-      if (!held) return;
-      if (!(await this.discard(held.pair.access))) throw new ContributorAuthError('revoke_failed');
-      this.#prepared = undefined;
+      // Access expiry (including expiry during DELETE) does not end the refresh
+      // chain. On 404, observe/rotate that exact pair before declaring it dead.
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const held = this.#prepared;
+        if (!held) return;
+        const status = await deleteToken(
+          this.options.http,
+          this.options.app,
+          'user',
+          held.pair.access
+        ).catch(() => 0);
+        if (status === 204) {
+          this.#prepared = undefined;
+          return;
+        }
+        if (status !== 404) throw new ContributorAuthError('revoke_failed');
+        const pair = await this.exchange({
+          grant_type: 'refresh_token',
+          refresh_token: held.pair.refresh,
+        });
+        if (pair === 'bad_refresh_token') {
+          this.#prepared = undefined;
+          return;
+        }
+        if (typeof pair === 'string') throw new ContributorAuthError('revoke_failed');
+        this.#prepared = { pair, approval: held.approval };
+      }
+      throw new ContributorAuthError('revoke_failed');
     });
   }
 

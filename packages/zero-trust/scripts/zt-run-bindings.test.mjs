@@ -471,6 +471,47 @@ test('declined confirmation and failed construction revoke the process-local aut
   await Promise.all(h.callbacks);
 });
 
+test('overlapping author operations cannot overwrite or revoke an active process-local owner', async () => {
+  const h = rig();
+  let reached;
+  let release;
+  const ready = new Promise((resolve) => {
+    reached = resolve;
+  });
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  const commands = await createCommands({
+    root: h.root,
+    onAuthorizationUrl: h.onAuthorizationUrl,
+    createController: (config) => ({
+      start: async () => {
+        reached();
+        await held;
+        const store = h.seed(config);
+        const run = store.run;
+        store.close();
+        return run;
+      },
+    }),
+  });
+  const preparing = commands.prepareAuthor(h.config);
+  await assert.rejects(commands.prepareAuthor(h.config), { code: 'busy' });
+  await preparing;
+  assert.equal(h.callbacks.length, 1);
+  const starting = commands.start(h.config);
+  await ready;
+  await assert.rejects(commands.start(h.config), { code: 'busy' });
+  await assert.rejects(commands.prepareAuthor(h.config), { code: 'busy' });
+  await assert.rejects(commands.discardAuthor(h.config), { code: 'busy' });
+  assert.deepEqual(h.counts(), { revoked: 0, userReads: 1 });
+  release();
+  await starting;
+  await commands.discardAuthor(h.config);
+  assert.deepEqual(h.counts(), { revoked: 1, userReads: 1 });
+  await Promise.all(h.callbacks);
+});
+
 test('resume delegates identity admission to the locked controller without a CLI OAuth preflight', async () => {
   const h = rig();
   const calls = [];

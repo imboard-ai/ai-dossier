@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { inspect } from 'node:util';
 import { describe, expect, it } from 'vitest';
+import { CLIENT_ID, CLIENT_SECRET } from '../github/__tests__/github-fake';
 import { Journal } from '../journal';
 import { assertSecretFree } from '../redaction';
 import { rig } from './__tests__/composition-fixture';
@@ -28,6 +29,73 @@ async function prepare(h: ReturnType<typeof rig>) {
 }
 
 describe('one process author authorization', () => {
+  it.each([
+    'before-disposal',
+    'during-delete',
+  ] as const)('ends the refresh chain when access expires %s', async (when) => {
+    const h = rig();
+    const { session } = await prepare(h);
+    if (when === 'before-disposal') {
+      h.advanceClock(9 * 60 * 60 * 1000);
+      for (const token of h.fake.tokens.values()) token.live = false;
+    } else h.fake.override(`DELETE /applications/${CLIENT_ID}/token`, { status: 404, json: null });
+    await session.dispose();
+    await session.dispose();
+    expect([...h.fake.tokens.values()].every((token) => !token.live)).toBe(true);
+    expect(h.fake.oauthCalls.filter((call) => call.grant_type === 'refresh_token')).toHaveLength(1);
+    for (const refresh of h.fake.refreshTokens.keys()) {
+      expect(
+        (
+          await h.fake.oauth({
+            client_id: CLIENT_ID,
+            client_secret: CLIENT_SECRET,
+            grant_type: 'refresh_token',
+            refresh_token: refresh,
+          })
+        ).json
+      ).toEqual({ error: 'bad_refresh_token' });
+    }
+  });
+
+  it('refuses account-only session selection before opening OAuth', async () => {
+    const h = rig();
+    await expect(
+      prepareAuthorSession(h.config, { userId: 12 } as never, h.edges)
+    ).rejects.toMatchObject({ code: 'invalid_options' });
+    expect(h.fake.oauthCalls).toEqual([]);
+    expect(h.fake.tokens.size).toBe(0);
+  });
+
+  it('shared authorization reaches terminal merge and leaves neither access nor refresh live', async () => {
+    const h = rig();
+    const { session, pages, onAuthorizationUrl } = await prepare(h);
+    const config = { ...h.config, authorApproval: session.approval };
+    const controller = createController(config, { ...h.edges, onAuthorizationUrl }, session);
+    const run = await controller.start(config);
+    expect(run.state).toBe('awaiting_contributor');
+    expect(pages).toHaveLength(1);
+    h.submit(run.runId);
+    await controller.resume(run.runId);
+    const pr = h.pr();
+    if (!pr) throw new Error('missing PR');
+    pr.merged_at = h.edges.now().toISOString();
+    pr.state = 'closed';
+    expect((await controller.resume(run.runId)).state).toBe('merged');
+    expect([...h.fake.tokens.values()].every((token) => !token.live)).toBe(true);
+    for (const refresh of h.fake.refreshTokens.keys()) {
+      expect(
+        (
+          await h.fake.oauth({
+            client_id: CLIENT_ID,
+            client_secret: CLIENT_SECRET,
+            grant_type: 'refresh_token',
+            refresh_token: refresh,
+          })
+        ).json
+      ).toEqual({ error: 'bad_refresh_token' });
+    }
+  }, 60000);
+
   it('refreshes consent that aged during confirmation and fresh-process authorize requires fresh identity', async () => {
     const h = rig({ checkpoint: 'plan' });
     const { session, pages, onAuthorizationUrl } = await prepare(h);

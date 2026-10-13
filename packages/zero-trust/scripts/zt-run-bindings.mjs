@@ -56,9 +56,22 @@ function refuse(code) {
 export async function createCommands({ root, createController, onAuthorizationUrl }) {
   root = path.resolve(root);
   const pendingAuthors = new Map();
+  const authorOperations = new Set();
   const authorKey = (config) => {
     const { authorApproval: _approval, ...input } = runConfigInput(config);
     return canonicalJson(input, 1024 * 1024);
+  };
+  // Reserve the process-local credential owner before any await. A refused
+  // competitor must never dispose the session the admitted start is using.
+  const withAuthor = async (config, work) => {
+    const key = authorKey(config);
+    if (authorOperations.has(key)) refuse('busy');
+    authorOperations.add(key);
+    try {
+      return await work(key);
+    } finally {
+      authorOperations.delete(key);
+    }
   };
   // New run IDs are random. Bind overlapping starts by the trusted config digest,
   // independently of fresh OAuth/approval timestamps, while keeping different
@@ -290,43 +303,46 @@ export async function createCommands({ root, createController, onAuthorizationUr
     );
   return {
     async discardAuthor(config) {
-      const key = authorKey(config);
-      const session = pendingAuthors.get(key);
-      await session?.dispose();
-      pendingAuthors.delete(key);
+      return withAuthor(config, async (key) => {
+        const session = pendingAuthors.get(key);
+        await session?.dispose();
+        pendingAuthors.delete(key);
+      });
     },
     async prepareAuthor(config, { name, email } = {}) {
-      checkRoot(config);
-      if (incidentRequested(root)) refuse('incident_active');
-      if (config.resumeRunId) refuse('invalid_resume_run_id');
-      const key = authorKey(config);
-      await pendingAuthors.get(key)?.dispose();
-      pendingAuthors.delete(key);
-      const session = await prepareAuthorSession(config, { name, email }, { onAuthorizationUrl });
-      // A config-supplied approval cannot masquerade as fresh authenticated consent.
-      pendingAuthors.set(key, session);
-      return session.approval;
-    },
-    async start(config) {
-      const key = authorKey(config);
-      const session = pendingAuthors.get(key);
-      let guard;
-      try {
+      return withAuthor(config, async (key) => {
         checkRoot(config);
         if (incidentRequested(root)) refuse('incident_active');
         if (config.resumeRunId) refuse('invalid_resume_run_id');
-        if (!session) refuse('author_approval_missing');
-        const approved = { ...config, authorApproval: session.approval };
-        guard = acquireStart(approved);
-        const run = await createController(approved, { onAuthorizationUrl }, session).start(
-          approved
-        );
-        return status(run.runId);
-      } finally {
-        if (guard !== undefined) fs.closeSync(guard);
-        await session?.dispose();
+        await pendingAuthors.get(key)?.dispose();
         pendingAuthors.delete(key);
-      }
+        const session = await prepareAuthorSession(config, { name, email }, { onAuthorizationUrl });
+        // A config-supplied approval cannot masquerade as fresh authenticated consent.
+        pendingAuthors.set(key, session);
+        return session.approval;
+      });
+    },
+    async start(config) {
+      return withAuthor(config, async (key) => {
+        const session = pendingAuthors.get(key);
+        let guard;
+        try {
+          checkRoot(config);
+          if (incidentRequested(root)) refuse('incident_active');
+          if (config.resumeRunId) refuse('invalid_resume_run_id');
+          if (!session) refuse('author_approval_missing');
+          const approved = { ...config, authorApproval: session.approval };
+          guard = acquireStart(approved);
+          const run = await createController(approved, { onAuthorizationUrl }, session).start(
+            approved
+          );
+          return status(run.runId);
+        } finally {
+          if (guard !== undefined) fs.closeSync(guard);
+          await session?.dispose();
+          pendingAuthors.delete(key);
+        }
+      });
     },
     edit(runId, bytes) {
       if (incidentRequested(root)) refuse('incident_active');

@@ -171,7 +171,7 @@ export async function prepareAuthor(
   identity: { readonly name?: string; readonly email?: string; readonly userId?: number } = {},
   edges: Pick<ControllerOverrides, 'fetch' | 'now' | 'onAuthorizationUrl'> = {}
 ) {
-  const session = await prepareAuthorSession(input, identity, edges);
+  const session = await prepareConsent(input, identity, edges, false);
   try {
     return session.approval;
   } finally {
@@ -182,8 +182,19 @@ export async function prepareAuthor(
 /** Opaque, process-local consent owner. Configuration and UI receive approval only. */
 export async function prepareAuthorSession(
   input: RunConfig,
-  identity: { readonly name?: string; readonly email?: string; readonly userId?: number } = {},
+  identity: { readonly name?: string; readonly email?: string } = {},
   edges: Pick<ControllerOverrides, 'fetch' | 'now' | 'onAuthorizationUrl'> = {}
+) {
+  if (Object.keys(identity).some((key) => !['name', 'email'].includes(key)))
+    throw new ContributorAuthError('invalid_options');
+  return prepareConsent(input, identity, edges, true);
+}
+
+async function prepareConsent(
+  input: RunConfig,
+  identity: { readonly name?: string; readonly email?: string; readonly userId?: number } = {},
+  edges: Pick<ControllerOverrides, 'fetch' | 'now' | 'onAuthorizationUrl'> = {},
+  retain = false
 ) {
   const config = validateRunConfig(runConfigInput(input));
   const fetcher = edges.fetch ?? fetch;
@@ -201,7 +212,7 @@ export async function prepareAuthorSession(
     if (!edges.onAuthorizationUrl) throw new Error('authorization_ui_unavailable');
     edges.onAuthorizationUrl(url);
     try {
-      const approval = await auth.completeAuthor(await receiver.callback, identity, true);
+      const approval = await auth.completeAuthor(await receiver.callback, identity, retain);
       const approvedConfig = validateRunConfig({
         ...runConfigInput(config),
         authorApproval: approval,
