@@ -848,6 +848,15 @@ describe('existing test cases survive the candidate (#1205)', () => {
     expect(codes({ ...input(), preservedDiscovery: success })).toEqual([]);
     expect(codes({ ...input(), preservedDiscovery: failing })).toEqual(['existing_tests_failed']);
     expect(codes({ ...input(), preservedDiscovery: null })).toEqual(['discovery_unknown']);
+    const report = (cases: string) =>
+      parseJunitReport(Buffer.from(`<testsuites><testsuite>${cases}</testsuite></testsuites>`));
+    // Skipped at runtime, or a restored file that no longer loads: never a pass.
+    for (const hidden of [
+      report('<testcase name="one"><skipped/></testcase><testcase name="two"/>'),
+      report('<testcase name="one"/>'),
+      parseJunitReport(Buffer.from('<testsuites></testsuites>')),
+    ])
+      expect(codes({ ...input(), preservedDiscovery: hidden })).toEqual(['existing_tests_failed']);
     expect(
       codes({
         ...input(),

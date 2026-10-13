@@ -104,7 +104,10 @@ describe('stop notices', () => {
       reason: 'test_removed,existing_tests_failed',
     });
     expect(notice.nextPermittedAction).toContain('Nothing was pushed');
-    expect(reviewHandoffNotice(['<script>ghp_x']).reason).toBe('invalid_input');
+    expect(reviewHandoffNotice(['regression_not_reproduced']).reason).toBe(
+      'regression_not_reproduced'
+    );
+    expect(reviewHandoffNotice(['<script>ghp_x' as 'invalid_input']).reason).toBe('invalid_input');
     expect(reviewHandoffNotice([]).reason).toBe('invalid_input');
   });
   it('records a gate hand-off in gating with closed reasons only', () => {

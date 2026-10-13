@@ -399,10 +399,12 @@ controller-held source, runs frozen dependency setup through the package proxy, 
 relevant checks with no network. A regression test must fail on the base and pass on the candidate. A
 timeout, unreadable report or zero test suites is inconclusive, never a pass. At most two localized
 repair attempts follow a failure. A separate scope and test-integrity review flags unrelated
-changes, deleted, renamed or disabled tests, reduced assertions and build or test configuration
-changes, and hands off on anything it cannot justify. When the candidate changes an existing test
-file, the review also runs the upstream's original tests against the patched source; an original
-test that now fails pauses the run, and `zt-run status` names the reason. If you selected the `verification` checkpoint, the run
+changes, deleted, renamed or disabled tests, reduced assertions and build or test
+configuration changes, and hands off on anything it cannot justify. It also runs the
+upstream's original tests against the patched source: an original test that now fails,
+skips or no longer runs pauses the run, and `zt-run status` names the reason. A fix that
+must change what an existing test expects therefore always pauses; edit the candidate
+yourself or contribute manually. If you selected the `verification` checkpoint, the run
 pauses before shipping, for your approval of `artifacts/verification/<candidateSha>.json`.
 
 ### Step 5: shipping and the pull request hand-off
@@ -502,6 +504,7 @@ admitted, and `resume` checks again after you have dealt with it.
 | Checkpoint `patch` | `user_paused` | Read `artifacts/candidate.diff`. | `approve`, then `resume` |
 | Checkpoint `verification` | `user_paused` | Read `artifacts/verification/<candidateSha>.json`. | `approve`, then `resume` |
 | Stale checkpoint | `user_paused` | The content changed since the checkpoint opened (`checkpoint_stale`). The status shows the reject command only. | `reject` or `cancel` |
+| Review refused the candidate | `user_paused` | Status names the review codes (for example `test_removed`, `existing_tests_failed`). Read `artifacts/candidate.diff`. A plain `resume` repeats the same review. | `edit`, then `resume`; or start a new run |
 | Revision feedback not admitted | `user_paused` (run moves to `paused_user`) | The maintainer feedback was unclear, unrelated to the issue, or tried to change targets or authority. Nothing was implemented and no VM started. Decide yourself: reply to the maintainer, or cancel. | Your call |
 | Reauthorization needed | unchanged | The App user token expired or was revoked, and the run printed a new `authorization_url`. | Open it, or run `authorize`, then `resume` |
 

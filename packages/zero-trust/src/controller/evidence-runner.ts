@@ -34,6 +34,7 @@ import { type JunitSummary, parseJunitReport } from '../ecosystem/report';
 import type { Journal } from '../journal';
 import type { CommandEvidence, CommandStatus } from '../receipt/schema';
 import { assertSecretFree, REDACTED, redactedExcerpt } from '../redaction';
+import { isTestPath } from '../review/integrity';
 import type { RunRecord } from '../state';
 import {
   appendVmEvent,
@@ -671,30 +672,27 @@ export function reproductionManifest(
   return createManifest([...entries.values()]);
 }
 
-/** The candidate with `testFiles` taken back from the base (plus any parent directories
- * the candidate lacks): the original tests applied to patched code (#1205). The inverse of
- * `reproductionManifest`; a path the candidate turned into a directory is refused. */
+/** The candidate's non-test source with exactly the base's test tree: the original tests on
+ * patched code (#1205). Every candidate test path is dropped, so a file added beside the
+ * tests cannot shadow the module they exercise. A layout that cannot hold the base's test
+ * tree (a parent directory the candidate made a file) is refused by manifest validation. */
 export function preservedTestsManifest(
   baseManifest: SourceManifest,
-  candidateManifest: SourceManifest,
-  testFiles: readonly string[]
+  candidateManifest: SourceManifest
 ): SourceManifest {
-  if (testFiles.length === 0) throw new EvidencePlanError('no_test_files');
-  const base = new Map(validateManifest(baseManifest).entries.map((e) => [e.path, e]));
-  const candidate = validateManifest(candidateManifest);
-  const entries = new Map<string, SourceEntry>(candidate.entries.map((e) => [e.path, e]));
-  testFiles.forEach((file, index) => {
-    const entry = base.get(file);
-    if (
-      !entry ||
-      entry.mode === MANIFEST_DIRECTORY ||
-      entries.get(file)?.mode === MANIFEST_DIRECTORY
-    )
-      throw new EvidencePlanError('test_file_missing', `test file #${index}`);
-    for (const directory of parentPaths(file))
-      if (!entries.has(directory)) entries.set(directory, base.get(directory) as SourceEntry);
-    entries.set(file, entry);
-  });
+  const base = validateManifest(baseManifest).entries;
+  const entries = new Map<string, SourceEntry>(
+    validateManifest(candidateManifest)
+      .entries.filter((e) => !isTestPath(e.path))
+      .map((e) => [e.path, e])
+  );
+  const baseEntries = new Map(base.map((e) => [e.path, e]));
+  for (const entry of base.filter((e) => isTestPath(e.path))) {
+    for (const directory of parentPaths(entry.path))
+      if (!entries.has(directory))
+        entries.set(directory, baseEntries.get(directory) as SourceEntry);
+    entries.set(entry.path, entry);
+  }
   return createManifest([...entries.values()]);
 }
 

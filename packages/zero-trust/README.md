@@ -195,9 +195,11 @@ Behavior fixed by these scenarios:
   only; `transitionPending` adds the history entry the controller records after the
   producer returns. `zt-run status` shows the action only while the run is in that
   `state` with exactly that `historyLength`, so a later stop never shows a stale
-  notice; the drift and ship steps also clear their notice when they run again.
+  notice; the review, drift and ship steps also clear their notice when they run again.
   Producers: the three refusals above (`blocked`; a write block names whether the fork
-  branch state is known), the drift hand-off (`paused_user`) and an ambiguous PR or
+  branch state is known), the drift hand-off (`paused_user`), the review hand-off
+  (`paused_user`, `reviewHandoffNotice`: the closed `IntegrityCode` set plus
+  `no_regression_test` and `regression_not_reproduced`) and an ambiguous PR or
   engagement reconciliation (`awaiting_contributor`, whose status would otherwise point
   back at the prefilled link). The ambiguity notice survives an unreadable listing and
   is retired by any other answer.
@@ -1410,25 +1412,6 @@ Test paths include any `test/`, `tests/`, `__tests__/` component, `*.test.*`,
 pytest skip/skipif/xfail decorators and skip calls, and unittest skip/skipIf/skipUnless.
 Modified tests compare textual `expect(`, `assert` and `self.assert*` counts.
 
-**Original tests (#1205).** Count checks alone let a candidate delete one existing
-test and add two new ones. Two more checks close that gap:
-
-- *Title inventory.* Test cases with a literal title (`it(`/`test(`, with any
-  `.only`/`.skip`-style modifier, and Python `def test_*`) are counted across all
-  base and all candidate test files. A modified base test file holding a title that
-  now occurs fewer times in the candidate yields `test_removed`, so a rename is a
-  finding but moving a test to another file is not. Titles never leave the function.
-  Dynamically built titles are not inventoried.
-- *Original tests on the patched source.* When the candidate changed or removed a
-  base test file, the review step runs the same full-suite command in a fresh VM on
-  the candidate with those base files restored (`preservedTestsManifest`) and passes
-  the summary as `preservedDiscovery`. More failures than the baseline yields
-  `existing_tests_failed`; a malformed summary, or a restore the candidate's layout
-  cannot hold, yields `discovery_unknown`. With permitted baseline failures the
-  comparison is by count.
-
-An integrity hand-off pauses the run (`paused_user`) and records a stop notice
-naming the codes, so `zt-run status` shows why.
 The scanner permits whitespace (including Python explicit line continuations)
 between marker tokens and after decorator `@` (LF, CRLF and bare CR), and
 conservatively admits Python grouping parentheses and implicit-continuation
@@ -1445,6 +1428,30 @@ change: a retained marker may have become active without any added token.
 Changes to short-circuit/conditional selector syntax around retained markers
 likewise refuse ambiguous activation instead of interpreting repository code.
 Non-test added lines containing `ai-dossier` or `imboard` are `promotional`.
+
+**Original tests (#1205).** Count checks alone let a candidate delete one existing
+test and add two new ones. Two more checks close that gap:
+
+- *Title inventory.* Test cases with a literal title (`it(`/`test(`, with any
+  `.only`/`.skip`-style modifier, and Python `def test_*`) are counted across all
+  base and all candidate test files. A modified base test file holding a title that
+  now occurs fewer times in the candidate yields `test_removed`, so a rename is a
+  finding but moving a test to another file is not. Titles never leave the function.
+  Dynamically built titles are not inventoried.
+- *Original tests on the patched source.* The review step runs the same full-suite
+  command, in one more fresh VM, on the candidate's non-test source with exactly the
+  base's test tree (`preservedTestsManifest`): every candidate test path is dropped,
+  so a file added beside the tests cannot shadow the module they exercise. Its summary
+  is `preservedDiscovery`. More failures or skips, or fewer tests or suites, than the
+  baseline yields `existing_tests_failed`; a malformed summary, or a candidate layout
+  that cannot hold the base's test tree, yields `discovery_unknown`. With permitted
+  baseline failures the comparison is by count, so swapping one failing test for
+  another is not detected.
+
+A fix that must change what an existing test expects therefore always hands off: edit
+the candidate yourself or contribute manually. An integrity hand-off pauses the run
+(`paused_user`) and records a stop notice naming the codes, so `zt-run status` shows
+why. A plain `resume` re-runs the same review.
 
 Protected config includes `package.json`, `package-lock.json`, `pyproject.toml`,
 `uv.lock`, `requirements*.txt`, `setup.py`, `setup.cfg`, `tox.ini`, `pytest.ini`,
@@ -3298,6 +3305,10 @@ functions against the real adapter, so the real-VM suite exercises this code.
   When the base does not fail, no candidate VM boots (`candidate: null`): the proof is
   `not_reproduced` when the base passed (a hand-off before patching) and `inconclusive`
   when it was inconclusive.
+- `preservedTestsManifest(base, candidate)` is the candidate's non-test entries plus
+  every base test entry (and the base directories they need): the original tests on the
+  patched source (#1205). A candidate layout that cannot hold them throws
+  `CanonicalError`.
 - Refusals before any VM: `EvidencePlanError(code, detail?)` with `network_mismatch`
   (`assertPlanNetworks`: a provisioning command not on `package_proxy` or a verification
   command not on `none`; `runPlanned` also refuses a provisioning command),

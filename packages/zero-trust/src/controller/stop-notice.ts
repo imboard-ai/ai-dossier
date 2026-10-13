@@ -3,7 +3,7 @@
  * so a later, unrelated stop never displays it. All text is fixed: no untrusted bytes. */
 
 import type { WriteBlockReason } from '../intents';
-import type { IntegrityCode } from '../review/integrity';
+import { INTEGRITY_CODES, type IntegrityCode } from '../review/integrity';
 import type { RunRecord } from '../state';
 import type { DriftHandoffReason } from './drift';
 import { VerificationRecordError } from './verification-record';
@@ -87,17 +87,21 @@ export const GATE_HANDOFF_REASONS = Object.freeze([
 ] as const);
 export type GateHandoffReason = (typeof GATE_HANDOFF_REASONS)[number];
 
+/** Dedupes `values` into the closed `allowed` set; anything else becomes `fallback`, so no
+ * untrusted text reaches status. */
+function closedReason(
+  values: readonly string[],
+  allowed: readonly string[],
+  fallback: string
+): string {
+  const closed = [...new Set(values.map((v) => (allowed.includes(v) ? v : fallback)))];
+  return closed.length ? closed.join(',') : fallback;
+}
+
 /** A gate hand-off leaves the run in `gating`; the notice is its only record. Unknown
  * decision codes collapse to `unknown_input`, so no untrusted text reaches status. */
 export function gateHandoffNotice(reasons: readonly string[]): Omit<StopNotice, 'historyLength'> {
-  const closed = [
-    ...new Set(
-      reasons.map((r) =>
-        (GATE_HANDOFF_REASONS as readonly string[]).includes(r) ? r : 'unknown_input'
-      )
-    ),
-  ];
-  const reason = closed.length ? closed.join(',') : 'unknown_input';
+  const reason = closedReason(reasons, GATE_HANDOFF_REASONS, 'unknown_input');
   return {
     state: 'gating',
     reason,
@@ -105,34 +109,27 @@ export function gateHandoffNotice(reasons: readonly string[]): Omit<StopNotice, 
   };
 }
 
-const INTEGRITY_CODES: readonly IntegrityCode[] = Object.freeze([
-  'test_deleted',
-  'test_removed',
-  'existing_tests_failed',
-  'test_disabled',
-  'assertions_reduced',
-  'discovery_reduced',
-  'discovery_unknown',
-  'config_changed',
-  'generated_or_binary',
-  'patch_too_large',
-  'promotional',
-  'invalid_input',
+/** Why review handed off: the integrity review's codes (#1205), or the regression proof
+ * that runs before it. */
+export type ReviewHandoffReason =
+  | IntegrityCode
+  | 'no_regression_test'
+  | 'regression_not_reproduced';
+const REVIEW_HANDOFF_REASONS: readonly ReviewHandoffReason[] = Object.freeze([
+  ...INTEGRITY_CODES,
+  'no_regression_test',
+  'regression_not_reproduced',
 ]);
 
-/** The deterministic integrity review refused the candidate (#1205). The run pauses with
- * the candidate retained; the codes come from the closed `IntegrityCode` set. */
-export function reviewHandoffNotice(codes: readonly string[]): Omit<StopNotice, 'historyLength'> {
-  const closed = [
-    ...new Set(
-      codes.map((c) => ((INTEGRITY_CODES as readonly string[]).includes(c) ? c : 'invalid_input'))
-    ),
-  ];
-  const reason = closed.length ? closed.join(',') : 'invalid_input';
+/** Review refused the candidate. The run pauses with the candidate retained. */
+export function reviewHandoffNotice(
+  reasons: readonly ReviewHandoffReason[]
+): Omit<StopNotice, 'historyLength'> {
+  const reason = closedReason(reasons, REVIEW_HANDOFF_REASONS, 'invalid_input');
   return {
     state: 'paused_user',
     reason,
-    nextPermittedAction: `Review refused the candidate (${reason}). Nothing was pushed; the candidate and its diff are retained for inspection. Start a new run or contribute manually.`,
+    nextPermittedAction: `Review refused the candidate (${reason}). Nothing was pushed; the candidate is retained in artifacts/candidate.diff. Fix it with \`edit --run <id> --patch <file>\` and resume, start a new run, or contribute manually. A plain resume repeats the same review.`,
   };
 }
 

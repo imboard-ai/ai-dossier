@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import type { AcquiredSource } from '../canonical/acquire';
 import { acquireSource, resolveBase } from '../canonical/acquire';
-import { type SourceManifest, sha256, validateManifest } from '../canonical/export';
+import { CanonicalError, type SourceManifest, sha256, validateManifest } from '../canonical/export';
 import type { ContributorApproval } from '../canonical/reconstruct';
 import {
   type CandidateAuthority,
@@ -15,7 +15,7 @@ import {
 import { dataDescriptors } from '../data-descriptors';
 import { createLlmDecisionProvider } from '../decision/providers/llm';
 import { publishPrivate, readPrivate } from '../durable-fs';
-import { buildCommandPlan, type ProxyEndpoints } from '../ecosystem/commands';
+import { buildCommandPlan, type CommandPlan, type ProxyEndpoints } from '../ecosystem/commands';
 import { detectEcosystem, sourceFilesFromManifest } from '../ecosystem/detect';
 import {
   loadProfileRecord,
@@ -81,6 +81,7 @@ import {
   freshnessNotice,
   gateHandoffNotice,
   isAlteredEvidence,
+  type ReviewHandoffReason,
   recordStopNotice,
   reviewHandoffNotice,
 } from './stop-notice';
@@ -450,6 +451,24 @@ export function createSteps(
       ? { suites: r.suites, tests: r.tests, failures: r.failures, skipped: r.skipped }
       : null;
   };
+  /** The base's own test tree on the candidate source (#1205), so a deleted, weakened or
+   * shadowed original test cannot hide a behaviour change. `null` when the candidate's
+   * layout cannot hold that tree: unknown evidence, which review refuses. */
+  const preservedEvidence = async (
+    c: PhaseContext,
+    baseManifest: SourceManifest,
+    candidateManifest: SourceManifest,
+    plan: CommandPlan
+  ): Promise<WorkspaceEvidence | null> => {
+    let manifest: SourceManifest;
+    try {
+      manifest = preservedTestsManifest(baseManifest, candidateManifest);
+    } catch (error) {
+      if (error instanceof CanonicalError) return null;
+      throw error;
+    }
+    return baselineEvidence({ ...workspace(c), manifest, plan });
+  };
   const steps: PhaseSteps = {
     async gate(c) {
       clearStopNotice(artifacts(c));
@@ -818,6 +837,10 @@ export function createSteps(
     },
     async review(c) {
       clearStopNotice(artifacts(c));
+      const handOff = (reasons: readonly ReviewHandoffReason[]) => {
+        recordStopNotice(artifacts(c), c.run, reviewHandoffNotice(reasons), true);
+        return { kind: 'hand_off' as const };
+      };
       const held = candidate(c);
       if (
         latestSourceEdit(c.store) &&
@@ -837,7 +860,7 @@ export function createSteps(
             baseEntries.get(e.path)?.sha256 !== e.sha256
         )
         .map((e) => e.path);
-      if (!testFiles.length) return { kind: 'hand_off' };
+      if (!testFiles.length) return handOff(['no_regression_test']);
       const regression = await regressionEvidence({
         ...workspace(c),
         baseManifest: base.manifest,
@@ -848,58 +871,28 @@ export function createSteps(
       });
       artifacts(c).put('regression', regression);
       artifacts(c).put('targets', testFiles);
-      if (regression.base.status !== 'failed' || !regression.candidate) return { kind: 'hand_off' };
+      if (regression.base.status !== 'failed' || !regression.candidate)
+        return handOff(['regression_not_reproduced']);
+      // One full-suite plan binds the baseline, candidate and preserved summaries together.
+      const fullSuite = buildCommandPlan(profile(c).manager, services.endpoints);
       const suite = await baselineEvidence({
         ...workspace(c),
         manifest: held.manifest,
-        plan: buildCommandPlan(profile(c).manager, services.endpoints),
+        plan: fullSuite,
       });
       artifacts(c).put('candidate_checks', suite);
-      // The base's own tests on the candidate source (#1205): a test the candidate changed
-      // or removed is restored, so weakening or deleting one cannot hide a behaviour change.
-      const candidateEntries = new Map(held.manifest.entries.map((e) => [e.path, e]));
-      const restored = base.manifest.entries
-        .filter(
-          (e) =>
-            isTestPath(e.path) &&
-            e.mode !== '040000' &&
-            candidateEntries.get(e.path)?.sha256 !== e.sha256
-        )
-        .map((e) => e.path);
-      let preservedDiscovery: ReturnType<typeof summary> | undefined;
-      if (restored.length) {
-        let manifest: SourceManifest | null = null;
-        try {
-          manifest = preservedTestsManifest(base.manifest, held.manifest, restored);
-        } catch {
-          // A restore the candidate's layout cannot hold is unknown evidence, never a pass.
-        }
-        if (manifest) {
-          const preserved = await baselineEvidence({
-            ...workspace(c),
-            manifest,
-            plan: buildCommandPlan(profile(c).manager, services.endpoints),
-          });
-          artifacts(c).put('preserved_checks', preserved);
-          preservedDiscovery = summary(preserved);
-        } else preservedDiscovery = null;
-      }
+      const preserved = await preservedEvidence(c, base.manifest, held.manifest, fullSuite);
+      artifacts(c).put('preserved_checks', preserved);
       const review = reviewCandidate({
         baseManifest: base.manifest,
         candidateManifest: held.manifest,
         baseDiscovery: summary(artifacts(c).require<WorkspaceEvidence>('baseline')),
         candidateDiscovery: summary(suite),
-        ...(preservedDiscovery === undefined ? {} : { preservedDiscovery }),
+        preservedDiscovery: preserved && summary(preserved),
       });
       artifacts(c).put('review', review);
       if (review.verdict === 'pass') return { kind: 'approved' };
-      recordStopNotice(
-        artifacts(c),
-        c.run,
-        reviewHandoffNotice(review.findings.map((f) => f.code)),
-        true
-      );
-      return { kind: 'hand_off' };
+      return handOff(review.findings.map((f) => f.code));
     },
     async verify(c) {
       await approval(c);
