@@ -310,9 +310,11 @@ const REASONS: Partial<Record<Outcome['kind'], ReasonCode>> = {
   revision: ReasonCode.RevisionRequested,
   ...STOP_REASONS,
 };
-/** Tracker outcomes that re-observe an already recorded state: when the run already carries
+/** Tracker and hand-off outcomes that re-observe an already recorded state: when the run already carries
  * the same reason, a repeat observation must not append a duplicate transition. */
 const IDEMPOTENT_TRACK_OUTCOMES: readonly Outcome['kind'][] = [
+  'contributor_handoff',
+  'engagement_observed',
   'revision',
   'submitted',
   'merged',

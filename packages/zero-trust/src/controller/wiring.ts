@@ -1144,6 +1144,8 @@ export function createController(
             ci: result.ci,
             headSha: result.headSha,
           });
+        // As in ship: adopt the driver's own transition instead of stamping a second one.
+        await c.observeRun(driver.snapshot().run);
         return result;
       },
       ship: async (c, deps, meta, policy) => {
@@ -1205,7 +1207,8 @@ export function createController(
         const baseline = artifacts(c).require<{ records: { status: string; argv: string }[] }>(
           'baseline'
         );
-        const result = await openHandoff(c, await shippingAdmission(c), 'shipping').issuePr({
+        const handoff = openHandoff(c, await shippingAdmission(c), 'shipping');
+        const result = await handoff.issuePr({
           binding: {
             upstream: config.upstream,
             base: deps.bindings.defaultBranch,
@@ -1236,6 +1239,9 @@ export function createController(
             ...(g.template ? { template: g.template } : {}),
           }),
         });
+        // Adopt the driver's durable transition: a second one stamped by the controller's
+        // clock would make the two journals disagree on the run's history.
+        await c.observeRun(handoff.snapshot().run);
         return result.kind === 'blocked'
           ? 'blocked'
           : result.kind === 'observed'

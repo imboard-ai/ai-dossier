@@ -44,7 +44,7 @@ import { approveCheckpoint } from '../checkpoints';
 import { validateRunConfig } from '../config';
 import { readControlRequests, requestControl } from '../control';
 import { applyUserPatch, changeCheckpoints, changeModelProfile } from '../edits';
-import { readOutcomeBudget, readOutcomeTrack } from '../outcome-records';
+import { readOutcomeBudget, readOutcomeHandoffs, readOutcomeTrack } from '../outcome-records';
 import { RunStore } from '../run-store';
 import { StepArtifacts } from '../steps';
 import { STOP_NOTICE_KEY, stopNoticeAction } from '../stop-notice';
@@ -98,6 +98,8 @@ function rig(
     wrappedPolicy?: boolean;
     userUnavailable?: boolean;
     baseUnavailable?: boolean;
+    /** Every clock read advances 1 ms, as a real clock does between two components. */
+    tickingClock?: boolean;
     driftTouch?: boolean;
     corruptPolicy?: boolean;
     restrictPolicy?: boolean;
@@ -616,7 +618,7 @@ function rig(
     read,
     fetch: fetcher,
     models,
-    now: () => new Date(clock),
+    now: () => new Date(options.tickingClock ? clock++ : clock),
     gitRemoteUrl: { upstream: `file://${upstream.dir}`, fork: `file://${fork.dir}` },
   });
   const authorize = async (task: Promise<unknown>) => {
@@ -798,6 +800,30 @@ describe('createController real composition', () => {
     h.advanceClock();
     return started.runId;
   }
+  it('records one hand-off transition when the driver and controller read a moving clock (#1203)', async () => {
+    const h = rig({ tickingClock: true });
+    const started = (await h.authorize(h.controller.start(h.config))) as {
+      runId: string;
+      state: string;
+    };
+    expect(started.state).toBe('awaiting_contributor');
+    const a = h.artifacts(started.runId);
+    expect(() => readOutcomeHandoffs(a.store, a.store.run)).not.toThrow();
+    a.close();
+    h.submit(started.runId);
+    expect(
+      ((await h.authorize(h.controller.resume(started.runId))) as { state: string }).state
+    ).toBe('submitted');
+    h.advanceClock();
+    h.feedback();
+    expect(
+      (
+        (await h.authorize(h.controller.resume(started.runId, { revise: true }))) as {
+          state: string;
+        }
+      ).state
+    ).toBe('submitted');
+  }, 60000);
   it('revises for a maintainer GitHub shows as CONTRIBUTOR only when resume names them (#1198)', async () => {
     const h = rig();
     const id = await published(h);
