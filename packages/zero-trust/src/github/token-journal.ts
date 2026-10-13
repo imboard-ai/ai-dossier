@@ -282,7 +282,8 @@ function reduceToken(ledger: TokenLedger, raw: unknown): TokenLedger {
       // Only a recorded native expiry, already passed, may settle a token.
       update(event.id, UNRESOLVED, (current) =>
         current.expiresAt !== null && Date.parse(current.expiresAt) <= Date.parse(observed)
-          ? { status: 'expired' }
+          ? // Legacy user-access expiry is not proof that refresh authority died.
+            { status: current.kind === 'installation' ? 'expired' : current.status }
           : fail()
       );
       break;
@@ -390,16 +391,34 @@ export class TokenJournal {
     return this.ledger;
   }
   /** Local cleanup only: access expiry cannot settle a refreshable user chain. */
-  settleExpired(now: string): void {
+  settleExpired(
+    now: string,
+    record: (event: TokenEvent) => void = (event) => {
+      this.record(event);
+    }
+  ): string[] {
     const observed = at(now);
+    const settled: string[] = [];
     for (const token of this.ledger.tokens.values())
       if (
         token.kind === 'installation' &&
         UNRESOLVED.includes(token.status) &&
         token.expiresAt !== null &&
         Date.parse(token.expiresAt) <= Date.parse(observed)
-      )
-        this.record({ v: 1, type: 'token_expired', id: token.id, at: observed });
+      ) {
+        record({ v: 1, type: 'token_expired', id: token.id, at: observed });
+        settled.push(token.id);
+      }
+    return settled;
+  }
+  resolveByOperator(
+    tokenId: string,
+    now: string,
+    record: (event: TokenEvent) => void = (event) => {
+      this.record(event);
+    }
+  ): void {
+    record({ v: 1, type: 'operator_resolved', id: tokenId, at: now });
   }
   record(event: TokenEvent): TokenLedger {
     // Scan the one free-form value raw as well as the encoded event (trap #1004).

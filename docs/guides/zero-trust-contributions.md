@@ -550,11 +550,13 @@ your GitHub settings (Applications, Authorized GitHub Apps). Lift the VM kill sw
 remains. Never
 delete files under `<stateDir>/.start-guards` while controllers may be running.
 
-An uncertain installation-token mint (malformed response, 5xx or transport failure)
-records an expiry bound **one hour after the response/failure is observed**, allowing
+An uncertain installation-token mint with a completed response (malformed 2xx or 5xx)
+records an expiry bound **one hour after the response is observed**, allowing
 for slow requests. Retry `kill-all` after that bound: it journals `token_expired` and
 reconciles cleanup. Before the bound it remains blocked. Legacy requests without a
-recorded bound never expire automatically. User-chain access-token expiry also does
+recorded bound never expire automatically. A transport failure also stays unbounded:
+the server may still be processing the request after the client disconnects.
+User-chain access-token expiry also does
 not prove that its refresh authority is dead.
 
 For a lost user-chain token, revoke the entire App authorization in GitHub settings

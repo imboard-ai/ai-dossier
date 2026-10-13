@@ -3434,8 +3434,9 @@ hand-offs. `ForkCredentialBroker` has a typed operation API and no generic token
   (`user_token_run_scoped`): only `endRun`, cancellation or `killAll` revoke it. `withForkPush(intent, target, operation, cancel?)` does all
   three and is the preferred entry point. It revokes on success, failure, throw and
   cancellation (including a cancel that arrives during the mint). A timer also revokes
-  the token 15 minutes after the mint request, even mid-operation. GitHub's 1 h / 8 h
-  lifetimes are recorded but never relied on.
+  the token 15 minutes after the mint request, even mid-operation. Normal push use
+  never relies on GitHub's longer native lifetimes. Cleanup may settle a passed
+  journaled installation expiry; user access expiry cannot settle refresh authority.
 - `GitPushCredential` is a git environment that redacts itself in JSON, `inspect` and
   `String()`. The token goes in an `http.extraheader` supplied via `GIT_CONFIG_*`, with
   the credential helper and global/system config off. The same overrides disable hooks,
@@ -3485,9 +3486,9 @@ an in-memory fake (`__tests__/github-fake.ts`), so CI makes no GitHub calls.
 An installation token whose value was lost in a full process crash cannot be revoked
 through any GitHub API. The run stays in `blocked_cleanup` until `resolveByOperator`
 or `settleExpired` after a journaled installation expiry. Uncertain installation
-mints record a conservative one-hour bound from response/failure observation;
+mints with completed responses record a conservative one-hour bound from response observation;
 `kill-all` retries settle it after that bound. Legacy unbounded requests and user
-refresh chains require operator resolution. Cleanup also verifies every remaining
+refresh chains and transport-uncertain mints require operator resolution. Cleanup also verifies every remaining
 VM and accounting obligation before leaving `blocked_cleanup`.
 
 ## Verified fork push (#1066)

@@ -361,12 +361,7 @@ export async function createCommands({ root, createController, onAuthorizationUr
         const journal = new TokenJournal(tokens);
         const token = journal.state.tokens.get(tokenId);
         if (!token || !UNRESOLVED.includes(token.status)) refuse('invalid_input');
-        journal.record({
-          v: 1,
-          type: 'operator_resolved',
-          id: tokenId,
-          at: new Date().toISOString(),
-        });
+        journal.resolveByOperator(tokenId, new Date().toISOString());
       } finally {
         tokens?.close();
         store.close();

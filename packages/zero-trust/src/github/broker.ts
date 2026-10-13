@@ -589,7 +589,7 @@ export class ForkCredentialBroker {
       type: 'token_mint_uncertain',
       id: tokenId,
       status,
-      ...(this.ledger.tokens.get(tokenId)?.kind === 'installation'
+      ...(status !== NO_RESPONSE && this.ledger.tokens.get(tokenId)?.kind === 'installation'
         ? { at: this.iso(observed), expiresAt: this.iso(observed + INSTALLATION_TOKEN_LIFETIME_MS) }
         : {}),
     });
@@ -901,7 +901,7 @@ export class ForkCredentialBroker {
   /** The owner confirmed by hand (e.g. GitHub settings) that this token is dead.
    * Returns what is still unresolved. */
   resolveByOperator(tokenId: string): CleanupReport | undefined {
-    this.record({ v: 1, type: 'operator_resolved', id: tokenId, at: this.iso() });
+    this.journal.resolveByOperator(tokenId, this.iso(), (event) => this.record(event));
     this.vault.delete(tokenId);
     return this.unresolved();
   }
@@ -909,17 +909,8 @@ export class ForkCredentialBroker {
   /** Settles installation obligations with a passed durable expiry. User refresh
    * authority and legacy unbounded requests always require explicit resolution. */
   settleExpired(): CleanupReport | undefined {
-    const now = this.now();
-    for (const token of this.tokens())
-      if (
-        token.kind === 'installation' &&
-        UNRESOLVED.includes(token.status) &&
-        token.expiresAt !== null &&
-        Date.parse(token.expiresAt) <= now
-      ) {
-        this.record({ v: 1, type: 'token_expired', id: token.id, at: this.iso(now) });
-        this.vault.delete(token.id);
-      }
+    for (const id of this.journal.settleExpired(this.iso(), (event) => this.record(event)))
+      this.vault.delete(id);
     return this.unresolved();
   }
 

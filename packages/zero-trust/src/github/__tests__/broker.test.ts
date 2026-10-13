@@ -1187,12 +1187,11 @@ describe('lead follow-ups: target binding, operator settlement, diagnostics', ()
   });
 
   it.each([
-    201, 503, 0,
+    201, 503,
   ])('uncertain installation mint %s settles only at the observed bound after restart', async (status) => {
     const first = await ready({
       http: async () => {
         first.clock.ms += 2 * 3600_000;
-        if (status === 0) throw new Error('transport');
         return { status, json: { token: 'malformed' } };
       },
     });
@@ -1212,6 +1211,52 @@ describe('lead follow-ups: target binding, operator settlement, diagnostics', ()
     expect(second.broker.settleExpired()).toBeUndefined();
     expect(ledgerOf(second).tokens.get(token?.id as string)?.status).toBe('expired');
     expect(second.broker.status().admissions).toBe('cleanup_blocked');
+  });
+
+  it('transport uncertainty stays unbounded even after a delayed server could mint', async () => {
+    const r = await ready();
+    r.fake.override('POST /app/installations', 'throw');
+    await expect(
+      r.broker.mintForkPush(intentOf(r.intents), { repositoryId: FORK_ID })
+    ).rejects.toEqual(refusal('mint_uncertain'));
+    const token = [...ledgerOf(r).tokens.values()][0];
+    expect(token?.expiresAt).toBeNull();
+    r.clock.ms += 365 * 24 * 3600_000;
+    expect(r.broker.settleExpired()?.outstanding[0]?.id).toBe(token?.id);
+    expect(r.broker.resolveByOperator(token?.id as string)).toBeUndefined();
+  });
+
+  it('repeated cached recovery expires once and retains legacy user refresh authority', async () => {
+    const r = await ready();
+    const user = r.broker.registerUserToken(
+      r.fake.authorizeUser(),
+      new Date(r.clock.ms + 3600_000).toISOString()
+    );
+    const installation = await r.broker.mintForkPush(intentOf(r.intents), {
+      repositoryId: FORK_ID,
+    });
+    r.clock.ms += 3600_000;
+    r.store.journal.append({
+      v: 1,
+      type: 'token_expired',
+      id: user,
+      at: new Date(r.clock.ms).toISOString(),
+    });
+    r.broker.close();
+    r.store.journal.close();
+    const second = rig({ dir: r.store.dir, fake: r.fake, clock: r.clock });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      expect((await second.broker.recover()).report?.outstanding.map((t) => t.id)).toEqual([user]);
+      expect(ledgerOf(second).tokens.get(installation.tokenId)?.status).toBe('expired');
+    }
+    expect(
+      second.store.journal.read().filter((raw) => {
+        const e = raw as { type: string; id?: string };
+        return e.type === 'token_expired' && e.id === installation.tokenId;
+      })
+    ).toHaveLength(1);
+    expect(second.broker.resolveByOperator(user)).toBeUndefined();
+    expect(ledgerOf(second).tokens.get(user)?.status).toBe('operator_resolved');
   });
 
   it('legacy uncertain installation evidence stays unbounded and rejects forged early or user bounds', async () => {

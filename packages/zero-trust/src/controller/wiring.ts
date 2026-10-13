@@ -728,11 +728,13 @@ export function createController(
   const cleanupCredentials = async (c: PhaseContext) => {
     const fork = artifacts(c).get<ForkReady>('fork');
     if (!fork) return;
-    const retained = new TokenJournal(journal(c, 'tokens'));
-    retained.settleExpired(now().toISOString());
-    if (![...retained.state.tokens.values()].some((token) => UNRESOLVED.includes(token.status)))
-      return;
-    broker ??= openBroker(c, fork);
+    if (!broker) {
+      const retained = new TokenJournal(journal(c, 'tokens'));
+      retained.settleExpired(now().toISOString());
+      if (![...retained.state.tokens.values()].some((token) => UNRESOLVED.includes(token.status)))
+        return;
+      broker = openBroker(c, fork);
+    }
     const result = await broker.recover();
     if (result.report) throw new Error('cleanup_incomplete');
   };

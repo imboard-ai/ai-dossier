@@ -683,6 +683,20 @@ test('resolve durably settles only the selected token without OAuth and retains 
   const h = rig();
   const store = h.seed();
   const runId = store.runId;
+  const budget = new BudgetLedger(
+    path.join(store.storeDirectory('budget'), 'ledger.json'),
+    store.contributionId
+  );
+  const hold = budget.reserve(
+    store.budgetSessionId(1),
+    {
+      money: { currency: 'USD', minor: 0 },
+      tokens: 1,
+      timeMs: 1,
+      rates: store.config.modelProfile.rates,
+    },
+    'work'
+  );
   store.persistRun(transitionRun(store.run, ReasonCode.CleanupFailed, new Date().toISOString()));
   const tokenIds = ['00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002'];
   const tokens = new Journal(store.storeDirectory('tokens'));
@@ -701,6 +715,7 @@ test('resolve durably settles only the selected token without OAuth and retains 
       useBy: null,
     });
     journal.record({ v: 1, type: 'token_minted', id, expiresAt: '2020-01-01T00:00:00.000Z' });
+    journal.record({ v: 1, type: 'token_expired', id, at: new Date().toISOString() });
   }
   const tokenFile = path.join(store.storeDirectory('tokens'), 'events.jsonl');
   tokens.close();
@@ -729,14 +744,16 @@ test('resolve durably settles only the selected token without OAuth and retains 
     [tokenIds[0]]
   );
   assert.equal(
-    events.some((e) => e.type === 'token_expired'),
-    false,
-    'user refresh authority survives access expiry'
+    events.filter((e) => e.type === 'token_expired').length,
+    2,
+    'legacy access expiry does not generate new settlement evidence'
   );
   await assert.rejects(commands.resolve(runId, tokenIds[0]), { code: 'invalid_input' });
   delete process.env.BINDING_APP_KEY;
   delete process.env.BINDING_APP_SECRET;
-  assert.equal((await commands.resolve(runId, tokenIds[1])).state, 'blocked');
+  assert.equal((await commands.resolve(runId, tokenIds[1])).state, 'blocked_cleanup');
+  budget.release(hold.id, 'Provider confirmed no charge');
+  assert.equal((await commands.killAll('Finish operator cleanup'))[0].state, 'blocked');
   events = fs.readFileSync(tokenFile, 'utf8').trim().split('\n').map(JSON.parse);
   assert.deepEqual(
     events.filter((e) => e.type === 'operator_resolved').map((e) => e.id),
