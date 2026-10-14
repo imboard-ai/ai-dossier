@@ -18,6 +18,7 @@ import {
   latestSourceEdit,
   sourceEditCount,
 } from '../dist/controller/edits.js';
+import { contributionIdOf } from '../dist/controller/ids.js';
 import { openWaitUntil, publicationWaitTime } from '../dist/controller/lifecycle-times.js';
 import {
   readOutcomeBudget,
@@ -138,7 +139,7 @@ export async function createCommands({ root, createController, onAuthorizationUr
       runId: () => {
         try {
           const id = controller.snapshot().runId;
-          return /^ztc-[a-f0-9]{16}-run-1$/u.test(id) ? id : null;
+          return contributionIdOf(id) ? id : null;
         } catch {
           return null;
         }
