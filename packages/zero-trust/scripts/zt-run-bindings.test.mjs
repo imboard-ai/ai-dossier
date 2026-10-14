@@ -1170,9 +1170,10 @@ test('production wiring keeps the VM journal alive until release-time interrupt 
     closed.push(this);
     return close.call(this);
   });
+  const progress = [];
   const controller = createController(
     config,
-    {},
+    { onRun: (run) => progress.push({ state: run.state, reason: run.reasonCode }) },
     {
       dispose: async () => {
         startedRelease();
@@ -1187,6 +1188,7 @@ test('production wiring keeps the VM journal alive until release-time interrupt 
   };
   const running = controller.start(config).catch((error) => error);
   await releasing;
+  assert.deepEqual(progress, [{ state: 'gating', reason: 'run_created' }]);
   let joined = false;
   const interrupt = controller.interrupt().then(() => {
     joined = true;
@@ -1200,6 +1202,7 @@ test('production wiring keeps the VM journal alive until release-time interrupt 
   await interrupt;
   assert.equal((await running).code, 'step_failed');
   assert.equal(live, false);
+  assert.ok(progress.some((row) => row.state === 'paused_user' && row.reason === 'user_paused'));
   assert.ok(closed.includes(journal));
   const store = RunStore.open(h.root, controller.snapshot().runId);
   try {
@@ -1469,15 +1472,17 @@ test('interrupt before store publication is latched and completed commands retir
   const h = rig();
   const before = ['SIGINT', 'SIGTERM', 'SIGHUP'].map((signal) => process.listenerCount(signal));
   let controller;
+  const progress = [];
   const commands = await createCommands({
     root: h.root,
     onAuthorizationUrl: h.onAuthorizationUrl,
-    createController: () => {
+    onRun: (run) => progress.push(run.state),
+    createController: (_config, edges) => {
       controller = new RunController({
         root: h.root,
         vm: new FakeVmAdapter(),
         recovery: new ScriptedRecovery(),
-        drivers: [],
+        drivers: [{ observeRun: edges.onRun }],
         now: () => new Date(),
         steps: { gate: async () => assert.fail('latched pause fences gate') },
         estimateVm: () => assert.fail('no allocation'),
@@ -1495,6 +1500,7 @@ test('interrupt before store publication is latched and completed commands retir
   await commands.prepareAuthor(h.config);
   const result = await commands.start(h.config);
   assert.equal(result.state, 'paused_user');
+  assert.deepEqual(progress, ['gating', 'paused_user']);
   assert.deepEqual(
     ['SIGINT', 'SIGTERM', 'SIGHUP'].map((signal) => process.listenerCount(signal)),
     before
@@ -2178,7 +2184,7 @@ test('incident-fenced resume preserves immediate lock exit 4, and both sweep mod
     const started = Date.now();
     const code = await main(['resume', '--root', h.root, '--run', runId], {
       createController: () => commands,
-      out: () => assert.fail('locked resume has no status output'),
+      out: (line) => assert.match(line, /^Work continues after authorization/u),
       err: (s) => err.push(s),
     });
     assert.equal(code, 4);

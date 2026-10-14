@@ -102,6 +102,8 @@ export interface ControllerOverrides {
   readonly signer?: Signer;
   /** Immediate production UI notification, never a credential or provider response. */
   readonly onAuthorizationUrl?: (url: string) => void;
+  /** Observational UI edge, called after durable lifecycle persistence. */
+  readonly onRun?: (run: RunRecord) => void;
 }
 
 export function incidentRequested(root: string): boolean {
@@ -544,6 +546,7 @@ export function createController(
           'now',
           'signer',
           'onAuthorizationUrl',
+          'onRun',
         ].includes(k)
     )
   )
@@ -1560,6 +1563,8 @@ export function createController(
     estimateVm: (_spec, purpose) => estimate(purpose),
     observeVm: async (_hold, handle) => observation(handle),
     drivers: [
+      // A separate driver cannot bypass mandatory synchronization on UI failure.
+      ...(overrides.onRun ? [{ observeRun: overrides.onRun }] : []),
       {
         observeRun: (run: RunRecord) => {
           for (const driver of [intents, handoff, tracker]) {

@@ -125,14 +125,18 @@ const ownSession = (session) => {
   return trackOwner(owner);
 };
 
-export async function createCommands({ root, createController, onAuthorizationUrl }) {
+export async function createCommands({ root, createController, onAuthorizationUrl, onRun }) {
   root = path.resolve(root);
   const pendingAuthors = new Map();
   const pendingPreparations = new Map();
   const authorOperations = new Set();
   const withController = async (config, session, work) => {
     if (stoppingAuthors) refuse('admission_closed');
-    const controller = createController(config, { onAuthorizationUrl }, session);
+    const controller = createController(
+      config,
+      { onAuthorizationUrl, ...(onRun ? { onRun } : {}) },
+      session
+    );
     const owner = trackOwner({
       kind: 'controller',
       dispose: () => controller.interrupt(),
