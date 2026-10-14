@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { expect, it } from 'vitest';
 import type { PolicyAssessment } from '../../policy/classify';
+import type { RunRecord } from '../../state';
 import { stopNoticeAction } from '../stop-notice';
 import { rig } from './composition-fixture';
 import { compositionHooks, noShipping } from './composition-hooks';
@@ -23,7 +24,7 @@ it('retains paid typed policy evidence before ownership hand-off and replaces it
       return { kind: 'malformed', reason: 'invalid_response', usage: result.usage };
     return result;
   };
-  const run = await h.authorize(h.controller.start(h.config));
+  const run = (await h.authorize(h.controller.start(h.config))) as RunRecord;
   expect(run.state).toBe('gating');
   expect(h.vm.calls.filter((call) => call.op === 'create')).toEqual([]);
   noShipping();
@@ -82,7 +83,7 @@ it('retains paid typed policy evidence before ownership hand-off and replaces it
   malformed = false;
   h.interceptRead(() => undefined);
   const recovered = h.reopen();
-  const resumed = await h.authorize(recovered.resume(run.runId), recovered);
+  const resumed = (await h.authorize(recovered.resume(run.runId), recovered)) as RunRecord;
   expect(resumed.state).toBe('awaiting_contributor');
   const c = h.artifacts(run.runId);
   expect(c.get<{ outcome: string }>('gate_assessment').outcome).toBe('proceed');
@@ -91,7 +92,7 @@ it('retains paid typed policy evidence before ownership hand-off and replaces it
 
 it('finalizes retained policy evidence for a post-assessment real-name hand-off', async () => {
   const h = rig({ realNameOnlyLogin: true });
-  const run = await h.authorize(h.controller.start(h.config));
+  const run = (await h.authorize(h.controller.start(h.config))) as RunRecord;
   expect(run.state).toBe('gating');
   const a = h.artifacts(run.runId);
   expect(a.get('gate_assessment')).toMatchObject({

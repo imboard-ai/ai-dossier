@@ -160,15 +160,18 @@ function policyGateSnapshot(input: unknown): unknown {
   let truncated = false;
   let nodes = 0;
   let bytes = 0;
-  const copy = (value: unknown, key: string, depth: number): unknown => {
+  const copy = (value: unknown, key: string, depth: number, project: boolean): unknown => {
     if (++nodes > 200000 || depth > 16) throw new InvalidStatusError();
     if (typeof value === 'string') {
       bytes += Buffer.byteLength(value);
       if (bytes > 96 * 1024 * 1024) throw new InvalidStatusError();
       assertNoSecrets(value);
-      if ((key === 'quote' || key === 'excerpt') && value.length > 512) {
-        truncated = true;
-        return Array.from(value).slice(0, 512).join('');
+      if (project && (key === 'quote' || key === 'excerpt') && value.length > 512) {
+        const points = Array.from(value);
+        if (points.length > 512) {
+          truncated = true;
+          return points.slice(0, 512).join('');
+        }
       }
       return value;
     }
@@ -183,8 +186,8 @@ function policyGateSnapshot(input: unknown): unknown {
     if (array) {
       const values = [];
       for (let i = 0; i < descriptors.length.value; i++) {
-        const held = copy(descriptors[String(i)].value, '', depth + 1);
-        if (key !== 'citations' || i < 16) values.push(held);
+        const held = copy(descriptors[String(i)].value, '', depth + 1, project);
+        if (!project || key !== 'citations' || i < 16) values.push(held);
         else truncated = true;
       }
       return values;
@@ -193,11 +196,17 @@ function policyGateSnapshot(input: unknown): unknown {
       keys.map((name) => {
         const field = String(name);
         assertNoSecrets(field);
-        return [field, copy(descriptors[field].value, field, depth + 1)];
+        return [field, copy(descriptors[field].value, field, depth + 1, project)];
       })
     );
   };
-  const held = copy(input, '', 0);
+  const full = copy(input, '', 0, false);
+  // Validate all evidence before projection: a malformed citation outside the
+  // display window is corruption, not a reason to silently discard that entry.
+  if (!validatePolicyGate(full)) throw new InvalidStatusError();
+  nodes = 0;
+  bytes = 0;
+  const held = copy(full, '', 0, true);
   if (!isRecord(held)) throw new InvalidStatusError();
   if (truncated) held.displayTruncated = true;
   return JSON.parse(canonicalJson(held, 1024 * 1024));

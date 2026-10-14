@@ -565,7 +565,8 @@ test('policy gate status exposes retained decisions and citations read-only, wit
     },
   };
   retain(large);
-  const projected = commands.status(store.runId);
+  const raw = commands.status(store.runId);
+  const projected = JSON.parse(renderJson(raw));
   assert.equal(projected.policyGate.displayTruncated, true);
   assert.equal(projected.policyGate.assessment.decisions.assignment.citations.length, 16);
   assert.equal(projected.policyGate.assessment.decisions.assignment.citations[0].quote.length, 512);
@@ -573,6 +574,59 @@ test('policy gate status exposes retained decisions and citations read-only, wit
   for (const output of [renderHuman(projected), renderJson(projected)])
     assert.match(output, /displayTruncated/);
   assert.equal(projected.estimatedSpend.amount, status.estimatedSpend.amount);
+  for (const citations of [
+    [
+      ...large.assessment.decisions.assignment.citations.slice(0, 16),
+      { sourceId: 'CONTRIBUTING.md', line: 0, quote: 'bad' },
+    ],
+    [
+      ...large.assessment.decisions.assignment.citations.slice(0, 16),
+      { sourceId: 'CONTRIBUTING.md', line: 17, quote: 'bad', unexpected: true },
+    ],
+  ]) {
+    retain({
+      ...large,
+      assessment: {
+        ...large.assessment,
+        decisions: {
+          assignment: {
+            ...large.assessment.decisions.assignment,
+            citations,
+          },
+        },
+      },
+    });
+    assert.throws(() => commands.status(store.runId), { name: 'InvalidStatusError' });
+  }
+  retain({
+    ...evidence,
+    assessment: {
+      ...evidence.assessment,
+      citations: Array.from({ length: 17 }, (_, i) => ({
+        path: 'CONTRIBUTING.md',
+        line: i === 16 ? 0 : i + 1,
+        ruleId: 'ai',
+        excerpt: 'AI',
+      })),
+    },
+  });
+  assert.throws(() => commands.status(store.runId), { name: 'InvalidStatusError' });
+  const unicodeQuote = '😀'.repeat(300);
+  retain({
+    ...evidence,
+    assessment: {
+      ...evidence.assessment,
+      decisions: {
+        assignment: {
+          ...evidence.assessment.decisions.assignment,
+          citations: [{ sourceId: 'CONTRIBUTING.md', line: 1, quote: unicodeQuote }],
+        },
+      },
+    },
+  });
+  const unicode = JSON.parse(renderJson(commands.status(store.runId)));
+  assert.equal(unicode.policyGate.displayTruncated, undefined);
+  assert.equal(unicode.policyGate.assessment.decisions.assignment.citations[0].quote, unicodeQuote);
   retain(evidence);
   store.persistRun(transitionRun(store.run, ReasonCode.GatePassed, new Date().toISOString()));
   assert.equal(commands.status(store.runId).policyGate, undefined);
