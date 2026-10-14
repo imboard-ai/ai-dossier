@@ -6,6 +6,7 @@ import {
   type BudgetRate,
   type BudgetReservation,
 } from '../budget-types';
+import { modelAccountingScope } from './accounting';
 import {
   type ModelAdapter,
   ModelError,
@@ -37,7 +38,10 @@ export async function meteredComplete(
   const pinnedRates = structuredClone(rates);
   const session = ledger.snapshot().sessions.find((item) => item.id === sessionId);
   if (!session) throw new BudgetError('unknown_session', 'Unknown budget session');
-  const inputBound = Buffer.byteLength(modelRequestBody(id, request), 'utf8');
+  const inputBound = Buffer.byteLength(
+    modelRequestBody(id, request, adapter.requestProfile),
+    'utf8'
+  );
   const estimate = estimateBudget(
     {
       currency: session.ceiling.currency,
@@ -63,14 +67,18 @@ export async function meteredComplete(
     throw error;
   }
   const started = performance.now();
+  const accounting = modelAccountingScope(adapter);
   let result: ModelResult;
   try {
-    result = await withModelDeadline(
-      { ...request, timeoutMs: request.timeoutMs * request.attempts },
-      (signal) => adapter.complete({ ...request, signal })
+    result = await accounting.run(() =>
+      withModelDeadline({ ...request, timeoutMs: request.timeoutMs * request.attempts }, (signal) =>
+        adapter.complete({ ...request, signal })
+      )
     );
   } catch (error) {
-    ledger.settle(reservation.id, null);
+    const evidence = accounting.consume(error);
+    if (evidence) ledger.release(reservation.id, evidence);
+    else ledger.settle(reservation.id, null);
     // Never propagate provider exception text/cause.
     if (error instanceof ModelError) throw new ModelError(error.code, error.status);
     throw new ModelError('model_unavailable');

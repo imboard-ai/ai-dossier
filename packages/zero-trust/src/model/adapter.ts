@@ -18,6 +18,7 @@ export interface ModelRequest {
   system: string;
   messages: readonly ModelMessage[];
   tools: readonly ModelTool[];
+  /** Total completion allowance, including both reasoning and visible output tokens. */
   maxOutputTokens: number;
   timeoutMs: number;
   signal?: AbortSignal;
@@ -49,7 +50,36 @@ export interface ModelAdapter {
   readonly id: string;
   /** Optional non-secret endpoint/profile fingerprint, never a credential. */
   readonly cacheIdentity?: string;
+  readonly requestProfile?: ModelRequestProfile;
   complete(request: ModelRequest): Promise<ModelResult>;
+}
+
+export interface ModelRequestProfile {
+  readonly maxTokensParameter: 'max_tokens' | 'max_completion_tokens';
+  readonly logprobs: boolean;
+}
+
+/** Defaults are model-family hints only; compatible providers can override both fields. */
+export function modelRequestProfile(
+  model: string,
+  options: Partial<ModelRequestProfile> = {}
+): ModelRequestProfile {
+  validateModelRequestProfile(options);
+  const reasoning = /^(?:gpt-5(?:[.-]|$)|o(?:1|3|4)(?:[.-]|$))/u.test(model);
+  const maxTokensParameter =
+    options.maxTokensParameter ?? (reasoning ? 'max_completion_tokens' : 'max_tokens');
+  const logprobs = options.logprobs ?? !reasoning;
+  return Object.freeze({ maxTokensParameter, logprobs });
+}
+
+export function validateModelRequestProfile(options: Partial<ModelRequestProfile>): void {
+  if (
+    (options.maxTokensParameter !== undefined &&
+      options.maxTokensParameter !== 'max_tokens' &&
+      options.maxTokensParameter !== 'max_completion_tokens') ||
+    (options.logprobs !== undefined && typeof options.logprobs !== 'boolean')
+  )
+    throw new ModelError('invalid_request');
 }
 
 export const MAX_TOOL_ARGUMENT_BYTES = 64 * 1024;
@@ -117,7 +147,11 @@ export function snapshotModelRequest(request: ModelRequest): SnapshotModelReques
 }
 
 /** Wire data is shared with metering so tool schemas and model overhead are counted. */
-export function modelRequestBody(id: string, request: ModelRequest): string {
+export function modelRequestBody(
+  id: string,
+  request: ModelRequest,
+  profile: ModelRequestProfile = modelRequestProfile(id)
+): string {
   return JSON.stringify({
     model: id,
     messages: [{ role: 'system', content: request.system }, ...request.messages],
@@ -125,9 +159,9 @@ export function modelRequestBody(id: string, request: ModelRequest): string {
     ...(request.tools.length
       ? { tools: request.tools, tool_choice: 'required', parallel_tool_calls: false }
       : {}),
-    max_tokens: request.maxOutputTokens,
+    [profile.maxTokensParameter]: request.maxOutputTokens,
     stream: false,
-    ...(request.logprobs === undefined ? {} : { logprobs: request.logprobs }),
+    ...(profile.logprobs && request.logprobs !== undefined ? { logprobs: request.logprobs } : {}),
   });
 }
 

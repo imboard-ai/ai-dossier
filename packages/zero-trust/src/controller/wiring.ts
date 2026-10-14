@@ -27,6 +27,7 @@ import { PrTracker, TrackError, trackFromHandoff } from '../github/track';
 import { IntentDriver, WriteBlockedError, WriteRefusedError } from '../intents';
 import { Journal } from '../journal';
 import { StoreLockedError } from '../lock';
+import { forwardModelAccounting } from '../model/accounting';
 import { type ModelAdapter, ModelError } from '../model/adapter';
 import { OpenAICompatibleAdapter } from '../model/openai-compatible';
 import { assessIssue } from '../policy/eligibility';
@@ -606,6 +607,7 @@ export function createController(
     const guarded: ModelAdapter = {
       id: adapter.id,
       cacheIdentity: adapter.cacheIdentity,
+      requestProfile: adapter.requestProfile,
       complete: async (request) => {
         controller.assertAdmission();
         const context = activeContext;
@@ -621,6 +623,7 @@ export function createController(
         return result;
       },
     };
+    forwardModelAccounting(guarded, adapter);
     models.set(phase, guarded);
     return guarded;
   };

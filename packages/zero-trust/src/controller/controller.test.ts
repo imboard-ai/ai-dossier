@@ -448,7 +448,7 @@ describe('RunController', () => {
     expect(h.duplicates()).toBe(0);
     expect(h.recovery.calls).toEqual(['store', 'budget', 'vm', 'credentials', 'intents']);
   });
-  it('reconciles unknown holds before VMs, leaves work fenced and cleanup funded', async () => {
+  it('held reservation blocks step(), persists a stop notice, and invokes no phase work', async () => {
     const h = rig();
     h.steps.scripts.plan = [
       async (c) => {
@@ -479,6 +479,9 @@ describe('RunController', () => {
     ).toBe(true);
     expect(() => budget.reserve(store.budgetSessionId(1), h.estimate)).toThrow('Reconcile');
     store.close();
+    expect(notice(h, id).action).toContain('hold_unsettled');
+    expect((await new RunController(h.deps).resume(id)).state).toBe('paused_user');
+    expect(h.steps.calls).toHaveLength(calls);
     expect(notice(h, id).action).toContain('hold_unsettled');
   });
   it('three destroy failures persist blocked_cleanup and deny all later work', async () => {

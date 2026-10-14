@@ -275,7 +275,14 @@ export async function decide(
   assertSecretFree({ id, model, cacheIdentity });
   const { ledger, sessionId } = budget;
   const rates = structuredClone(budget.rates);
-  const meteredAdapter = Object.freeze({ id: model, complete: adapter.complete.bind(adapter) });
+  const meteredAdapter = forwardModelAccounting(
+    Object.freeze({
+      id: model,
+      requestProfile: adapter.requestProfile,
+      complete: adapter.complete.bind(adapter),
+    }),
+    adapter
+  );
   const inputs = snapshotInputs(rawInputs);
   const identity = {
     provider: id,
@@ -481,3 +488,5 @@ export async function decide(
     return escalate('secret');
   }
 }
+
+import { forwardModelAccounting } from '../model/accounting';

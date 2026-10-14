@@ -2,15 +2,18 @@ import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { assertNoSecrets, assertSecretFree } from '../redaction';
 import { isRecord } from '../state';
+import { beginModelAccounting, recordModelRejection, registerModelAccounting } from './accounting';
 import {
   MAX_TOOL_ARGUMENT_BYTES,
   type ModelAdapter,
   ModelError,
   type ModelRequest,
+  type ModelRequestProfile,
   type ModelResult,
   type ModelToolCall,
   type ModelUsage,
   modelRequestBody,
+  modelRequestProfile,
   type SnapshotModelRequest,
   snapshotModelRequest,
   withModelDeadline,
@@ -26,6 +29,24 @@ import {
 
 export const MAX_MODEL_RESPONSE_BYTES = 1024 * 1024;
 const RETRY_DELAY_MS = 50;
+function rejectionEvidence(raw: unknown, status: number): string | undefined {
+  if (!isRecord(raw) || !isRecord(raw.error) || 'usage' in raw || 'choices' in raw) return;
+  const expected: Record<number, string> = {
+    400: 'invalid_request_error',
+    401: 'authentication_error',
+    403: 'permission_error',
+    404: 'invalid_request_error',
+    422: 'invalid_request_error',
+  };
+  if (
+    status === 401 &&
+    raw.error.type === 'invalid_request_error' &&
+    raw.error.code === 'invalid_api_key'
+  )
+    return 'openai-pre-generation-rejection:http-401:invalid_api_key:attempt-1';
+  if (!expected[status] || raw.error.type !== expected[status]) return;
+  return `openai-pre-generation-rejection:http-${status}:${expected[status]}:attempt-1`;
+}
 const count = (value: unknown): value is number =>
   Number.isSafeInteger(value) && (value as number) >= 0;
 const malformed = (
@@ -167,15 +188,20 @@ export interface OpenAICompatibleOptions {
   /** API base URL, e.g. https://provider.example/v1; localhost HTTP is allowed. */
   endpoint: string;
   apiKeyEnv: string;
+  /** Trusted controller transport: exactly one HTTP attempt per call; no hidden retries. */
   fetch: typeof fetch;
+  maxTokensParameter?: ModelRequestProfile['maxTokensParameter'];
+  logprobs?: boolean;
 }
 /** Contains no credential field. The key is read only at startup check and call time. */
 export class OpenAICompatibleAdapter implements ModelAdapter {
   readonly id: string;
   readonly cacheIdentity: string;
+  readonly requestProfile: ModelRequestProfile;
   private readonly url: string;
   private readonly apiKeyEnv: string;
   private readonly fetcher: typeof fetch;
+  private readonly openAiBillingContract: boolean;
   constructor(options: OpenAICompatibleOptions) {
     try {
       const { model, endpoint, apiKeyEnv, fetch: fetcher } = options;
@@ -185,14 +211,23 @@ export class OpenAICompatibleAdapter implements ModelAdapter {
         throw new ModelError('invalid_request');
       assertNoSecrets(model);
       this.id = model;
+      this.requestProfile = modelRequestProfile(model, options);
+      this.openAiBillingContract = url.href.replace(/\/$/u, '') === 'https://api.openai.com/v1';
       this.url = `${url.href.replace(/\/$/u, '')}/chat/completions`;
-      this.cacheIdentity = createHash('sha256').update(this.url).digest('hex');
+      this.cacheIdentity = createHash('sha256')
+        .update(JSON.stringify([this.url, this.requestProfile]))
+        .digest('hex');
       this.apiKeyEnv = apiKeyEnv;
       this.fetcher = fetcher;
     } catch {
       throw new ModelError('invalid_request');
     }
     this.key();
+    if (
+      Object.getPrototypeOf(this) === OpenAICompatibleAdapter.prototype &&
+      this.complete === OpenAICompatibleAdapter.prototype.complete
+    )
+      registerModelAccounting(this);
   }
   private key(): string {
     return readModelKey(this.apiKeyEnv);
@@ -207,16 +242,18 @@ export class OpenAICompatibleAdapter implements ModelAdapter {
       method: 'POST',
       redirect: 'error',
       headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-      body: modelRequestBody(this.id, request),
+      body: modelRequestBody(this.id, request, this.requestProfile),
       signal,
     });
     signal.throwIfAborted();
     return response;
   }
   async complete(input: ModelRequest): Promise<ModelResult> {
+    beginModelAccounting();
     const request = snapshotModelRequest(input);
     const key = this.key();
     let backoff = 0;
+    let rejected: { error: ModelError; evidence: string } | undefined;
     try {
       for (let attempt = 0; ; attempt++) {
         const outcome = await withModelDeadline<{ retry: number } | { result: ModelResult }>(
@@ -225,6 +262,30 @@ export class OpenAICompatibleAdapter implements ModelAdapter {
             if (backoff) await delay(backoff, undefined, { signal });
             const response = await this.post(request, key, signal);
             if (!response.ok) {
+              if (
+                attempt === 0 &&
+                this.openAiBillingContract &&
+                [400, 401, 403, 404, 422].includes(response.status)
+              ) {
+                const bytes = await readBoundedModelBody(
+                  response,
+                  signal,
+                  MAX_MODEL_RESPONSE_BYTES
+                );
+                let evidence: string | undefined;
+                try {
+                  if (bytes)
+                    evidence = rejectionEvidence(
+                      JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)),
+                      response.status
+                    );
+                } catch {
+                  /* Unparseable rejection is an unknown charge. */
+                }
+                const error = new ModelError('model_http', response.status);
+                if (evidence) rejected = { error, evidence };
+                throw error;
+              }
               // A tee'd/injected body can keep cancellation pending forever.
               void response.body?.cancel().catch(() => {});
               if (
@@ -255,8 +316,11 @@ export class OpenAICompatibleAdapter implements ModelAdapter {
         ['model_http', 'model_timeout', 'model_aborted'].includes(error.code) &&
         (error.status === undefined ||
           (Number.isInteger(error.status) && error.status >= 100 && error.status <= 599))
-      )
-        throw new ModelError(error.code, error.status);
+      ) {
+        const safe = new ModelError(error.code, error.status);
+        if (rejected?.error === error) recordModelRejection(this, safe, rejected.evidence);
+        throw safe;
+      }
       throw new ModelError('model_unavailable');
     }
   }
