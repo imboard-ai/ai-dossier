@@ -12,6 +12,7 @@ import {
   ModelError,
   type ModelRequest,
   type ModelResult,
+  modelOutputTokens,
   modelRequestBody,
   snapshotModelRequest,
 } from '../adapter';
@@ -600,6 +601,134 @@ describe('OpenAI-compatible untrusted responses and transport', () => {
 });
 
 describe('real budget ledger metering', () => {
+  const headroomQuestion: TypedQuestion = {
+    id: 'headroom',
+    version: '1',
+    kind: 'boolean',
+    prompt: 'Allowed?',
+    escalateValue: 'unclear',
+    acceptThreshold: { true: 0.9, false: 0.9 },
+  };
+  it('headroom admits a complete typed answer after reasoning and settles truncation without accepting it', async () => {
+    const store = ledger();
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async (_url, init) => {
+      const bytes = init?.body as string;
+      const cap = JSON.parse(bytes).max_completion_tokens;
+      expect(store.snapshot().reservations.at(-1)?.estimate.tokens).toBe(
+        Buffer.byteLength(bytes) + cap
+      );
+      // Recorded response shapes: old-cap reasoning exhaustion versus complete tool output.
+      return response(
+        cap <= 1024
+          ? recorded({ content: null }, 'length', {
+              prompt_tokens: 10,
+              completion_tokens: cap,
+              completion_tokens_details: { reasoning_tokens: cap },
+            })
+          : recorded(
+              { tool_calls: [tool('{"value":true,"citations":[]}', 'report_decision')] },
+              'tool_calls',
+              {
+                prompt_tokens: 10,
+                completion_tokens: 1500,
+                completion_tokens_details: { reasoning_tokens: 1400 },
+              }
+            )
+      );
+    });
+    const model = adapter(fetcher, {
+      maxTokensParameter: 'max_completion_tokens',
+      logprobs: false,
+    });
+    const oldProvider = createLlmDecisionProvider({ adapter: model, maxOutputTokens: 1024 });
+    const truncated = await meteredComplete(
+      model,
+      store,
+      's1',
+      rates,
+      oldProvider.request(headroomQuestion, [], 0)
+    );
+    expect(truncated.kind).toBe('malformed');
+    expect(oldProvider.decode(truncated)).toBeNull();
+    const provider = createLlmDecisionProvider({ adapter: model });
+    const result = await meteredComplete(
+      model,
+      store,
+      's1',
+      rates,
+      provider.request(headroomQuestion, [], 0)
+    );
+    expect(provider.decode(result)).toEqual({ value: true, citations: [] });
+    expect(store.snapshot().reservations.map((r) => [r.status, r.observed?.tokens])).toEqual([
+      ['settled', 1034],
+      ['settled', 1510],
+    ]);
+    expect(provider.cacheIdentity).not.toBe(oldProvider.cacheIdentity);
+  });
+  it('larger role caps cannot dispatch without budget and retries reserve the exact total cap twice', async () => {
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async (_url, init) => {
+      const bytes = init?.body as string;
+      const cap = JSON.parse(bytes).max_completion_tokens;
+      expect(cap).toBe(32768);
+      expect(store.snapshot().reservations.at(-1)?.estimate.tokens).toBe(
+        2 * (Buffer.byteLength(bytes) + cap)
+      );
+      return response(recorded());
+    });
+    const model = adapter(fetcher, { maxTokensParameter: 'max_completion_tokens' });
+    const provider = createLlmDecisionProvider({ adapter: model });
+    const store = ledger(2000);
+    await expect(
+      meteredComplete(model, store, 's1', rates, provider.request(headroomQuestion, [], 0))
+    ).rejects.toBeInstanceOf(BudgetExhaustedError);
+    expect(fetcher).not.toHaveBeenCalled();
+    expect(store.snapshot().reservations).toEqual([]);
+    store.startSession({
+      id: 's2',
+      ceiling: { currency: 'USD', minor: 1_000_000 },
+      cleanupAllowance: 0,
+      tokenLimit: 100_000,
+      timeLimitMs: 100_000,
+    });
+    await meteredComplete(model, store, 's2', rates, {
+      ...request,
+      maxOutputTokens: modelOutputTokens(model, 'agent'),
+      attempts: 2,
+    });
+  });
+  it('legacy defaults and explicit total-cap overrides remain distinct and cache-bound', () => {
+    const fetcher = vi.fn<typeof fetch>();
+    const legacy = adapter(fetcher);
+    expect(
+      createLlmDecisionProvider({ adapter: legacy }).request(headroomQuestion, [], 0)
+        .maxOutputTokens
+    ).toBe(1024);
+    expect(modelOutputTokens(legacy, 'agent')).toBe(16384);
+    const custom = adapter(fetcher, {
+      maxTokensParameter: 'max_completion_tokens',
+      decisionOutputTokens: 12345,
+      agentOutputTokens: 45678,
+    });
+    expect(
+      createLlmDecisionProvider({ adapter: custom }).request(headroomQuestion, [], 0)
+        .maxOutputTokens
+    ).toBe(12345);
+    expect(modelOutputTokens(custom, 'agent')).toBe(45678);
+    const other = adapter(fetcher, {
+      maxTokensParameter: 'max_completion_tokens',
+      decisionOutputTokens: 12345,
+      agentOutputTokens: 45679,
+    });
+    expect(createLlmDecisionProvider({ adapter: custom }).cacheIdentity).not.toBe(
+      createLlmDecisionProvider({ adapter: other }).cacheIdentity
+    );
+    for (const invalid of [0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, null, '8192']) {
+      expect(() => adapter(fetcher, { decisionOutputTokens: invalid as number })).toThrow(
+        ModelError
+      );
+      expect(() => adapter(fetcher, { agentOutputTokens: invalid as number })).toThrow(ModelError);
+    }
+  });
   it.each([
     'gpt-5-mini',
     'gpt-5.1',
@@ -623,6 +752,8 @@ describe('real budget ledger metering', () => {
     };
     const decisionRequest = provider.request(question, [], 0);
     expect(decisionRequest.logprobs).toBeUndefined();
+    expect(decisionRequest.maxOutputTokens).toBe(8192);
+    expect(modelOutputTokens(reasoning, 'agent')).toBe(32768);
     await reasoning.complete({ ...decisionRequest, logprobs: true });
     const body = JSON.parse(fetcher.mock.calls[0][1]?.body as string);
     expect(body.max_completion_tokens).toBe(decisionRequest.maxOutputTokens);
