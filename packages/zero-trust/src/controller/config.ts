@@ -5,6 +5,7 @@ import { requireBudgetRates } from '../budget';
 import { BudgetError, type BudgetRate } from '../budget-types';
 import { isAppSlug } from '../github/fork';
 import { isGitHubLogin, upstreamIssueBinding } from '../github/handoff';
+import { type ModelRequestProfile, validateModelRequestProfile } from '../model/adapter';
 import { assertSecretFree } from '../redaction';
 import { isRecord } from '../state';
 import { DEFAULT_LIMITS, type VmLimits } from '../vm/adapter';
@@ -154,13 +155,11 @@ function phase(raw: unknown): ModelPhase {
     ['adapter', 'model', 'endpoint', 'apiKeyEnv', 'maxTokensParameter', 'logprobs'],
     'invalid_model_profile'
   );
-  if (
-    (p.maxTokensParameter !== undefined &&
-      p.maxTokensParameter !== 'max_tokens' &&
-      p.maxTokensParameter !== 'max_completion_tokens') ||
-    (p.logprobs !== undefined && typeof p.logprobs !== 'boolean')
-  )
+  try {
+    validateModelRequestProfile(p as Partial<ModelRequestProfile>);
+  } catch {
     fail('invalid_model_profile');
+  }
   const endpoint = text(p.endpoint, 'invalid_model_profile');
   try {
     const url = new URL(endpoint);
@@ -183,8 +182,10 @@ function phase(raw: unknown): ModelPhase {
     model: text(p.model, 'invalid_model_profile'),
     endpoint,
     apiKeyEnv: env(p.apiKeyEnv),
-    ...(p.maxTokensParameter === undefined ? {} : { maxTokensParameter: p.maxTokensParameter }),
-    ...(p.logprobs === undefined ? {} : { logprobs: p.logprobs }),
+    ...(p.maxTokensParameter === undefined
+      ? {}
+      : { maxTokensParameter: p.maxTokensParameter as ModelRequestProfile['maxTokensParameter'] }),
+    ...(p.logprobs === undefined ? {} : { logprobs: p.logprobs as boolean }),
   };
 }
 function signer(file: string): void {

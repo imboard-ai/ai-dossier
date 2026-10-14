@@ -6,6 +6,7 @@ import {
   type BudgetRate,
   type BudgetReservation,
 } from '../budget-types';
+import { modelAccountingScope } from './accounting';
 import {
   type ModelAdapter,
   ModelError,
@@ -15,7 +16,6 @@ import {
   snapshotModelRequest,
   withModelDeadline,
 } from './adapter';
-import { modelNoChargeEvidence } from './openai-compatible';
 
 export class BudgetExhaustedError extends Error {
   constructor(readonly code: 'ceiling_exceeded' | 'limit_exceeded') {
@@ -67,14 +67,16 @@ export async function meteredComplete(
     throw error;
   }
   const started = performance.now();
+  const accounting = modelAccountingScope(adapter);
   let result: ModelResult;
   try {
-    result = await withModelDeadline(
-      { ...request, timeoutMs: request.timeoutMs * request.attempts },
-      (signal) => adapter.complete({ ...request, signal })
+    result = await accounting.run(() =>
+      withModelDeadline({ ...request, timeoutMs: request.timeoutMs * request.attempts }, (signal) =>
+        adapter.complete({ ...request, signal })
+      )
     );
   } catch (error) {
-    const evidence = modelNoChargeEvidence(error);
+    const evidence = accounting.consume(error);
     if (evidence) ledger.release(reservation.id, evidence);
     else ledger.settle(reservation.id, null);
     // Never propagate provider exception text/cause.

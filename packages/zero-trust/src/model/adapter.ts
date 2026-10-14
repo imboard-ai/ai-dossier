@@ -64,16 +64,22 @@ export function modelRequestProfile(
   model: string,
   options: Partial<ModelRequestProfile> = {}
 ): ModelRequestProfile {
+  validateModelRequestProfile(options);
   const reasoning = /^(?:gpt-5(?:[.-]|$)|o(?:1|3|4)(?:[.-]|$))/u.test(model);
   const maxTokensParameter =
     options.maxTokensParameter ?? (reasoning ? 'max_completion_tokens' : 'max_tokens');
   const logprobs = options.logprobs ?? !reasoning;
+  return Object.freeze({ maxTokensParameter, logprobs });
+}
+
+export function validateModelRequestProfile(options: Partial<ModelRequestProfile>): void {
   if (
-    !['max_tokens', 'max_completion_tokens'].includes(maxTokensParameter) ||
-    typeof logprobs !== 'boolean'
+    (options.maxTokensParameter !== undefined &&
+      options.maxTokensParameter !== 'max_tokens' &&
+      options.maxTokensParameter !== 'max_completion_tokens') ||
+    (options.logprobs !== undefined && typeof options.logprobs !== 'boolean')
   )
     throw new ModelError('invalid_request');
-  return Object.freeze({ maxTokensParameter, logprobs });
 }
 
 export const MAX_TOOL_ARGUMENT_BYTES = 64 * 1024;

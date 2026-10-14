@@ -2802,10 +2802,12 @@ Observed usage is priced with pinned rates and settled; missing/invalid usage,
 errors and timeouts use `settle(id, null)`, preserving the full hold, except a
 recognized first-attempt pre-generation rejection from `https://api.openai.com/v1`:
 400/404/422 `invalid_request_error`, 401 `authentication_error`, or 403
-`permission_error`, with neither usage nor choices. Adapter-origin evidence
+`permission_error` (also 401 `invalid_request_error` with `invalid_api_key`), with neither usage nor choices. Adapter-origin evidence
 releases that reservation durably using only status/type/attempt, never error
 message text. Compatible endpoints and malformed, unknown, billed or retried
 errors remain unknown; HTTP status by itself cannot release a hold. Accounting
+provenance is bound to the built-in adapter and this metered invocation, and
+consumed once; an injected adapter cannot replay a previously captured error.
 keeps `max(estimate, observed)` as the existing ledger specifies; it never frees
 money, tokens or time merely because observed usage was lower. Per-call token
 commitment is `(wire bytes + maxOutputTokens) × attempts`; time commitment is
@@ -2913,7 +2915,8 @@ Returned content-token likelihoods include punctuation and need not cover tool-c
 arguments; the bound is not the likelihood of the answer value.
 
 LLM options default to `maxOutputTokens: 1024`, `timeoutMs: 30000` and
-`logprobs: true`. Configure `logprobs: false` for endpoints that do not support
+the resolved adapter profile's `logprobs` setting (reasoning-family false,
+legacy true when no profile is supplied). Configure `logprobs: false` for endpoints that do not support
 the parameter; this is an explicit profile choice, never a retry or fallback.
 Nullable/missing/empty logprob content means no token evidence. Optional non-secret
 `id` identifies the trusted endpoint/profile for shared caches (default `llm`).
@@ -2965,7 +2968,9 @@ never weaken the shared credential policy to force a verdict.
 
 Every pass goes through `meteredComplete` with the supplied durable ledger/session/
 rates. No call happens without reservation; exhausted admission returns an escalated
-verdict with `reason: 'budget'`. Failed calls retain conservative unknown holds.
+verdict with `reason: 'budget'`. Failed calls retain conservative unknown holds
+unless the model harness supplies recognized first-attempt OpenAI pre-generation
+rejection evidence as described above.
 `reason` also includes `invalid_pass`, `provider`, `confidence`, `disagreement`,
 `floor`, `secret`, `cache`, `cache_write`, `ledger`, `configuration`, `aborted`,
 `input` or `accepted`. Non-exhaustion ledger errors (missing rates/session, resume

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { assertNoSecrets, assertSecretFree } from '../redaction';
 import { isRecord } from '../state';
+import { recordModelRejection, registerModelAccounting } from './accounting';
 import {
   MAX_TOOL_ARGUMENT_BYTES,
   type ModelAdapter,
@@ -28,12 +29,6 @@ import {
 
 export const MAX_MODEL_RESPONSE_BYTES = 1024 * 1024;
 const RETRY_DELAY_MS = 50;
-// Evidence is adapter-originated, never inferred from a caller-created ModelError/status.
-const noChargeErrors = new WeakMap<ModelError, string>();
-export function modelNoChargeEvidence(error: unknown): string | undefined {
-  return error instanceof ModelError ? noChargeErrors.get(error) : undefined;
-}
-
 function rejectionEvidence(raw: unknown, status: number): string | undefined {
   if (!isRecord(raw) || !isRecord(raw.error) || 'usage' in raw || 'choices' in raw) return;
   const expected: Record<number, string> = {
@@ -43,6 +38,12 @@ function rejectionEvidence(raw: unknown, status: number): string | undefined {
     404: 'invalid_request_error',
     422: 'invalid_request_error',
   };
+  if (
+    status === 401 &&
+    raw.error.type === 'invalid_request_error' &&
+    raw.error.code === 'invalid_api_key'
+  )
+    return 'openai-pre-generation-rejection:http-401:invalid_api_key:attempt-1';
   if (!expected[status] || raw.error.type !== expected[status]) return;
   return `openai-pre-generation-rejection:http-${status}:${expected[status]}:attempt-1`;
 }
@@ -221,6 +222,7 @@ export class OpenAICompatibleAdapter implements ModelAdapter {
       throw new ModelError('invalid_request');
     }
     this.key();
+    registerModelAccounting(this);
   }
   private key(): string {
     return readModelKey(this.apiKeyEnv);
@@ -245,6 +247,7 @@ export class OpenAICompatibleAdapter implements ModelAdapter {
     const request = snapshotModelRequest(input);
     const key = this.key();
     let backoff = 0;
+    let rejected: { error: ModelError; evidence: string } | undefined;
     try {
       for (let attempt = 0; ; attempt++) {
         const outcome = await withModelDeadline<{ retry: number } | { result: ModelResult }>(
@@ -274,7 +277,7 @@ export class OpenAICompatibleAdapter implements ModelAdapter {
                   /* Unparseable rejection is an unknown charge. */
                 }
                 const error = new ModelError('model_http', response.status);
-                if (evidence) noChargeErrors.set(error, evidence);
+                if (evidence) rejected = { error, evidence };
                 throw error;
               }
               // A tee'd/injected body can keep cancellation pending forever.
@@ -309,8 +312,7 @@ export class OpenAICompatibleAdapter implements ModelAdapter {
           (Number.isInteger(error.status) && error.status >= 100 && error.status <= 599))
       ) {
         const safe = new ModelError(error.code, error.status);
-        const evidence = noChargeErrors.get(error);
-        if (evidence) noChargeErrors.set(safe, evidence);
+        if (rejected?.error === error) recordModelRejection(this, safe, rejected.evidence);
         throw safe;
       }
       throw new ModelError('model_unavailable');
