@@ -4,20 +4,20 @@ description: 'Read a GitHub issue and its comments, explore the codebase, confir
 metadata:
   dossier.dossier_schema_version: '1.0.0'
   dossier.title: 'Plan Issue — Rich Planning Document'
-  dossier.version: '1.8.2'
+  dossier.version: '1.9.0'
   dossier.protocol_version: '"1.0"'
   dossier.status: 'Stable'
-  dossier.last_updated: '2026-10-06'
+  dossier.last_updated: '2026-10-14'
   dossier.objective: 'Read a GitHub issue and its comments, explore the codebase, confirm new states/flows are reachable, and write a rich planning document — consuming an existing plan:v1 artifact when present (validate-then-refine, never recreate) and posting the result back as the issue''s canonical artifact'
   dossier.category: '["development"]'
   dossier.tags: '["issue","workflow","git","github","plan","planning"]'
   dossier.risk_level: 'medium'
   dossier.risk_factors: '["modifies_files","network_access"]'
   dossier.requires_approval: 'false'
-  dossier.inputs: '{"optional":[{"default":"main","description":"Target branch for this issue. Used to explore code on the correct branch.","name":"base_branch","type":"string"},{"default":".","description":"Path to the worktree where the planning file should be created. Defaults to current directory.","name":"worktree_path","type":"string"},{"default":"If your environment exposes a read-only production data store (a database MCP server, read replica, or analytics warehouse), use it to run a read-only count of the triggering condition. If no such access exists, treat reachability as unverifiable and escalate rather than assuming the state occurs.","description":"How to query this project''s production data to confirm a new state/flow actually occurs (used by the reachability check). Bind this per-project to a concrete method — e.g. a read-only database MCP server, a read replica, or an analytics warehouse. If unset, the reachability check uses the generic default below and degrades to escalate-when-unverifiable.","name":"prod_data_access","type":"string"},{"description":"Runstate run id minted by gate-issue; pass through unchanged","name":"run_id","type":"string"}],"required":[{"description":"GitHub issue number","name":"issue_number","type":"number"}]}'
+  dossier.inputs: '{"optional":[{"default":"main","description":"Target branch for this issue. Used to explore code on the correct branch.","name":"base_branch","type":"string"},{"default":".","description":"Path to the worktree where the planning file should be created. Defaults to current directory.","name":"worktree_path","type":"string"},{"default":"If your environment exposes a read-only production data store (a database MCP server, read replica, or analytics warehouse), use it to run a read-only count of the triggering condition. If no such access exists, reachability is unverifiable: escalate rather than assuming the state occurs.","description":"How to query this project''s production data to confirm a new state/flow actually occurs (used by the reachability check, Step 4b). Bind this per-project to a concrete method — e.g. a read-only database MCP server, a read replica, or an analytics warehouse. Set it to exactly `none` (trimmed, case-insensitive) when the project deliberately grants no production access: Step 4b then skips the production query and proceeds on the traced trigger alone. Any other non-empty value names an access method; an empty value is treated as unset. If unset, the generic default below applies — escalate when no production data store is available.","name":"prod_data_access","type":"string"},{"description":"Runstate run id minted by gate-issue; pass through unchanged","name":"run_id","type":"string"}],"required":[{"description":"GitHub issue number","name":"issue_number","type":"number"}]}'
   dossier.authors: '[{"name":"Yuval Dimnik"}]'
-  dossier.checksum: '{"algorithm":"sha256","hash":"6bcaaecdef2b5af56dfd7182c520ef9baf873b21e5e56d4743cd60389455df56"}'
-  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"fy9ZImIn2bkgr412qcNCmCPh+z9qjNUEMjcjJU8MacMCt+66vXp7/5yIoptlCz6XUfEM/pF80Qr5u5KvCbjvBw==","signed_at":"2026-10-07T12:00:32.072Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
+  dossier.checksum: '{"algorithm":"sha256","hash":"b57295136deb8546e1ee4b364b6e6a223504035b0db18ea4d0dd06c3ffde79cf"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"Njsw6jMqPsKq8d+U4/3LvQOJ85MhXutMqVKavzLWXPr2+jWeZl/X0KGYrTGzEvYf52K9V0h2JxNJhmnGt2HvCg==","signed_at":"2026-10-14T12:23:23.140Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Plan Issue — Rich Planning Document
@@ -88,14 +88,19 @@ From the issue description and comments:
 If the issue introduces a NEW state, branch, flow, or user-reachable condition, establish that real input can actually reach it **before** planning the build. Building unreachable states is a top source of wasted work. For each new state/flow:
 
 1. **What real input reaches this state?** Trace the concrete trigger — the user action, API payload, data-record shape, or config that produces it.
-2. **Does production data confirm it happens?** Do not reason from first principles — query real data, using the `prod_data_access` method to run a **read-only** count of the triggering condition.
-3. **Record the evidence** (query and result count) in the planning document's "Reachability Evidence" section.
+2. **Does production data confirm it happens?** Unless `prod_data_access` is exactly `none` (trimmed, case-insensitive — any other non-empty value names an access method, and an empty value counts as unset), do not reason from first principles — query real data, using the `prod_data_access` method to run a **read-only** count of the triggering condition.
+3. **Record the evidence** (the traced trigger, plus the query and result count when one ran) in the planning document's "Reachability Evidence" section.
 
-Decision rule:
+Decision rule — exactly one case applies to each state/flow; take the first that matches:
 
-- **0 occurrences in prod** → the state is currently unreachable. Do NOT plan the build. Add to Open Questions: _"Reachability unconfirmed — prod shows 0 occurrences of `<trigger>`. Confirm whether this state is real or imminent before building."_ and treat it as an escalation.
-- **>0 occurrences** → reachable; proceed, and cite the count as justification in the plan.
-- **No prod access, or not a data-reachable state** (pure UI, infra, refactor, copy change) → state explicitly why a data check is N/A and proceed.
+A. **Not a data-reachable state** (pure UI, infra, refactor, copy change) → state explicitly why a data check is N/A and proceed.
+B. **`prod_data_access` is `none`** — the project deliberately grants no production access → skip the production query in step 2 above ("Does production data confirm it happens?"). Step 1 still applies: record the concrete trigger you traced (cite the code path or input that produces it), verdict `N/A — no production access by policy`, and proceed. This is the project's decision, not a gap, so it is never an escalation.
+C. **A production query ran and the triggering condition is observable in the data it reads:**
+   - **0 occurrences** → the state is currently unreachable. Do NOT plan the build. Add to Open Questions: _"Reachability unconfirmed — prod shows 0 occurrences of `<trigger>`. Confirm whether this state is real or imminent before building."_ and treat it as an escalation.
+   - **>0 occurrences** → reachable; proceed, and cite the count as justification in the plan.
+D. **The count could not be taken** — `prod_data_access` is unset and no read-only production data store is available; the named method fails (server absent, permission denied, connection refused); or the triggering condition is not observable in the production data (e.g. a payload field that is not persisted — state why) → reachability is UNVERIFIABLE. Do NOT plan the build and do NOT record it as N/A or as 0 occurrences. Add to Open Questions: _"Reachability unverifiable — could not count `<trigger>` (<reason: no store available / method failed: … / not observable in stored data: …>). Confirm the state is real, fix the access method, or rerun with `prod_data_access=none` if this project deliberately grants no production access."_ and treat it as an escalation.
+
+Missing access is never silently N/A: only case A (no data to check) and case B (an explicit `none`) proceed without a count.
 
 Skip this step only for issues that add no new reachable state (refactors, copy changes, dependency bumps, pure infra).
 
@@ -127,9 +132,9 @@ On the invalid-artifact path: lead with why the artifact was rejected.>
 3. ...
 
 ## Reachability Evidence
-<For each NEW state/flow the approach introduces: the trigger, the prod query run, and the result count.
+<For each NEW state/flow the approach introduces: the trigger, plus the prod query run and result count, or 'skipped (`prod_data_access=none`)'.
 State "N/A — no new reachable state" for refactors / infra / copy changes.>
-- State: <name> | Trigger: <what produces it> | Prod check: <query> → <N occurrences> | Verdict: reachable / UNREACHABLE (escalated) / N/A
+- State: <name> | Trigger: <what produces it> | Prod check: <query> → <N occurrences>, or skipped (`prod_data_access=none`) | Verdict: reachable / UNREACHABLE (escalated) / UNVERIFIABLE (escalated) / N/A (not data-reachable) / N/A — no production access by policy
 
 ## Predicted Files
 - `path/to/file.ts` — <what changes and why>
@@ -237,7 +242,7 @@ Let the CLI stamp `at=` and compute `next=implement` — do not pass either; nev
 - [ ] Issue body and ALL comments were read
 - [ ] Relevant code was explored on the correct base branch
 - [ ] Trap index, if present (`docs/agent-traps/` directory or `docs/agent-traps.md` file), was grepped for terms from the issue title and affected paths and only matching files/rows were read; any hit is under Risk Areas
-- [ ] Reachability check performed for every new state/flow (prod data cited, or N/A justified); unreachable states escalated, not built
+- [ ] Reachability check performed for every new state/flow under Step 4b's decision rule — prod count cited, N/A justified (not data-reachable, or `prod_data_access=none` with the traced trigger), or escalated (0 occurrences, or unverifiable); unreachable and unverifiable states escalated, not built
 - [ ] Planning file follows the `PLANNING-{number}-{slug}.md` naming convention
 - [ ] Acceptance Criteria section is populated — verbatim from the issue where stated, else the minimal testable set, each checkable by reading code/tests
 - [ ] All sections are populated (Problem, Acceptance Criteria, Approach, Predicted Files, Risk, Test Scope)
