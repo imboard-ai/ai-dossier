@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { type FakeVm, FakeVmAdapter, junit } from '../__tests__/fake-vm';
-import { exportSource, type SourceManifest, sha256 } from '../canonical/export';
+import { CanonicalError, exportSource, type SourceManifest, sha256 } from '../canonical/export';
 import { buildCommandPlan, type CommandPlan, type PlannedCommand } from '../ecosystem/commands';
 import {
   detectEcosystem,
@@ -25,6 +25,7 @@ import {
   MAX_LOG_EXCERPT_CHARS,
   ProvisioningFailedError,
   ProvisioningNotClosedError,
+  preservedTestsManifest,
   provisionWorkspace,
   REDACTED_EXCERPT,
   type RunLifecycle,
@@ -672,5 +673,39 @@ describe('reproductionManifest', () => {
       })
     ).rejects.toMatchObject({ code: 'no_regression_targets' });
     expect(adapter.calls).toEqual([]);
+  });
+});
+
+describe('preservedTestsManifest (#1205)', () => {
+  const at = (m: SourceManifest, p: string) => m.entries.find((e) => e.path === p)?.sha256;
+  function candidateWith(edit: (dir: string) => void): SourceManifest {
+    const dir = tempDir('zt-runner-preserve-');
+    fs.cpSync(path.join(NPM, 'base'), dir, { recursive: true });
+    for (const patch of ['regression.patch', 'fix.patch'])
+      spawnSync('git', ['apply', path.join(NPM, patch)], { cwd: dir });
+    edit(dir);
+    return exportSource(dir);
+  }
+  it('is the candidate source with exactly the base test tree', () => {
+    const candidate = candidateWith((dir) => {
+      fs.rmSync(path.join(dir, 'test', 'duration.test.js'));
+      // A module beside the tests could shadow the one they exercise.
+      fs.writeFileSync(path.join(dir, 'test', 'duration.js'), 'module.exports = {};\n');
+      fs.mkdirSync(path.join(dir, 'tests'));
+      fs.writeFileSync(path.join(dir, 'tests', 'x.js'), 'x');
+    });
+    const manifest = preservedTestsManifest(BASE, candidate);
+    expect(at(manifest, 'test/duration.test.js')).toBe(at(BASE, 'test/duration.test.js'));
+    expect(at(manifest, 'src/duration.js')).toBe(at(CANDIDATE, 'src/duration.js'));
+    for (const dropped of [REGRESSION_TEST, 'test/duration.js', 'tests/x.js'])
+      expect(at(manifest, dropped)).toBeUndefined();
+  });
+
+  it('refuses a layout that cannot hold the base test tree', () => {
+    const candidate = candidateWith((dir) => {
+      fs.rmSync(path.join(dir, 'test'), { recursive: true });
+      fs.writeFileSync(path.join(dir, 'test'), 'not a directory');
+    });
+    expect(() => preservedTestsManifest(BASE, candidate)).toThrow(CanonicalError);
   });
 });

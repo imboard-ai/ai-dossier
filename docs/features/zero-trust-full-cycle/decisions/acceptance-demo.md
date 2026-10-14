@@ -6,7 +6,7 @@
   revision on the same PR through a compare-and-swap push. `zt-acceptance-check` passed live both
   before and after the revision. Contributions mechanics work end to end. Candidate *quality* does
   not yet hold: two of the three live candidates deleted an existing upstream test, and review and
-  verification let it through (#1205). That blocks a public launch, not this gate.
+  verification let it through (#1205, since fixed; see Defects). That blocked a public launch, not this gate.
 - **Spec:** [acceptance runbook](../acceptance-runbook.md); [PRD](../prd.md) §7 scenarios S4 and S5;
   epic #1002.
 - **Builds on:** [github-credentials](github-credentials.md) (gate 3) and
@@ -140,7 +140,7 @@ Defects filed as sub-issues of #1002 during the demo:
 | #1200 | New installation-token format blocks shipping | fixed |
 | #1202 | An uncertain token mint leaves the run in `blocked_cleanup` | open |
 | #1203 | Hand-off transition stamped twice | fixed |
-| #1205 | A candidate can delete an existing test and still pass | open |
+| #1205 | A candidate can delete an existing test and still pass | fixed (review inventories test titles and runs the original tests on the patched source) |
 
 Not filed as a product defect: the check script fails `pr-body` until the PR tracker has started,
 which happens on the `resume` after `submitted`. The runbook's stop B should say to run that second

@@ -7,6 +7,7 @@ import {
   gateHandoffNotice,
   isAlteredEvidence,
   recordStopNotice,
+  reviewHandoffNotice,
   STOP_NOTICE_KEY,
   stopNoticeAction,
   writeBlockedNotice,
@@ -95,6 +96,19 @@ describe('stop notices', () => {
     expect(isAlteredEvidence(new VerificationRecordError('evidence_mismatch'))).toBe(true);
     expect(isAlteredEvidence(new VerificationRecordError('unavailable'))).toBe(false);
     expect(isAlteredEvidence(new Error('invalid_record'))).toBe(false);
+  });
+  it('records an integrity review hand-off as paused_user with closed codes only (#1205)', () => {
+    const notice = reviewHandoffNotice(['test_removed', 'existing_tests_failed', 'test_removed']);
+    expect(notice).toMatchObject({
+      state: 'paused_user',
+      reason: 'test_removed,existing_tests_failed',
+    });
+    expect(notice.nextPermittedAction).toContain('Nothing was pushed');
+    expect(reviewHandoffNotice(['regression_not_reproduced']).reason).toBe(
+      'regression_not_reproduced'
+    );
+    expect(reviewHandoffNotice(['<script>ghp_x' as 'invalid_input']).reason).toBe('invalid_input');
+    expect(reviewHandoffNotice([]).reason).toBe('invalid_input');
   });
   it('records a gate hand-off in gating with closed reasons only', () => {
     const notice = gateHandoffNotice(['ai_unclear', 'ownership_unclear', 'ai_unclear']);

@@ -777,3 +777,93 @@ describe('deterministic candidate scope/test integrity', () => {
     expect(first.findings.every(Object.isFrozen)).toBe(true);
   });
 });
+
+describe('existing test cases survive the candidate (#1205)', () => {
+  const header = "const test = require('node:test');\n";
+  const original = `${header}test('rejects text that is not a duration', () => {\n  assert.throws(() => toSeconds('soon'), TypeError);\n});\n`;
+  it('fixture #4/#5 shape: one test replaced by more tests is test_removed', () => {
+    const replaced = `${header}test('converts seconds and minutes', () => {\n  assert.equal(toSeconds('90s'), 90);\n});\n\ntest('throws error on invalid format', () => {\n  assert.throws(() => toSeconds('10x'), /Invalid/);\n});\n`;
+    const value = input(
+      { 'test/duration.test.js': original, 'src/duration.js': 'old\n' },
+      {
+        'test/duration.test.js': replaced,
+        'test/test-duration.js': `${header}test('converts seconds and minutes', () => {});\n`,
+        'src/duration.js': 'new\n',
+      }
+    );
+    expect(codes(value)).toEqual(['test_removed']);
+    expect(reviewCandidate(value).findings[0].path).toBe('test/duration.test.js');
+  });
+  it('a test moved to another file under the same title is not a finding', () => {
+    const kept = `${header}test('rejects text that is not a duration', () => {\n  assert.throws(() => toSeconds('soon'), TypeError);\n  assert.throws(() => toSeconds(''), TypeError);\n});\n`;
+    expect(
+      codes(
+        input(
+          { 'test/a.test.js': original, 'test/b.test.js': header },
+          {
+            'test/a.test.js': `${header}test('other', () => { assert.ok(1); assert.ok(2); });\n`,
+            'test/b.test.js': kept,
+          }
+        )
+      )
+    ).toEqual([]);
+  });
+  it('renames, duplicate titles and python test functions are inventoried', () => {
+    expect(
+      codes(input({ 'a.test.ts': "it('one', f);\n" }, { 'a.test.ts': "it('uno', f);\n" }))
+    ).toEqual(['test_removed']);
+    expect(
+      codes(
+        input(
+          { 'a.test.ts': 'it(\'same\', f);\nit("same", g);\n' },
+          { 'a.test.ts': "it('same', f);\nit('new', g);\n" }
+        )
+      )
+    ).toEqual(['test_removed']);
+    expect(
+      codes(
+        input(
+          { 'tests/test_a.py': 'def test_rejects():\n    assert f()\n' },
+          { 'tests/test_a.py': 'async def test_other():\n    assert f()\n' }
+        )
+      )
+    ).toEqual(['test_removed']);
+  });
+  it('non-test calls and dynamic titles are not inventoried', () => {
+    expect(
+      codes(
+        input(
+          { 'a.test.ts': "TEST.test('x');\nit(`a $" + '{b}`, f);\n' },
+          { 'a.test.ts': "TEST.test('y');\nit(`a $" + '{c}`, f);\n' }
+        )
+      )
+    ).toEqual([]);
+  });
+  it('base tests failing more often on the candidate source is existing_tests_failed', () => {
+    const failing = parseJunitReport(
+      Buffer.from(
+        '<testsuites><testsuite><testcase name="one"><failure/></testcase><testcase name="two"/></testsuite></testsuites>'
+      )
+    );
+    expect(codes({ ...input(), preservedDiscovery: success })).toEqual([]);
+    expect(codes({ ...input(), preservedDiscovery: failing })).toEqual(['existing_tests_failed']);
+    expect(codes({ ...input(), preservedDiscovery: null })).toEqual(['discovery_unknown']);
+    const report = (cases: string) =>
+      parseJunitReport(Buffer.from(`<testsuites><testsuite>${cases}</testsuite></testsuites>`));
+    // Skipped at runtime, or a restored file that no longer loads: never a pass.
+    for (const hidden of [
+      report('<testcase name="one"><skipped/></testcase><testcase name="two"/>'),
+      report('<testcase name="one"/>'),
+      parseJunitReport(Buffer.from('<testsuites></testsuites>')),
+    ])
+      expect(codes({ ...input(), preservedDiscovery: hidden })).toEqual(['existing_tests_failed']);
+    expect(
+      codes({
+        ...input(),
+        baseDiscovery: failing,
+        candidateDiscovery: failing,
+        preservedDiscovery: failing,
+      })
+    ).toEqual([]);
+  });
+});

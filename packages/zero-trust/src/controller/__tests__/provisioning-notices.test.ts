@@ -142,8 +142,9 @@ describe('recoverable provisioning at the real composition boundary', () => {
       })
     );
     let provisions = 0;
+    // Verification is the 7th provision; review's original-tests run (#1205) is the 6th.
     h.overrideExec((request) => {
-      if (request.network === 'package_proxy' && ++provisions === 6)
+      if (request.network === 'package_proxy' && ++provisions === 7)
         fs.writeFileSync(file, expired);
       return undefined;
     });
@@ -153,7 +154,7 @@ describe('recoverable provisioning at the real composition boundary', () => {
       state: string;
     };
     expect(run.state).toBe('paused_user');
-    expect(h.vm.calls.filter((call) => call.op === 'create')).toHaveLength(6);
+    expect(h.vm.calls.filter((call) => call.op === 'create')).toHaveLength(7);
     expect(h.vm.liveVms()).toEqual([]);
     const a = h.artifacts(run.runId);
     expect(a.get('diagnostic')).toMatchObject({ phase: 'verify', code: 'proxy_ca_expired' });
