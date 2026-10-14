@@ -2808,6 +2808,9 @@ message text. Compatible endpoints and malformed, unknown, billed or retried
 errors remain unknown; HTTP status by itself cannot release a hold. Accounting
 provenance is bound to the built-in adapter and this metered invocation, and
 consumed once; an injected adapter cannot replay a previously captured error.
+Subclasses and replaced complete methods have no release authority. More than
+one built-in completion invocation within a reservation also disqualifies release,
+even if a later invocation receives an otherwise recognized rejection.
 keeps `max(estimate, observed)` as the existing ledger specifies; it never frees
 money, tokens or time merely because observed usage was lower. Per-call token
 commitment is `(wire bytes + maxOutputTokens) × attempts`; time commitment is

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { assertNoSecrets, assertSecretFree } from '../redaction';
 import { isRecord } from '../state';
-import { recordModelRejection, registerModelAccounting } from './accounting';
+import { beginModelAccounting, recordModelRejection, registerModelAccounting } from './accounting';
 import {
   MAX_TOOL_ARGUMENT_BYTES,
   type ModelAdapter,
@@ -222,7 +222,11 @@ export class OpenAICompatibleAdapter implements ModelAdapter {
       throw new ModelError('invalid_request');
     }
     this.key();
-    registerModelAccounting(this);
+    if (
+      Object.getPrototypeOf(this) === OpenAICompatibleAdapter.prototype &&
+      this.complete === OpenAICompatibleAdapter.prototype.complete
+    )
+      registerModelAccounting(this);
   }
   private key(): string {
     return readModelKey(this.apiKeyEnv);
@@ -244,6 +248,7 @@ export class OpenAICompatibleAdapter implements ModelAdapter {
     return response;
   }
   async complete(input: ModelRequest): Promise<ModelResult> {
+    beginModelAccounting();
     const request = snapshotModelRequest(input);
     const key = this.key();
     let backoff = 0;

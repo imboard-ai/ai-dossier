@@ -40,3 +40,14 @@ verified implementation. Original invalid pool directory preserved.
 Zero-trust is private, so the version-bump gate correctly requires no npm bump.
 Production-only npm audit at high threshold passed (moderate advisories remain).
 Review repair tests include real composition and captured-error replay controls.
+
+## Second security pass
+
+Blind conformance at ef68e10 found all four ACs met. Security independently
+reproduced a same-scope subclass/replaced-method sequence: billed/unknown work
+followed by a second complete call's rejection released the aggregate reservation.
+Eighth deduplicated fix: record the original built-in complete method, never grant
+authority to subclasses, and count completion entries across the entire metered
+scope. More than one invocation permanently disqualifies release; a replaced
+method cannot authenticate rejection provenance. Regressions cover both decorators
+and billed, unknown, caught-error and subclass inputs.

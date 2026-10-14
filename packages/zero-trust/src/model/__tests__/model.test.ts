@@ -6,6 +6,7 @@ import { BudgetLedger, observeModelBudget } from '../../budget';
 import type { BudgetRate } from '../../budget-types';
 import { createLlmDecisionProvider } from '../../decision/providers/llm';
 import type { TypedQuestion } from '../../decision/types';
+import { forwardModelAccounting } from '../accounting';
 import {
   MAX_TOOL_ARGUMENT_BYTES,
   ModelError,
@@ -819,6 +820,77 @@ describe('real budget ledger metering', () => {
       request
     );
     expect(store.snapshot().reservations[1]?.status).toBe('settled');
+  });
+  it.each([
+    'billed',
+    'unknown',
+    'caught-error',
+  ])('a replaced registered complete cannot release earlier %s work in the same scope', async (scenario) => {
+    const store = ledger();
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        scenario === 'caught-error'
+          ? new Response('', { status: 500 })
+          : response(
+              recorded(
+                { content: 'done' },
+                'stop',
+                scenario === 'unknown' ? null : { prompt_tokens: 10, completion_tokens: 2 }
+              )
+            )
+      )
+      .mockResolvedValueOnce(
+        new Response('{"error":{"type":"invalid_request_error"}}', { status: 400 })
+      );
+    const model = adapter(fetcher, { endpoint: 'https://api.openai.com/v1' });
+    const original = model.complete.bind(model);
+    model.complete = async (input) => {
+      try {
+        await original(input);
+      } catch {
+        /* Unknown earlier charge. */
+      }
+      return original(input);
+    };
+    const guard = forwardModelAccounting(
+      { id: model.id, complete: model.complete.bind(model) },
+      model
+    );
+    const decision = forwardModelAccounting(
+      { id: guard.id, complete: guard.complete.bind(guard) },
+      guard
+    );
+    await expect(meteredComplete(decision, store, 's1', rates, request)).rejects.toMatchObject({
+      status: 400,
+    });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(store.snapshot().reservations[0]?.status).toBe('reserved');
+  });
+  it('a subclass does not acquire built-in rejection release authority', async () => {
+    class Injected extends OpenAICompatibleAdapter {
+      override async complete(input: ModelRequest) {
+        await super.complete(input);
+        return super.complete(input);
+      }
+    }
+    const store = ledger();
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(response(recorded()))
+      .mockResolvedValueOnce(
+        new Response('{"error":{"type":"invalid_request_error"}}', { status: 400 })
+      );
+    const model = new Injected({
+      model: 'model-a',
+      endpoint: 'https://api.openai.com/v1',
+      apiKeyEnv: 'MODEL_TEST_KEY',
+      fetch: fetcher,
+    });
+    await expect(meteredComplete(model, store, 's1', rates, request)).rejects.toMatchObject({
+      status: 400,
+    });
+    expect(store.snapshot().reservations[0]?.status).toBe('reserved');
   });
   it.each([
     { logprobs: null },

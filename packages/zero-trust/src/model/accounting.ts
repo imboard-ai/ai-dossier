@@ -3,12 +3,13 @@ import type { ModelAdapter } from './adapter';
 
 // Controller-only provenance. Arbitrary adapters cannot release a reservation by
 // throwing an error captured from a different built-in call or metering scope.
-const origins = new WeakMap<ModelAdapter, ModelAdapter>();
-const contexts = new AsyncLocalStorage<{ origin?: ModelAdapter; token: object }>();
+type Origin = { adapter: ModelAdapter; complete: ModelAdapter['complete'] };
+const origins = new WeakMap<ModelAdapter, Origin>();
+const contexts = new AsyncLocalStorage<{ origin?: Origin; token: object; calls: number }>();
 const rejections = new WeakMap<object, { token: object; evidence: string }>();
 
 export function registerModelAccounting(adapter: ModelAdapter): void {
-  origins.set(adapter, adapter);
+  origins.set(adapter, { adapter, complete: adapter.complete });
 }
 
 /** Trusted decorators preserve accounting provenance as well as request metadata. */
@@ -23,11 +24,22 @@ export function forwardModelAccounting<T extends ModelAdapter>(
 
 export function recordModelRejection(adapter: ModelAdapter, error: object, evidence: string): void {
   const context = contexts.getStore();
-  if (context?.origin === adapter) rejections.set(error, { token: context.token, evidence });
+  if (
+    context?.calls === 1 &&
+    context.origin?.adapter === adapter &&
+    adapter.complete === context.origin.complete
+  )
+    rejections.set(error, { token: context.token, evidence });
+}
+
+/** A second complete call in one reservation permanently makes total billing unknown. */
+export function beginModelAccounting(): void {
+  const context = contexts.getStore();
+  if (context) context.calls++;
 }
 
 export function modelAccountingScope(adapter: ModelAdapter) {
-  const context = { origin: origins.get(adapter), token: {} };
+  const context = { origin: origins.get(adapter), token: {}, calls: 0 };
   return {
     run<T>(operation: () => Promise<T>): Promise<T> {
       return contexts.run(context, operation);
@@ -36,7 +48,9 @@ export function modelAccountingScope(adapter: ModelAdapter) {
       if (typeof error !== 'object' || error === null) return;
       const rejection = rejections.get(error);
       rejections.delete(error);
-      return rejection?.token === context.token ? rejection.evidence : undefined;
+      return context.calls === 1 && rejection?.token === context.token
+        ? rejection.evidence
+        : undefined;
     },
   };
 }
