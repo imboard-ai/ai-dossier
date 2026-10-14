@@ -6,6 +6,7 @@ import {
   freshnessNotice,
   gateHandoffNotice,
   isAlteredEvidence,
+  rebindControllerRefusalNotice,
   recordStopNotice,
   reviewHandoffNotice,
   STOP_NOTICE_KEY,
@@ -58,6 +59,17 @@ describe('stop notices', () => {
     expect(s.values.get(STOP_NOTICE_KEY)).toBeNull();
     clearStopNotice(s);
     expect(s.puts).toHaveLength(2);
+  });
+
+  it('release rebinding neither creates a refusal nor replaces another producer notice', () => {
+    const s = store();
+    rebindControllerRefusalNotice(s, run('blocked_cleanup', 5));
+    expect(s.puts).toEqual([]);
+    recordStopNotice(s, run('shipping', 3), freshnessNotice(['policy_changed']), true);
+    const retained = s.values.get(STOP_NOTICE_KEY);
+    rebindControllerRefusalNotice(s, run('blocked_cleanup', 5));
+    expect(s.puts).toHaveLength(1);
+    expect(s.values.get(STOP_NOTICE_KEY)).toBe(retained);
   });
 
   it('shows a notice only for exactly the stop it explains', () => {

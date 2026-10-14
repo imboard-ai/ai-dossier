@@ -10,7 +10,7 @@ import type { ProxyCaReason } from './proxy-preflight';
 import { VerificationRecordError } from './verification-record';
 
 export interface StopNotice {
-  readonly state: 'paused_user' | 'awaiting_contributor' | 'blocked' | 'gating';
+  readonly state: RunRecord['state'];
   /** The run history length once the stop is recorded. */
   readonly historyLength: number;
   readonly reason: string;
@@ -58,6 +58,55 @@ export function recordStopNotice(
  * stop then cannot leave the notice behind for a later stop at the same length. */
 export function clearStopNotice(store: NoticeStore): void {
   if (store.get(STOP_NOTICE_KEY) != null) store.put(STOP_NOTICE_KEY, null);
+}
+
+export type ControllerRefusalReason =
+  | 'active_time_exhausted'
+  | 'budget_exhausted'
+  | 'hold_unsettled';
+
+const CONTROLLER_REFUSAL_ACTIONS: Readonly<Record<ControllerRefusalReason, string>> = Object.freeze(
+  {
+    active_time_exhausted:
+      'No further phase work was admitted: active_time_exhausted. The active-time limit cannot be extended for this run. Cancel it or start a new run with an appropriate limit.',
+    budget_exhausted:
+      'No further phase work was admitted: budget_exhausted. Inspect the retained budget limits and start a new run with an appropriate budget. To cancel this run, request cancel then explicitly resume to apply it.',
+    hold_unsettled:
+      'No further phase work was admitted: hold_unsettled. Inspect the retained budget reservations and reconcile their actual outcome before explicitly resuming, or cancel the run. Extending the budget does not settle an unknown hold.',
+  }
+);
+
+export function controllerRefusalNotice(
+  reason: ControllerRefusalReason,
+  state: RunRecord['state']
+): Omit<StopNotice, 'historyLength'> {
+  return {
+    state,
+    reason,
+    nextPermittedAction:
+      state === 'blocked_cleanup'
+        ? `No further phase work was admitted: ${reason}. Cleanup remains incomplete. Inspect the retained cleanup evidence and explicitly resume to retry cleanup; cancellation is unavailable until cleanup is reconciled.`
+        : CONTROLLER_REFUSAL_ACTIONS[reason],
+  };
+}
+
+/** Admission must not retire a notice owned by a different phase producer. */
+export function clearControllerRefusalNotice(store: NoticeStore): void {
+  const notice = store.get<StopNotice | null>(STOP_NOTICE_KEY);
+  if (notice && Object.hasOwn(CONTROLLER_REFUSAL_ACTIONS, notice.reason)) clearStopNotice(store);
+}
+
+/** Release cleanup may add a final transition after the controller's stop. Rebind
+ * only an existing admission refusal; never create one or replace a producer's notice. */
+export function rebindControllerRefusalNotice(store: NoticeStore, run: RunRecord): void {
+  const notice = store.get<StopNotice | null>(STOP_NOTICE_KEY);
+  if (notice && Object.hasOwn(CONTROLLER_REFUSAL_ACTIONS, notice.reason))
+    recordStopNotice(
+      store,
+      run,
+      controllerRefusalNotice(notice.reason as ControllerRefusalReason, run.state),
+      false
+    );
 }
 
 /** The action status shows for `run`, or undefined when no notice explains this stop. */

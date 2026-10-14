@@ -3,14 +3,72 @@ import { fork } from 'node:child_process';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { CLIENT_ID, OWNER } from '../../github/__tests__/github-fake';
+import { ForkCredentialBroker } from '../../github/broker';
 import { Journal } from '../../journal';
+import { ReasonCode, transitionRun } from '../../state';
 import { requestControl } from '../control';
 import { RunStore } from '../run-store';
+import { STOP_NOTICE_KEY, stopNoticeAction } from '../stop-notice';
 import { rig, TIME } from './composition-fixture';
 import { compositionHooks, noShipping } from './composition-hooks';
 
 compositionHooks();
 describe('gate 4 composed cleanup regressions', () => {
+  it.each([
+    false,
+    true,
+  ])('rebinds an existing refusal after release persists cleanup failure (throw=%s) (#1191)', async (throwing) => {
+    let h!: ReturnType<typeof rig>;
+    let activeStore: RunStore | undefined;
+    let expired = false;
+    const persist = RunStore.prototype.persistRun;
+    vi.spyOn(RunStore.prototype, 'persistRun').mockImplementation(function (run) {
+      activeStore = this;
+      return persist.call(this, run);
+    });
+    const recover = ForkCredentialBroker.prototype.recover;
+    let releasePersisted = false;
+    vi.spyOn(ForkCredentialBroker.prototype, 'recover').mockImplementation(async function () {
+      const result = await recover.call(this);
+      if (activeStore?.run.state === 'paused_user') {
+        releasePersisted = true;
+        activeStore.persistRun(
+          transitionRun(activeStore.run, ReasonCode.CleanupFailed, activeStore.run.updatedAt)
+        );
+        if (throwing) throw new Error('release cleanup failed');
+      }
+      return result;
+    });
+    h = rig({
+      activeMinutes: 120,
+      beforeRead: async () => {
+        if (!expired && h.controller.snapshot().state === 'planning') {
+          expired = true;
+          h.advanceClock(120 * 60000);
+        }
+      },
+    });
+    const task = h.authorize(h.controller.start(h.config));
+    if (throwing) await expect(task).rejects.toThrow('release cleanup failed');
+    else await task;
+    expect(expired).toBe(true);
+    expect(releasePersisted).toBe(true);
+    const a = h.artifacts(h.controller.snapshot().runId);
+    try {
+      expect(a.store.run.state).toBe('blocked_cleanup');
+      expect(a.get(STOP_NOTICE_KEY)).toMatchObject({
+        state: a.store.run.state,
+        historyLength: a.store.run.history.length,
+        reason: 'active_time_exhausted',
+      });
+      expect(stopNoticeAction(a.get(STOP_NOTICE_KEY), a.store.run)).toContain(
+        'explicitly resume to retry cleanup'
+      );
+    } finally {
+      a.close();
+    }
+    noShipping();
+  }, 60000);
   it('SIGKILL after submitted persistence reports lost authority before observation-only resume, without OAuth or paid work', async () => {
     const h = rig({ persistent: true });
     const child = fork(

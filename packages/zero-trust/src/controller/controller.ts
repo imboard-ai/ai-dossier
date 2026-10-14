@@ -189,6 +189,13 @@ export interface RecoveryHooks {
   prepareCancellation?(context: PhaseContext): Promise<void>;
 }
 export interface ControllerDependencies {
+  /** Persist admission refusals through the composed run artifact store; null retires only
+   * this controller's prior refusal. Persistence failures must propagate. */
+  readonly recordControllerStop?: (
+    context: PhaseContext,
+    reason: import('./stop-notice').ControllerRefusalReason | null,
+    transitionPending: boolean
+  ) => void | Promise<void>;
   readonly trackerAction?: (
     context: PhaseContext,
     request: TrackerActionRequest
@@ -396,6 +403,7 @@ export class RunController {
   private reviewers: readonly string[] = [];
   private actionResult?: TrackerActionResult;
   private publicationWait?: OpenPublicationWait;
+  private controllerStopReason?: import('./stop-notice').ControllerRefusalReason;
   constructor(private readonly deps: ControllerDependencies) {}
   snapshot(): RunRecord {
     if (!this.last) throw new ControllerError('not_running');
@@ -603,6 +611,7 @@ export class RunController {
     this.reviewers = [];
     this.actionResult = undefined;
     this.publicationWait = undefined;
+    this.controllerStopReason = undefined;
     const watcher = setInterval(() => {
       this.observeIncident();
       this.observeControl();
@@ -1097,13 +1106,9 @@ export class RunController {
       throw new ControllerError('invalid_outcome');
     }
   }
-  private async step(phase: PhaseName, reacquire = false): Promise<Outcome> {
-    this.assertAdmission();
-    if (this.unfundedCleanup.size)
-      return stopped(this.held.run.state) ? { kind: 'waiting' } : { kind: 'hand_off' };
-    const key = this.key(phase);
-    const cached = this.cached.get(key);
-    if (cached && !reacquire && !['track', 'ship'].includes(phase)) return cached;
+  private admissionRefusal(
+    phase: PhaseName
+  ): import('./stop-notice').ControllerRefusalReason | null {
     const observedAt = this.deps.now();
     const status = assembleStatus({
       run: this.held.run,
@@ -1118,15 +1123,57 @@ export class RunController {
         openWaitUntil(this.held.run, observedAt.getTime())
       ),
     });
-    if (
-      (phase !== 'track' &&
-        status.activeTimeMs >= this.held.config.budget.activeMinutes * 60_000) ||
-      (phase !== 'track' && isBudgetSessionExhausted(this.budget.snapshot(), this.sessionId())) ||
-      this.budget
-        .snapshot()
-        .reservations.some((hold) => hold.status === 'reserved' && this.oldHolds.has(hold.id))
-    )
+    return phase !== 'track' &&
+      status.activeTimeMs >= this.held.config.budget.activeMinutes * 60_000
+      ? 'active_time_exhausted'
+      : phase !== 'track' && isBudgetSessionExhausted(this.budget.snapshot(), this.sessionId())
+        ? 'budget_exhausted'
+        : this.budget
+              .snapshot()
+              .reservations.some((hold) => hold.status === 'reserved' && this.oldHolds.has(hold.id))
+          ? 'hold_unsettled'
+          : null;
+  }
+  private async step(phase: PhaseName, reacquire = false): Promise<Outcome> {
+    this.assertAdmission();
+    if (this.unfundedCleanup.size)
       return stopped(this.held.run.state) ? { kind: 'waiting' } : { kind: 'hand_off' };
+    const key = this.key(phase);
+    const cached = this.cached.get(key);
+    if (cached && !reacquire && !['track', 'ship'].includes(phase)) return cached;
+    let refusal = this.admissionRefusal(phase);
+    const transitionPending = this.held.run.state !== 'gating' && !stopped(this.held.run.state);
+    try {
+      await this.deps.recordControllerStop?.(
+        this.context(),
+        refusal,
+        refusal !== null && transitionPending
+      );
+      // Retirement can await storage long enough to exhaust time or budget.
+      // Recheck before granting the producer its phase/allocation lease.
+      if (refusal === null) {
+        this.assertAdmission();
+        refusal = this.admissionRefusal(phase);
+        if (refusal)
+          await this.deps.recordControllerStop?.(this.context(), refusal, transitionPending);
+      }
+    } catch (error) {
+      // A diagnostic write is part of admission, never a reason to release a live
+      // guest. Preserve cleanup accounting/fences and propagate the original failure.
+      this.abort.abort();
+      try {
+        await this.cleanup();
+      } catch {
+        // cleanup retains its durable blocked_cleanup/accounting fence. The
+        // notice persistence failure remains the invocation's primary error.
+      }
+      throw error;
+    }
+    this.assertAdmission();
+    if (refusal) {
+      this.controllerStopReason = refusal;
+      return stopped(this.held.run.state) ? { kind: 'waiting' } : { kind: 'hand_off' };
+    }
     // Time parked after a gate hand-off waits on the operator, not the run (#1184).
     if (phase === 'gate') this.finishPublicationWait();
     let result: Outcome;
@@ -1183,15 +1230,23 @@ export class RunController {
   }
   private async apply(result: Outcome): Promise<boolean> {
     if (['hand_off', 'waiting'].includes(result.kind)) {
-      if (
-        result.kind === 'hand_off' &&
-        this.held.run.state !== 'gating' &&
-        !stopped(this.held.run.state)
-      )
-        await this.persist(
-          transitionRun(this.held.run, ReasonCode.UserPaused, this.deps.now().toISOString())
-        );
-      await this.cleanup();
+      try {
+        if (
+          result.kind === 'hand_off' &&
+          this.held.run.state !== 'gating' &&
+          !stopped(this.held.run.state)
+        )
+          await this.persist(
+            transitionRun(this.held.run, ReasonCode.UserPaused, this.deps.now().toISOString())
+          );
+        await this.cleanup();
+      } finally {
+        // Teardown may add a blocked_cleanup transition. Bind only this refusal
+        // again to the final durable stop, rather than leaving its predicted pause stale.
+        const reason = this.controllerStopReason;
+        this.controllerStopReason = undefined;
+        if (reason) await this.deps.recordControllerStop?.(this.context(), reason, false);
+      }
       return false;
     }
     if (result.kind === 'verified') {

@@ -17,6 +17,14 @@ import { validateRunConfig } from './config';
 import { requestControl } from './control';
 import { ControllerError, type PhaseContext, RunController } from './controller';
 import { RunStore } from './run-store';
+import { StepArtifacts } from './steps';
+import {
+  clearControllerRefusalNotice,
+  controllerRefusalNotice,
+  recordStopNotice,
+  STOP_NOTICE_KEY,
+  stopNoticeAction,
+} from './stop-notice';
 import {
   publishVerification,
   type VerificationRecord,
@@ -184,6 +192,26 @@ function rig(checkpoints: ('plan' | 'patch' | 'verification')[] = []) {
   });
   let now = new Date(TIME);
   const deps = {
+    recordControllerStop: (
+      c: PhaseContext,
+      reason: import('./stop-notice').ControllerRefusalReason | null,
+      pending: boolean
+    ): void | Promise<void> => {
+      const journal = new Journal(path.join(c.store.storeDirectory('control'), 'steps'));
+      try {
+        const artifacts = new StepArtifacts(journal, c.run.runId);
+        if (reason)
+          recordStopNotice(
+            artifacts,
+            c.run,
+            controllerRefusalNotice(reason, pending ? 'paused_user' : c.run.state),
+            pending
+          );
+        else clearControllerRefusalNotice(artifacts);
+      } finally {
+        journal.close();
+      }
+    },
     root: path.join(root, 'runs'),
     steps,
     recovery,
@@ -212,6 +240,18 @@ function rig(checkpoints: ('plan' | 'patch' | 'verification')[] = []) {
 }
 function open(h: ReturnType<typeof rig>, runId: string) {
   return RunStore.open(h.deps.root, runId);
+}
+
+function notice(h: ReturnType<typeof rig>, runId: string) {
+  const store = open(h, runId);
+  const journal = new Journal(path.join(store.storeDirectory('control'), 'steps'));
+  try {
+    const retained = new StepArtifacts(journal, runId).get(STOP_NOTICE_KEY);
+    return { retained, action: stopNoticeAction(retained, store.run) };
+  } finally {
+    journal.close();
+    store.close();
+  }
 }
 
 describe('RunController', () => {
@@ -439,6 +479,7 @@ describe('RunController', () => {
     ).toBe(true);
     expect(() => budget.reserve(store.budgetSessionId(1), h.estimate)).toThrow('Reconcile');
     store.close();
+    expect(notice(h, id).action).toContain('hold_unsettled');
   });
   it('three destroy failures persist blocked_cleanup and deny all later work', async () => {
     const h = rig();
@@ -465,8 +506,206 @@ describe('RunController', () => {
         return { kind: 'acquired' };
       },
     ];
-    expect((await h.controller.start(h.config)).state).toBe('paused_user');
+    const run = await h.controller.start(h.config);
+    expect(run.state).toBe('paused_user');
     expect(h.steps.calls).not.toContain('plan');
+    expect(notice(h, run.runId).retained).toMatchObject({
+      state: 'paused_user',
+      historyLength: run.history.length,
+      reason: 'active_time_exhausted',
+    });
+    expect(notice(h, run.runId).action).toContain('start a new run');
+  });
+  it('retains a gate budget refusal without a transition and retires it after extension', async () => {
+    const h = rig();
+    h.steps.scripts.gate = [{ kind: 'hand_off' }];
+    const run = await h.controller.start(h.config);
+    const store = open(h, run.runId);
+    const ledger = new BudgetLedger(
+      path.join(store.storeDirectory('budget'), 'ledger.json'),
+      store.contributionId
+    );
+    const sessionId = store.budgetSessionId(1);
+    const hold = ledger.reserve(sessionId, {
+      ...h.estimate,
+      money: { currency: 'USD', minor: 90 },
+    });
+    ledger.settle(hold.id, {
+      ...observation(hold.estimate),
+      money: { currency: 'USD', minor: 100 },
+    });
+    store.close();
+    expect((await h.controller.resume(run.runId)).history).toEqual(run.history);
+    expect(h.steps.calls).toEqual(['gate']);
+    expect(notice(h, run.runId).retained).toMatchObject({
+      state: 'gating',
+      historyLength: 0,
+      reason: 'budget_exhausted',
+    });
+    expect(notice(h, run.runId).action).toContain('budget_exhausted');
+    // Exercise the ledger's trusted extension, not an invented observation or hold release.
+    ledger.extendCeiling({
+      sessionId,
+      previousMinor: 100,
+      ceiling: { currency: 'USD', minor: 200 },
+      approvalId: 'fixture-extension',
+      approvedAt: TIME,
+      actor: 'user',
+    });
+    expect((await h.controller.resume(run.runId)).state).toBe('submitted');
+    expect(notice(h, run.runId).retained).toBeNull();
+  });
+  it('rechecks active time after awaited notice retirement before admitting a phase (#1191)', async () => {
+    const h = rig();
+    const record = h.deps.recordControllerStop;
+    h.deps.recordControllerStop = async (c, reason, pending) => {
+      await record(c, reason, pending);
+      if (reason === null && h.steps.calls.includes('acquire')) {
+        await Promise.resolve();
+        h.setTime('2026-10-08T02:00:00.000Z');
+      }
+    };
+    const run = await h.controller.start(h.config);
+    expect(h.steps.calls).toEqual(['gate', 'acquire']);
+    expect(run.state).toBe('paused_user');
+    expect(notice(h, run.runId).retained).toMatchObject({
+      state: run.state,
+      historyLength: run.history.length,
+      reason: 'active_time_exhausted',
+    });
+    expect(notice(h, run.runId).action).toContain('active_time_exhausted');
+  });
+  it.each([
+    false,
+    true,
+  ])('joins cleanup before propagating notice persistence failure (retirement=%s)', async (retirement) => {
+    const h = rig();
+    h.steps.scripts.acquire = [
+      async (c) => {
+        await c.createVm({ scope: 'container' });
+        if (!retirement) h.setTime('2026-10-08T02:00:00.000Z');
+        return { kind: 'acquired' };
+      },
+    ];
+    h.deps.recordControllerStop = async (c, reason) => {
+      if (reason || (retirement && h.steps.calls.includes('acquire'))) {
+        await Promise.resolve();
+        // Callback context has no allocation lease.
+        await expect(c.createVm({ scope: 'container' })).rejects.toMatchObject({
+          code: 'admission_closed',
+        });
+        throw new Error('notice persistence failed');
+      }
+    };
+    const destroy = vi.spyOn(h.vm, 'destroy');
+    await expect(h.controller.start(h.config)).rejects.toThrow('notice persistence failed');
+    expect(h.steps.calls).not.toContain('plan');
+    expect(destroy).toHaveBeenCalledTimes(1);
+    expect(await h.vm.listByRun(h.controller.snapshot().runId)).toEqual([]);
+  });
+  it('retains blocked_cleanup when notice persistence and guest destruction both fail', async () => {
+    const h = rig();
+    h.steps.scripts.acquire = [
+      async (c) => {
+        await c.createVm({ scope: 'container' });
+        h.setTime('2026-10-08T02:00:00.000Z');
+        return { kind: 'acquired' };
+      },
+    ];
+    h.deps.recordControllerStop = async (_c, reason) => {
+      if (reason) throw new Error('notice persistence failed');
+    };
+    const destroy = vi.spyOn(h.vm, 'destroy').mockRejectedValue(new Error('destroy failed'));
+    await expect(h.controller.start(h.config)).rejects.toThrow('notice persistence failed');
+    expect(destroy).toHaveBeenCalledTimes(3);
+    const store = open(h, h.controller.snapshot().runId);
+    expect(store.run.state).toBe('blocked_cleanup');
+    store.close();
+    expect(h.steps.calls).not.toContain('plan');
+  });
+  it('awaits asynchronous notice persistence before returning a refusal', async () => {
+    const h = rig();
+    h.steps.scripts.acquire = [
+      async () => {
+        h.setTime('2026-10-08T02:00:00.000Z');
+        return { kind: 'acquired' };
+      },
+    ];
+    let release!: () => void;
+    let entered!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const record = h.deps.recordControllerStop;
+    h.deps.recordControllerStop = async (c, reason, pending) => {
+      if (reason) {
+        entered();
+        await barrier;
+      }
+      await record(c, reason, pending);
+    };
+    let completed = false;
+    const pending = h.controller.start(h.config).then((run) => {
+      completed = true;
+      return run;
+    });
+    await ready;
+    expect(completed).toBe(false);
+    expect(h.steps.calls).not.toContain('plan');
+    release();
+    const run = await pending;
+    expect(notice(h, run.runId).action).toContain('active_time_exhausted');
+  });
+  it('binds a refusal to the final cleanup-blocked stop and its permitted retry action', async () => {
+    const h = rig();
+    h.steps.scripts.acquire = [
+      async (c) => {
+        await c.createVm({ scope: 'container' });
+        h.setTime('2026-10-08T02:00:00.000Z');
+        return { kind: 'acquired' };
+      },
+    ];
+    const destroy = vi.spyOn(h.vm, 'destroy').mockRejectedValue(new Error('destroy failed'));
+    const run = await h.controller.start(h.config);
+    expect(run.state).toBe('blocked_cleanup');
+    expect(destroy.mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(h.steps.calls).toEqual(['gate', 'acquire']);
+    const retained = notice(h, run.runId);
+    expect(retained.retained).toMatchObject({
+      state: 'blocked_cleanup',
+      historyLength: run.history.length,
+      reason: 'active_time_exhausted',
+    });
+    expect(retained.action).toContain('explicitly resume to retry cleanup');
+    expect(retained.action).toContain('cancellation is unavailable');
+  });
+  it('binds the notice when pause persistence cleanup cannot enumerate guests', async () => {
+    const h = rig();
+    h.steps.scripts.acquire = [
+      async (c) => {
+        await c.createVm({ scope: 'container' });
+        h.setTime('2026-10-08T02:00:00.000Z');
+        vi.spyOn(h.vm, 'listByRun').mockRejectedValue(new Error('enumeration failed'));
+        return { kind: 'acquired' };
+      },
+    ];
+    await expect(h.controller.start(h.config)).rejects.toMatchObject({ code: 'recovery_failed' });
+    const id = h.controller.snapshot().runId;
+    const store = open(h, id);
+    const run = store.run;
+    store.close();
+    expect(run.state).toBe('blocked_cleanup');
+    const retained = notice(h, id);
+    expect(retained.retained).toMatchObject({
+      state: run.state,
+      historyLength: run.history.length,
+      reason: 'active_time_exhausted',
+    });
+    expect(retained.action).toContain('explicitly resume to retry cleanup');
+    expect(h.steps.calls).toEqual(['gate', 'acquire']);
   });
   it('recovery completes before any step, and recovery failure admits none', async () => {
     const h = rig();
