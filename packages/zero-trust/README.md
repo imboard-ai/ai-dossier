@@ -83,6 +83,9 @@ It projects only lifecycle primitives, never config, provider text or credential
 The callback is a separate controller driver: output failure cannot skip mandatory
 driver synchronization or cleanup. Signal ownership and interruption stay unchanged.
 Read-only JSON commands receive no callback or progress lines.
+The callback is synchronous and must not return asynchronous work. A synchronous
+exception fails the invocation after every driver has been attempted; observational
+means it supplies UI evidence, not that its exceptions are ignored.
 An asynchronous stdout/stderr failure (including a closed pipe) joins the same
 process-owned cleanup barrier before exit 1, rather than crashing past cleanup.
 

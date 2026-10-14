@@ -102,7 +102,8 @@ export interface ControllerOverrides {
   readonly signer?: Signer;
   /** Immediate production UI notification, never a credential or provider response. */
   readonly onAuthorizationUrl?: (url: string) => void;
-  /** Observational UI edge, called after durable lifecycle persistence. */
+  /** Synchronous UI edge after durable persistence; must not return async work.
+   * Throws fail the invocation after all drivers have been attempted. */
   readonly onRun?: (run: RunRecord) => void;
 }
 

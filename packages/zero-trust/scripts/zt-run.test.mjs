@@ -254,6 +254,12 @@ test('read-only JSON commands never receive progress callbacks or wait messages'
   assert.equal(r.stdout.length, 1);
   assert.equal(JSON.parse(r.stdout[0]).state, status.state);
   assert.equal(r.factories[0].onRun, undefined);
+  const metrics = aggregate([]);
+  const m = await invoke(['metrics', '--root', 'runs', '--json'], { metrics: async () => metrics });
+  assert.equal(m.code, 0);
+  assert.equal(m.stdout.length, 1);
+  assert.deepEqual(JSON.parse(m.stdout[0]), JSON.parse(JSON.stringify(metrics)));
+  assert.equal(m.factories[0].onRun, undefined);
 });
 for (const [command, args] of Object.entries(valid)) {
   test(`${command}: closed parser refuses missing/unknown/duplicate/positional arguments before effects`, async () => {
