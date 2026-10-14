@@ -400,6 +400,7 @@ export class RunController {
   private control?: ControlRequest | 'invalid' | 'interrupt';
   private interruptRequested = false;
   private controlApplied = false;
+  private finalizationFailed = false;
   private controlCleanup?: Promise<void>;
   private controlReconciled?: Promise<void>;
   private controlReconciledKind?: 'pause' | 'cancel';
@@ -426,7 +427,13 @@ export class RunController {
     } catch (error) {
       // A pre-interrupt phase error is still returned to its caller, but is not a
       // cleanup failure when the finalizer independently completed the stop.
-      if (!this.controlApplied || !this.last || this.last.state === 'blocked_cleanup') throw error;
+      if (
+        this.finalizationFailed ||
+        !this.controlApplied ||
+        !this.last ||
+        this.last.state === 'blocked_cleanup'
+      )
+        throw error;
     }
     if (this.last?.state === 'blocked_cleanup') throw new ControllerError('admission_closed');
   }
@@ -631,6 +638,7 @@ export class RunController {
     this.control = undefined;
     this.interruptRequested = false;
     this.controlApplied = false;
+    this.finalizationFailed = false;
     this.controlCleanup = undefined;
     this.controlReconciled = undefined;
     this.controlReconciledKind = undefined;
@@ -648,35 +656,40 @@ export class RunController {
       .then(work)
       .finally(async () => {
         try {
-          await this.deps.release?.();
-        } finally {
-          // A signal can arrive while release awaits token revocation, after work
-          // has already resolved or rejected. Keep pins alive until its independent
-          // control cleanup is joined and the durable stop is applied.
-          // Release can persist a cleanup block even when revocation rejects.
-          // Publish that final durable state before the store pins are closed.
           try {
-            this.observeControl();
-            if (this.control && !this.controlApplied && this.store && this.journal)
-              await this.applyControl();
-            if (this.store) {
-              const final = this.store.run;
-              if (!this.last || !sameRunRecord(this.last, final)) this.notify(final);
-              else this.last = final;
-            }
+            await this.deps.release?.();
           } finally {
+            // A signal can arrive while release awaits token revocation, after work
+            // has already resolved or rejected. Keep pins alive until its independent
+            // control cleanup is joined and the durable stop is applied.
+            // Release can persist a cleanup block even when revocation rejects.
+            // Publish that final durable state before the store pins are closed.
             try {
-              this.deps.retire?.();
+              this.observeControl();
+              if (this.control && !this.controlApplied && this.store && this.journal)
+                await this.applyControl();
+              if (this.store) {
+                const final = this.store.run;
+                if (!this.last || !sameRunRecord(this.last, final)) this.notify(final);
+                else this.last = final;
+              }
             } finally {
-              clearInterval(watcher);
-              this.journal?.close();
-              this.store?.close();
-              this.store = undefined;
-              this.ledger = undefined;
-              this.journal = undefined;
-              this.running = undefined;
+              try {
+                this.deps.retire?.();
+              } finally {
+                clearInterval(watcher);
+                this.journal?.close();
+                this.store?.close();
+                this.store = undefined;
+                this.ledger = undefined;
+                this.journal = undefined;
+                this.running = undefined;
+              }
             }
           }
+        } catch (error) {
+          this.finalizationFailed = true;
+          throw error;
         }
       });
     this.running = task;
@@ -791,6 +804,12 @@ export class RunController {
           failures
         );
     }
+    // An early resume interrupt can precede normal adapter initialization. A
+    // lazy empty inventory is not proof that retained guests are gone.
+    await this.attemptRecovery(
+      () => this.deps.recovery.reconcileVms(this.context(), () => this.cleanup()),
+      failures
+    );
     await this.attemptRecovery(() => this.cleanup(), failures);
     await this.attemptRecovery(() => this.reconcileCleanupObligations(), failures);
     if (this.unfundedCleanup.size) failures.push(new ControllerError('admission_closed'));

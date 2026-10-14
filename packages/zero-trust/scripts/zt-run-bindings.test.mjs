@@ -22,6 +22,7 @@ import { STOP_NOTICE_KEY } from '../dist/controller/stop-notice.js';
 import { createController, incidentRequested, stopStoredRun } from '../dist/controller/wiring.js';
 import { AppCredentials } from '../dist/github/app-auth.js';
 import { ForkCredentialBroker } from '../dist/github/broker.js';
+import { ContributorAuthorization } from '../dist/github/contributor.js';
 import { TokenJournal } from '../dist/github/token-journal.js';
 import { Journal } from '../dist/journal.js';
 import { ReasonCode, transitionRun } from '../dist/state.js';
@@ -253,6 +254,28 @@ function rig() {
     },
     counts: () => ({ revoked, userReads }),
   };
+}
+
+async function prepareAndDisposeAuthor(h) {
+  const commands = await createCommands({
+    root: h.root,
+    createController,
+    onAuthorizationUrl: h.onAuthorizationUrl,
+  });
+  const approval = await commands.prepareAuthor(h.config);
+  await commands.discardAuthor(h.config);
+  await Promise.all(h.callbacks);
+  return approval;
+}
+function proxyFixture(h) {
+  fs.writeFileSync(
+    h.config.executionProfile.proxyEndpointsFile,
+    JSON.stringify({
+      endpoints: { npmRegistry: 'http://10.0.0.2:4873', pypiIndex: 'http://10.0.0.2:4873/simple' },
+      target: { host: '10.0.0.2', port: 4873 },
+    }),
+    { mode: 0o600 }
+  );
 }
 
 test('second-process pause/cancel are durable under the active guard and observational status reports pending and damaged requests', async () => {
@@ -683,14 +706,7 @@ test.each(
   mode,
 }) => {
   const h = rig();
-  const prepare = await createCommands({
-    root: h.root,
-    createController,
-    onAuthorizationUrl: h.onAuthorizationUrl,
-  });
-  const approval = await prepare.prepareAuthor(h.config);
-  await prepare.discardAuthor(h.config);
-  await Promise.all(h.callbacks);
+  const approval = await prepareAndDisposeAuthor(h);
   const approved = { ...h.config, authorApproval: approval };
   let runId;
   const starting = ['start', 'adopting'].includes(mode);
@@ -853,14 +869,7 @@ test.each(
 
 test('production wiring keeps the VM journal alive until release-time interrupt destruction joins', async () => {
   const h = rig();
-  const commands = await createCommands({
-    root: h.root,
-    createController,
-    onAuthorizationUrl: h.onAuthorizationUrl,
-  });
-  const approval = await commands.prepareAuthor(h.config);
-  await commands.discardAuthor(h.config);
-  await Promise.all(h.callbacks);
+  const approval = await prepareAndDisposeAuthor(h);
   const config = {
     ...h.config,
     authorApproval: approval,
@@ -872,14 +881,7 @@ test('production wiring keeps the VM journal alive until release-time interrupt 
       ],
     },
   };
-  fs.writeFileSync(
-    h.config.executionProfile.proxyEndpointsFile,
-    JSON.stringify({
-      endpoints: { npmRegistry: 'http://10.0.0.2:4873', pypiIndex: 'http://10.0.0.2:4873/simple' },
-      target: { host: '10.0.0.2', port: 4873 },
-    }),
-    { mode: 0o600 }
-  );
+  proxyFixture(h);
   let live = false,
     journal,
     startedRelease,
@@ -958,16 +960,166 @@ test('production wiring keeps the VM journal alive until release-time interrupt 
   }
 });
 
+test('early resume interrupt initializes the retained VM inventory before declaring cleanup complete', async () => {
+  const h = rig();
+  const approval = await prepareAndDisposeAuthor(h);
+  proxyFixture(h);
+  const config = {
+    ...h.config,
+    authorApproval: approval,
+    modelProfile: {
+      ...h.config.modelProfile,
+      rates: [
+        ...h.config.modelProfile.rates,
+        { ...h.config.modelProfile.rates[0], resource: 'local-qemu', unit: 'millisecond' },
+      ],
+    },
+  };
+  const seeded = h.seed(config);
+  const id = seeded.runId;
+  const dir = path.join(seeded.storeDirectory('control'), 'controller');
+  fs.mkdirSync(dir, { mode: 0o700 });
+  fs.writeFileSync(path.join(dir, 'events.jsonl'), '', { mode: 0o600 });
+  seeded.close();
+  let live = true,
+    listed = 0,
+    destroyed = 0;
+  vi.spyOn(LocalQemuAdapter.prototype, 'listByRun').mockImplementation(async (runId) => {
+    listed++;
+    return live ? [{ vmId: 'retained-vm', runId, pid: null, alive: true, paths: [] }] : [];
+  });
+  vi.spyOn(LocalQemuAdapter.prototype, 'destroy').mockImplementation(async function (vm) {
+    destroyed++;
+    live = false;
+    this.options.journal.append({ v: 1, type: 'vm_destroyed', runId: vm.runId, vmId: vm.vmId });
+  });
+  const controller = createController(config);
+  const running = controller.resume(id);
+  await controller.interrupt(); // Before the resume microtask initializes adapters.
+  assert.equal((await running).state, 'paused_user');
+  assert.equal(live, false);
+  assert.ok(listed > 0);
+  assert.equal(destroyed, 1);
+  const store = RunStore.open(h.root, id);
+  try {
+    assert.equal(store.run.state, 'paused_user');
+    assert.equal(readControlRequests(store).pending.length, 0);
+  } finally {
+    store.close();
+  }
+});
+
+test('production refresh cleanup failure rejects interruption and records a cleanup block', async () => {
+  const h = rig();
+  const approval = await prepareAndDisposeAuthor(h);
+  proxyFixture(h);
+  const config = { ...h.config, authorApproval: approval };
+  let clock = Date.now(),
+    broker,
+    entered,
+    refreshes = 0,
+    deletes = 0;
+  const ready = new Promise((resolve) => {
+    entered = resolve;
+  });
+  const app = new AppCredentials({
+    appId: '1',
+    clientId: 'fixture',
+    privateKey: process.env.BINDING_APP_KEY,
+    clientSecret: process.env.BINDING_APP_SECRET,
+  });
+  const session = {
+    dispose: async () => {},
+    adopt: async (owner, run) => {
+      broker = owner;
+      const auth = new ContributorAuthorization({
+        app,
+        broker,
+        http: async (request) =>
+          request.method === 'DELETE'
+            ? { status: 503, json: null }
+            : { status: 200, json: { id: 12, login: 'contributor' } },
+        oauth: async (form) => {
+          if (form.grant_type === 'refresh_token') {
+            refreshes++;
+            return { status: 200, json: { access_token: 'ghu_' + 'z'.repeat(30) } };
+          }
+          return {
+            status: 200,
+            json: {
+              access_token: 'ghu_' + 'a'.repeat(30),
+              refresh_token: 'ghr_' + 'b'.repeat(30),
+              expires_in: 1,
+            },
+          };
+        },
+        contributor: 'contributor',
+        appSlug: 'fixture',
+        now: () => clock,
+      });
+      const url = new URL(auth.begin('http://127.0.0.1:12345/callback').url);
+      await auth.complete({ code: 'approved', state: url.searchParams.get('state') }, run, 12);
+      return auth;
+    },
+  };
+  const controller = createController(
+    config,
+    {
+      vm: new FakeVmAdapter(),
+      now: () => new Date(clock),
+      fetch: async (input, init) => {
+        if (new URL(String(input)).pathname === '/user')
+          return new Response(JSON.stringify({ id: 12, login: 'contributor' }));
+        if (init?.method === 'DELETE') {
+          deletes++;
+          return new Response(null, { status: 503 });
+        }
+        throw new Error('unexpected_request');
+      },
+    },
+    session
+  );
+  controller.deps.recordControllerStop = () => {};
+  controller.deps.steps.gate = async (c) => {
+    const j = new Journal(path.join(c.store.storeDirectory('control'), 'steps'));
+    new StepArtifacts(j, c.run.runId).put('fork', {
+      repositoryId: 22,
+      installationId: 33,
+      owner: 'contributor',
+    });
+    j.close();
+    await controller.deps.recovery.recoverCredentials(c);
+    entered();
+    await new Promise((resolve) => c.signal.addEventListener('abort', resolve, { once: true }));
+    return { kind: 'hand_off' };
+  };
+  let initialError;
+  const running = controller.start(config).catch((error) => {
+    initialError = error;
+    entered();
+    return error;
+  });
+  await ready;
+  if (initialError) throw initialError;
+  clock += 2000;
+  await assert.rejects(controller.interrupt(), /cleanup_incomplete/);
+  assert.match((await running).message, /cleanup_incomplete/);
+  assert.equal(refreshes, 1);
+  assert.ok(deletes > 0);
+  assert.ok(
+    broker.status().tokens.some((token) => token.kind === 'user' && token.status !== 'revoked')
+  );
+  const store = RunStore.open(h.root, controller.snapshot().runId);
+  try {
+    assert.equal(store.run.state, 'blocked_cleanup');
+  } finally {
+    store.close();
+  }
+}, 60000);
+
 test('signal joins mixed active-controller and preparation owners despite one cleanup rejection', async () => {
   const h = rig();
-  const prepare = await createCommands({
-    root: h.root,
-    createController,
-    onAuthorizationUrl: h.onAuthorizationUrl,
-  });
-  const approval = await prepare.prepareAuthor(h.config);
-  await prepare.discardAuthor(h.config);
-  await Promise.all(h.callbacks);
+  const approval = await prepareAndDisposeAuthor(h);
   const ids = [1, 2].map((number) => {
     const store = h.seed({
       ...h.config,

@@ -1744,23 +1744,45 @@ export function createController(
       },
     },
     release: async () => {
-      try {
-        await refreshBeforeCleanup();
-        if (activeStore && TERMINAL_STATES.includes(activeStore.run.state))
-          await broker?.endRun(activeStore.run.state === 'cancelled' ? 'cancelled' : 'completed');
-        else if (broker) {
-          // A dormant controller has no operation that needs a credential. Sweep
-          // held values before stopping lease timers, without closing resumable
-          // admission permanently as endRun would do.
-          const recovered = await broker.recover();
-          if (!recovered.admitted && recovered.report) throw new Error('cleanup_incomplete');
-        }
-      } finally {
+      const failures: unknown[] = [];
+      for (const cleanup of [
+        refreshBeforeCleanup,
+        async () => {
+          if (activeStore && TERMINAL_STATES.includes(activeStore.run.state))
+            await broker?.endRun(activeStore.run.state === 'cancelled' ? 'cancelled' : 'completed');
+          else if (broker) {
+            // A dormant controller has no operation that needs a credential. Sweep
+            // held values before stopping lease timers, without closing resumable
+            // admission permanently as endRun would do.
+            const recovered = await broker.recover();
+            if (!recovered.admitted && recovered.report) throw new Error('cleanup_incomplete');
+          }
+        },
+        async () => {
+          try {
+            await authorSession?.dispose();
+          } finally {
+            authorSession = undefined;
+          }
+        },
+      ]) {
         try {
-          await authorSession?.dispose();
-        } finally {
-          authorSession = undefined;
+          await cleanup();
+        } catch (error) {
+          failures.push(error);
         }
+      }
+      if (failures.length) {
+        const current = activeStore?.run;
+        if (
+          current &&
+          !TERMINAL_STATES.includes(current.state) &&
+          current.state !== 'blocked_cleanup'
+        )
+          activeStore?.persistRun(
+            transitionRun(current, ReasonCode.CleanupFailed, now().toISOString())
+          );
+        throw new Error('cleanup_incomplete');
       }
     },
     retire: () => {

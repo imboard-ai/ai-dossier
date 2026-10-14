@@ -160,6 +160,40 @@ it.each([
   store.close();
 });
 
+it.each([
+  'release',
+  'retire',
+] as const)('interrupt propagates %s failures after applying pause', async (failure) => {
+  const h = rig();
+  let entered!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  h.steps.scripts.gate = [
+    async (c) => {
+      entered();
+      await new Promise<void>((resolve) =>
+        c.signal.addEventListener('abort', () => resolve(), { once: true })
+      );
+      return { kind: 'hand_off' };
+    },
+  ];
+  const error = new Error(`${failure}_failed`);
+  const controller = new RunController({
+    ...h.deps,
+    release: async () => {
+      if (failure === 'release') throw error;
+    },
+    retire: () => {
+      if (failure === 'retire') throw error;
+    },
+  });
+  const running = controller.start(h.config).catch((e) => e);
+  await ready;
+  await expect(controller.interrupt()).rejects.toBe(error);
+  expect(await running).toBe(error);
+});
+
 let template: VerificationRecord;
 let artifacts: string;
 const roots: string[] = [];
