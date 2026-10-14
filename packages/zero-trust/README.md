@@ -1830,6 +1830,27 @@ modules remain isolated, including type-only imports.
 
 ## Contribution policy (#1091)
 
+### Retained gate hand-off diagnostics (#1220)
+
+The composed gate retains `gate_assessment` in the digest-checked step journal before
+returning its policy decision. It contains the full `PolicyAssessment` (including all
+per-dimension decision metadata and validated citations), pinned `baseSha`, outcome,
+reasons, budget session and history length. A completed hand-off notice binds its
+exact assessment digest; controller refusals and incomplete attempts cannot select it.
+This is diagnostic evidence, separate
+from the admitted `gate` record, and grants no permission. A new gate attempt clears
+the selected diagnostic before any read; historical digest-named bytes remain retained.
+For an exact current gating hand-off, human and JSON `zt-run status` include
+`policyGate: { baseSha, reasons, assessment }`. Inspect `assessment.decisions` for
+`status: escalated` and the reason (`invalid_pass`, `disagreement`, `budget`, etc.).
+Empty citation lists mean no validated decision citation is available; deterministic
+floor citations remain in `assessment.citations`. Status never invents quotes or runs
+a model to recover them. Status bounds each citation list to 16 entries and each
+display quote/excerpt to 512 code points, with `displayTruncated: true` when reduced;
+the complete assessment and citation digests remain in the artifact. Early stops
+before assessment have no `policyGate`. Legacy runs without this artifact omit the field. Gate notices
+acknowledge that policy decision calls may have been charged before implementation starts.
+
 `discoverPolicy(read: GitHubRead, { owner, repo, ref })` performs credential-free
 Contents GETs at a **40-character lowercase commit SHA**. Supply `anonymousReader()`
 or an offline fake; no credential module is imported. `POLICY_PATHS` is the frozen

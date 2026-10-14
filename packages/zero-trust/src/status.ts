@@ -1,5 +1,10 @@
+import Ajv from 'ajv';
 import { validateAuthorApproval } from './controller/config';
-import { assertNoSecrets } from './redaction';
+import { dataDescriptors } from './data-descriptors';
+import type { PolicyAssessment } from './policy/classify';
+import { canonicalJson } from './receipt/schema';
+import { assertNoSecrets, assertSecretFree } from './redaction';
+import { object as strictObject } from './schema-object';
 import {
   isNonemptyString,
   isReasonCode,
@@ -16,6 +21,13 @@ export interface MoneyEstimate {
 
 /** §5.1 status facts. Money is estimated, time is active milliseconds (not waits). */
 export interface StatusRecord {
+  /** Observed policy diagnostics, never admission or publication authority. */
+  readonly policyGate?: {
+    readonly baseSha: string;
+    readonly reasons: readonly string[];
+    readonly assessment: PolicyAssessment;
+    readonly displayTruncated?: boolean;
+  };
   readonly runId: string;
   readonly phase: string;
   readonly state: RunState;
@@ -42,6 +54,162 @@ export class InvalidStatusError extends Error {
     super('Invalid zero-trust status record');
     this.name = 'InvalidStatusError';
   }
+}
+
+const text = { type: 'string' };
+const object = (properties: Record<string, unknown>, required = Object.keys(properties)) => ({
+  ...strictObject(properties),
+  required,
+});
+const citation = object({ sourceId: text, line: { type: 'integer', minimum: 1 }, quote: text });
+const decision = object({
+  status: { enum: ['accepted', 'escalated'] },
+  reason: {
+    enum: [
+      'accepted',
+      'budget',
+      'ledger',
+      'invalid_pass',
+      'provider',
+      'confidence',
+      'disagreement',
+      'floor',
+      'secret',
+      'cache',
+      'cache_write',
+      'configuration',
+      'aborted',
+      'input',
+    ],
+  },
+  value: { type: ['string', 'boolean'] },
+  confidence: text,
+  provider: text,
+  model: text,
+  questionVersion: text,
+  questionDigest: text,
+  inputDigest: text,
+  citations: { type: 'array', items: citation },
+  citationDigest: text,
+});
+const validatePolicyGate = new Ajv({ strict: false }).compile(
+  object(
+    {
+      baseSha: { type: 'string', pattern: '^[a-f0-9]{40}$' },
+      reasons: { type: 'array', items: { type: 'string', pattern: '^[a-z_]{1,64}$' } },
+      displayTruncated: { type: 'boolean' },
+      assessment: object(
+        {
+          ai: {
+            enum: [
+              'banned',
+              'requires_approval',
+              'disclosure_required',
+              'welcomed',
+              'silent',
+              'unclear',
+            ],
+          },
+          assignment: { enum: ['required', 'not_required', 'unclear'] },
+          directPr: { enum: ['welcomed', 'discussion_first', 'unclear'] },
+          draftRequired: { type: 'boolean' },
+          receiptBlockAllowed: { type: 'boolean' },
+          baselineFailuresPermitted: { type: 'boolean' },
+          citations: {
+            type: 'array',
+            items: object({
+              path: text,
+              line: { type: 'integer', minimum: 1 },
+              ruleId: text,
+              excerpt: text,
+            }),
+          },
+          reason: { enum: ['budget', 'ledger'] },
+          decisions: object(
+            Object.fromEntries(
+              [
+                'ai',
+                'assignment',
+                'directPr',
+                'draftRequired',
+                'receiptBlockAllowed',
+                'baselineFailuresPermitted',
+              ].map((dimension) => [dimension, decision])
+            ),
+            []
+          ),
+        },
+        [
+          'ai',
+          'assignment',
+          'directPr',
+          'draftRequired',
+          'receiptBlockAllowed',
+          'baselineFailuresPermitted',
+          'citations',
+        ]
+      ),
+    },
+    ['baseSha', 'reasons', 'assessment']
+  )
+);
+
+/** Full quotes stay durable. Display a bounded, explicitly marked projection,
+ * scanning every source string even when its citation is outside the display cap. */
+function policyGateSnapshot(input: unknown): unknown {
+  let truncated = false;
+  let nodes = 0;
+  let bytes = 0;
+  const copy = (value: unknown, key: string, depth: number, project: boolean): unknown => {
+    if (++nodes > 200000 || depth > 16) throw new InvalidStatusError();
+    if (typeof value === 'string') {
+      bytes += Buffer.byteLength(value);
+      if (bytes > 96 * 1024 * 1024) throw new InvalidStatusError();
+      assertNoSecrets(value);
+      if (project && (key === 'quote' || key === 'excerpt') && value.length > 512) {
+        const points = Array.from(value);
+        if (points.length > 512) {
+          truncated = true;
+          return points.slice(0, 512).join('');
+        }
+      }
+      return value;
+    }
+    if (
+      value === null ||
+      typeof value === 'boolean' ||
+      (typeof value === 'number' && Number.isSafeInteger(value) && !Object.is(value, -0))
+    )
+      return value;
+    if (typeof value !== 'object') throw new InvalidStatusError();
+    const { array, keys, descriptors } = dataDescriptors(value);
+    if (array) {
+      const values = [];
+      for (let i = 0; i < descriptors.length.value; i++) {
+        const held = copy(descriptors[String(i)].value, '', depth + 1, project);
+        if (!project || key !== 'citations' || i < 16) values.push(held);
+        else truncated = true;
+      }
+      return values;
+    }
+    return Object.fromEntries(
+      keys.map((name) => {
+        const field = String(name);
+        assertNoSecrets(field);
+        return [field, copy(descriptors[field].value, field, depth + 1, project)];
+      })
+    );
+  };
+  const full = copy(input, '', 0, false);
+  // Validate all evidence before projection: a malformed citation outside the
+  // display window is corruption, not a reason to silently discard that entry.
+  if (!validatePolicyGate(full)) throw new InvalidStatusError();
+  nodes = 0;
+  bytes = 0;
+  const held = copy(full, '', 0, true);
+  if (!isRecord(held)) throw new InvalidStatusError();
+  if (truncated) held.displayTruncated = true;
+  return JSON.parse(canonicalJson(held, 1024 * 1024));
 }
 
 function isAmount(value: unknown): value is number {
@@ -74,6 +242,7 @@ function safeStatus(input: StatusRecord): StatusRecord {
     reasonCode: input.reasonCode,
     nextPermittedAction: input.nextPermittedAction,
     authorApproval: input.authorApproval,
+    policyGate: input.policyGate,
   };
   // Inspect actual strings (JSON escapes whitespace), never invoke input toJSON.
   // Unknown properties are stripped rather than visited or serialized.
@@ -116,6 +285,15 @@ function safeStatus(input: StatusRecord): StatusRecord {
     }
   }
   if (estimatedSpend.currency !== budgetRemaining.currency) throw new InvalidStatusError();
+  let policyGate: StatusRecord['policyGate'];
+  if (value.policyGate !== undefined) {
+    // Canonical descriptor snapshot rejects getters/toJSON and bounds allocation.
+    // Scan the detached primitive strings before JSON quoting can hide whitespace.
+    const held = policyGateSnapshot(value.policyGate);
+    assertSecretFree(held);
+    if (!validatePolicyGate(held)) throw new InvalidStatusError();
+    policyGate = held as StatusRecord['policyGate'];
+  }
   return {
     runId: value.runId,
     phase: value.phase,
@@ -129,6 +307,7 @@ function safeStatus(input: StatusRecord): StatusRecord {
     reasonCode: value.reasonCode,
     nextPermittedAction: value.nextPermittedAction,
     ...(authorApproval === undefined ? {} : { authorApproval }),
+    ...(policyGate === undefined ? {} : { policyGate }),
   };
 }
 
