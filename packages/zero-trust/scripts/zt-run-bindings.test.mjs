@@ -1260,6 +1260,51 @@ test('early resume interrupt initializes the retained VM inventory before declar
   }
 });
 
+test('early resume interrupt checks retained credentials and blocks when the held value was lost', async () => {
+  const h = rig();
+  const config = { ...h.config, authorApproval: await prepareAndDisposeAuthor(h) };
+  proxyFixture(h);
+  const store = h.seed(config);
+  const id = store.runId;
+  const fork = { repositoryId: 22, installationId: 33, owner: 'contributor' };
+  const tokens = new Journal(store.storeDirectory('tokens'));
+  const broker = new ForkCredentialBroker({
+    store: tokens,
+    fork,
+    app: new AppCredentials({
+      appId: '1',
+      clientId: 'fixture',
+      privateKey: process.env.BINDING_APP_KEY,
+      clientSecret: process.env.BINDING_APP_SECRET,
+    }),
+    http: () => assert.fail('lost values must not be fabricated'),
+    intents: () => assert.fail('no new intents'),
+  });
+  broker.registerUserToken(`ghu_${'c'.repeat(30)}`, new Date(Date.now() + 3600000).toISOString());
+  broker.close();
+  tokens.close();
+  const steps = new Journal(path.join(store.storeDirectory('control'), 'steps'));
+  new StepArtifacts(steps, id).put('fork', fork);
+  steps.close();
+  const dir = path.join(store.storeDirectory('control'), 'controller');
+  fs.mkdirSync(dir, { mode: 0o700 });
+  fs.writeFileSync(path.join(dir, 'events.jsonl'), '', { mode: 0o600 });
+  store.close();
+  const controller = createController(config, {
+    vm: new FakeVmAdapter(),
+    onAuthorizationUrl: () => assert.fail('cleanup cannot request OAuth'),
+  });
+  const running = controller.resume(id).catch((error) => error);
+  await assert.rejects(controller.interrupt());
+  await running;
+  const reopened = RunStore.open(h.root, id);
+  try {
+    assert.equal(reopened.run.state, 'blocked_cleanup');
+  } finally {
+    reopened.close();
+  }
+});
+
 test('production refresh cleanup failure rejects interruption and records a cleanup block', async () => {
   const h = rig();
   const approval = await prepareAndDisposeAuthor(h);
@@ -1293,13 +1338,13 @@ test('production refresh cleanup failure rejects interruption and records a clea
         oauth: async (form) => {
           if (form.grant_type === 'refresh_token') {
             refreshes++;
-            return { status: 200, json: { access_token: 'ghu_' + 'z'.repeat(30) } };
+            return { status: 200, json: { access_token: `ghu_${'z'.repeat(30)}` } };
           }
           return {
             status: 200,
             json: {
-              access_token: 'ghu_' + 'a'.repeat(30),
-              refresh_token: 'ghr_' + 'b'.repeat(30),
+              access_token: `ghu_${'a'.repeat(30)}`,
+              refresh_token: `ghr_${'b'.repeat(30)}`,
               expires_in: 1,
             },
           };
@@ -1355,7 +1400,7 @@ test('production refresh cleanup failure rejects interruption and records a clea
   clock += 2000;
   await assert.rejects(controller.interrupt(), /cleanup_incomplete/);
   assert.match((await running).message, /cleanup_incomplete/);
-  assert.equal(refreshes, 1);
+  assert.equal(refreshes, 2); // Independent control cleanup and final release both join.
   assert.ok(deletes > 0);
   assert.ok(
     broker.status().tokens.some((token) => token.kind === 'user' && token.status !== 'revoked')

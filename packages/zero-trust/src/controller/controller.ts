@@ -811,6 +811,10 @@ export class RunController {
       failures
     );
     await this.attemptRecovery(() => this.cleanup(), failures);
+    await this.attemptRecovery(
+      () => this.deps.recovery.cleanupCredentials?.(this.context()) ?? Promise.resolve(),
+      failures
+    );
     await this.attemptRecovery(() => this.reconcileCleanupObligations(), failures);
     if (this.unfundedCleanup.size) failures.push(new ControllerError('admission_closed'));
     for (const hold of this.budget.snapshot().reservations.filter((h) => h.status === 'reserved')) {

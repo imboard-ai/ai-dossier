@@ -629,6 +629,11 @@ export function createController(
   };
   const journals = new Map<string, Journal>();
   let activeStore: RunStore | undefined;
+  const markCleanupFailed = (store = activeStore) => {
+    const current = store?.run;
+    if (current && !TERMINAL_STATES.includes(current.state) && current.state !== 'blocked_cleanup')
+      store?.persistRun(transitionRun(current, ReasonCode.CleanupFailed, now().toISOString()));
+  };
   let heldArtifacts: StepArtifacts | undefined;
   let rawVm: VmAdapter | undefined = overrides.vm;
   let broker: ForkCredentialBroker | undefined;
@@ -809,11 +814,7 @@ export function createController(
         return intents.snapshot();
       },
       now: () => now().getTime(),
-      onCleanupBlocked: () => {
-        const current = c.store.run;
-        if (!TERMINAL_STATES.includes(current.state) && current.state !== 'blocked_cleanup')
-          c.store.persistRun(transitionRun(current, ReasonCode.CleanupFailed, now().toISOString()));
-      },
+      onCleanupBlocked: () => markCleanupFailed(c.store),
     });
   const cleanupCredentials = async (c: PhaseContext) => {
     const fork = artifacts(c).get<ForkReady>('fork');
@@ -825,6 +826,7 @@ export function createController(
         return;
       broker = openBroker(c, fork);
     }
+    await refreshBeforeCleanup();
     const result = await broker.recover();
     if (result.report) throw new Error('cleanup_incomplete');
   };
@@ -1460,13 +1462,7 @@ export function createController(
           return { kind: 'hand_off' };
         }
         if (error instanceof VmCleanupError) {
-          if (
-            !TERMINAL_STATES.includes(c.store.run.state) &&
-            c.store.run.state !== 'blocked_cleanup'
-          )
-            c.store.persistRun(
-              transitionRun(c.store.run, ReasonCode.CleanupFailed, now().toISOString())
-            );
+          markCleanupFailed(c.store);
           return { kind: 'hand_off' };
         }
         return diagnose(c, phase, error);
@@ -1504,15 +1500,7 @@ export function createController(
       return;
     const refreshed = await contributor.refresh();
     if (refreshed.kind === 'unavailable') {
-      const current = activeStore?.run;
-      if (
-        current &&
-        !TERMINAL_STATES.includes(current.state) &&
-        current.state !== 'blocked_cleanup'
-      )
-        activeStore?.persistRun(
-          transitionRun(current, ReasonCode.CleanupFailed, now().toISOString())
-        );
+      markCleanupFailed();
       throw new Error('cleanup_incomplete');
     }
   };
@@ -1773,15 +1761,7 @@ export function createController(
         }
       }
       if (failures.length) {
-        const current = activeStore?.run;
-        if (
-          current &&
-          !TERMINAL_STATES.includes(current.state) &&
-          current.state !== 'blocked_cleanup'
-        )
-          activeStore?.persistRun(
-            transitionRun(current, ReasonCode.CleanupFailed, now().toISOString())
-          );
+        markCleanupFailed();
         throw new Error('cleanup_incomplete');
       }
     },
