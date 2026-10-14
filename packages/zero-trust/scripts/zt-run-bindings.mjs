@@ -80,8 +80,28 @@ const stopAuthors = async (signal) => {
         'error: revoke_failed; revoke the App authorization at https://github.com/settings/applications\n'
       );
   }
-  process.exit(signal === 'SIGINT' ? 130 : signal === 'SIGHUP' ? 129 : 143);
+  process.exit(
+    signal === 'output_failure' ? 1 : signal === 'SIGINT' ? 130 : signal === 'SIGHUP' ? 129 : 143
+  );
 };
+/** Stream errors are asynchronous: observer try/catch cannot join their cleanup. */
+export function createCommandOutput() {
+  const failed = new Set();
+  for (const stream of [process.stdout, process.stderr]) {
+    stream.on('error', () => {
+      failed.add(stream);
+      // Fence and join the same process-owned barrier as an active signal.
+      void stopAuthors('output_failure');
+    });
+  }
+  const write = (stream, line) => {
+    if (!failed.has(stream)) stream.write(`${line}\n`);
+  };
+  return {
+    out: (line) => write(process.stdout, line),
+    err: (line) => write(process.stderr, line),
+  };
+}
 const interrupted = () => {
   void stopAuthors('SIGINT');
 };
@@ -125,14 +145,18 @@ const ownSession = (session) => {
   return trackOwner(owner);
 };
 
-export async function createCommands({ root, createController, onAuthorizationUrl }) {
+export async function createCommands({ root, createController, onAuthorizationUrl, onRun }) {
   root = path.resolve(root);
   const pendingAuthors = new Map();
   const pendingPreparations = new Map();
   const authorOperations = new Set();
   const withController = async (config, session, work) => {
     if (stoppingAuthors) refuse('admission_closed');
-    const controller = createController(config, { onAuthorizationUrl }, session);
+    const controller = createController(
+      config,
+      { onAuthorizationUrl, ...(onRun ? { onRun } : {}) },
+      session
+    );
     const owner = trackOwner({
       kind: 'controller',
       dispose: () => controller.interrupt(),
