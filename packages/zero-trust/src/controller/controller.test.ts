@@ -32,6 +32,168 @@ import {
 } from './verification-record';
 import { verifyCandidate } from './verifier';
 
+it('interrupt joins verification cleanup and resumes the exact phase without replaying implementation', async () => {
+  const h = rig();
+  let entered!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  h.steps.scripts.verify = [
+    async (c) => {
+      await c.createVm({ scope: 'container' });
+      entered();
+      await new Promise<void>((resolve) =>
+        c.signal.addEventListener('abort', () => resolve(), { once: true })
+      );
+      throw new Error('verification interrupted');
+    },
+  ];
+  const running = h.controller.start(h.config);
+  await ready;
+  await h.controller.interrupt();
+  const paused = await running;
+  expect(paused.state).toBe('paused_user');
+  expect(paused.history.at(-1)?.from).toBe('verifying');
+  expect(h.vm.liveVms()).toEqual([]);
+  const resumed = await h.controller.resume(paused.runId);
+  expect(resumed.state).toBe('submitted');
+  expect(h.steps.calls.filter((phase) => phase === 'verify')).toHaveLength(2);
+  expect(h.steps.calls.filter((phase) => phase === 'implement')).toHaveLength(1);
+});
+
+it.each([
+  'paused_user',
+  'awaiting_maintainer',
+] as const)('interrupt during %s recovery preserves the resumable no-compute state', async (state) => {
+  const h = rig();
+  h.steps.scripts.gate = [
+    state === 'paused_user' ? { kind: 'proceed' } : { kind: 'request_permission' },
+  ];
+  if (state === 'paused_user') h.steps.scripts.plan = [{ kind: 'hand_off' }];
+  const initial = await h.controller.start(h.config);
+  expect(initial.state).toBe(state);
+  let entered!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  h.recovery.recoverCredentials = async (c?: PhaseContext) => {
+    if (!c) throw new Error('missing context');
+    entered();
+    await new Promise<void>((resolve) =>
+      c.signal.addEventListener('abort', () => resolve(), { once: true })
+    );
+  };
+  const priorCalls = h.steps.calls.length;
+  const running = h.controller.resume(initial.runId);
+  await ready;
+  await h.controller.interrupt();
+  expect((await running).state).toBe(state);
+  expect(h.steps.calls).toHaveLength(priorCalls);
+  const store = RunStore.open(h.deps.root, initial.runId);
+  expect(store.run.state).toBe(state);
+  store.close();
+});
+
+it.each([
+  false,
+  true,
+])('release-time interrupt joins cleanup even when work rejects (%s)', async (fails) => {
+  const h = rig();
+  h.steps.scripts.gate = [
+    async (c) => {
+      await c.createVm({ scope: 'container' });
+      if (fails) throw new Error('provider failed');
+      return { kind: 'hand_off' };
+    },
+  ];
+  let releasing!: () => void;
+  let release!: () => void;
+  let destroying!: () => void;
+  let finishDestroy!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    releasing = resolve;
+  });
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const startedDestroy = new Promise<void>((resolve) => {
+    destroying = resolve;
+  });
+  const heldDestroy = new Promise<void>((resolve) => {
+    finishDestroy = resolve;
+  });
+  const destroy = h.vm.destroy.bind(h.vm);
+  h.vm.destroy = async (vm) => {
+    destroying();
+    if (fails) await heldDestroy;
+    await destroy(vm);
+  };
+  const controller = new RunController({
+    ...h.deps,
+    release: async () => {
+      releasing();
+      await held;
+    },
+  });
+  const running = controller.start(h.config);
+  const outcome = running.then(
+    (run) => ({ run, error: null }),
+    (error) => ({ run: null, error })
+  );
+  await ready;
+  let interrupted = false;
+  const interrupt = controller.interrupt().then(() => {
+    interrupted = true;
+  });
+  if (fails) await startedDestroy;
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(interrupted).toBe(false);
+  expect(h.vm.liveVms()).toHaveLength(fails ? 1 : 0);
+  release();
+  finishDestroy();
+  await interrupt;
+  expect(h.vm.liveVms()).toEqual([]);
+  const result = await outcome;
+  if (fails) expect(result.error).toMatchObject({ code: 'step_failed' });
+  const store = RunStore.open(h.deps.root, controller.snapshot().runId);
+  expect(store.run.state).toBe('paused_user');
+  store.close();
+});
+
+it.each([
+  'release',
+  'retire',
+] as const)('interrupt propagates %s failures after applying pause', async (failure) => {
+  const h = rig();
+  let entered!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  h.steps.scripts.gate = [
+    async (c) => {
+      entered();
+      await new Promise<void>((resolve) =>
+        c.signal.addEventListener('abort', () => resolve(), { once: true })
+      );
+      return { kind: 'hand_off' };
+    },
+  ];
+  const error = new Error(`${failure}_failed`);
+  const controller = new RunController({
+    ...h.deps,
+    release: async () => {
+      if (failure === 'release') throw error;
+    },
+    retire: () => {
+      if (failure === 'retire') throw error;
+    },
+  });
+  const running = controller.start(h.config).catch((e) => e);
+  await ready;
+  await expect(controller.interrupt()).rejects.toBe(error);
+  expect(await running).toBe(error);
+});
+
 let template: VerificationRecord;
 let artifacts: string;
 const roots: string[] = [];

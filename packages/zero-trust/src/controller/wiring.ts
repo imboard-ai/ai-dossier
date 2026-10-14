@@ -629,6 +629,11 @@ export function createController(
   };
   const journals = new Map<string, Journal>();
   let activeStore: RunStore | undefined;
+  const markCleanupFailed = (store = activeStore) => {
+    const current = store?.run;
+    if (current && !TERMINAL_STATES.includes(current.state) && current.state !== 'blocked_cleanup')
+      store?.persistRun(transitionRun(current, ReasonCode.CleanupFailed, now().toISOString()));
+  };
   let heldArtifacts: StepArtifacts | undefined;
   let rawVm: VmAdapter | undefined = overrides.vm;
   let broker: ForkCredentialBroker | undefined;
@@ -809,11 +814,7 @@ export function createController(
         return intents.snapshot();
       },
       now: () => now().getTime(),
-      onCleanupBlocked: () => {
-        const current = c.store.run;
-        if (!TERMINAL_STATES.includes(current.state) && current.state !== 'blocked_cleanup')
-          c.store.persistRun(transitionRun(current, ReasonCode.CleanupFailed, now().toISOString()));
-      },
+      onCleanupBlocked: () => markCleanupFailed(c.store),
     });
   const cleanupCredentials = async (c: PhaseContext) => {
     const fork = artifacts(c).get<ForkReady>('fork');
@@ -825,6 +826,7 @@ export function createController(
         return;
       broker = openBroker(c, fork);
     }
+    await refreshBeforeCleanup();
     const result = await broker.recover();
     if (result.report) throw new Error('cleanup_incomplete');
   };
@@ -1460,13 +1462,7 @@ export function createController(
           return { kind: 'hand_off' };
         }
         if (error instanceof VmCleanupError) {
-          if (
-            !TERMINAL_STATES.includes(c.store.run.state) &&
-            c.store.run.state !== 'blocked_cleanup'
-          )
-            c.store.persistRun(
-              transitionRun(c.store.run, ReasonCode.CleanupFailed, now().toISOString())
-            );
+          markCleanupFailed(c.store);
           return { kind: 'hand_off' };
         }
         return diagnose(c, phase, error);
@@ -1504,15 +1500,7 @@ export function createController(
       return;
     const refreshed = await contributor.refresh();
     if (refreshed.kind === 'unavailable') {
-      const current = activeStore?.run;
-      if (
-        current &&
-        !TERMINAL_STATES.includes(current.state) &&
-        current.state !== 'blocked_cleanup'
-      )
-        activeStore?.persistRun(
-          transitionRun(current, ReasonCode.CleanupFailed, now().toISOString())
-        );
+      markCleanupFailed();
       throw new Error('cleanup_incomplete');
     }
   };
@@ -1744,49 +1732,65 @@ export function createController(
       },
     },
     release: async () => {
-      try {
-        await refreshBeforeCleanup();
-        if (activeStore && TERMINAL_STATES.includes(activeStore.run.state))
-          await broker?.endRun(activeStore.run.state === 'cancelled' ? 'cancelled' : 'completed');
-        else if (broker) {
-          // A dormant controller has no operation that needs a credential. Sweep
-          // held values before stopping lease timers, without closing resumable
-          // admission permanently as endRun would do.
-          const recovered = await broker.recover();
-          if (!recovered.admitted && recovered.report) throw new Error('cleanup_incomplete');
-        }
-      } finally {
-        try {
-          await authorSession?.dispose();
-          authorSession = undefined;
-        } finally {
-          try {
-            // Both refresh and broker cleanup can persist CleanupFailed, including
-            // on rejection. Bind the retained refusal before closing its journal.
-            if (activeStore && heldArtifacts)
-              rebindControllerRefusalNotice(heldArtifacts, activeStore.run);
-          } finally {
-            broker?.close();
-            for (const j of journals.values()) j.close();
-            journals.clear();
-            activeStore = undefined;
-            activeContext = undefined;
-            heldArtifacts = undefined;
-            broker = undefined;
-            contributor = undefined;
-            pusher = undefined;
-            intents = undefined;
-            handoff = undefined;
-            handoffMode = undefined;
-            tracker = undefined;
-            revisionObservationWaiting = false;
-            shipping = undefined;
-            receipt = undefined;
-            app = undefined;
-            models.clear();
-            if (!overrides.vm) rawVm = undefined;
+      const failures: unknown[] = [];
+      for (const cleanup of [
+        refreshBeforeCleanup,
+        async () => {
+          if (activeStore && TERMINAL_STATES.includes(activeStore.run.state))
+            await broker?.endRun(activeStore.run.state === 'cancelled' ? 'cancelled' : 'completed');
+          else if (broker) {
+            // A dormant controller has no operation that needs a credential. Sweep
+            // held values before stopping lease timers, without closing resumable
+            // admission permanently as endRun would do.
+            const recovered = await broker.recover();
+            if (!recovered.admitted && recovered.report) throw new Error('cleanup_incomplete');
           }
+        },
+        async () => {
+          try {
+            await authorSession?.dispose();
+          } finally {
+            authorSession = undefined;
+          }
+        },
+      ]) {
+        try {
+          await cleanup();
+        } catch (error) {
+          failures.push(error);
         }
+      }
+      if (failures.length) {
+        markCleanupFailed();
+        throw failures[0];
+      }
+    },
+    retire: () => {
+      try {
+        // Both refresh and broker cleanup can persist CleanupFailed, including
+        // on rejection. Bind the retained refusal before closing its journal.
+        if (activeStore && heldArtifacts)
+          rebindControllerRefusalNotice(heldArtifacts, activeStore.run);
+      } finally {
+        broker?.close();
+        for (const j of journals.values()) j.close();
+        journals.clear();
+        activeStore = undefined;
+        activeContext = undefined;
+        heldArtifacts = undefined;
+        broker = undefined;
+        contributor = undefined;
+        pusher = undefined;
+        intents = undefined;
+        handoff = undefined;
+        handoffMode = undefined;
+        tracker = undefined;
+        revisionObservationWaiting = false;
+        shipping = undefined;
+        receipt = undefined;
+        app = undefined;
+        models.clear();
+        if (!overrides.vm) rawVm = undefined;
       }
     },
   });
