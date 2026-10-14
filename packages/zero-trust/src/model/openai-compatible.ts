@@ -192,6 +192,8 @@ export interface OpenAICompatibleOptions {
   fetch: typeof fetch;
   maxTokensParameter?: ModelRequestProfile['maxTokensParameter'];
   logprobs?: boolean;
+  decisionOutputTokens?: number;
+  agentOutputTokens?: number;
 }
 /** Contains no credential field. The key is read only at startup check and call time. */
 export class OpenAICompatibleAdapter implements ModelAdapter {

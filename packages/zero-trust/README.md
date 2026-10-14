@@ -2774,6 +2774,13 @@ the profile's token cap and `stream: false`. Optional `maxTokensParameter`
 both by the adapter and each `ModelPhase`. Defaults for gpt-5 and o1/o3/o4
 families are `max_completion_tokens` and no logprobs; other models retain legacy
 defaults. A disabled profile omits likelihoods even if a caller requests them.
+Optional positive safe-integer `decisionOutputTokens` and `agentOutputTokens` select
+total reasoning-plus-visible completion caps before metering. Total-completion
+profiles default to 8,192 for typed decisions and 32,768 for planning/implementation/
+repair; legacy profiles retain 1,024 and 16,384. Explicit decision-provider caps win.
+Transport never widens an admitted request; insufficient budget prevents dispatch.
+These defaults provide headroom, not a completeness guarantee: reasoning-only
+truncation stays malformed, with known total completion usage settled once.
 The exact resolved profile is shared by wire-byte estimation and transport,
 and participates in decision cache identity. The API key goes only in Authorization.
 `apiKeyEnv` must be a shell environment identifier; model/endpoint strings pass

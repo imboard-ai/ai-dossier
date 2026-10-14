@@ -34,6 +34,7 @@ describe('composed model profiles (#1186)', () => {
   it.each([
     false,
     true,
+    undefined,
   ])('preserves custom alias profile through execution and decision wrappers: logprobs=%s', async (logprobs) => {
     vi.stubEnv('ZT_MODEL_PROFILE_KEY', 'model-profile-only-fixture-key');
     const h = rig();
@@ -45,6 +46,15 @@ describe('composed model profiles (#1186)', () => {
       const body = JSON.parse(bytes);
       expect(body).toHaveProperty('max_completion_tokens');
       expect(body).not.toHaveProperty('max_tokens');
+      expect(body.max_completion_tokens).toBe(
+        body.tools[0]?.function.name === 'report_decision'
+          ? logprobs === undefined
+            ? 8192
+            : 9000
+          : logprobs === undefined
+            ? 32768
+            : 40000
+      );
       if (!logprobs) expect(body).not.toHaveProperty('logprobs');
       const contribution = contributionIdOf(h.controller.snapshot().runId);
       if (!contribution) throw new Error('Expected fixture contribution ID');
@@ -113,6 +123,7 @@ describe('composed model profiles (#1186)', () => {
       },
       maxTokensParameter: 'max_completion_tokens',
       logprobs,
+      ...(logprobs === undefined ? {} : { decisionOutputTokens: 9000, agentOutputTokens: 40000 }),
     });
     Object.assign(h.edges.models, { planning: model, implementing: model, repair: model });
     const run = await h.authorize(h.controller.start(h.config));

@@ -275,8 +275,12 @@ Budget notes:
   `ceilingMinor − cleanupAllowanceMinor` ($2.25 here); the remaining $0.25 per session is kept for
   VM teardown.
 - Every model call reserves its worst case before it runs: the request size in bytes counted as
-  input tokens plus the output cap (16,384 tokens for planning and implementation calls, 1,024
-  for typed decisions), times the token price. A reservation that would cross the ceiling is
+  input tokens plus the resolved total completion cap, times the token price. For
+  `max_completion_tokens` profiles the defaults are 32,768 for planning/implementation/repair
+  and 8,192 for typed decisions (reasoning plus visible output); legacy `max_tokens`
+  profiles retain 16,384 and 1,024. Optional per-phase `agentOutputTokens` and
+  `decisionOutputTokens` override these totals; allowed retries reserve each attempt.
+  A reservation that would cross the ceiling is
   refused, so a very expensive model can stop the run even though the fixture is tiny. A model at or below about $3 per million tokens leaves ample
   headroom at $2.25 per session.
 - The `local-qemu` rate is required; without it the first VM allocation fails with `missing_rate`.

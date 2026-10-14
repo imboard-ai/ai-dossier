@@ -12,6 +12,7 @@ import {
   ModelError,
   type ModelMessage,
   type ModelResult,
+  modelOutputTokens,
 } from '../model/adapter';
 import { BudgetExhaustedError, meteredComplete } from '../model/metered';
 import { assertNoSecrets, assertSecretFree, REDACTED, redactedExcerpt } from '../redaction';
@@ -35,7 +36,6 @@ export const MAX_WORKER_REPLY_BYTES = 16 * 1024;
 export const DEFAULT_LOOP_CLEANUP_TIMEOUT_MS = 5000;
 export const TERMINAL_TRANSCRIPT_TIMEOUT_MS = 1000;
 const MODEL_TIMEOUT_MS = 60_000;
-const MODEL_OUTPUT_TOKENS = 16384;
 
 /** Shared active execution accounting across phases, fresh VMs and repairs. Seed
  * elapsedMs from persisted controller state on resume; time between loops is idle. */
@@ -363,7 +363,7 @@ async function loop(
           system: AGENT_SYSTEM,
           messages,
           tools: agentTools(phase),
-          maxOutputTokens: MODEL_OUTPUT_TOKENS,
+          maxOutputTokens: modelOutputTokens(ctx.model, 'agent'),
           timeoutMs: Math.min(MODEL_TIMEOUT_MS, time),
         }));
       // Snapshot the adapter-owned result before the asynchronous transcript sink.

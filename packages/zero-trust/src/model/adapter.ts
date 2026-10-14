@@ -57,19 +57,34 @@ export interface ModelAdapter {
 export interface ModelRequestProfile {
   readonly maxTokensParameter: 'max_tokens' | 'max_completion_tokens';
   readonly logprobs: boolean;
+  /** Total completion caps chosen before metering, not transport-side multipliers. */
+  readonly decisionOutputTokens?: number;
+  readonly agentOutputTokens?: number;
 }
 
-/** Defaults are model-family hints only; compatible providers can override both fields. */
+/** Defaults are model-family hints only; compatible providers can override them. */
 export function modelRequestProfile(
   model: string,
   options: Partial<ModelRequestProfile> = {}
-): ModelRequestProfile {
+): Required<ModelRequestProfile> {
   validateModelRequestProfile(options);
   const reasoning = /^(?:gpt-5(?:[.-]|$)|o(?:1|3|4)(?:[.-]|$))/u.test(model);
   const maxTokensParameter =
     options.maxTokensParameter ?? (reasoning ? 'max_completion_tokens' : 'max_tokens');
   const logprobs = options.logprobs ?? !reasoning;
-  return Object.freeze({ maxTokensParameter, logprobs });
+  const totalCompletion = maxTokensParameter === 'max_completion_tokens';
+  return Object.freeze({
+    maxTokensParameter,
+    logprobs,
+    decisionOutputTokens: options.decisionOutputTokens ?? (totalCompletion ? 8192 : 1024),
+    agentOutputTokens: options.agentOutputTokens ?? (totalCompletion ? 32768 : 16384),
+  });
+}
+
+/** Also resolves older/injected profiles that only specify the wire parameter. */
+export function modelOutputTokens(adapter: ModelAdapter, role: 'decision' | 'agent'): number {
+  const profile = modelRequestProfile(adapter.id, adapter.requestProfile);
+  return role === 'decision' ? profile.decisionOutputTokens : profile.agentOutputTokens;
 }
 
 export function validateModelRequestProfile(options: Partial<ModelRequestProfile>): void {
@@ -77,7 +92,10 @@ export function validateModelRequestProfile(options: Partial<ModelRequestProfile
     (options.maxTokensParameter !== undefined &&
       options.maxTokensParameter !== 'max_tokens' &&
       options.maxTokensParameter !== 'max_completion_tokens') ||
-    (options.logprobs !== undefined && typeof options.logprobs !== 'boolean')
+    (options.logprobs !== undefined && typeof options.logprobs !== 'boolean') ||
+    [options.decisionOutputTokens, options.agentOutputTokens].some(
+      (cap) => cap !== undefined && (!Number.isSafeInteger(cap) || cap < 1)
+    )
   )
     throw new ModelError('invalid_request');
 }
