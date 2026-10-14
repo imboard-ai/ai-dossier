@@ -22,6 +22,8 @@ N/A — infrastructure signal handling, no new data-reachable state. Existing pa
 - `packages/zero-trust/scripts/zt-run-bindings.test.mjs` — actual subprocess signals and cleanup evidence.
 - `packages/zero-trust/src/controller/controller.ts` — interrupt-and-join using existing pause admission.
 - `packages/zero-trust/src/controller/controller.test.ts` — verification-phase interruption and resume regression (corrected actual test path during implementation).
+- `packages/zero-trust/src/controller/wiring.ts` — separate credential sweeping from resource retirement so late signal cleanup can still journal destruction (review-discovered lifecycle ordering).
+- `packages/zero-trust/README.md` and `docs/guides/zero-trust-contributions.md` — scoped signal ownership, cleanup diagnostics, exit codes and existing verification-claim limitation.
 - `docs/agent-traps.md` — record the ownership gap.
 
 ## Reusable Code
@@ -29,6 +31,8 @@ Controller observeControl/applyControl already abort, destroy VMs, reconcile hol
 
 ## Risk Areas
 Trap rows #1110, #1109 and #1213: stop admission after awaits, join independent cleanup, and transfer token ownership without a gap. Concurrent workers #1219/#1220/#1223 own budget/gate/revision feedback changes; this scope is signal cleanup only. SIGKILL cannot run cleanup and remains recovery's responsibility.
+
+Review confirmed that successful cleanup does not erase the verifier's once-only candidate claim. A claimed verification without a record remains fail-closed on resume; this existing verifier contract is retained and documented. Controller phase re-entry and resource-cleanup guarantees are tested independently.
 
 ## Test Scope
 Run real process signal tests with disposable stores and recording credential/VM adapters; assert durable pause and resumed phase. Run binding suite, controller/package suite, build and CI-equivalent lint/coverage gates. Keep failures observable rather than catching assertions in production error boundaries.

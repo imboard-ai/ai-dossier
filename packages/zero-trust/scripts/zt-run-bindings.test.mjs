@@ -26,6 +26,7 @@ import { TokenJournal } from '../dist/github/token-journal.js';
 import { Journal } from '../dist/journal.js';
 import { ReasonCode, transitionRun } from '../dist/state.js';
 import { renderHuman, renderJson } from '../dist/status.js';
+import { LocalQemuAdapter } from '../dist/vm/local-qemu.js';
 import { createCommands } from './zt-run-bindings.mjs';
 import { main } from './zt-run-lib.mjs';
 
@@ -65,6 +66,23 @@ test('resume with missing model rates refuses before OAuth/continuation and reta
   }
 });
 const cleanup = [];
+function subprocessOAuthSetup(revoke = 'return new Response(null,{status:204});') {
+  return `
+    const nativeFetch = globalThis.fetch;
+    globalThis.fetch = async (input,init) => {
+      const url = new URL(String(input));
+      if(url.pathname === '/login/oauth/access_token')return new Response(JSON.stringify({access_token:'ghu_'+'a'.repeat(30),refresh_token:'ghr_'+'b'.repeat(30),expires_in:3600}));
+      if(url.pathname === '/user')return new Response(JSON.stringify({id:12,login:'contributor',name:'Verified Name'}));
+      if(url.pathname === '/user/emails')return new Response(JSON.stringify([{email:'verified@example.org',verified:true}]));
+      if(url.pathname === '/applications/fixture/token' && init.method === 'DELETE') {${revoke}}
+      throw new Error('unexpected_request');
+    };
+    const onAuthorizationUrl = value => {
+      const url=new URL(value);const callback=new URL(url.searchParams.get('redirect_uri'));
+      callback.searchParams.set('state',url.searchParams.get('state'));callback.searchParams.set('code','approved');void nativeFetch(callback);
+    };
+  `;
+}
 async function signalProcess(code, onOutput) {
   const child = spawn(process.execPath, ['--input-type=module', '-e', code], {
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -699,20 +717,8 @@ test.each(
     const config = ${JSON.stringify(approved)};
     const root = ${JSON.stringify(h.root)};
     const mode = ${JSON.stringify(mode)};
-    const nativeFetch = globalThis.fetch;
-    globalThis.fetch = async (input, init) => {
-      const url = new URL(String(input));
-      if (url.pathname === '/login/oauth/access_token') return new Response(JSON.stringify({access_token:'ghu_'+'a'.repeat(30),refresh_token:'ghr_'+'b'.repeat(30),expires_in:3600}));
-      if (url.pathname === '/user') return new Response(JSON.stringify({id:12,login:'contributor',name:'Verified Name'}));
-      if (url.pathname === '/user/emails') return new Response(JSON.stringify([{email:'verified@example.org',verified:true}]));
-      if (url.pathname === '/applications/fixture/token' && init.method === 'DELETE') return new Response(null,{status:204});
-      throw new Error('unexpected_request');
-    };
-    const commands = await createCommands({ root, onAuthorizationUrl: value => {
-      const url = new URL(value); const callback = new URL(url.searchParams.get('redirect_uri'));
-      callback.searchParams.set('state',url.searchParams.get('state'));callback.searchParams.set('code','approved');
-      void nativeFetch(callback);
-    }, createController: (next, edges, session) => {
+    ${subprocessOAuthSetup()}
+    const commands = await createCommands({ root, onAuthorizationUrl, createController: (next, edges, session) => {
       const vm = new FakeVmAdapter();
       const destroy = vm.destroy.bind(vm);
       vm.destroy = async value => {
@@ -845,6 +851,113 @@ test.each(
   }
 });
 
+test('production wiring keeps the VM journal alive until release-time interrupt destruction joins', async () => {
+  const h = rig();
+  const commands = await createCommands({
+    root: h.root,
+    createController,
+    onAuthorizationUrl: h.onAuthorizationUrl,
+  });
+  const approval = await commands.prepareAuthor(h.config);
+  await commands.discardAuthor(h.config);
+  await Promise.all(h.callbacks);
+  const config = {
+    ...h.config,
+    authorApproval: approval,
+    modelProfile: {
+      ...h.config.modelProfile,
+      rates: [
+        ...h.config.modelProfile.rates,
+        { ...h.config.modelProfile.rates[0], resource: 'local-qemu', unit: 'millisecond' },
+      ],
+    },
+  };
+  fs.writeFileSync(
+    h.config.executionProfile.proxyEndpointsFile,
+    JSON.stringify({
+      endpoints: { npmRegistry: 'http://10.0.0.2:4873', pypiIndex: 'http://10.0.0.2:4873/simple' },
+      target: { host: '10.0.0.2', port: 4873 },
+    }),
+    { mode: 0o600 }
+  );
+  let live = false,
+    journal,
+    startedRelease,
+    finishRelease,
+    startedDestroy,
+    finishDestroy;
+  const releasing = new Promise((resolve) => {
+    startedRelease = resolve;
+  });
+  const released = new Promise((resolve) => {
+    finishRelease = resolve;
+  });
+  const destroying = new Promise((resolve) => {
+    startedDestroy = resolve;
+  });
+  const destroyed = new Promise((resolve) => {
+    finishDestroy = resolve;
+  });
+  vi.spyOn(LocalQemuAdapter.prototype, 'listByRun').mockImplementation(async (id) =>
+    live ? [{ vmId: 'fixture-vm', runId: id, pid: null, alive: true, paths: [] }] : []
+  );
+  vi.spyOn(LocalQemuAdapter.prototype, 'destroy').mockImplementation(async function (handle) {
+    journal = this.options.journal;
+    startedDestroy();
+    await destroyed;
+    live = false;
+    journal.append({ v: 1, type: 'vm_destroyed', runId: handle.runId, vmId: handle.vmId });
+  });
+  const closed = [];
+  const close = Journal.prototype.close;
+  vi.spyOn(Journal.prototype, 'close').mockImplementation(function () {
+    closed.push(this);
+    return close.call(this);
+  });
+  const controller = createController(
+    config,
+    {},
+    {
+      dispose: async () => {
+        startedRelease();
+        await released;
+      },
+    }
+  );
+  controller.deps.steps.gate = async (c) => {
+    await controller.deps.recovery.reconcileVms(c, async () => {});
+    live = true;
+    throw new Error('provider_failed');
+  };
+  const running = controller.start(config).catch((error) => error);
+  await releasing;
+  let joined = false;
+  const interrupt = controller.interrupt().then(() => {
+    joined = true;
+  });
+  await destroying;
+  finishRelease();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(joined, false);
+  assert.ok(!closed.includes(journal));
+  finishDestroy();
+  await interrupt;
+  assert.equal((await running).code, 'step_failed');
+  assert.equal(live, false);
+  assert.ok(closed.includes(journal));
+  const store = RunStore.open(h.root, controller.snapshot().runId);
+  try {
+    assert.equal(store.run.state, 'paused_user');
+    assert.match(
+      fs.readFileSync(path.join(store.storeDirectory('vm'), 'events.jsonl'), 'utf8'),
+      /vm_destroyed/
+    );
+    assert.equal(readControlRequests(store).pending.length, 0);
+  } finally {
+    store.close();
+  }
+});
+
 test('signal joins mixed active-controller and preparation owners despite one cleanup rejection', async () => {
   const h = rig();
   const prepare = await createCommands({
@@ -869,15 +982,7 @@ test('signal joins mixed active-controller and preparation owners despite one cl
     const {createCommands} = await import(${JSON.stringify(new URL('./zt-run-bindings.mjs', import.meta.url).href)});
     const {RunStore} = await import(${JSON.stringify(new URL('../dist/controller/run-store.js', import.meta.url).href)});
     const root = ${JSON.stringify(h.root)};
-    const nativeFetch = globalThis.fetch;
-    globalThis.fetch = async (input,init) => {
-      const url = new URL(String(input));
-      if(url.pathname === '/login/oauth/access_token')return new Response(JSON.stringify({access_token:'ghu_'+'a'.repeat(30),refresh_token:'ghr_'+'b'.repeat(30),expires_in:3600}));
-      if(url.pathname === '/user')return new Response(JSON.stringify({id:12,login:'contributor',name:'Verified Name'}));
-      if(url.pathname === '/user/emails')return new Response(JSON.stringify([{email:'verified@example.org',verified:true}]));
-      if(init.method === 'DELETE') {await new Promise(r=>setTimeout(r,350));process.stdout.write('AUTHOR_REVOKED\\n');return new Response(null,{status:204});}
-      throw new Error('unexpected_request');
-    };
+    ${subprocessOAuthSetup("await new Promise(r=>setTimeout(r,350));process.stdout.write('AUTHOR_REVOKED\\n');return new Response(null,{status:204});")}
     let sequence=0;
     const factory = () => {
       const index=++sequence;
@@ -893,10 +998,7 @@ test('signal joins mixed active-controller and preparation owners despite one cl
         }
       };
     };
-    const options = {root,createController:factory,onAuthorizationUrl:value=> {
-      const url=new URL(value);const callback=new URL(url.searchParams.get('redirect_uri'));
-      callback.searchParams.set('state',url.searchParams.get('state'));callback.searchParams.set('code','approved');void nativeFetch(callback);
-    }};
+    const options = {root,createController:factory,onAuthorizationUrl};
     const first=await createCommands(options), second=await createCommands(options), third=await createCommands(options);
     await third.prepareAuthor({...${JSON.stringify(h.config)},issueUrl:'https://github.com/owner/repo/issues/3'});
     void first.resume(${JSON.stringify(ids[0])});void second.resume(${JSON.stringify(ids[1])});

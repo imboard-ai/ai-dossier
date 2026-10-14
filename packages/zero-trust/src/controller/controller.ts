@@ -205,6 +205,8 @@ export interface ControllerDependencies {
   readonly incidentRequested?: () => boolean;
   /** Release run-owned journals/credential leases before the RunStore pins close. */
   readonly release?: () => Promise<void>;
+  /** Retire driver resources only after late control cleanup/reconciliation joins. */
+  readonly retire?: () => void;
   readonly root: string;
   readonly steps: PhaseSteps;
   readonly recovery: RecoveryHooks;
@@ -655,28 +657,25 @@ export class RunController {
           // Publish that final durable state before the store pins are closed.
           try {
             this.observeControl();
-            if (this.control && !this.controlApplied && this.store && this.journal) {
-              try {
-                await this.applyControl();
-              } finally {
-                // Observation-only reconciliation may reopen driver journals
-                // after release. Retire those resources before dropping pins.
-                await this.deps.release?.();
-              }
-            }
+            if (this.control && !this.controlApplied && this.store && this.journal)
+              await this.applyControl();
             if (this.store) {
               const final = this.store.run;
               if (!this.last || !sameRunRecord(this.last, final)) this.notify(final);
               else this.last = final;
             }
           } finally {
-            clearInterval(watcher);
-            this.journal?.close();
-            this.store?.close();
-            this.store = undefined;
-            this.ledger = undefined;
-            this.journal = undefined;
-            this.running = undefined;
+            try {
+              this.deps.retire?.();
+            } finally {
+              clearInterval(watcher);
+              this.journal?.close();
+              this.store?.close();
+              this.store = undefined;
+              this.ledger = undefined;
+              this.journal = undefined;
+              this.running = undefined;
+            }
           }
         }
       });

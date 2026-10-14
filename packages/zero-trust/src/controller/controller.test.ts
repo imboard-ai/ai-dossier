@@ -71,11 +71,7 @@ it.each([
   ];
   if (state === 'paused_user') h.steps.scripts.plan = [{ kind: 'hand_off' }];
   const initial = await h.controller.start(h.config);
-  if (state === 'paused_user') {
-    const store = RunStore.open(h.deps.root, initial.runId);
-    store.persistRun(transitionRun(store.run, ReasonCode.UserPaused, TIME));
-    store.close();
-  }
+  expect(initial.state).toBe(state);
   let entered!: () => void;
   const ready = new Promise<void>((resolve) => {
     entered = resolve;
@@ -129,7 +125,7 @@ it.each([
   const destroy = h.vm.destroy.bind(h.vm);
   h.vm.destroy = async (vm) => {
     destroying();
-    await heldDestroy;
+    if (fails) await heldDestroy;
     await destroy(vm);
   };
   const controller = new RunController({
@@ -149,11 +145,11 @@ it.each([
   const interrupt = controller.interrupt().then(() => {
     interrupted = true;
   });
-  await startedDestroy;
-  release();
+  if (fails) await startedDestroy;
   await new Promise((resolve) => setImmediate(resolve));
   expect(interrupted).toBe(false);
-  expect(h.vm.liveVms()).toHaveLength(1);
+  expect(h.vm.liveVms()).toHaveLength(fails ? 1 : 0);
+  release();
   finishDestroy();
   await interrupt;
   expect(h.vm.liveVms()).toEqual([]);

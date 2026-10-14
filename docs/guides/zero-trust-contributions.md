@@ -561,7 +561,7 @@ Artifact paths are relative to the run's directory in the run store (`<state-dir
 | Approve | `approve --run <id> --checkpoint <plan\|patch\|verification> --digest <sha256>` | The digest must match the open checkpoint exactly. Approval does not continue the run; `resume` does. |
 | Reject | `reject --run <id> --checkpoint <point> --digest <sha256> --reason <text>` | **Rejecting cancels the run.** |
 | Pause | `pause --run <id> --reason <text>` | Returns as soon as the request is saved (`pause_requested: "<id>"`). The controller stops admitting work, destroys the VM and keeps the held source and conversation. Refused in a state with no compute (`nothing_to_pause`). A request that reaches a dormant run is applied at the next `resume`; until then `status` shows `pause_requested`. |
-| Interrupt | Ctrl-C / SIGINT, SIGTERM or SIGHUP | Waits for all process-owned cleanup: active compute is paused, VMs are destroyed and held credentials are revoked before exit. An already-paused or no-compute run keeps its state. Inspect `status`, then `resume` to continue the interrupted phase. Repeated signals do not shorten cleanup. SIGKILL cannot run this cleanup. |
+| Interrupt | Ctrl-C / SIGINT, SIGTERM or SIGHUP during author preparation, active `start`/`resume` or PR-action invocations | Joins their process-owned cleanup: active compute is paused, VMs are destroyed and held credentials are revoked before exit. An already-paused or no-compute run keeps its state. Inspect `status` before `resume`: a verification attempt already claimed without a record remains fail-closed rather than rerunning the candidate. Repeated signals do not shorten these tracked invocations' cleanup. SIGKILL cannot run graceful cleanup. |
 | Resume | `resume --run <id>` | Provisions a fresh VM and returns to the interrupted phase. An open checkpoint must be approved first. |
 | Cancel | `cancel --run <id> --reason <text>` | Allowed in any non-terminal state except `blocked_cleanup`. Destroys VMs and revokes credentials. In a waiting state (paused, awaiting you or a maintainer, submitted) the request is queued: run `resume` to apply it; until then `status` shows `cancel_requested`. A submitted pull request cannot be recalled; the cancelled status gives you a prepared close comment to post yourself. |
 | Edit | `edit --run <id> --patch <file.diff>` | Only while paused from `implementing` or `verifying`. A text Git diff (at most 10 MiB); binary patches, symlinks and unsafe paths are refused. Every accepted edit needs fresh review and verification, and the pull request says **"Includes contributor edits"**. Refused while paused from `shipping` (`edit_after_verification`). |
@@ -582,7 +582,13 @@ An interrupted active invocation reports `cleanup_failed` with its run ID when V
 credential or accounting cleanup remains uncertain. Check `status` and reconcile
 each outstanding obligation using the procedure below; App revocation alone cannot
 destroy a leftover VM. A successful compute-phase interruption leaves `paused_user`
-and can resume. A genuine cleanup failure keeps `blocked_cleanup` and fails closed.
+and normally can resume. Verification interrupted after its durable candidate claim
+retains that claim: resume may report `attempt_without_record` and move to `blocked`
+instead of rerunning verification (see the package README's verification attempt
+limitation). Successful resource cleanup does not discard verification evidence.
+A genuine cleanup failure keeps `blocked_cleanup` and fails closed. The signal
+barrier above does not cover `kill-all`; interrupting that separate cleanup command
+can leave durable obligations requiring another cleanup retry.
 
 ```sh
 node scripts/zt-run.mjs kill-all --root <state-dir>/runs --reason "<why>"
