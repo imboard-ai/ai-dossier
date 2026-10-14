@@ -1762,7 +1762,7 @@ export function createController(
       }
       if (failures.length) {
         markCleanupFailed();
-        throw new Error('cleanup_incomplete');
+        throw failures[0];
       }
     },
     retire: () => {

@@ -490,12 +490,7 @@ export class RunController {
       } catch (error) {
         failures.push(error);
       }
-      await this.attemptRecovery(
-        () => this.deps.recovery.reconcileVms(this.context(), () => this.cleanup()),
-        failures
-      );
-      // A wrapper cannot bypass actual listByRun/teardown reconciliation.
-      await this.attemptRecovery(() => this.cleanup(), failures);
+      await this.reconcileVms(failures);
       const beforeTracker = await this.reconcileTracker(failures);
       await this.attemptRecovery(
         () => this.deps.recovery.cleanupCredentials?.(this.context()) ?? Promise.resolve(),
@@ -785,6 +780,14 @@ export class RunController {
       this.unfundedCleanup.delete(vmId);
     }
   }
+  private async reconcileVms(failures: unknown[]): Promise<void> {
+    await this.attemptRecovery(
+      () => this.deps.recovery.reconcileVms(this.context(), () => this.cleanup()),
+      failures
+    );
+    // A wrapper cannot bypass actual listByRun/teardown reconciliation.
+    await this.attemptRecovery(() => this.cleanup(), failures);
+  }
   private async applyControl(): Promise<RunRecord> {
     await this.controlCleanup?.catch(() => {});
     const failures: unknown[] = [];
@@ -806,11 +809,7 @@ export class RunController {
     }
     // An early resume interrupt can precede normal adapter initialization. A
     // lazy empty inventory is not proof that retained guests are gone.
-    await this.attemptRecovery(
-      () => this.deps.recovery.reconcileVms(this.context(), () => this.cleanup()),
-      failures
-    );
-    await this.attemptRecovery(() => this.cleanup(), failures);
+    await this.reconcileVms(failures);
     await this.attemptRecovery(
       () => this.deps.recovery.cleanupCredentials?.(this.context()) ?? Promise.resolve(),
       failures

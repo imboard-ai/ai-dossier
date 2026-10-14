@@ -277,6 +277,19 @@ function proxyFixture(h) {
     { mode: 0o600 }
   );
 }
+function withQemuAccounting(config, approval) {
+  return {
+    ...config,
+    authorApproval: approval,
+    modelProfile: {
+      ...config.modelProfile,
+      rates: [
+        ...config.modelProfile.rates,
+        { ...config.modelProfile.rates[0], resource: 'local-qemu', unit: 'millisecond' },
+      ],
+    },
+  };
+}
 
 test('second-process pause/cancel are durable under the active guard and observational status reports pending and damaged requests', async () => {
   const h = rig();
@@ -1121,17 +1134,7 @@ test.each(
 test('production wiring keeps the VM journal alive until release-time interrupt destruction joins', async () => {
   const h = rig();
   const approval = await prepareAndDisposeAuthor(h);
-  const config = {
-    ...h.config,
-    authorApproval: approval,
-    modelProfile: {
-      ...h.config.modelProfile,
-      rates: [
-        ...h.config.modelProfile.rates,
-        { ...h.config.modelProfile.rates[0], resource: 'local-qemu', unit: 'millisecond' },
-      ],
-    },
-  };
+  const config = withQemuAccounting(h.config, approval);
   proxyFixture(h);
   let live = false,
     journal,
@@ -1215,17 +1218,7 @@ test('early resume interrupt initializes the retained VM inventory before declar
   const h = rig();
   const approval = await prepareAndDisposeAuthor(h);
   proxyFixture(h);
-  const config = {
-    ...h.config,
-    authorApproval: approval,
-    modelProfile: {
-      ...h.config.modelProfile,
-      rates: [
-        ...h.config.modelProfile.rates,
-        { ...h.config.modelProfile.rates[0], resource: 'local-qemu', unit: 'millisecond' },
-      ],
-    },
-  };
+  const config = withQemuAccounting(h.config, approval);
   const seeded = h.seed(config);
   const id = seeded.runId;
   const dir = path.join(seeded.storeDirectory('control'), 'controller');
@@ -1398,8 +1391,8 @@ test('production refresh cleanup failure rejects interruption and records a clea
   await ready;
   if (initialError) throw initialError;
   clock += 2000;
-  await assert.rejects(controller.interrupt(), /cleanup_incomplete/);
-  assert.match((await running).message, /cleanup_incomplete/);
+  await assert.rejects(controller.interrupt(), /revoke_failed/);
+  assert.match((await running).message, /revoke_failed/);
   assert.equal(refreshes, 2); // Independent control cleanup and final release both join.
   assert.ok(deletes > 0);
   assert.ok(
