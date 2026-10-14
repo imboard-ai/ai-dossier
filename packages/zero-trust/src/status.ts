@@ -1,5 +1,8 @@
+import Ajv from 'ajv';
 import { validateAuthorApproval } from './controller/config';
-import { assertNoSecrets } from './redaction';
+import type { PolicyAssessment } from './policy/classify';
+import { canonicalJson } from './receipt/schema';
+import { assertNoSecrets, assertSecretFree } from './redaction';
 import {
   isNonemptyString,
   isReasonCode,
@@ -16,6 +19,12 @@ export interface MoneyEstimate {
 
 /** §5.1 status facts. Money is estimated, time is active milliseconds (not waits). */
 export interface StatusRecord {
+  /** Observed policy diagnostics, never admission or publication authority. */
+  readonly policyGate?: {
+    readonly baseSha: string;
+    readonly reasons: readonly string[];
+    readonly assessment: PolicyAssessment;
+  };
   readonly runId: string;
   readonly phase: string;
   readonly state: RunState;
@@ -43,6 +52,102 @@ export class InvalidStatusError extends Error {
     this.name = 'InvalidStatusError';
   }
 }
+
+const text = { type: 'string' };
+const object = (properties: Record<string, unknown>, required = Object.keys(properties)) => ({
+  type: 'object',
+  additionalProperties: false,
+  properties,
+  required,
+});
+const citation = object({ sourceId: text, line: { type: 'integer', minimum: 1 }, quote: text });
+const decision = object({
+  status: { enum: ['accepted', 'escalated'] },
+  reason: {
+    enum: [
+      'accepted',
+      'budget',
+      'ledger',
+      'invalid_pass',
+      'provider',
+      'confidence',
+      'disagreement',
+      'floor',
+      'secret',
+      'cache',
+      'cache_write',
+      'configuration',
+      'aborted',
+      'input',
+    ],
+  },
+  value: { type: ['string', 'boolean'] },
+  confidence: text,
+  provider: text,
+  model: text,
+  questionVersion: text,
+  questionDigest: text,
+  inputDigest: text,
+  citations: { type: 'array', items: citation },
+  citationDigest: text,
+});
+const validatePolicyGate = new Ajv({ strict: false }).compile(
+  object({
+    baseSha: { type: 'string', pattern: '^[a-f0-9]{40}$' },
+    reasons: { type: 'array', items: { type: 'string', pattern: '^[a-z_]{1,64}$' } },
+    assessment: object(
+      {
+        ai: {
+          enum: [
+            'banned',
+            'requires_approval',
+            'disclosure_required',
+            'welcomed',
+            'silent',
+            'unclear',
+          ],
+        },
+        assignment: { enum: ['required', 'not_required', 'unclear'] },
+        directPr: { enum: ['welcomed', 'discussion_first', 'unclear'] },
+        draftRequired: { type: 'boolean' },
+        receiptBlockAllowed: { type: 'boolean' },
+        baselineFailuresPermitted: { type: 'boolean' },
+        citations: {
+          type: 'array',
+          items: object({
+            path: text,
+            line: { type: 'integer', minimum: 1 },
+            ruleId: text,
+            excerpt: text,
+          }),
+        },
+        reason: { enum: ['budget', 'ledger'] },
+        decisions: object(
+          Object.fromEntries(
+            [
+              'ai',
+              'assignment',
+              'directPr',
+              'draftRequired',
+              'receiptBlockAllowed',
+              'baselineFailuresPermitted',
+            ].map((dimension) => [dimension, decision])
+          ),
+          []
+        ),
+      },
+      [
+        'ai',
+        'assignment',
+        'directPr',
+        'draftRequired',
+        'receiptBlockAllowed',
+        'baselineFailuresPermitted',
+        'citations',
+      ]
+    ),
+  })
+);
 
 function isAmount(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0;
@@ -74,6 +179,7 @@ function safeStatus(input: StatusRecord): StatusRecord {
     reasonCode: input.reasonCode,
     nextPermittedAction: input.nextPermittedAction,
     authorApproval: input.authorApproval,
+    policyGate: input.policyGate,
   };
   // Inspect actual strings (JSON escapes whitespace), never invoke input toJSON.
   // Unknown properties are stripped rather than visited or serialized.
@@ -116,6 +222,15 @@ function safeStatus(input: StatusRecord): StatusRecord {
     }
   }
   if (estimatedSpend.currency !== budgetRemaining.currency) throw new InvalidStatusError();
+  let policyGate: StatusRecord['policyGate'];
+  if (value.policyGate !== undefined) {
+    // Canonical descriptor snapshot rejects getters/toJSON and bounds allocation.
+    // Scan the detached primitive strings before JSON quoting can hide whitespace.
+    const held = JSON.parse(canonicalJson(value.policyGate, 1024 * 1024));
+    assertSecretFree(held);
+    if (!validatePolicyGate(held)) throw new InvalidStatusError();
+    policyGate = held as StatusRecord['policyGate'];
+  }
   return {
     runId: value.runId,
     phase: value.phase,
@@ -129,6 +244,7 @@ function safeStatus(input: StatusRecord): StatusRecord {
     reasonCode: value.reasonCode,
     nextPermittedAction: value.nextPermittedAction,
     ...(authorApproval === undefined ? {} : { authorApproval }),
+    ...(policyGate === undefined ? {} : { policyGate }),
   };
 }
 

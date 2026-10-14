@@ -171,7 +171,7 @@ export function gateHandoffNotice(reasons: readonly string[]): Omit<StopNotice, 
   return {
     state: 'gating',
     reason,
-    nextPermittedAction: `Handed off at the gate (${reason}). Nothing was written and no model work started. Check the upstream issue and contribution policy, then resume explicitly or contribute manually.`,
+    nextPermittedAction: `Handed off at the gate (${reason}). No implementation VM or code work started and nothing was published. Policy decision calls may already have run and been charged; inspect the retained policyGate evidence and estimatedSpend in status. Check the upstream issue and contribution policy, then resume explicitly or contribute manually.`,
   };
 }
 

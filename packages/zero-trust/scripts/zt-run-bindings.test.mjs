@@ -397,6 +397,142 @@ test('status explains a revision paused because its feedback was not admitted', 
   assert.match(status.nextPermittedAction, /feedback was judged out of scope or ambiguous/);
 });
 
+test('policy gate status exposes retained decisions and citations read-only, with exact stop binding', async () => {
+  const h = rig();
+  const store = h.seed();
+  const journal = new Journal(path.join(store.storeDirectory('control'), 'steps'));
+  const artifacts = new StepArtifacts(journal, store.runId);
+  const evidence = {
+    historyLength: store.run.history.length,
+    sessionId: store.budgetSessionId(1),
+    baseSha: 'a'.repeat(40),
+    outcome: 'hand_off',
+    reasons: ['ownership_unclear'],
+    assessment: {
+      ai: 'welcomed',
+      assignment: 'unclear',
+      directPr: 'unclear',
+      draftRequired: true,
+      receiptBlockAllowed: false,
+      baselineFailuresPermitted: false,
+      citations: [{ path: 'CONTRIBUTING.md', line: 3, ruleId: 'ai', excerpt: 'AI is welcome.' }],
+      decisions: {
+        assignment: {
+          status: 'escalated',
+          reason: 'invalid_pass',
+          value: 'unclear',
+          confidence: '0',
+          provider: 'llm',
+          model: 'fixture',
+          questionVersion: '1',
+          questionDigest: 'b'.repeat(64),
+          inputDigest: 'c'.repeat(64),
+          citations: [],
+          citationDigest: 'd'.repeat(64),
+        },
+      },
+    },
+  };
+  const construct = vi.fn(() => assert.fail('status cannot construct execution'));
+  const oauth = vi.fn(() => assert.fail('status cannot authorize'));
+  const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}'));
+  const commands = await createCommands({
+    root: h.root,
+    createController: construct,
+    onAuthorizationUrl: oauth,
+  });
+  assert.equal(commands.status(store.runId).policyGate, undefined); // legacy absence
+  artifacts.put('gate_assessment', evidence);
+  const eventsBefore = fs.readFileSync(journal.filePath);
+  const ledgerBefore = fs.readFileSync(path.join(store.storeDirectory('budget'), 'ledger.json'));
+  const status = commands.status(store.runId);
+  assert.deepEqual(status.policyGate, {
+    baseSha: evidence.baseSha,
+    reasons: evidence.reasons,
+    assessment: evidence.assessment,
+  });
+  assert.deepEqual(JSON.parse(renderJson(status)).policyGate, status.policyGate);
+  assert.match(renderHuman(status), /policyGate:.*fixture.*invalid_pass/);
+  assert.match(renderHuman(status), /CONTRIBUTING.md/);
+  assert.deepEqual(fs.readFileSync(journal.filePath), eventsBefore);
+  assert.deepEqual(
+    fs.readFileSync(path.join(store.storeDirectory('budget'), 'ledger.json')),
+    ledgerBefore
+  );
+  assert.equal(fetch.mock.calls.length + construct.mock.calls.length + oauth.mock.calls.length, 0);
+  for (const assessment of [
+    { ...evidence.assessment, ai: 'invented-permission' },
+    { ...evidence.assessment, unknown: 'not-a-status-fact' },
+    {
+      ...evidence.assessment,
+      decisions: { assignment: { ...evidence.assessment.decisions.assignment, status: 'passed' } },
+    },
+  ]) {
+    artifacts.put('gate_assessment', { ...evidence, assessment });
+    assert.throws(() => commands.status(store.runId), { name: 'InvalidStatusError' });
+  }
+  assert.throws(
+    () =>
+      renderJson({
+        ...status,
+        policyGate: {
+          ...status.policyGate,
+          assessment: {
+            ...evidence.assessment,
+            decisions: {
+              assignment: {
+                ...evidence.assessment.decisions.assignment,
+                model: 'Bearer\tfixture-secret',
+              },
+            },
+          },
+        },
+      }),
+    { name: 'SecretRedactionError' }
+  );
+  let getters = 0;
+  assert.throws(() =>
+    renderJson({
+      ...status,
+      policyGate: {
+        ...status.policyGate,
+        get assessment() {
+          getters++;
+          return evidence.assessment;
+        },
+      },
+    })
+  );
+  assert.equal(getters, 0);
+  for (const changed of [
+    { historyLength: evidence.historyLength + 1 },
+    { sessionId: `${store.runId}-s2` },
+    { outcome: 'proceed' },
+  ]) {
+    artifacts.put('gate_assessment', { ...evidence, ...changed });
+    assert.equal(commands.status(store.runId).policyGate, undefined);
+  }
+  artifacts.put('gate_assessment', evidence);
+  store.persistRun(transitionRun(store.run, ReasonCode.GatePassed, new Date().toISOString()));
+  assert.equal(commands.status(store.runId).policyGate, undefined);
+  journal.close();
+  store.close();
+});
+
+test('policy gate status refuses corrupted digest-named decision evidence', async () => {
+  const h = rig();
+  const store = h.seed();
+  const journal = new Journal(path.join(store.storeDirectory('control'), 'steps'));
+  new StepArtifacts(journal, store.runId).put('gate_assessment', { diagnostic: true });
+  const digest = journal.read().at(-1).digest;
+  const file = path.join(path.dirname(journal.filePath), `${digest}.json`);
+  fs.writeFileSync(file, '{}');
+  journal.close();
+  store.close();
+  const commands = await createCommands({ root: h.root, createController });
+  assert.throws(() => commands.status(store.runId), /invalid_step_artifact/);
+});
+
 test('start overrides file-supplied approval only with fresh OAuth consent; status opens the readOnly store API', async () => {
   const h = rig();
   const calls = [];

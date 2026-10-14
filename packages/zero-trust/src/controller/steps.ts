@@ -473,6 +473,9 @@ export function createSteps(
   const steps: PhaseSteps = {
     async gate(c) {
       clearStopNotice(artifacts(c));
+      // Diagnostic evidence is separate from the admitted GateRecord. Retire the
+      // selection before reads so an early refusal cannot describe an older attempt.
+      artifacts(c).put('gate_assessment', null);
       const handOff = (...reasons: string[]) => {
         recordStopNotice(artifacts(c), c.run, gateHandoffNotice(reasons), false);
         return { kind: 'hand_off' as const };
@@ -505,6 +508,14 @@ export function createSteps(
               signal: c.signal,
             });
       const decision = decideGate(p, e, c.run.contributor);
+      artifacts(c).put('gate_assessment', {
+        historyLength: c.run.history.length,
+        sessionId: c.sessionId,
+        baseSha,
+        assessment: p,
+        outcome: decision.kind,
+        reasons: 'reasons' in decision ? decision.reasons : [],
+      });
       if (
         decision.kind === 'terminate' ||
         decision.kind === 'ineligible' ||
