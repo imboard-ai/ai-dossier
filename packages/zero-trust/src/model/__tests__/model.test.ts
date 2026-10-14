@@ -4,6 +4,8 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BudgetLedger, observeModelBudget } from '../../budget';
 import type { BudgetRate } from '../../budget-types';
+import { createLlmDecisionProvider } from '../../decision/providers/llm';
+import type { TypedQuestion } from '../../decision/types';
 import {
   MAX_TOOL_ARGUMENT_BYTES,
   ModelError,
@@ -596,6 +598,159 @@ describe('OpenAI-compatible untrusted responses and transport', () => {
 });
 
 describe('real budget ledger metering', () => {
+  it.each([
+    'gpt-5-mini',
+    'gpt-5.1',
+    'o1',
+    'o3-mini',
+    'o4-mini',
+  ])('reasoning model %s caps total completion and omits likelihoods', async (model) => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response(recorded()));
+    const reasoning = new OpenAICompatibleAdapter({
+      model,
+      endpoint: 'https://api.openai.com/v1',
+      apiKeyEnv: 'MODEL_TEST_KEY',
+      fetch: fetcher,
+    });
+    const provider = createLlmDecisionProvider({ adapter: reasoning });
+    const question: TypedQuestion = {
+      id: 'profile',
+      version: '1',
+      kind: 'boolean',
+      prompt: 'Allowed?',
+      escalateValue: 'unclear',
+      acceptThreshold: { true: 0.9, false: 0.9 },
+    };
+    const decisionRequest = provider.request(question, [], 0);
+    expect(decisionRequest.logprobs).toBeUndefined();
+    await reasoning.complete({ ...decisionRequest, logprobs: true });
+    const body = JSON.parse(fetcher.mock.calls[0][1]?.body as string);
+    expect(body.max_completion_tokens).toBe(decisionRequest.maxOutputTokens);
+    expect(body).not.toHaveProperty('max_tokens');
+    expect(body).not.toHaveProperty('logprobs');
+  });
+  it('custom profile controls exact wire bound and counts reasoning usage once', async () => {
+    const store = ledger();
+    const fetcher = vi.fn<typeof fetch>().mockImplementation(async (_url, init) => {
+      const body = init?.body as string;
+      expect(JSON.parse(body)).toMatchObject({ max_completion_tokens: 100 });
+      expect(JSON.parse(body)).not.toHaveProperty('logprobs');
+      expect(store.snapshot().reservations[0]?.estimate.tokens).toBe(Buffer.byteLength(body) + 100);
+      return response(
+        recorded({ content: 'done' }, 'stop', {
+          prompt_tokens: 10,
+          completion_tokens: 90,
+          completion_tokens_details: { reasoning_tokens: 80 },
+        })
+      );
+    });
+    const model = new OpenAICompatibleAdapter({
+      model: 'model-a',
+      endpoint: 'https://provider.example/v1',
+      apiKeyEnv: 'MODEL_TEST_KEY',
+      fetch: fetcher,
+      maxTokensParameter: 'max_completion_tokens',
+      logprobs: false,
+    });
+    await meteredComplete(model, store, 's1', rates, { ...request, logprobs: true });
+    expect(store.snapshot().reservations[0]).toMatchObject({
+      status: 'settled',
+      observed: { tokens: 100, money: { minor: 200 } },
+    });
+    expect(model.cacheIdentity).not.toBe(adapter(fetcher).cacheIdentity);
+  });
+  it.each([
+    [400, 'invalid_request_error'],
+    [401, 'authentication_error'],
+    [403, 'permission_error'],
+    [404, 'invalid_request_error'],
+    [422, 'invalid_request_error'],
+  ])('confirmed pre-generation %s releases durably without persisting error text', async (status, type) => {
+    const store = ledger();
+    const fetcher = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            error: { type, message: KEY, param: 'max_tokens', code: 'unsupported_parameter' },
+          }),
+          { status: status as number }
+        )
+      )
+      .mockResolvedValueOnce(response(recorded()));
+    const model = new OpenAICompatibleAdapter({
+      model: 'model-a',
+      endpoint: 'https://api.openai.com/v1',
+      apiKeyEnv: 'MODEL_TEST_KEY',
+      fetch: fetcher,
+    });
+    await expect(meteredComplete(model, store, 's1', rates, request)).rejects.toMatchObject({
+      code: 'model_http',
+      status,
+    });
+    expect(store.snapshot().reservations[0]?.status).toBe('released');
+    expect(JSON.stringify(store.snapshot())).not.toContain(KEY);
+    const reopened = new BudgetLedger(path.join(directory, 'budget.json'), 'contribution');
+    await meteredComplete(model, reopened, 's1', rates, request);
+    expect(reopened.snapshot().reservations.map((r) => r.status)).toEqual(['released', 'settled']);
+  });
+  it.each([
+    'compatible-endpoint',
+    'malformed',
+    'usage',
+    'choices',
+    'unknown-type',
+    '429',
+    '500',
+    'retry',
+  ])('unknown billing %s retains a hold', async (scenario) => {
+    const store = ledger();
+    const raw: Record<string, unknown> = {
+      error: { type: scenario === 'unknown-type' ? 'server_error' : 'invalid_request_error' },
+    };
+    if (scenario === 'usage') raw.usage = { prompt_tokens: 10, completion_tokens: 1 };
+    if (scenario === 'choices') raw.choices = [];
+    const status = scenario === '429' ? 429 : scenario === '500' ? 500 : 400;
+    const fetcher = vi.fn<typeof fetch>();
+    if (scenario === 'retry') fetcher.mockResolvedValueOnce(new Response('', { status: 500 }));
+    fetcher.mockResolvedValue(
+      new Response(scenario === 'malformed' ? 'not json' : JSON.stringify(raw), { status })
+    );
+    const model = new OpenAICompatibleAdapter({
+      model: 'model-a',
+      endpoint:
+        scenario === 'compatible-endpoint'
+          ? 'https://provider.example/v1'
+          : 'https://api.openai.com/v1',
+      apiKeyEnv: 'MODEL_TEST_KEY',
+      fetch: fetcher,
+    });
+    await expect(
+      meteredComplete(model, store, 's1', rates, {
+        ...request,
+        attempts: scenario === 'retry' ? 2 : 1,
+      })
+    ).rejects.toMatchObject({ code: 'model_http' });
+    expect(store.snapshot().reservations[0]?.status).toBe('reserved');
+  });
+  it('a fabricated HTTP rejection cannot release an unknown charge', async () => {
+    const store = ledger();
+    await expect(
+      meteredComplete(
+        {
+          id: 'model-a',
+          complete: async () => {
+            throw new ModelError('model_http', 400);
+          },
+        },
+        store,
+        's1',
+        rates,
+        request
+      )
+    ).rejects.toMatchObject({ status: 400 });
+    expect(store.snapshot().reservations[0]?.status).toBe('reserved');
+  });
   it('refuses already-aborted calls without creating unknown reservations', async () => {
     const store = ledger();
     const model = new ScriptedModel('model-a', [textResult]);

@@ -2769,7 +2769,13 @@ nonempty environment key at startup and re-reads it at call time. HTTPS is requi
 except HTTP on `localhost`, `127.0.0.1` or `[::1]`. Query/fragment delimiters (even
 empty ones) and credentials in endpoint URLs are refused; redirects
 are disabled. It POSTs to the API base plus `/chat/completions`, with `tools`,
-`max_tokens` and `stream: false`. The API key goes only in Authorization.
+the profile's token cap and `stream: false`. Optional `maxTokensParameter`
+(`max_tokens` or `max_completion_tokens`) and `logprobs` (boolean) are supported
+both by the adapter and each `ModelPhase`. Defaults for gpt-5 and o1/o3/o4
+families are `max_completion_tokens` and no logprobs; other models retain legacy
+defaults. A disabled profile omits likelihoods even if a caller requests them.
+The exact resolved profile is shared by wire-byte estimation and transport,
+and participates in decision cache identity. The API key goes only in Authorization.
 `apiKeyEnv` must be a shell environment identifier; model/endpoint strings pass
 secret-pattern guards. Reserved GitHub-authority variables (`ZTFC_*`, `GIT_*`,
 `GH_TOKEN`, `GITHUB_TOKEN`, `GITHUB_CLIENT_SECRET`) and GitHub-token key values
@@ -2793,11 +2799,20 @@ provider price for conservative admission. Split input/output pricing is not sup
 Reservation refusal throws `BudgetExhaustedError` with a limit/ceiling
 code and calls no provider. Other ledger errors retain their typed semantics.
 Observed usage is priced with pinned rates and settled; missing/invalid usage,
-errors and timeouts use `settle(id, null)`, preserving the full hold. Accounting
+errors and timeouts use `settle(id, null)`, preserving the full hold, except a
+recognized first-attempt pre-generation rejection from `https://api.openai.com/v1`:
+400/404/422 `invalid_request_error`, 401 `authentication_error`, or 403
+`permission_error`, with neither usage nor choices. Adapter-origin evidence
+releases that reservation durably using only status/type/attempt, never error
+message text. Compatible endpoints and malformed, unknown, billed or retried
+errors remain unknown; HTTP status by itself cannot release a hold. Accounting
 keeps `max(estimate, observed)` as the existing ledger specifies; it never frees
 money, tokens or time merely because observed usage was lower. Per-call token
 commitment is `(wire bytes + maxOutputTokens) × attempts`; time commitment is
 `timeoutMs × attempts`. Session limits must cover these conservative quantities.
+`maxOutputTokens` bounds the total completion, including reasoning AND visible
+tokens. OpenAI `completion_tokens` already includes reasoning; its details are
+not added a second time. Providers must honor the configured combined cap.
 An already-aborted caller is refused before reservation. The caller decides pause/failure
 and explicitly reconciles unknown reservations on resume.
 

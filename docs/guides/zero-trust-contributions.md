@@ -322,6 +322,13 @@ revision feedback use `implementing` when it is absent). Each phase has:
 | `model` | The model ID sent to the endpoint. It must also have a rate in `rates`. |
 | `endpoint` | Base URL; `/chat/completions` is appended. Must be `https://`, or plain `http://` only for a loopback address (a local server). No credentials, query or fragment in the URL. |
 | `apiKeyEnv` | Name of the environment variable that holds the key. |
+| `maxTokensParameter` | Optional `"max_tokens"` or `"max_completion_tokens"`. Defaults to `max_completion_tokens` for gpt-5 and o1/o3/o4 families, otherwise `max_tokens`. The completion allowance includes reasoning and visible output. |
+| `logprobs` | Optional boolean. Defaults to false for those reasoning families, otherwise true. False omits likelihood requests in policy/feedback decisions and execution. Profile overrides also work for compatible providers and custom model aliases. |
+
+Recognized first-attempt pre-generation OpenAI errors on `https://api.openai.com/v1`
+(400/401/403/404/422 with the matching typed error and no usage/choices) release the
+reservation with sanitized no-charge evidence. Status alone is insufficient: malformed,
+unknown-provider, potentially billed, retried, timeout and transport errors retain their holds.
 
 `rates` is the price list the budget uses. Every model named in `phases` needs one rate, even a
 free one; a missing model rate refuses the config (`missing_rate`). The local VM also needs a

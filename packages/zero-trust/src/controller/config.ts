@@ -39,6 +39,8 @@ export interface ModelPhase {
   readonly model: string;
   readonly endpoint: string;
   readonly apiKeyEnv: string;
+  readonly maxTokensParameter?: 'max_tokens' | 'max_completion_tokens';
+  readonly logprobs?: boolean;
 }
 export interface RunConfig {
   readonly issueUrl: string;
@@ -147,7 +149,18 @@ function env(raw: unknown): string {
   return value;
 }
 function phase(raw: unknown): ModelPhase {
-  const p = object(raw, ['adapter', 'model', 'endpoint', 'apiKeyEnv'], 'invalid_model_profile');
+  const p = object(
+    raw,
+    ['adapter', 'model', 'endpoint', 'apiKeyEnv', 'maxTokensParameter', 'logprobs'],
+    'invalid_model_profile'
+  );
+  if (
+    (p.maxTokensParameter !== undefined &&
+      p.maxTokensParameter !== 'max_tokens' &&
+      p.maxTokensParameter !== 'max_completion_tokens') ||
+    (p.logprobs !== undefined && typeof p.logprobs !== 'boolean')
+  )
+    fail('invalid_model_profile');
   const endpoint = text(p.endpoint, 'invalid_model_profile');
   try {
     const url = new URL(endpoint);
@@ -170,6 +183,8 @@ function phase(raw: unknown): ModelPhase {
     model: text(p.model, 'invalid_model_profile'),
     endpoint,
     apiKeyEnv: env(p.apiKeyEnv),
+    ...(p.maxTokensParameter === undefined ? {} : { maxTokensParameter: p.maxTokensParameter }),
+    ...(p.logprobs === undefined ? {} : { logprobs: p.logprobs }),
   };
 }
 function signer(file: string): void {

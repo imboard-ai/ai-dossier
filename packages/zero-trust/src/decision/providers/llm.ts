@@ -1,5 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { ModelAdapter, ModelRequest, ModelResult } from '../../model/adapter';
+import {
+  type ModelAdapter,
+  type ModelRequest,
+  type ModelResult,
+  modelRequestProfile,
+} from '../../model/adapter';
 import {
   type CitationMode,
   type DecisionInput,
@@ -24,7 +29,7 @@ export function createLlmDecisionProvider(options: LlmDecisionOptions): Decision
     adapter,
     maxOutputTokens = 1024,
     timeoutMs = 30_000,
-    logprobs = true,
+    logprobs = (adapter.requestProfile ?? modelRequestProfile(adapter.id)).logprobs,
     id = 'llm',
   } = options;
   return Object.freeze({

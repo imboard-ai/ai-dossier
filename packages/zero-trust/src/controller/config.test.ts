@@ -253,6 +253,26 @@ describe('validateRunConfig', () => {
     expect(path.isAbsolute(config.executionProfile.profileDir)).toBe(true);
     expect(config.executionProfile.stateDir).toBe(path.resolve(raw.executionProfile.stateDir));
   });
+  it('preserves optional model wire profile and rejects invalid parameter names or likelihood flags', () => {
+    const { raw } = configFixture();
+    Object.assign(raw.modelProfile.phases.planning, {
+      maxTokensParameter: 'max_completion_tokens',
+      logprobs: false,
+    });
+    expect(validateRunConfig(raw).modelProfile.phases.planning).toMatchObject({
+      maxTokensParameter: 'max_completion_tokens',
+      logprobs: false,
+    });
+    for (const invalid of [
+      { maxTokensParameter: 'max_output_tokens' },
+      { logprobs: 'false' },
+      { logprobs: null },
+    ]) {
+      const copy = structuredClone(raw);
+      Object.assign(copy.modelProfile.phases.planning, invalid);
+      expect(() => validateRunConfig(copy)).toThrow(new RunConfigError('invalid_model_profile'));
+    }
+  });
   it('scans array metadata and cloneable container payloads, including cycles', () => {
     const { raw } = configFixture();
     Object.assign(raw.modelProfile.rates, { extra: 'ghp_secret' });
