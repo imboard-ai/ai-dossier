@@ -9,11 +9,16 @@ import {
   restoreRun,
   sameRunRecord,
   sessionStartedAt,
+  TERMINAL_STATES,
 } from '../state';
 import { InvalidStatusError, renderJson, type StatusRecord } from '../status';
 import type { AuthorApproval } from './config';
 import { contributionIdOf } from './ids';
 import { lifecycleTimes } from './lifecycle-times';
+
+/** Run-token revocation does not prove the contributor's App grant was deleted. */
+const MANUAL_APP_REVOCATION =
+  'Run-token cleanup does not confirm removal of the GitHub App authorization. To revoke it fully, open GitHub Settings → Applications → Authorized GitHub Apps and revoke this run’s App if it is still listed. Confirm the App no longer appears there.';
 export const DEFAULT_STATE_ACTIONS: Readonly<Record<RunState, string>> = Object.freeze({
   gating: 'Inspect eligibility and contribution policies.',
   awaiting_maintainer: 'Resume explicitly to check the maintainer invitation.',
@@ -59,6 +64,29 @@ export interface StatusParts {
     readonly appSlug: string;
     readonly forkName?: string;
   };
+}
+/** Reapply after a caller selects a more specific action; never duplicate the suffix. */
+export function withManualAppRevocation(status: StatusRecord): StatusRecord {
+  renderJson(status);
+  if (
+    status.state === 'blocked_cleanup' &&
+    !status.nextPermittedAction.includes(DEFAULT_STATE_ACTIONS.blocked_cleanup)
+  )
+    status = {
+      ...status,
+      nextPermittedAction: `${DEFAULT_STATE_ACTIONS.blocked_cleanup} ${status.nextPermittedAction}`,
+    };
+  if (
+    (!TERMINAL_STATES.includes(status.state) && status.state !== 'blocked_cleanup') ||
+    status.nextPermittedAction.endsWith(MANUAL_APP_REVOCATION)
+  )
+    return status;
+  const result = {
+    ...status,
+    nextPermittedAction: `${status.nextPermittedAction} ${MANUAL_APP_REVOCATION}`,
+  };
+  renderJson(result);
+  return result;
 }
 /** Pure assembly, no reads/polling or external writes. Monetary amounts are minor units. */
 export function assembleStatus(parts: StatusParts): StatusRecord {
@@ -144,6 +172,5 @@ export function assembleStatus(parts: StatusParts): StatusRecord {
   )
     status = { ...status, nextPermittedAction: 'authorize' };
   // Validate every emitted fact through the same whitelist used by both renderers.
-  renderJson(status);
-  return status;
+  return withManualAppRevocation(status);
 }

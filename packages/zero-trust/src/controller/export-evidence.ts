@@ -1,0 +1,114 @@
+/** Controller-owned export sources. Publish before completion/authorization, under
+ * the run's lifetime guard; no worker path or credential store enters this boundary. */
+import path from 'node:path';
+import { replacePrivate } from '../durable-fs';
+import { prDisclosure } from '../github/pr-body';
+import type { SignedReceipt } from '../receipt/issue';
+import { canonicalJson } from '../receipt/schema';
+import { assertSecretFree, SecretRedactionError } from '../redaction';
+import { jsonRecord, optionalBytes, RECORD_BYTES } from '../retention/files';
+import { offlineReceipt } from '../retention/offline-receipt';
+import { parsePortfolio } from '../retention/portfolio';
+import { parseVerification } from '../retention/verification';
+import type { CommandRecord } from './evidence-runner';
+import type { RunStore } from './run-store';
+
+const MAX_BYTES = RECORD_BYTES;
+export type ExportEvidenceErrorCode =
+  | 'invalid_export_evidence'
+  | 'export_evidence_limit'
+  | 'export_evidence_unavailable';
+/** The pusher preserves error names in its safe deferred-authorization diagnostic.
+ * Encode only a closed controller code, never a filesystem/provider message. */
+export class ExportEvidenceError extends Error {
+  constructor(readonly code: ExportEvidenceErrorCode) {
+    super(code);
+    this.name = `ExportEvidenceError_${code}`;
+  }
+}
+function validate<T>(work: () => T): T {
+  try {
+    return work();
+  } catch (error) {
+    if (error instanceof SecretRedactionError || error instanceof ExportEvidenceError) throw error;
+    throw new ExportEvidenceError('invalid_export_evidence');
+  }
+}
+function existing(file: string): unknown | undefined {
+  try {
+    const bytes = optionalBytes(path.dirname(file), path.basename(file), MAX_BYTES);
+    return bytes === null ? undefined : jsonRecord(bytes, MAX_BYTES);
+  } catch {
+    throw new ExportEvidenceError('invalid_export_evidence');
+  }
+}
+function publish(file: string, value: unknown): void {
+  assertSecretFree(value);
+  let bytes: Buffer;
+  try {
+    bytes = Buffer.from(`${canonicalJson(value, MAX_BYTES - 1)}\n`);
+  } catch {
+    throw new ExportEvidenceError('export_evidence_limit');
+  }
+  try {
+    replacePrivate(file, bytes);
+  } catch {
+    throw new ExportEvidenceError('export_evidence_unavailable');
+  }
+}
+
+export function retainReceipt(store: RunStore, receipt: SignedReceipt): void {
+  store.withPinnedDirectory((root) => {
+    const file = path.join(root, 'receipt-evidence.json');
+    const previous = existing(file);
+    if (previous !== undefined && !Array.isArray(previous))
+      throw new ExportEvidenceError('invalid_export_evidence');
+    const receipts = (previous ?? []) as unknown[];
+    const checked = validate(() =>
+      [...receipts, receipt].map((r) => offlineReceipt(r, store.run, store.contributionId))
+    );
+    if (checked.some((r) => r.receipt.upstreamRepositoryId !== store.upstreamRepositoryId))
+      throw new ExportEvidenceError('invalid_export_evidence');
+    const unique = [...new Map(checked.map((r) => [r.digest, r])).values()];
+    // Export permits 128 verification entries, including the independent source.
+    if (unique.length > 127) throw new ExportEvidenceError('export_evidence_limit');
+    publish(file, unique);
+  });
+}
+
+export function retainVerification(
+  store: RunStore,
+  candidateSha: string,
+  records: readonly CommandRecord[]
+): void {
+  store.withPinnedDirectory((root) => {
+    const file = path.join(root, 'verification-evidence.json');
+    const previous = existing(file);
+    if (previous !== undefined) validate(() => parseVerification(previous, store.runId));
+    // Preserve the actual supervised counts and statuses, including skipped/null.
+    const value = JSON.parse(
+      canonicalJson({ runId: store.runId, candidateSha, records }, MAX_BYTES)
+    );
+    validate(() => parseVerification(value, store.runId));
+    publish(file, value);
+  });
+}
+
+export function retainPortfolio(
+  store: RunStore,
+  candidateSha: string,
+  policyCitations: readonly { path: string; line: number; ruleId: string; excerpt: string }[]
+): void {
+  store.withPinnedDirectory((root) => {
+    const file = path.join(root, 'portfolio-evidence.json');
+    const previous = existing(file);
+    if (previous !== undefined) validate(() => parsePortfolio(previous, store.runId));
+    const value = {
+      runId: store.runId,
+      disclosure: prDisclosure(candidateSha),
+      policyCitations,
+    };
+    validate(() => parsePortfolio(value, store.runId));
+    publish(file, value);
+  });
+}

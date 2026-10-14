@@ -21,9 +21,10 @@ import {
 import { createManifest, type SourceManifest } from '../canonical/export';
 import { assertRepairAllowed, RepairCapExceededError } from '../ecosystem/classify';
 import { Journal } from '../journal';
+import { parseVerification } from '../retention/verification';
 import { ReasonCode as R, transitionRun } from '../state';
 import { VmCleanupError } from '../vm/adapter';
-import { EvidencePlanError, ProvisioningFailedError } from './evidence-runner';
+import { type CommandRecord, EvidencePlanError, ProvisioningFailedError } from './evidence-runner';
 import {
   beginVerification,
   loadVerification,
@@ -60,7 +61,14 @@ describe('verifyCandidate: verdicts and the repair cap (AC1, scenario 7)', () =>
   it('a passing candidate persists a VerificationRecord and moves the run to shipping', async () => {
     const h = harness();
     const input = candidateInput();
-    const outcome = verified(await verifyCandidate(h.deps(), input));
+    const retainEvidence = vi.fn((candidateSha: string, records: readonly CommandRecord[]) =>
+      parseVerification({ runId: RUN_ID, candidateSha, records }, RUN_ID)
+    );
+    const outcome = verified(await verifyCandidate({ ...h.deps(), retainEvidence }, input));
+    expect(retainEvidence.mock.results[0]?.value.verified).toBe(true);
+    expect(
+      retainEvidence.mock.calls[0]?.[1].some((r: { id: string }) => r.id === 'npm-rebuild')
+    ).toBe(true);
     expect(outcome.verdict).toBe('passed');
     expect(outcome.run.state).toBe('shipping');
     expect(h.observed.at(-1)).toBe(outcome.run);
@@ -164,9 +172,33 @@ describe('verifyCandidate: inconclusive is never a pass (AC2)', () => {
     const adapter = new VerifierFakeVm(fixtureScript);
     adapter.on(['npm', 'rebuild'], { exitCode: 1 });
     const h = harness(adapter);
-    const outcome = verified(await verifyCandidate(h.deps(), candidateInput()));
+    const retainEvidence = vi.fn((candidateSha: string, records: readonly CommandRecord[]) =>
+      parseVerification({ runId: RUN_ID, candidateSha, records }, RUN_ID)
+    );
+    const outcome = verified(
+      await verifyCandidate({ ...h.deps(), retainEvidence }, candidateInput())
+    );
     expect(outcome.verdict).toBe('inconclusive');
     expect(outcome.run.state).toBe('implementing');
+    expect(retainEvidence.mock.results[0]?.value.verified).toBe(false);
+    expect(
+      retainEvidence.mock.results[0]?.value.commands.some(
+        (c: { id: string }) => c.id === 'npm-rebuild'
+      )
+    ).toBe(true);
+  });
+  it('does not publish completion or shipping after export evidence persistence fails (#1181)', async () => {
+    const h = harness();
+    const input = candidateInput();
+    const retainEvidence = vi.fn(() => {
+      throw new Error('storage unavailable');
+    });
+    await expect(verifyCandidate({ ...h.deps(), retainEvidence }, input)).rejects.toThrow(
+      'storage unavailable'
+    );
+    expect(retainEvidence).toHaveBeenCalledOnce();
+    expect(h.observed.map((r) => r.state)).not.toContain('shipping');
+    expect(storeFiles(h.artifactsDir)).not.toContain(`verification/${input.candidateSha}.json`);
   });
 });
 
@@ -415,14 +447,14 @@ describe('verifyCandidate: refusals and failures', () => {
     );
   });
 
-  it('a provisioning failure makes the run unsupported, after teardown', async () => {
+  it('a provisioning failure pauses the run, after teardown', async () => {
     const adapter = new VerifierFakeVm(fixtureScript);
     adapter.on(['npm', 'ci', '--ignore-scripts', '--no-fund'], { exitCode: 1 });
     const h = harness(adapter);
     await expect(verifyCandidate(h.deps(), candidateInput())).rejects.toBeInstanceOf(
       ProvisioningFailedError
     );
-    expect(h.observed.map((r) => r.state)).toEqual(['unsupported']);
+    expect(h.observed.map((r) => r.state)).toEqual(['paused_user']);
     expect(adapter.liveVms()).toEqual([]);
   });
 

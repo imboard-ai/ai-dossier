@@ -6,6 +6,7 @@ import type { WriteBlockReason } from '../intents';
 import { INTEGRITY_CODES, type IntegrityCode } from '../review/integrity';
 import type { RunRecord } from '../state';
 import type { DriftHandoffReason } from './drift';
+import type { ProxyCaReason } from './proxy-preflight';
 import { VerificationRecordError } from './verification-record';
 
 export interface StopNotice {
@@ -16,6 +17,22 @@ export interface StopNotice {
   readonly nextPermittedAction: string;
 }
 export const STOP_NOTICE_KEY = 'stop_notice';
+
+export function provisioningNotice(
+  reason: ProxyCaReason | 'provisioning_failed'
+): Omit<StopNotice, 'historyLength'> {
+  const action =
+    reason === 'provisioning_failed'
+      ? 'Inspect the provisioning diagnostic and package mirror, correct the unavailable input, then resume explicitly.'
+      : reason === 'proxy_ca_not_yet_valid'
+        ? 'Check the controller clock and proxy CA validity, then resume explicitly.'
+        : 'Restart the proxy (zt-proxy down, then zt-proxy up), check caCertificateFile in the run endpoints file, then resume explicitly.';
+  return {
+    state: 'paused_user',
+    reason,
+    nextPermittedAction: `${reason}: ${action} No broader network or automatic repair is permitted.`,
+  };
+}
 
 /** Structural view of the step artifact journal (`StepArtifacts`). */
 interface NoticeStore {

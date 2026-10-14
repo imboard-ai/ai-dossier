@@ -25,17 +25,19 @@ import {
   readOutcomeTrack,
 } from '../dist/controller/outcome-records.js';
 import { RunStore } from '../dist/controller/run-store.js';
-import { assembleStatus } from '../dist/controller/status.js';
+import { assembleStatus, withManualAppRevocation } from '../dist/controller/status.js';
 import { StepArtifacts } from '../dist/controller/steps.js';
 import { STOP_NOTICE_KEY, stopNoticeAction } from '../dist/controller/stop-notice.js';
 import {
+  beginAuthorPreparation,
   fenceIncident,
   incidentRequested,
-  prepareAuthor,
   stopStoredRun,
 } from '../dist/controller/wiring.js';
 import { assertDirectoryAncestors, privateDir, readPrivate } from '../dist/durable-fs.js';
 import { MAX_BODY_LENGTH } from '../dist/github/handoff.js';
+import { TokenJournal, UNRESOLVED } from '../dist/github/token-journal.js';
+import { Journal } from '../dist/journal.js';
 
 const FEEDBACK_NOT_ADMITTED =
   'This revision handed off: the maintainer feedback was judged out of scope or ambiguous, so nothing was implemented or pushed (the typed verdict is retained). Address the feedback yourself on the pull request, or cancel the run.';
@@ -53,12 +55,88 @@ function refuse(code) {
   throw Object.assign(new Error(code), { code });
 }
 
+// Signals terminate a process, not one command facade. All facades share the
+// same ephemeral cleanup barrier; no credential or shutdown state is durable.
+const authorOwners = new Set();
+let stoppingAuthors = false;
+const stopAuthors = async (signal) => {
+  if (stoppingAuthors) return;
+  stoppingAuthors = true;
+  // Before broker adoption there is no durable credential ledger. Join every
+  // process-local owner before honoring termination, including an active start.
+  const results = await Promise.allSettled([...authorOwners].map((owner) => owner.dispose()));
+  if (results.some((result) => result.status === 'rejected'))
+    process.stderr.write(
+      'error: revoke_failed; revoke the App authorization at https://github.com/settings/applications\n'
+    );
+  process.exit(signal === 'SIGINT' ? 130 : 143);
+};
+const interrupted = () => {
+  void stopAuthors('SIGINT');
+};
+const terminated = () => {
+  void stopAuthors('SIGTERM');
+};
+const releaseOwner = (owner) => {
+  authorOwners.delete(owner);
+  if (!authorOwners.size) {
+    process.removeListener('SIGINT', interrupted);
+    process.removeListener('SIGTERM', terminated);
+  }
+};
+const trackOwner = (owner) => {
+  if (!authorOwners.size) {
+    process.on('SIGINT', interrupted);
+    process.on('SIGTERM', terminated);
+  }
+  authorOwners.add(owner);
+  return owner;
+};
+const ownSession = (session) => {
+  const owner = Object.freeze({
+    approval: session.approval,
+    dispose: async () => {
+      await session.dispose();
+      releaseOwner(owner);
+    },
+    adopt: async (...args) => {
+      if (stoppingAuthors) refuse('admission_closed');
+      const contributor = await session.adopt(...args);
+      releaseOwner(owner); // Broker now owns durable cleanup and signal recovery.
+      return contributor;
+    },
+  });
+  return trackOwner(owner);
+};
+
 export async function createCommands({ root, createController, onAuthorizationUrl }) {
   root = path.resolve(root);
   const pendingAuthors = new Map();
+  const pendingPreparations = new Map();
+  const authorOperations = new Set();
+  const disposePreparation = async (key) => {
+    const owner = pendingPreparations.get(key);
+    if (!owner) return;
+    await owner.dispose();
+    releaseOwner(owner);
+    pendingPreparations.delete(key);
+  };
   const authorKey = (config) => {
     const { authorApproval: _approval, ...input } = runConfigInput(config);
     return canonicalJson(input, 1024 * 1024);
+  };
+  // Reserve the process-local credential owner before any await. A refused
+  // competitor must never dispose the session the admitted start is using.
+  const withAuthor = async (config, work) => {
+    if (stoppingAuthors) refuse('admission_closed');
+    const key = authorKey(config);
+    if (authorOperations.has(key)) refuse('busy');
+    authorOperations.add(key);
+    try {
+      return await work(key);
+    } finally {
+      authorOperations.delete(key);
+    }
   };
   // New run IDs are random. Bind overlapping starts by the trusted config digest,
   // independently of fresh OAuth/approval timestamps, while keeping different
@@ -284,36 +362,68 @@ export async function createCommands({ root, createController, onAuthorizationUr
         if (run.state === 'cancelled' && retained.publication)
           result.nextPermittedAction = `Submitted PR: ${retained.publication.url}. ${retained.withdrawal ?? 'The contributor may withdraw the submitted PR explicitly.'}`;
         store.validateEvidence();
-        return result;
+        return withManualAppRevocation(result);
       },
       true
     );
   return {
+    async discardAuthor(config) {
+      return withAuthor(config, async (key) => {
+        await disposePreparation(key);
+        const session = pendingAuthors.get(key);
+        await session?.dispose();
+        pendingAuthors.delete(key);
+      });
+    },
     async prepareAuthor(config, { name, email } = {}) {
-      checkRoot(config);
-      if (incidentRequested(root)) refuse('incident_active');
-      if (config.resumeRunId) refuse('invalid_resume_run_id');
-      const approval = await prepareAuthor(config, { name, email }, { onAuthorizationUrl });
-      // A config-supplied approval cannot masquerade as fresh authenticated consent.
-      pendingAuthors.set(authorKey(config), approval);
-      return approval;
+      return withAuthor(config, async (key) => {
+        checkRoot(config);
+        if (incidentRequested(root)) refuse('incident_active');
+        if (config.resumeRunId) refuse('invalid_resume_run_id');
+        await disposePreparation(key);
+        await pendingAuthors.get(key)?.dispose();
+        pendingAuthors.delete(key);
+        const preparation = trackOwner(
+          beginAuthorPreparation(config, { name, email }, { onAuthorizationUrl })
+        );
+        pendingPreparations.set(key, preparation);
+        let session;
+        try {
+          const prepared = await preparation.ready;
+          if (stoppingAuthors) refuse('admission_closed');
+          session = ownSession(prepared);
+          releaseOwner(preparation); // Atomic move: never a gap in cleanup ownership.
+          pendingPreparations.delete(key);
+        } catch (error) {
+          await disposePreparation(key);
+          throw error;
+        }
+        // A config-supplied approval cannot masquerade as fresh authenticated consent.
+        pendingAuthors.set(key, session);
+        return session.approval;
+      });
     },
     async start(config) {
-      checkRoot(config);
-      if (incidentRequested(root)) refuse('incident_active');
-      if (config.resumeRunId) refuse('invalid_resume_run_id');
-      const key = authorKey(config);
-      const approval = pendingAuthors.get(key);
-      if (!approval) refuse('author_approval_missing');
-      pendingAuthors.delete(key);
-      const approved = { ...config, authorApproval: approval };
-      const guard = acquireStart(approved);
-      try {
-        const run = await createController(approved, { onAuthorizationUrl }).start(approved);
-        return status(run.runId);
-      } finally {
-        fs.closeSync(guard);
-      }
+      return withAuthor(config, async (key) => {
+        const session = pendingAuthors.get(key);
+        let guard;
+        try {
+          checkRoot(config);
+          if (incidentRequested(root)) refuse('incident_active');
+          if (config.resumeRunId) refuse('invalid_resume_run_id');
+          if (!session) refuse('author_approval_missing');
+          const approved = { ...config, authorApproval: session.approval };
+          guard = acquireStart(approved);
+          const run = await createController(approved, { onAuthorizationUrl }, session).start(
+            approved
+          );
+          return status(run.runId);
+        } finally {
+          if (guard !== undefined) fs.closeSync(guard);
+          await session?.dispose();
+          pendingAuthors.delete(key);
+        }
+      });
     },
     edit(runId, bytes) {
       if (incidentRequested(root)) refuse('incident_active');
@@ -349,6 +459,25 @@ export async function createCommands({ root, createController, onAuthorizationUr
       return status(run.runId);
     },
     status,
+    async resolve(runId, tokenId) {
+      const store = RunStore.open(root, runId, { cleanup: true });
+      let tokens;
+      try {
+        checkRoot(store.config);
+        if (store.run.state !== 'blocked_cleanup') refuse('cleanup_required');
+        tokens = new Journal(store.storeDirectory('tokens'));
+        const journal = new TokenJournal(tokens);
+        const token = journal.state.tokens.get(tokenId);
+        if (!token || !UNRESOLVED.includes(token.status)) refuse('invalid_input');
+        journal.resolveByOperator(tokenId, new Date().toISOString());
+      } finally {
+        tokens?.close();
+        store.close();
+      }
+      // Acknowledgement settles one credential, never independent VM/accounting obligations.
+      await stopStoredRun(root, runId, 'Operator confirmed credential dead');
+      return status(runId);
+    },
     async prAction(runId, request) {
       if (incidentRequested(root)) refuse('incident_active');
       const config = configFor(runId, true);

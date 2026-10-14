@@ -9,8 +9,12 @@ import { FakeVmAdapter } from '../dist/__tests__/fake-vm.js';
 import { BudgetLedger } from '../dist/budget.js';
 import { ScriptedRecovery } from '../dist/controller/__tests__/fake-steps.js';
 import { pauseAtCheckpoint } from '../dist/controller/checkpoints.js';
-import { validateRunConfig } from '../dist/controller/config.js';
-import { acknowledgeControl, readControlRequests } from '../dist/controller/control.js';
+import { runConfigInput, validateRunConfig } from '../dist/controller/config.js';
+import {
+  acknowledgeControl,
+  readControlRequests,
+  requestControl,
+} from '../dist/controller/control.js';
 import { RunController } from '../dist/controller/controller.js';
 import { RunStore } from '../dist/controller/run-store.js';
 import { StepArtifacts } from '../dist/controller/steps.js';
@@ -18,8 +22,10 @@ import { STOP_NOTICE_KEY } from '../dist/controller/stop-notice.js';
 import { createController, incidentRequested, stopStoredRun } from '../dist/controller/wiring.js';
 import { AppCredentials } from '../dist/github/app-auth.js';
 import { ForkCredentialBroker } from '../dist/github/broker.js';
+import { TokenJournal } from '../dist/github/token-journal.js';
 import { Journal } from '../dist/journal.js';
 import { ReasonCode, transitionRun } from '../dist/state.js';
+import { renderHuman, renderJson } from '../dist/status.js';
 import { createCommands } from './zt-run-bindings.mjs';
 import { main } from './zt-run-lib.mjs';
 
@@ -293,6 +299,43 @@ test('cancelled CLI status retains publication URL and contributor withdrawal in
   assert.equal(status.state, 'cancelled');
   assert.match(status.nextPermittedAction, /https:\/\/github.com\/owner\/repo\/pull\/2/);
   assert.match(status.nextPermittedAction, /prepared contributor comment/);
+  for (const output of [renderHuman(status), renderJson(status)]) {
+    assert.match(output, /Settings → Applications → Authorized GitHub Apps/);
+    assert.match(output, /does not confirm removal/);
+    assert.match(output, /prepared contributor comment/);
+    assert.equal(output.split('Settings → Applications → Authorized GitHub Apps').length, 2);
+  }
+  assert.deepEqual(commands.status(store.runId), status);
+});
+
+test('cleanup-blocked CLI status retains cleanup and revocation guidance despite corrupt control evidence', async () => {
+  const h = rig();
+  const store = h.seed();
+  const row = requestControl(store, { kind: 'cancel', reason: 'Stop' }, new Date());
+  store.persistRun(transitionRun(store.run, ReasonCode.CleanupFailed, new Date().toISOString()));
+  fs.writeFileSync(path.join(store.storeDirectory('control'), 'requests', `${row.id}.json`), '{');
+  store.close();
+  const construct = vi.fn(() => assert.fail('status cannot construct execution'));
+  const oauth = vi.fn(() => assert.fail('status cannot authorize'));
+  const fetch = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}'));
+  const commands = await createCommands({
+    root: h.root,
+    createController: construct,
+    onAuthorizationUrl: oauth,
+  });
+  const status = commands.status(store.runId);
+  assert.equal(status.state, 'blocked_cleanup');
+  assert.equal(status.phase, 'invalid_control');
+  for (const output of [renderHuman(status), renderJson(status)]) {
+    assert.match(output, /Reconcile remaining resources and credentials/);
+    assert.match(output, /corrupt or unknown/);
+    assert.match(output, /Settings → Applications → Authorized GitHub Apps/);
+    assert.equal(output.split('Settings → Applications → Authorized GitHub Apps').length, 2);
+  }
+  assert.equal(fetch.mock.calls.length, 0);
+  assert.equal(oauth.mock.calls.length, 0);
+  assert.equal(construct.mock.calls.length, 0);
+  assert.deepEqual(h.counts(), { revoked: 0, userReads: 0 });
 });
 
 test('status shows a stop notice only for the exact stop it explains', async () => {
@@ -357,8 +400,13 @@ test('status explains a revision paused because its feedback was not admitted', 
 test('start overrides file-supplied approval only with fresh OAuth consent; status opens the readOnly store API', async () => {
   const h = rig();
   const calls = [];
-  const factory = (config, edges) => ({
+  const factory = (config, edges, session) => ({
     start: async (next) => {
+      assert.equal(
+        typeof session?.adopt,
+        'function',
+        'start must hand the identity authorization to its credential owner'
+      );
       assert.equal(config, next);
       assert.equal(edges.onAuthorizationUrl, h.onAuthorizationUrl);
       calls.push(config);
@@ -388,6 +436,216 @@ test('start overrides file-supplied approval only with fresh OAuth consent; stat
   await Promise.all(h.callbacks);
 });
 
+test('declined confirmation and failed construction revoke the process-local author token', async () => {
+  const h = rig();
+  const commands = await createCommands({
+    root: h.root,
+    onAuthorizationUrl: h.onAuthorizationUrl,
+    createController: () => assert.fail('declined confirmation cannot construct execution'),
+  });
+  const configFile = path.join(h.dir, 'start-config.json');
+  fs.writeFileSync(configFile, JSON.stringify(runConfigInput(h.config)), { mode: 0o600 });
+  const output = [];
+  assert.equal(
+    await main(['start', '--config', configFile, '--root', h.root], {
+      createController: () => commands,
+      out: (line) => output.push(line),
+      err: (line) => output.push(line),
+      confirmAuthor: () => false,
+    }),
+    2
+  );
+  assert.deepEqual(h.counts(), { revoked: 1, userReads: 1 }, output.join('\n'));
+  assert.equal(fs.existsSync(h.root), false);
+  assert.ok(!output.join('\n').includes(`ghu_${'a'.repeat(30)}`));
+  const failed = await createCommands({
+    root: h.root,
+    onAuthorizationUrl: h.onAuthorizationUrl,
+    createController: () => {
+      throw new Error('construction_refused');
+    },
+  });
+  await failed.prepareAuthor(h.config);
+  await assert.rejects(failed.start(h.config), /construction_refused/);
+  await failed.discardAuthor(h.config);
+  assert.deepEqual(h.counts(), { revoked: 2, userReads: 2 });
+  await Promise.all(h.callbacks);
+});
+
+test('overlapping author operations cannot overwrite or revoke an active process-local owner', async () => {
+  const h = rig();
+  let reached;
+  let release;
+  const ready = new Promise((resolve) => {
+    reached = resolve;
+  });
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  const commands = await createCommands({
+    root: h.root,
+    onAuthorizationUrl: h.onAuthorizationUrl,
+    createController: (config) => ({
+      start: async () => {
+        reached();
+        await held;
+        const store = h.seed(config);
+        const run = store.run;
+        store.close();
+        return run;
+      },
+    }),
+  });
+  const preparing = commands.prepareAuthor(h.config);
+  await assert.rejects(commands.prepareAuthor(h.config), { code: 'busy' });
+  await preparing;
+  assert.equal(h.callbacks.length, 1);
+  const starting = commands.start(h.config);
+  await ready;
+  await assert.rejects(commands.start(h.config), { code: 'busy' });
+  await assert.rejects(commands.prepareAuthor(h.config), { code: 'busy' });
+  await assert.rejects(commands.discardAuthor(h.config), { code: 'busy' });
+  assert.deepEqual(h.counts(), { revoked: 0, userReads: 1 });
+  release();
+  await starting;
+  await commands.discardAuthor(h.config);
+  assert.deepEqual(h.counts(), { revoked: 1, userReads: 1 });
+  await Promise.all(h.callbacks);
+});
+
+test('failed preparation cleanup remains reachable by explicit discard before another authorization', async () => {
+  const h = rig();
+  const transport = globalThis.fetch;
+  let refuseDelete = true;
+  let deletes = 0;
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(String(input));
+    if (url.pathname === '/user') return new Response(JSON.stringify({}));
+    if (url.pathname === '/applications/fixture/token' && init.method === 'DELETE') {
+      deletes++;
+      if (refuseDelete) return new Response(null, { status: 503 });
+    }
+    return transport(input, init);
+  };
+  const listeners = process.listenerCount('SIGTERM');
+  const commands = await createCommands({
+    root: h.root,
+    createController,
+    onAuthorizationUrl: h.onAuthorizationUrl,
+  });
+  await assert.rejects(commands.prepareAuthor(h.config), { code: 'revoke_failed' });
+  const failed = deletes;
+  await assert.rejects(commands.prepareAuthor(h.config), { code: 'revoke_failed' });
+  assert.equal(h.callbacks.length, 1);
+  assert.ok(deletes > failed);
+  refuseDelete = false;
+  await commands.discardAuthor(h.config);
+  assert.equal(h.counts().revoked, 1);
+  assert.equal(process.listenerCount('SIGTERM'), listeners);
+  await commands.discardAuthor(h.config);
+  assert.equal(h.counts().revoked, 1);
+  await Promise.all(h.callbacks);
+});
+
+test.each(
+  ['SIGINT', 'SIGTERM'].flatMap((signal) =>
+    ['confirmation', 'user', 'email', 'exchange', 'callback', 'facades', 'facades-fail'].map(
+      (stage) => ({ signal, stage })
+    )
+  )
+)('pre-broker $signal at $stage joins credential cleanup before process exit', async ({
+  signal,
+  stage,
+}) => {
+  const h = rig();
+  const code = `
+    const nativeFetch = globalThis.fetch;
+    const stage = ${JSON.stringify(stage)};
+    let issued = 0;
+    const { createCommands } = await import(${JSON.stringify(new URL('./zt-run-bindings.mjs', import.meta.url).href)});
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/login/oauth/access_token') {
+        issued++;
+        process.stdout.write('ISSUED\\n');
+        if (stage === 'exchange') {
+          process.stdout.write('AUTHOR_READY\\n');
+          await new Promise(r => setTimeout(r, 100));
+        }
+        return new Response(JSON.stringify({ access_token: 'ghu_'+'a'.repeat(29)+issued, refresh_token: 'ghr_'+'b'.repeat(29)+issued, expires_in: 3600 }));
+      }
+      if (url.pathname === '/user' || url.pathname === '/user/emails') {
+        if ((stage === 'user' && url.pathname === '/user') || (stage === 'email' && url.pathname === '/user/emails')) {
+          process.stdout.write('AUTHOR_READY\\n');
+          return new Promise(() => {});
+        }
+        return new Response(JSON.stringify(url.pathname === '/user' ? { id: 12, login: 'contributor', name: 'Verified Name' } : [{ email: 'verified@example.org', verified: true }]));
+      }
+      if (url.pathname === '/applications/fixture/token' && init.method === 'DELETE') {
+        const second = JSON.parse(init.body).access_token.endsWith('2');
+        await new Promise(r => setTimeout(r, second ? 500 : 50));
+        if (second && stage === 'facades-fail') return new Response(null, { status: 503 });
+        process.stdout.write('REVOKED\\n');
+        return new Response(null, { status: 204 });
+      }
+      throw new Error('unexpected_request');
+    };
+    const options = { root: ${JSON.stringify(h.root)}, createController: () => { throw new Error('no execution'); }, onAuthorizationUrl: value => {
+      if (stage === 'callback') { process.stdout.write('AUTHOR_READY\\n'); return; }
+      const page = new URL(value);
+      const redirect = new URL(page.searchParams.get('redirect_uri'));
+      redirect.searchParams.set('state', page.searchParams.get('state'));
+      redirect.searchParams.set('code', 'approved');
+      void nativeFetch(redirect);
+    } };
+    const commands = await createCommands(options);
+    setInterval(() => {}, 1000); // Physical transport/TTY liveness while scripted reads await.
+    await commands.prepareAuthor(${JSON.stringify(h.config)}, stage === 'email' ? { email: 'verified@example.org' } : {}).catch(() => {});
+    if (stage.startsWith('facades')) await (await createCommands(options)).prepareAuthor({ ...${JSON.stringify(h.config)}, issueUrl: 'https://github.com/owner/repo/issues/2' });
+    if (stage === 'confirmation' || stage.startsWith('facades')) process.stdout.write('AUTHOR_READY\\n');
+  `;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', code], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let output = '';
+  let errors = '';
+  let sent = false;
+  child.stderr.on('data', (bytes) => {
+    errors += bytes;
+  });
+  child.stdout.on('data', (bytes) => {
+    output += bytes;
+    if (!sent && output.includes('AUTHOR_READY')) {
+      sent = true;
+      child.kill(signal);
+    }
+  });
+  try {
+    const exit = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('signal cleanup timed out')), 10000);
+      child.once('error', reject);
+      child.once('exit', (status, killedBy) => {
+        clearTimeout(timer);
+        resolve({ status, killedBy });
+      });
+    });
+    assert.deepEqual(exit, { status: signal === 'SIGINT' ? 130 : 143, killedBy: null }, errors);
+    if (stage === 'callback') {
+      assert.ok(!output.includes('ISSUED'));
+      assert.ok(!output.includes('REVOKED'));
+    } else {
+      assert.match(output, /ISSUED\n/);
+      assert.match(output, /AUTHOR_READY\nREVOKED\n/);
+      if (stage === 'facades') assert.equal(output.match(/REVOKED/g).length, 2);
+      if (stage === 'facades-fail')
+        assert.match(errors, /error: revoke_failed; revoke the App authorization/);
+    }
+    assert.equal(fs.existsSync(h.root), false);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+  }
+});
+
 test('resume delegates identity admission to the locked controller without a CLI OAuth preflight', async () => {
   const h = rig();
   const calls = [];
@@ -402,6 +660,7 @@ test('resume delegates identity admission to the locked controller without a CLI
     }),
   });
   const approval = await commands.prepareAuthor(h.config);
+  await commands.discardAuthor(h.config);
   const store = h.seed({ ...h.config, authorApproval: approval });
   const runId = store.runId;
   store.close();
@@ -431,6 +690,7 @@ test('shipping resume reaches the controller with an unavailable OAuth UI', asyn
     createController,
   });
   const approval = await setup.prepareAuthor(h.config);
+  await setup.discardAuthor(h.config);
   const store = h.seed({ ...h.config, authorApproval: approval });
   const runId = store.runId;
   for (const reason of [
@@ -560,6 +820,7 @@ test('explicit authorize emits its actual loopback OAuth URL and verifies record
     onAuthorizationUrl: h.onAuthorizationUrl,
   });
   const approval = await commands.prepareAuthor(h.config);
+  await commands.discardAuthor(h.config);
   const store = h.seed({ ...h.config, authorApproval: approval });
   const runId = store.runId;
   store.close();
@@ -633,6 +894,151 @@ test('dormant kill-all does not claim value-lost credential revocation successfu
   store.close();
   const commands = await createCommands({ root: h.root, createController });
   assert.equal((await commands.killAll('Incident stop'))[0].state, 'blocked_cleanup');
+  assert.deepEqual(h.counts(), { revoked: 0, userReads: 0 });
+});
+
+test('resolve durably settles only the selected token without OAuth and retains independent obligations', async () => {
+  const h = rig();
+  const store = h.seed();
+  const runId = store.runId;
+  const budget = new BudgetLedger(
+    path.join(store.storeDirectory('budget'), 'ledger.json'),
+    store.contributionId
+  );
+  const hold = budget.reserve(
+    store.budgetSessionId(1),
+    {
+      money: { currency: 'USD', minor: 0 },
+      tokens: 1,
+      timeMs: 1,
+      rates: store.config.modelProfile.rates,
+    },
+    'work'
+  );
+  store.persistRun(transitionRun(store.run, ReasonCode.CleanupFailed, new Date().toISOString()));
+  const tokenIds = ['00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002'];
+  const tokens = new Journal(store.storeDirectory('tokens'));
+  const journal = new TokenJournal(tokens);
+  for (const id of tokenIds) {
+    journal.record({
+      v: 1,
+      type: 'token_requested',
+      id,
+      kind: 'user',
+      parentId: null,
+      intentKey: null,
+      attempt: null,
+      repositoryId: null,
+      at: new Date().toISOString(),
+      useBy: null,
+    });
+    journal.record({ v: 1, type: 'token_minted', id, expiresAt: '2020-01-01T00:00:00.000Z' });
+    journal.record({ v: 1, type: 'token_expired', id, at: new Date().toISOString() });
+  }
+  const tokenFile = path.join(store.storeDirectory('tokens'), 'events.jsonl');
+  tokens.close();
+  const steps = new Journal(path.join(store.storeDirectory('control'), 'steps'));
+  new StepArtifacts(steps, runId).put('fork', {
+    repositoryId: 22,
+    installationId: 33,
+    owner: 'contributor',
+  });
+  steps.close();
+  const commands = await createCommands({
+    root: h.root,
+    createController: () => assert.fail('no controller or OAuth'),
+  });
+  await assert.rejects(commands.resolve(runId, tokenIds[0]), { name: 'StoreLockedError' });
+  store.close();
+  const before = fs.readFileSync(tokenFile);
+  await assert.rejects(commands.resolve(runId, '00000000-0000-0000-0000-000000000003'), {
+    code: 'invalid_input',
+  });
+  assert.deepEqual(fs.readFileSync(tokenFile), before);
+  assert.equal((await commands.resolve(runId, tokenIds[0])).state, 'blocked_cleanup');
+  let events = fs.readFileSync(tokenFile, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(
+    events.filter((e) => e.type === 'operator_resolved').map((e) => e.id),
+    [tokenIds[0]]
+  );
+  assert.equal(
+    events.filter((e) => e.type === 'token_expired').length,
+    2,
+    'legacy access expiry does not generate new settlement evidence'
+  );
+  await assert.rejects(commands.resolve(runId, tokenIds[0]), { code: 'invalid_input' });
+  delete process.env.BINDING_APP_KEY;
+  delete process.env.BINDING_APP_SECRET;
+  assert.equal((await commands.resolve(runId, tokenIds[1])).state, 'blocked_cleanup');
+  budget.release(hold.id, 'Provider confirmed no charge');
+  assert.equal((await commands.killAll('Finish operator cleanup'))[0].state, 'blocked');
+  events = fs.readFileSync(tokenFile, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(
+    events.filter((e) => e.type === 'operator_resolved').map((e) => e.id),
+    tokenIds
+  );
+  assert.deepEqual(h.counts(), { revoked: 0, userReads: 0 });
+});
+
+test('kill-all settles uncertain installation expiry only at its durable bound after reopen', async () => {
+  const h = rig();
+  const store = h.seed();
+  const runId = store.runId;
+  store.persistRun(transitionRun(store.run, ReasonCode.CleanupFailed, new Date().toISOString()));
+  const tokens = new Journal(store.storeDirectory('tokens'));
+  const journal = new TokenJournal(tokens);
+  const id = '00000000-0000-0000-0000-000000000004';
+  const observed = new Date();
+  const expiry = new Date(observed.getTime() + 3600000);
+  journal.record({
+    v: 1,
+    type: 'token_requested',
+    id,
+    kind: 'installation',
+    parentId: null,
+    intentKey: 'push',
+    attempt: 1,
+    repositoryId: 22,
+    at: observed.toISOString(),
+    useBy: expiry.toISOString(),
+  });
+  journal.record({
+    v: 1,
+    type: 'token_mint_uncertain',
+    id,
+    status: 201,
+    at: observed.toISOString(),
+    expiresAt: expiry.toISOString(),
+  });
+  journal.record({ v: 1, type: 'token_unrevocable', id, at: observed.toISOString() });
+  const tokenFile = path.join(store.storeDirectory('tokens'), 'events.jsonl');
+  tokens.close();
+  const steps = new Journal(path.join(store.storeDirectory('control'), 'steps'));
+  new StepArtifacts(steps, runId).put('fork', {
+    repositoryId: 22,
+    installationId: 33,
+    owner: 'contributor',
+  });
+  steps.close();
+  store.close();
+  const vm = new FakeVmAdapter();
+  await stopStoredRun(h.root, runId, 'Retry cleanup', {
+    vm,
+    now: () => new Date(expiry.getTime() - 1),
+  });
+  const commands = await createCommands({
+    root: h.root,
+    createController: () => assert.fail('no OAuth'),
+  });
+  assert.equal(commands.status(runId).state, 'blocked_cleanup');
+  delete process.env.BINDING_APP_KEY;
+  delete process.env.BINDING_APP_SECRET;
+  await stopStoredRun(h.root, runId, 'Retry cleanup', { vm, now: () => expiry });
+  const reopened = RunStore.open(h.root, runId);
+  assert.equal(reopened.run.state, 'blocked');
+  reopened.close();
+  const events = fs.readFileSync(tokenFile, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(events.filter((e) => e.type === 'token_expired' && e.id === id).length, 1);
   assert.deepEqual(h.counts(), { revoked: 0, userReads: 0 });
 });
 

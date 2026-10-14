@@ -241,7 +241,7 @@ fresh work. Lost credential values remain a `blocked_cleanup` obligation rather
 than invented revocation. OAuth access expiry **does not** kill a refresh chain:
 the fixture genuinely elapses both independently recorded provider lifetimes,
 and audits access liveness, `refreshAlive` and refresh-token liveness. Production
-broker recovery does not automatically settle native expiry to hide secret loss.
+broker recovery does not settle user-chain access expiry to hide secret loss.
 
 `node scripts/zt-run.mjs pause|cancel --root <stateDir>/runs --run <id> --reason <text>`
 returns immediately after the stop-only request is durably fsynced. It neither waits
@@ -366,8 +366,13 @@ Config-supplied author approval cannot substitute for this start-side consent.
 The identity is recorded once, bound into the config digest, and never replaced
 on resume. Another authenticated numeric account refuses with
 `author_approval_mismatch`. An authorization URL contains no access/refresh token.
-Pre-start and explicit-authorize credentials are revoked after identity checks;
-execution may request a separate authorization when it needs a fork credential.
+Start retains the validated access/refresh pair in an opaque process-local session
+through confirmation and gating, then transfers it once to the recovered fork-bound
+broker. Normal start therefore opens one authorization page. Decline, refusal,
+construction failure and unused-session disposal revoke the owned pair; expired
+access is refreshed without a new page to end its refresh chain. No token is durable.
+The one-shot `prepareAuthor` helper and explicit `authorize` still revoke after identity
+checks; fresh-process resume retains its existing authorization requirements.
 
 `status` performs observational reads without the writer lock, never creates or
 repairs files, and refuses incomplete/corrupt or concurrently changed evidence.
@@ -412,9 +417,14 @@ node scripts/zt-run.mjs export --root state/runs --run ztc-0123456789abcdef-run-
 The injected factory builds the command facade; the thin entry binds it to
 `createCommands` and the real `dist/controller/wiring.js:createController`.
 No production environment-variable test override exists. Credential-bound
-`prepareAuthor(config, identity?, edges?)` and `stopStoredRun(root, runId, reason,
+`prepareAuthor(config, identity?, edges?)`, `prepareAuthorSession(config, selection?, edges?)`
+and `stopStoredRun(root, runId, reason,
 edges?)` remain in wiring, outside the public index. `onAuthorizationUrl` is a
 production UI callback for immediate loopback URL display, not phase injection.
+`beginAuthorPreparation` supplies the facade's owner before OAuth starts: its `ready`
+promise yields the same session, while `dispose()` interrupts callback/identity waits,
+joins a potentially issued token exchange and revokes any resulting pair. Token
+exchange/revocation are never abandoned in favor of an untracked late outcome.
 The composed controller also exposes `authorize(runId)` for explicit account
 authorization without phase execution.
 
@@ -436,12 +446,38 @@ at recovery/credential admission boundaries; the watcher also interrupts waits.
 
 ## Controller composition (#1108)
 
-Scripts import `createController(config, overrides?)` directly from
+Scripts import `createController(config, overrides?, authorSession?)` directly from
 `src/controller/wiring.ts` (or its compiled `dist/controller/wiring.js`). This
 credential-bearing root is deliberately **not exported by the package index**.
 No other production source module may import it, including through type imports.
 `controller/steps.ts` is the credential-free glue between the real producers and
 the core `RunController` outcome unions.
+
+For a shared start authorization, `selection` accepts only `name` and `email`;
+account-only `{ userId }` checks belong to the non-retaining `prepareAuthor` helper.
+Keep the session separate from approval/configuration and always dispose an unused
+owner, including when controller construction fails:
+
+```ts
+const session = await prepareAuthorSession(config, {}, { onAuthorizationUrl });
+try {
+  const approved = { ...config, authorApproval: session.approval };
+  // Display/confirm session.approval before starting.
+  await createController(approved, { onAuthorizationUrl }, session).start(approved);
+} finally {
+  await session.dispose(); // No-op after successful adoption; broker owns cleanup.
+}
+```
+
+The command facade holds each configuration's author operation exclusively before
+any await. Competing prepare/start/discard calls return `busy` without touching its
+credential owner. Failed disposal retains the session for an explicit cleanup retry.
+While any command facade owns a preparation or unadopted session, a shared process-local
+SIGINT/SIGTERM barrier joins all their revocations before exiting (130/143).
+Failed preparations remain keyed cleanup-only owners for explicit discard or a preparation
+retry; they cannot authorize a start. Adoption/disposal removes these scoped handlers;
+the broker's existing durable recovery owns credentials after adoption. Failed signal
+cleanup prints a fixed manual App-revocation instruction rather than claiming success.
 
 The root validates closed config, creates the durable RunStore and BudgetLedger,
 preflights local QEMU before allocation, reads the private proxy endpoints file,
@@ -452,7 +488,8 @@ settled from observed local elapsed time. Include a pinned zero-price
 `local-qemu` / `millisecond` rate in `modelProfile.rates` for this unbilled local
 provider. An interrupted charge remains unknown, never replaced with an estimate.
 
-`proxyEndpointsFile` is an owned private regular JSON file (0600), with exactly:
+`proxyEndpointsFile` is an owned private regular JSON file (0600). It requires `endpoints`
+and `target`; the supplied TLS-intercepting Squid setup also supplies controller-only CA metadata:
 
 ```json
 {
@@ -460,7 +497,8 @@ provider. An interrupted charge remains unknown, never replaced with an estimate
     "npmRegistry": "<worker-relay-url>/",
     "pypiIndex": "<worker-relay-url>/index/"
   },
-  "target": { "host": "<physical-mirror-ipv4>", "port": 4873 }
+  "target": { "host": "<physical-mirror-ipv4>", "port": 4873 },
+  "caCertificateFile": "<absolute-proxy-state-dir>/ca-public/ca.crt"
 }
 ```
 
@@ -470,6 +508,11 @@ See the package-proxy setup section below. `target.host` and `target.port` ident
 the controller-reachable physical mirror and are deployment-specific; repository
 or model text cannot change them. Invalid or malformed proxy files produce only
 the non-echoing `invalid_proxy_file` diagnostic.
+The CA lasts 24 hours and is checked before every provisioning allocation. Expiry pauses
+with `proxy_ca_expired`; restart the proxy with `down` then `up`, and resume explicitly.
+Legacy non-intercepting proxies may omit `caCertificateFile`, in which case no CA check is
+possible. See [proxy setup and recovery](../../docs/guides/zero-trust-contributions.md#one-time-setup).
+Keep raw `up --out` output separate from this derived endpoints file.
 GitHub App secrets are read only when constructing the credential session from
 the environment names in config; the Ed25519 signer uses `signerKeyFile`.
 
@@ -1000,19 +1043,23 @@ Order of work, each step fail-closed:
    rebuilds the commit from it. A `CanonicalError`, or a rebuilt SHA other than
    `candidateSha`, returns `{ kind: 'identity_mismatch', reason }` and moves the run to
    `blocked` (`policy_blocked`), before `prepareBoundary` and before any VM is created.
-4. `beginVerification` claims the candidate (an exclusive marker; a concurrent claim is
-   `already_verified`). `prepareBoundary(artifactsDir)`, then `runWorkspace` (#1095)
+4. `prepareBoundary(artifactsDir)`, then `runWorkspace` (#1095)
    creates a new VM and uploads exactly the files of that validated, reconstructed
-   manifest. The implementation VM is never reused. `verificationPlan(profileRecord,
+   manifest and provisions it. Only after provisioning succeeds, `beginVerification`
+   claims the candidate (an exclusive marker; a concurrent claim is `already_verified`).
+   A refused claim releases the workspace without executing verification. The implementation
+   VM is never reused. `verificationPlan(profileRecord,
    endpoints, regressionTargets, planOptions?)` runs the suite's verification commands,
    then the regression targets' test command (id suffix `REGRESSION_COMMAND_SUFFIX`,
    `-regression`), all with `network: 'none'`. While the VM is still live,
    `probeBoundary` (a probe that throws leaves failed evidence in its closed session)
    and `await finishBoundary` with the same output collector; then the bounded teardown
    and `session.cleanup()`. From the claim on, any failure that has not already moved
-   the run (`ProvisioningFailedError` to `unsupported`, `VmCleanupError` to
-   `blocked_cleanup`) blocks it before the error propagates, and is journaled
+   the run (`VmCleanupError` to `blocked_cleanup`) blocks it before the error propagates,
+   and is journaled
    (`verification_aborted`, error class only).
+   Provisioning-only failures precede the claim and pause for explicit correction/resume;
+   they never authorize a second execution of an already-claimed verification attempt.
 5. If `finishBoundary` throws (secret-shaped guest output, collector truncation, an
    unpublishable artifact), its artifact cannot be read back, or the canaries cannot be
    removed, nothing authoritative exists: no record, the run goes to `blocked` and the
@@ -2271,6 +2318,17 @@ artifacts for authority, invents records, or auto-persists returned evidence:
 | `verification-evidence.json` | `{ runId, candidateSha, records }`; `records` are 1–128 actual verification-phase `CommandRecord` values returned by the evidence runner, with unique command IDs. Each `evidence` must match id, argv, status, supervised exit code, suite count and log digest. Status is reclassified using the producer's classifier, with timeout/signal, report counts (including supervised `skipped`) and capture mode checked. Missing skipped counts in legacy records fail closed; they never default to zero. All-skipped reports remain inconclusive. Truncated output cannot establish success. Only receipt-style metadata is exported, with `verified` calculated by `evidenceVerified`. Omit the optional source to represent absent verification; a present empty command array is invalid. |
 | `portfolio-evidence.json` | `{ runId, disclosure, policyCitations }`; a present file requires a disclosure string and citations array, at most 128 actual policy assessment citations (`path`, positive `line`, `ruleId`, `excerpt`). Only a missing file yields null disclosure/citations. Missing fields in a present file fail closed; prose and defaults cannot replace them. |
 
+Live controller composition writes these sources under the run's lifetime guard,
+with bounded, secret-checked atomic 0600 writes and directory fsync. Independent
+verification retains the actual supervised command records before publishing its
+completion; shipping retains each distinct signed receipt before returning push
+authorization; PR preparation retains the renderer's exact candidate-bound LLM
+disclosure and the gate's policy citations before issuing the contributor link.
+Receipts survive retries and revisions (127 distinct envelopes maximum, leaving
+room for the independent verification entry); the independent source and portfolio
+describe the latest produced candidate. Absent legacy sources remain unknown;
+recovery never invents command counts from a claimed verdict.
+
 Every selected JSON record is bounded to 1 MiB before allocation and must be valid
 UTF-8. Metadata and pinned regular no-follow inode checks precede reads; bounded
 reads detect growth and replacement. Journals are capped at 16 MiB, 10,000 records,
@@ -3244,7 +3302,7 @@ Design, evidence and verdict:
   treat timeouts, unreadable reports and zero suites as `inconclusive` (as are report case
   counts that contradict the exit status: exit 0 with a failing or no executed case, or a
   non-zero exit with no failing case), map provisioning
-  failures to `unsupported_environment`, and enforce the two-repair cap from run history
+   failures to `paused_user` for explicit operator correction, and enforce the two-repair cap from run history
   (`assertRepairAllowed`). `classifyCommand` adds the rule for setup steps without a
   report (exit 0 passes, other exits fail, a timeout or signal is `inconclusive`);
   `commandEvidence` (status from `classifyCommand`) and `overallStatus` build receipt evidence.
@@ -3278,9 +3336,11 @@ functions against the real adapter, so the real-VM suite exercises this code.
   `network_not_allowed` (`ProvisioningNotClosedError` if it is accepted; any other error
   propagates). The returned `ProvisionedWorkspace` records that code as
   `phaseSwitch.refusedWith`. A provisioning command that does not pass destroys the VM,
-  then makes `lifecycle.run` `unsupported_environment` through `applyProvisioning`, passes
+   then makes `lifecycle.run` `paused_user` through `applyProvisioning`, passes
   it to `lifecycle.observeRun` and throws `ProvisioningFailedError` with that run, the
-  records and the failed command id.
+   records and the failed command id. The composition retains the failed command's bounded,
+   redacted log excerpt in its diagnostic. Genuine unsupported ecosystem/profile/host refusals
+   remain terminal; a failed mirror/install command alone cannot establish that refusal.
 - `runPlanned(adapter, workspace, command, collector, options?)` runs one verification
   command and returns a `CommandRecord`. It accepts only a workspace `provisionWorkspace`
   returned and that was not released (`EvidencePlanError('workspace_unproven')`
@@ -3317,15 +3377,15 @@ functions against the real adapter, so the real-VM suite exercises this code.
   directory in, the candidate). `detail` names a command id and phase or a test-file
   index, never repository text.
 - `RunLifecycle` is `{ run, now, observeRun, journal?, retryDelayMs?, sleep? }`. The runner
-  changes the run only on a failure, and every changed run (`unsupported_environment`,
+   changes the run only on a failure, and every changed run (`paused_user`,
   `blocked_cleanup`) reaches `observeRun` before the throw.
 - Teardown on every path: each workspace VM is released through `teardownVm`, including
   when a command, an upload or the phase switch throws; `journal` then gets an
   `evidence_workspace_aborted` event with the stage, the command id and the error class.
   Three failed deletions make the run `blocked_cleanup` and throw `VmCleanupError`, with
   `cause` set to the failure that led to the teardown (for a failed provisioning,
-  `{ failedAt, records }`). A blocked cleanup wins over a provisioning failure because
-  `unsupported` has no cleanup edge. A `create` that throws returns no handle; the
+   `{ failedAt, records }`). A blocked cleanup wins over a recoverable provisioning pause:
+   explicit resume must not leave uncertain guests behind. A `create` that throws returns no handle; the
   adapter cleans up after its own failed create.
 - Logs: `logArtifact(stdout, stderr, outputTruncated)` makes each command's `LogArtifact`:
   the SHA-256 of the whole log, a tail excerpt of at most `MAX_LOG_EXCERPT_CHARS` (4096)
@@ -3426,11 +3486,11 @@ Under the hybrid hand-off ([decision record](../../docs/features/zero-trust-full
 the broker performs fork pushes only. Upstream comments and PRs are contributor
 hand-offs. `ForkCredentialBroker` has a typed operation API and no generic token call:
 
-- `recover()` must run first. It revokes every journaled token without a recorded
-  revocation before any admission. Values held in process memory (`TokenVault`) are
+- `recover()` must run first. It settles passed journaled installation expiry, then
+  revokes remaining journaled tokens before any admission. Values held in process memory (`TokenVault`) are
   revoked one by one. User-chain tokens whose values were lost are ended by deleting
   the grant with a live user token. An installation token whose value was lost cannot be
-  revoked through any API, so the broker enters `blocked_cleanup` and reports its id and
+  revoked through any API; while it remains unresolved the broker enters `blocked_cleanup` and reports its id and
   native expiry for the operator. It never records that token as revoked. Recovery over a
   journal whose run already ended returns `admitted: false`.
 - `registerUserToken(value, expiresAt)` holds the contributor's unscoped user token
@@ -3454,8 +3514,9 @@ hand-offs. `ForkCredentialBroker` has a typed operation API and no generic token
   (`user_token_run_scoped`): only `endRun`, cancellation or `killAll` revoke it. `withForkPush(intent, target, operation, cancel?)` does all
   three and is the preferred entry point. It revokes on success, failure, throw and
   cancellation (including a cancel that arrives during the mint). A timer also revokes
-  the token 15 minutes after the mint request, even mid-operation. GitHub's 1 h / 8 h
-  lifetimes are recorded but never relied on.
+  the token 15 minutes after the mint request, even mid-operation. Normal push use
+  never relies on GitHub's longer native lifetimes. Cleanup may settle a passed
+  journaled installation expiry; user access expiry cannot settle refresh authority.
 - `GitPushCredential` is a git environment that redacts itself in JSON, `inspect` and
   `String()`. The token goes in an `http.extraheader` supplied via `GIT_CONFIG_*`, with
   the credential helper and global/system config off. The same overrides disable hooks,
@@ -3471,6 +3532,12 @@ hand-offs. `ForkCredentialBroker` has a typed operation API and no generic token
   token last. Revoking the user token ends its refresh chain, so the journal records that
   the next run needs a new contributor authorization. Revoking or rotating a parent
   never counts as revoking a child.
+  Normal run-token cleanup does **not** confirm removal of the contributor's App
+  authorization. Terminal and `blocked_cleanup` controller status (human and JSON)
+  retain the existing next action and also direct the contributor to GitHub **Settings →
+  Applications → Authorized GitHub Apps**: revoke this run's App if it is still listed,
+  then confirm it no longer appears. After the last live user token is revoked, the
+  grant API cannot delete it with that token; a 404 is not proof of grant deletion.
 - `killAll()` closes admission, waits for in-flight mints, and deletes the contributor's
   grant with an unexpired, unrevoked user-chain token *before* revoking anything else.
   It then revokes installation tokens. A 404 from the grant endpoint means "not
@@ -3480,7 +3547,9 @@ hand-offs. `ForkCredentialBroker` has a typed operation API and no generic token
   is revoked one by one, and `complete` is false: a token of the grant the broker does
   not hold may still be live.
 - `resolveByOperator(tokenId)` journals that the owner confirmed by hand that a token is
-  dead. `settleExpired()` settles unresolved tokens whose *journaled* native `expiresAt`
+  dead. The supported CLI is `zt-run resolve --root <dir> --run <id> --token <id> --confirm-dead`;
+  revoke user refresh authority in GitHub settings before acknowledging it.
+  `settleExpired()` settles unresolved installation tokens whose *journaled* `expiresAt`
   has passed; a token with no recorded expiry is never settled by time. Both return
   what is still unresolved, so the controller can complete cleanup.
 - `onJournalFailed` reports a journal write failure (disk, permissions) separately from
@@ -3496,7 +3565,11 @@ an in-memory fake (`__tests__/github-fake.ts`), so CI makes no GitHub calls.
 
 An installation token whose value was lost in a full process crash cannot be revoked
 through any GitHub API. The run stays in `blocked_cleanup` until `resolveByOperator`
-or, when the mint response was journaled, `settleExpired` after its native expiry.
+or `settleExpired` after a journaled installation expiry. Uncertain installation
+mints with malformed successful responses record a conservative one-hour bound from response observation;
+`kill-all` retries settle it after that bound. Legacy unbounded requests and user
+refresh chains, 5xx responses and transport-uncertain mints require operator resolution. Cleanup also verifies every remaining
+VM and accounting obligation before leaving `blocked_cleanup`.
 
 ## Verified fork push (#1066)
 

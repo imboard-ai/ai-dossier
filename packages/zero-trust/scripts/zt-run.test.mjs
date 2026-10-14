@@ -120,6 +120,7 @@ const valid = {
   approve: ['--run', run, '--checkpoint', 'plan', '--digest', digest],
   reject: ['--run', run, '--checkpoint', 'plan', '--digest', digest, '--reason', 'Review declined'],
   authorize: ['--run', run],
+  resolve: ['--run', run, '--token', '00000000-0000-0000-0000-000000000001', '--confirm-dead'],
   'kill-all': ['--reason', 'Incident'],
   metrics: [],
   adoption: ['--run', run, '--note', 'Voluntary observation'],
@@ -166,6 +167,19 @@ test('all valid command dispatches preserve exact arguments and defaults', async
     if (command === 'sweep') assert.deepEqual(calls[0], [{ apply: false }]);
     if (command === 'resume') assert.deepEqual(calls[0], [run, { revise: false }]);
     if (command === 'approve') assert.deepEqual(calls[0], [run, { point: 'plan', digest }]);
+    if (command === 'resolve')
+      assert.deepEqual(calls[0], [run, '00000000-0000-0000-0000-000000000001']);
+  }
+});
+test('resolve requires explicit death confirmation and an exact token ID before effects', async () => {
+  for (const args of [
+    ['--token', '00000000-0000-0000-0000-000000000001'],
+    ['--token', '../tokens', '--confirm-dead'],
+    ['--token', '00000000-0000-0000-0000-000000000001', '--confirm-dead', 'false'],
+  ]) {
+    const r = await invoke(['resolve', '--root', 'runs', '--run', run, ...args]);
+    assert.equal(r.code, 3);
+    assert.equal(r.factories.length, 0);
   }
 });
 test('contributor commands preserve inputs and print only contributor-confirmed links', async () => {

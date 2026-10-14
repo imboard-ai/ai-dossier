@@ -9,6 +9,7 @@ export const TOKEN_KINDS = Object.freeze(['installation', 'user', 'user_scoped']
 export type TokenKind = (typeof TOKEN_KINDS)[number];
 /** The kinds a fork push can be minted as. */
 export type ForkPushVia = Exclude<TokenKind, 'user'>;
+export const INSTALLATION_TOKEN_LIFETIME_MS = 3600_000;
 export type TokenStatus =
   /** Mint request journaled; GitHub's answer not yet recorded (may exist). */
   | 'requested'
@@ -44,7 +45,7 @@ export interface TokenRecord {
   readonly requestedAt: string;
   /** Broker-enforced use deadline (mint request + 15 min); null for the user token. */
   readonly useBy: string | null;
-  /** GitHub's native expiry (1 h / 8 h); recorded, never relied on. */
+  /** Native expiry, or an installation-only conservative uncertain-mint bound. */
   readonly expiresAt: string | null;
   readonly status: TokenStatus;
   readonly revokedVia?: 'token' | 'grant';
@@ -84,7 +85,14 @@ export type TokenEvent =
   | { v: 1; type: 'token_rotated'; id: string; at: string }
   | { v: 1; type: 'token_unrevocable'; id: string; at: string }
   /** Mint outcome unknown (transport failure, 5xx, malformed 2xx); `status` 0 = no response. */
-  | { v: 1; type: 'token_mint_uncertain'; id: string; status: number }
+  | {
+      v: 1;
+      type: 'token_mint_uncertain';
+      id: string;
+      status: number;
+      at?: string;
+      expiresAt?: string;
+    }
   /** GitHub issued a token broader than requested; it is revoked next. */
   | { v: 1; type: 'token_overbroad'; id: string; at: string }
   /** The owner confirmed by hand (GitHub settings) that this token is dead. */
@@ -247,7 +255,20 @@ function reduceToken(ledger: TokenLedger, raw: unknown): TokenLedger {
       break;
     case 'token_mint_uncertain':
       httpStatus(event.status);
-      update(event.id, ['requested'], (current) => ({ status: current.status }));
+      update(event.id, ['requested'], (current) => {
+        // Legacy events have no bound. User-chain access expiry never proves grant death.
+        if (event.expiresAt === undefined && event.at === undefined) return {};
+        const observed = at(event.at);
+        const expiresAt = at(event.expiresAt);
+        if (
+          current.kind !== 'installation' ||
+          event.status !== 201 ||
+          Date.parse(observed) < Date.parse(current.requestedAt) ||
+          Date.parse(expiresAt) !== Date.parse(observed) + INSTALLATION_TOKEN_LIFETIME_MS
+        )
+          fail();
+        return { expiresAt };
+      });
       break;
     case 'token_overbroad':
       at(event.at);
@@ -262,7 +283,8 @@ function reduceToken(ledger: TokenLedger, raw: unknown): TokenLedger {
       // Only a recorded native expiry, already passed, may settle a token.
       update(event.id, UNRESOLVED, (current) =>
         current.expiresAt !== null && Date.parse(current.expiresAt) <= Date.parse(observed)
-          ? { status: 'expired' }
+          ? // Legacy user-access expiry is not proof that refresh authority died.
+            { status: current.kind === 'installation' ? 'expired' : current.status }
           : fail()
       );
       break;
@@ -368,6 +390,36 @@ export class TokenJournal {
   }
   get state(): TokenLedger {
     return this.ledger;
+  }
+  /** Local cleanup only: access expiry cannot settle a refreshable user chain. */
+  settleExpired(
+    now: string,
+    record: (event: TokenEvent) => void = (event) => {
+      this.record(event);
+    }
+  ): string[] {
+    const observed = at(now);
+    const settled: string[] = [];
+    for (const token of this.ledger.tokens.values())
+      if (
+        token.kind === 'installation' &&
+        UNRESOLVED.includes(token.status) &&
+        token.expiresAt !== null &&
+        Date.parse(token.expiresAt) <= Date.parse(observed)
+      ) {
+        record({ v: 1, type: 'token_expired', id: token.id, at: observed });
+        settled.push(token.id);
+      }
+    return settled;
+  }
+  resolveByOperator(
+    tokenId: string,
+    now: string,
+    record: (event: TokenEvent) => void = (event) => {
+      this.record(event);
+    }
+  ): void {
+    record({ v: 1, type: 'operator_resolved', id: tokenId, at: now });
   }
   record(event: TokenEvent): TokenLedger {
     // Scan the one free-form value raw as well as the encoded event (trap #1004).

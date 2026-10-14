@@ -393,7 +393,7 @@ describe('network by phase (PRD §5.5)', () => {
 });
 
 describe('teardown on every path (PRD §5.9)', () => {
-  it('a provisioning failure destroys the VM, then makes the run unsupported_environment', async () => {
+  it('a provisioning failure destroys the VM, then pauses for operator correction', async () => {
     const { adapter, options, observed } = setup();
     adapter.on(PLAN.provisioning[0].argv, { exitCode: 1, stderr: 'integrity mismatch' });
     const error = await provisionWorkspace({ ...options, manifest: BASE, plan: PLAN }).catch(
@@ -402,9 +402,9 @@ describe('teardown on every path (PRD §5.9)', () => {
     expect(error).toBeInstanceOf(ProvisioningFailedError);
     expect(error.failedAt).toBe(PLAN.provisioning[0].id);
     expect(error.records).toHaveLength(1);
-    expect(error.run.state).toBe('unsupported');
-    expect(error.run.history.at(-1)?.reasonCode).toBe(R.UnsupportedEnvironment);
-    expect(observed.map((r) => r.state)).toEqual(['unsupported']);
+    expect(error.run.state).toBe('paused_user');
+    expect(error.run.history.at(-1)?.reasonCode).toBe(R.UserPaused);
+    expect(observed.map((r) => r.state)).toEqual(['paused_user']);
     expect(adapter.liveVms()).toEqual([]);
     expect(adapter.calls.some((c) => c.op === 'endProvisioning')).toBe(false);
   });
