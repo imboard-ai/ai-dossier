@@ -95,6 +95,19 @@ export function clearControllerRefusalNotice(store: NoticeStore): void {
   if (notice && Object.hasOwn(CONTROLLER_REFUSAL_ACTIONS, notice.reason)) clearStopNotice(store);
 }
 
+/** Release cleanup may add a final transition after the controller's stop. Rebind
+ * only an existing admission refusal; never create one or replace a producer's notice. */
+export function rebindControllerRefusalNotice(store: NoticeStore, run: RunRecord): void {
+  const notice = store.get<StopNotice | null>(STOP_NOTICE_KEY);
+  if (notice && Object.hasOwn(CONTROLLER_REFUSAL_ACTIONS, notice.reason))
+    recordStopNotice(
+      store,
+      run,
+      controllerRefusalNotice(notice.reason as ControllerRefusalReason, run.state),
+      false
+    );
+}
+
 /** The action status shows for `run`, or undefined when no notice explains this stop. */
 export function stopNoticeAction(
   notice: unknown,

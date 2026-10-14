@@ -1106,13 +1106,9 @@ export class RunController {
       throw new ControllerError('invalid_outcome');
     }
   }
-  private async step(phase: PhaseName, reacquire = false): Promise<Outcome> {
-    this.assertAdmission();
-    if (this.unfundedCleanup.size)
-      return stopped(this.held.run.state) ? { kind: 'waiting' } : { kind: 'hand_off' };
-    const key = this.key(phase);
-    const cached = this.cached.get(key);
-    if (cached && !reacquire && !['track', 'ship'].includes(phase)) return cached;
+  private admissionRefusal(
+    phase: PhaseName
+  ): import('./stop-notice').ControllerRefusalReason | null {
     const observedAt = this.deps.now();
     const status = assembleStatus({
       run: this.held.run,
@@ -1127,18 +1123,25 @@ export class RunController {
         openWaitUntil(this.held.run, observedAt.getTime())
       ),
     });
-    const refusal =
-      phase !== 'track' && status.activeTimeMs >= this.held.config.budget.activeMinutes * 60_000
-        ? 'active_time_exhausted'
-        : phase !== 'track' && isBudgetSessionExhausted(this.budget.snapshot(), this.sessionId())
-          ? 'budget_exhausted'
-          : this.budget
-                .snapshot()
-                .reservations.some(
-                  (hold) => hold.status === 'reserved' && this.oldHolds.has(hold.id)
-                )
-            ? 'hold_unsettled'
-            : null;
+    return phase !== 'track' &&
+      status.activeTimeMs >= this.held.config.budget.activeMinutes * 60_000
+      ? 'active_time_exhausted'
+      : phase !== 'track' && isBudgetSessionExhausted(this.budget.snapshot(), this.sessionId())
+        ? 'budget_exhausted'
+        : this.budget
+              .snapshot()
+              .reservations.some((hold) => hold.status === 'reserved' && this.oldHolds.has(hold.id))
+          ? 'hold_unsettled'
+          : null;
+  }
+  private async step(phase: PhaseName, reacquire = false): Promise<Outcome> {
+    this.assertAdmission();
+    if (this.unfundedCleanup.size)
+      return stopped(this.held.run.state) ? { kind: 'waiting' } : { kind: 'hand_off' };
+    const key = this.key(phase);
+    const cached = this.cached.get(key);
+    if (cached && !reacquire && !['track', 'ship'].includes(phase)) return cached;
+    let refusal = this.admissionRefusal(phase);
     const transitionPending = this.held.run.state !== 'gating' && !stopped(this.held.run.state);
     try {
       await this.deps.recordControllerStop?.(
@@ -1146,6 +1149,14 @@ export class RunController {
         refusal,
         refusal !== null && transitionPending
       );
+      // Retirement can await storage long enough to exhaust time or budget.
+      // Recheck before granting the producer its phase/allocation lease.
+      if (refusal === null) {
+        this.assertAdmission();
+        refusal = this.admissionRefusal(phase);
+        if (refusal)
+          await this.deps.recordControllerStop?.(this.context(), refusal, transitionPending);
+      }
     } catch (error) {
       // A diagnostic write is part of admission, never a reason to release a live
       // guest. Preserve cleanup accounting/fences and propagate the original failure.

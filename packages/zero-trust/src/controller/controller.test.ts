@@ -555,6 +555,26 @@ describe('RunController', () => {
     expect((await h.controller.resume(run.runId)).state).toBe('submitted');
     expect(notice(h, run.runId).retained).toBeNull();
   });
+  it('rechecks active time after awaited notice retirement before admitting a phase (#1191)', async () => {
+    const h = rig();
+    const record = h.deps.recordControllerStop;
+    h.deps.recordControllerStop = async (c, reason, pending) => {
+      await record(c, reason, pending);
+      if (reason === null && h.steps.calls.includes('acquire')) {
+        await Promise.resolve();
+        h.setTime('2026-10-08T02:00:00.000Z');
+      }
+    };
+    const run = await h.controller.start(h.config);
+    expect(h.steps.calls).toEqual(['gate', 'acquire']);
+    expect(run.state).toBe('paused_user');
+    expect(notice(h, run.runId).retained).toMatchObject({
+      state: run.state,
+      historyLength: run.history.length,
+      reason: 'active_time_exhausted',
+    });
+    expect(notice(h, run.runId).action).toContain('active_time_exhausted');
+  });
   it.each([
     false,
     true,

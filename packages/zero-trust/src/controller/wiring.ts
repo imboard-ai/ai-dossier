@@ -84,6 +84,7 @@ import {
   clearStopNotice,
   controllerRefusalNotice,
   provisioningNotice,
+  rebindControllerRefusalNotice,
   recordStopNotice,
   writeBlockedNotice,
 } from './stop-notice';
@@ -1756,25 +1757,32 @@ export function createController(
           await authorSession?.dispose();
           authorSession = undefined;
         } finally {
-          broker?.close();
-          for (const j of journals.values()) j.close();
-          journals.clear();
-          activeStore = undefined;
-          activeContext = undefined;
-          heldArtifacts = undefined;
-          broker = undefined;
-          contributor = undefined;
-          pusher = undefined;
-          intents = undefined;
-          handoff = undefined;
-          handoffMode = undefined;
-          tracker = undefined;
-          revisionObservationWaiting = false;
-          shipping = undefined;
-          receipt = undefined;
-          app = undefined;
-          models.clear();
-          if (!overrides.vm) rawVm = undefined;
+          try {
+            // Both refresh and broker cleanup can persist CleanupFailed, including
+            // on rejection. Bind the retained refusal before closing its journal.
+            if (activeStore && heldArtifacts)
+              rebindControllerRefusalNotice(heldArtifacts, activeStore.run);
+          } finally {
+            broker?.close();
+            for (const j of journals.values()) j.close();
+            journals.clear();
+            activeStore = undefined;
+            activeContext = undefined;
+            heldArtifacts = undefined;
+            broker = undefined;
+            contributor = undefined;
+            pusher = undefined;
+            intents = undefined;
+            handoff = undefined;
+            handoffMode = undefined;
+            tracker = undefined;
+            revisionObservationWaiting = false;
+            shipping = undefined;
+            receipt = undefined;
+            app = undefined;
+            models.clear();
+            if (!overrides.vm) rawVm = undefined;
+          }
         }
       }
     },
