@@ -670,6 +670,7 @@ is expected for either blocked state: inspect `status` to distinguish them.
 | Exit | Meaning |
 |---|---|
 | 0 | A durable stop, including every hand-off. |
+| 1 | Output stream failed (for example a closed pipe); process-owned cleanup was joined before exit. Inspect `status` before resuming. |
 | 2 | Blocked, failed, unsupported, cancelled, cleanup blocked, or the operation was unavailable. |
 | 3 | Invalid input: a fixed `error: <code>` line plus the usage line. |
 | 4 | Another controller holds the run store (`store_locked`) or is busy. |

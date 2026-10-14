@@ -80,8 +80,28 @@ const stopAuthors = async (signal) => {
         'error: revoke_failed; revoke the App authorization at https://github.com/settings/applications\n'
       );
   }
-  process.exit(signal === 'SIGINT' ? 130 : signal === 'SIGHUP' ? 129 : 143);
+  process.exit(
+    signal === 'output_failure' ? 1 : signal === 'SIGINT' ? 130 : signal === 'SIGHUP' ? 129 : 143
+  );
 };
+/** Stream errors are asynchronous: observer try/catch cannot join their cleanup. */
+export function createCommandOutput() {
+  const failed = new Set();
+  for (const stream of [process.stdout, process.stderr]) {
+    stream.on('error', () => {
+      failed.add(stream);
+      // Fence and join the same process-owned barrier as an active signal.
+      void stopAuthors('output_failure');
+    });
+  }
+  const write = (stream, line) => {
+    if (!failed.has(stream)) stream.write(`${line}\n`);
+  };
+  return {
+    out: (line) => write(process.stdout, line),
+    err: (line) => write(process.stderr, line),
+  };
+}
 const interrupted = () => {
   void stopAuthors('SIGINT');
 };

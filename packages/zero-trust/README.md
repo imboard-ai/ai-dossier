@@ -83,6 +83,8 @@ It projects only lifecycle primitives, never config, provider text or credential
 The callback is a separate controller driver: output failure cannot skip mandatory
 driver synchronization or cleanup. Signal ownership and interruption stay unchanged.
 Read-only JSON commands receive no callback or progress lines.
+An asynchronous stdout/stderr failure (including a closed pipe) joins the same
+process-owned cleanup barrier before exit 1, rather than crashing past cleanup.
 
 ### Active pause and cancellation (#1110)
 

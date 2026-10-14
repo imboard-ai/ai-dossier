@@ -959,13 +959,14 @@ test.each(
   assert.equal(fs.existsSync(h.root), false);
 });
 
-test.each(
-  ['SIGINT', 'SIGTERM', 'SIGHUP'].flatMap((signal) =>
+test.each([
+  ...['SIGINT', 'SIGTERM', 'SIGHUP'].flatMap((signal) =>
     ['start', 'resume', 'vm-fail', 'token-fail', 'adopting', 'release', 'release-error'].map(
       (mode) => ({ signal, mode })
     )
-  )
-)('active $mode $signal joins pause, VM destruction and broker revocation', async ({
+  ),
+  ...['start', 'resume'].map((mode) => ({ signal: 'output_failure', mode })),
+])('active $mode $signal joins pause, VM destruction and broker revocation', async ({
   signal,
   mode,
 }) => {
@@ -985,7 +986,7 @@ test.each(
   const code = `
     import fs from 'node:fs';
     import path from 'node:path';
-    const { createCommands } = await import(${JSON.stringify(new URL('./zt-run-bindings.mjs', import.meta.url).href)});
+    const { createCommands, createCommandOutput } = await import(${JSON.stringify(new URL('./zt-run-bindings.mjs', import.meta.url).href)});
     const { RunController } = await import(${JSON.stringify(new URL('../dist/controller/controller.js', import.meta.url).href)});
     const { RunStore } = await import(${JSON.stringify(new URL('../dist/controller/run-store.js', import.meta.url).href)});
     const { ScriptedRecovery } = await import(${JSON.stringify(new URL('../dist/controller/__tests__/fake-steps.js', import.meta.url).href)});
@@ -997,8 +998,10 @@ test.each(
     const config = ${JSON.stringify(approved)};
     const root = ${JSON.stringify(h.root)};
     const mode = ${JSON.stringify(mode)};
+    const outputFailure = ${JSON.stringify(signal)} === 'output_failure';
+    const { out } = createCommandOutput();
     ${subprocessOAuthSetup()}
-    const commands = await createCommands({ root, onAuthorizationUrl, createController: (next, edges, session) => {
+    const commands = await createCommands({ root, onAuthorizationUrl, onRun: run => out(run.state + ' / ' + run.reasonCode), createController: (next, edges, session) => {
       const vm = new FakeVmAdapter();
       const destroy = vm.destroy.bind(vm);
       vm.destroy = async value => {
@@ -1010,7 +1013,7 @@ test.each(
       };
       const recovery = new ScriptedRecovery();
       let broker, tokens, store;
-      return new RunController({ root, vm, recovery, drivers: [], now: () => new Date(),
+      return new RunController({ root, vm, recovery, drivers: [{observeRun: edges.onRun}], now: () => new Date(),
         estimateVm: () => ({money:{currency:'USD',minor:0},tokens:0,timeMs:1,rates:[{...config.modelProfile.rates[0],resource:'local-qemu',unit:'millisecond'}]}),
         observeVm: async () => ({money:{currency:'USD',minor:0},tokens:0,timeMs:1,source:'observed'}),
         steps: { gate: async c => {
@@ -1043,7 +1046,8 @@ test.each(
           await c.createVm({scope:'container'});
           if(mode === 'release-error')throw new Error('provider_failed');
           if(mode === 'release')return {kind:'hand_off'};
-          process.stdout.write('ACTIVE_READY\\n');
+           process.stdout.write('ACTIVE_READY\\n');
+           if(outputFailure) setTimeout(() => out('verifying / candidate_ready'), 50);
           await new Promise(r => c.signal.addEventListener('abort',r,{once:true}));
           return {kind:'proceed'};
         }, acquire: async () => { throw new Error('forbidden next phase'); } },
@@ -1068,19 +1072,30 @@ test.each(
           : 'ACTIVE_READY';
     if (!sent && output.includes(marker)) {
       sent = true;
-      child.kill(signal);
+      if (signal === 'output_failure') child.stdout.destroy();
+      else child.kill(signal);
     }
-    if (sent && !repeated && output.includes('DESTROYING')) {
+    if (signal !== 'output_failure' && sent && !repeated && output.includes('DESTROYING')) {
       repeated = true;
       child.kill(signal);
     }
   });
   assert.deepEqual(
     exit,
-    { status: signal === 'SIGINT' ? 130 : signal === 'SIGHUP' ? 129 : 143, killedBy: null },
+    {
+      status:
+        signal === 'output_failure'
+          ? 1
+          : signal === 'SIGINT'
+            ? 130
+            : signal === 'SIGHUP'
+              ? 129
+              : 143,
+      killedBy: null,
+    },
     errors
   );
-  assert.equal(repeated, mode !== 'adopting');
+  assert.equal(repeated, signal !== 'output_failure' && mode !== 'adopting');
   assert.equal(
     fs.existsSync(path.join(h.dir, 'vm-dead')),
     !['vm-fail', 'adopting'].includes(mode),
