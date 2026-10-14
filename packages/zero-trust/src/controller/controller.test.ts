@@ -32,6 +32,35 @@ import {
 } from './verification-record';
 import { verifyCandidate } from './verifier';
 
+it('interrupt joins verification cleanup and resumes the exact phase without replaying implementation', async () => {
+  const h = rig();
+  let entered!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  h.steps.scripts.verify = [
+    async (c) => {
+      await c.createVm({ scope: 'container' });
+      entered();
+      await new Promise<void>((resolve) =>
+        c.signal.addEventListener('abort', () => resolve(), { once: true })
+      );
+      throw new Error('verification interrupted');
+    },
+  ];
+  const running = h.controller.start(h.config);
+  await ready;
+  await h.controller.interrupt();
+  const paused = await running;
+  expect(paused.state).toBe('paused_user');
+  expect(paused.history.at(-1)?.from).toBe('verifying');
+  expect(h.vm.liveVms()).toEqual([]);
+  const resumed = await h.controller.resume(paused.runId);
+  expect(resumed.state).toBe('submitted');
+  expect(h.steps.calls.filter((phase) => phase === 'verify')).toHaveLength(2);
+  expect(h.steps.calls.filter((phase) => phase === 'implement')).toHaveLength(1);
+});
+
 let template: VerificationRecord;
 let artifacts: string;
 const roots: string[] = [];

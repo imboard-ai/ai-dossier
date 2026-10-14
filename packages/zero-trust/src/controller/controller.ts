@@ -39,6 +39,7 @@ import {
   type ControlRequest,
   controlRefusal,
   readControlRequests,
+  requestControl,
 } from './control';
 import { latestSourceEdit, sourceEditCount } from './edits';
 import {
@@ -395,6 +396,7 @@ export class RunController {
   private cached = new Map<string, Outcome>();
   private last?: RunRecord;
   private control?: ControlRequest | 'invalid';
+  private interruptRequested = false;
   private controlCleanup?: Promise<void>;
   private controlReconciled?: Promise<void>;
   private controlReconciledKind?: 'pause' | 'cancel';
@@ -408,6 +410,16 @@ export class RunController {
   snapshot(): RunRecord {
     if (!this.last) throw new ControllerError('not_running');
     return this.last;
+  }
+  /** Process termination is a pause, not cancellation. Join the invocation through
+   * release so broker-held credentials are swept before its owner exits. */
+  async interrupt(): Promise<void> {
+    const running = this.running;
+    if (!running) return;
+    this.interruptRequested = true;
+    this.observeControl();
+    const run = await running;
+    if (run.state === 'blocked_cleanup') throw new ControllerError('admission_closed');
   }
   start(config: RunConfig): Promise<RunRecord> {
     return this.launch(async () => {
@@ -604,6 +616,7 @@ export class RunController {
     this.unfundedCleanup.clear();
     this.cached.clear();
     this.control = undefined;
+    this.interruptRequested = false;
     this.controlCleanup = undefined;
     this.controlReconciled = undefined;
     this.controlReconciledKind = undefined;
@@ -660,6 +673,16 @@ export class RunController {
   private observeControl(): void {
     if (!this.store || !this.journal || this.control || this.incident) return;
     try {
+      // A signal can precede initial store publication. Retain it until the
+      // normal control path can durably record and apply the pause.
+      if (this.interruptRequested) {
+        requestControl(
+          this.store,
+          { kind: 'pause', reason: 'Process interrupted' },
+          this.deps.now()
+        );
+        this.interruptRequested = false;
+      }
       const state = readControlRequests(this.store);
       if (state.invalid) this.control = 'invalid';
       else

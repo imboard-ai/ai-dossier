@@ -646,6 +646,232 @@ test.each(
   }
 });
 
+test.each(
+  ['SIGINT', 'SIGTERM', 'SIGHUP'].flatMap((signal) =>
+    ['start', 'resume', 'vm-fail', 'token-fail'].map((mode) => ({ signal, mode }))
+  )
+)('active $mode $signal joins pause, VM destruction and broker revocation', async ({
+  signal,
+  mode,
+}) => {
+  const h = rig();
+  const prepare = await createCommands({
+    root: h.root,
+    createController,
+    onAuthorizationUrl: h.onAuthorizationUrl,
+  });
+  const approval = await prepare.prepareAuthor(h.config);
+  await prepare.discardAuthor(h.config);
+  await Promise.all(h.callbacks);
+  const approved = { ...h.config, authorApproval: approval };
+  let runId;
+  if (mode !== 'start') {
+    const store = h.seed(approved);
+    runId = store.runId;
+    const directory = path.join(store.storeDirectory('control'), 'controller');
+    fs.mkdirSync(directory, { mode: 0o700 });
+    fs.writeFileSync(path.join(directory, 'events.jsonl'), '', { mode: 0o600 });
+    store.close();
+  }
+  const code = `
+    import fs from 'node:fs';
+    import path from 'node:path';
+    const { createCommands } = await import(${JSON.stringify(new URL('./zt-run-bindings.mjs', import.meta.url).href)});
+    const { RunController } = await import(${JSON.stringify(new URL('../dist/controller/controller.js', import.meta.url).href)});
+    const { RunStore } = await import(${JSON.stringify(new URL('../dist/controller/run-store.js', import.meta.url).href)});
+    const { ScriptedRecovery } = await import(${JSON.stringify(new URL('../dist/controller/__tests__/fake-steps.js', import.meta.url).href)});
+    const { FakeVmAdapter } = await import(${JSON.stringify(new URL('../dist/__tests__/fake-vm.js', import.meta.url).href)});
+    const { ForkCredentialBroker } = await import(${JSON.stringify(new URL('../dist/github/broker.js', import.meta.url).href)});
+    const { AppCredentials } = await import(${JSON.stringify(new URL('../dist/github/app-auth.js', import.meta.url).href)});
+    const { Journal } = await import(${JSON.stringify(new URL('../dist/journal.js', import.meta.url).href)});
+    const { ReasonCode, transitionRun } = await import(${JSON.stringify(new URL('../dist/state.js', import.meta.url).href)});
+    const config = ${JSON.stringify(approved)};
+    const root = ${JSON.stringify(h.root)};
+    const mode = ${JSON.stringify(mode)};
+    const nativeFetch = globalThis.fetch;
+    globalThis.fetch = async (input, init) => {
+      const url = new URL(String(input));
+      if (url.pathname === '/login/oauth/access_token') return new Response(JSON.stringify({access_token:'ghu_'+'a'.repeat(30),refresh_token:'ghr_'+'b'.repeat(30),expires_in:3600}));
+      if (url.pathname === '/user') return new Response(JSON.stringify({id:12,login:'contributor',name:'Verified Name'}));
+      if (url.pathname === '/user/emails') return new Response(JSON.stringify([{email:'verified@example.org',verified:true}]));
+      if (url.pathname === '/applications/fixture/token' && init.method === 'DELETE') return new Response(null,{status:204});
+      throw new Error('unexpected_request');
+    };
+    const commands = await createCommands({ root, onAuthorizationUrl: value => {
+      const url = new URL(value); const callback = new URL(url.searchParams.get('redirect_uri'));
+      callback.searchParams.set('state',url.searchParams.get('state'));callback.searchParams.set('code','approved');
+      void nativeFetch(callback);
+    }, createController: (next, edges, session) => {
+      const vm = new FakeVmAdapter();
+      const destroy = vm.destroy.bind(vm);
+      vm.destroy = async value => {
+        process.stdout.write('DESTROYING\\n');
+        await new Promise(r => setTimeout(r, 150));
+        if (mode === 'vm-fail') throw new Error('destruction_failed');
+        await destroy(value);
+        fs.writeFileSync(path.join(config.executionProfile.stateDir,'vm-dead'), 'yes');
+      };
+      const recovery = new ScriptedRecovery();
+      let broker, tokens, store;
+      return new RunController({ root, vm, recovery, drivers: [], now: () => new Date(),
+        estimateVm: () => ({money:{currency:'USD',minor:0},tokens:0,timeMs:1,rates:[{...config.modelProfile.rates[0],resource:'local-qemu',unit:'millisecond'}]}),
+        observeVm: async () => ({money:{currency:'USD',minor:0},tokens:0,timeMs:1,source:'observed'}),
+        steps: { gate: async c => {
+          store = c.store;
+          tokens = new Journal(store.storeDirectory('tokens'));
+          broker = new ForkCredentialBroker({ store: tokens, fork:{repositoryId:22,installationId:33,owner:'contributor'},
+            app: new AppCredentials({appId:'1',clientId:'fixture',privateKey:process.env.BINDING_APP_KEY,clientSecret:process.env.BINDING_APP_SECRET}),
+            sleep: async () => {},
+            http: async request => {
+              if (request.method === 'GET') return {status:401,body:null};
+              process.stdout.write('REVOKING\\n');
+              await new Promise(r => setTimeout(r,250));
+              if (mode === 'token-fail') return {status:503,body:null};
+              fs.writeFileSync(path.join(config.executionProfile.stateDir,'token-dead'), 'yes');
+              return {status:204,body:null};
+            }, intents: () => { throw new Error('no intents'); },
+            onCleanupBlocked: () => { if(store.run.state !== 'blocked_cleanup')store.persistRun(transitionRun(store.run,ReasonCode.CleanupFailed,new Date().toISOString())); }
+          });
+          await broker.recover();
+          if (session) await session.adopt(broker,c.run,next);
+          else broker.registerUserToken('ghu_'+'c'.repeat(30),new Date(Date.now()+3600000).toISOString());
+          await c.createVm({scope:'container'});
+          fs.writeFileSync(path.join(config.executionProfile.stateDir,'active-run'), c.run.runId);
+          process.stdout.write('ACTIVE_READY\\n');
+          await new Promise(r => c.signal.addEventListener('abort',r,{once:true}));
+          return {kind:'proceed'};
+        }, acquire: async () => { throw new Error('forbidden next phase'); } },
+        release: async () => { try { const result = await broker?.recover(); if(result?.report)throw new Error('cleanup_incomplete'); } finally { broker?.close();tokens?.close(); } }
+      });
+    }});
+    setInterval(() => {}, 1000);
+    if(mode === 'start') {await commands.prepareAuthor(config); await commands.start(config).catch(e=>process.stderr.write(String(e.stack)));}
+    else await commands.resume(${JSON.stringify(runId)}).catch(e=>process.stderr.write(String(e.stack)));
+  `;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', code], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let output = '';
+  let errors = '';
+  let sent = false;
+  let repeated = false;
+  child.stderr.on('data', (bytes) => {
+    errors += bytes;
+  });
+  child.stdout.on('data', (bytes) => {
+    output += bytes;
+    if (!sent && output.includes('ACTIVE_READY')) {
+      sent = true;
+      child.kill(signal);
+    }
+    if (sent && !repeated && output.includes('DESTROYING')) {
+      repeated = true;
+      child.kill(signal);
+    }
+  });
+  try {
+    const exit = await new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error(`active signal timed out: ${output} ${errors}`)),
+        10000
+      );
+      child.once('error', reject);
+      child.once('exit', (status, killedBy) => {
+        clearTimeout(timer);
+        resolve({ status, killedBy });
+      });
+    });
+    assert.deepEqual(
+      exit,
+      { status: signal === 'SIGINT' ? 130 : signal === 'SIGHUP' ? 129 : 143, killedBy: null },
+      errors
+    );
+    assert.ok(repeated);
+    assert.equal(fs.existsSync(path.join(h.dir, 'vm-dead')), mode !== 'vm-fail', output);
+    assert.equal(fs.existsSync(path.join(h.dir, 'token-dead')), mode !== 'token-fail', output);
+    const id = fs.readFileSync(path.join(h.dir, 'active-run'), 'utf8');
+    const store = RunStore.open(h.root, id);
+    try {
+      assert.equal(store.run.state, mode.endsWith('fail') ? 'blocked_cleanup' : 'paused_user');
+      assert.equal(store.run.history.at(-1).from, mode === 'token-fail' ? 'paused_user' : 'gating');
+      assert.equal(readControlRequests(store).pending.length, 0);
+      const rows = fs
+        .readFileSync(path.join(store.storeDirectory('tokens'), 'events.jsonl'), 'utf8')
+        .trim()
+        .split('\n')
+        .map(JSON.parse);
+      assert.equal(
+        rows.filter((row) => row.type === 'token_revoked').length,
+        mode === 'token-fail' ? 0 : 1
+      );
+    } finally {
+      store.close();
+    }
+    if (mode.endsWith('fail')) assert.match(errors, /error: revoke_failed/);
+    else {
+      const phases = [];
+      const vm = new FakeVmAdapter();
+      const controller = new RunController({
+        root: h.root,
+        vm,
+        recovery: new ScriptedRecovery(),
+        drivers: [],
+        now: () => new Date(),
+        steps: {
+          gate: async (c) => {
+            phases.push(c.run.state);
+            return { kind: 'blocked' };
+          },
+        },
+        estimateVm: () => assert.fail('resuming gating must not allocate in this fixture'),
+        observeVm: async () => assert.fail('no retained VM remains'),
+      });
+      assert.equal((await controller.resume(id)).state, 'blocked');
+      assert.deepEqual(phases, ['gating']);
+    }
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+  }
+});
+
+test('interrupt before store publication is latched and completed commands retire all signal handlers', async () => {
+  const h = rig();
+  const before = ['SIGINT', 'SIGTERM', 'SIGHUP'].map((signal) => process.listenerCount(signal));
+  let controller;
+  const commands = await createCommands({
+    root: h.root,
+    onAuthorizationUrl: h.onAuthorizationUrl,
+    createController: () => {
+      controller = new RunController({
+        root: h.root,
+        vm: new FakeVmAdapter(),
+        recovery: new ScriptedRecovery(),
+        drivers: [],
+        now: () => new Date(),
+        steps: { gate: async () => assert.fail('latched pause fences gate') },
+        estimateVm: () => assert.fail('no allocation'),
+        observeVm: async () => assert.fail('no allocation'),
+      });
+      const start = controller.start.bind(controller);
+      controller.start = (config) => {
+        const running = start(config);
+        void controller.interrupt();
+        return running;
+      };
+      return controller;
+    },
+  });
+  await commands.prepareAuthor(h.config);
+  const result = await commands.start(h.config);
+  assert.equal(result.state, 'paused_user');
+  assert.deepEqual(
+    ['SIGINT', 'SIGTERM', 'SIGHUP'].map((signal) => process.listenerCount(signal)),
+    before
+  );
+  await controller.interrupt(); // Dormant operation is a no-op.
+  await Promise.all(h.callbacks);
+});
+
 test('resume delegates identity admission to the locked controller without a CLI OAuth preflight', async () => {
   const h = rig();
   const calls = [];

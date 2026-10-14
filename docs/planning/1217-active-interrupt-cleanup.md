@@ -21,7 +21,7 @@ N/A — infrastructure signal handling, no new data-reachable state. Existing pa
 - `packages/zero-trust/scripts/zt-run-bindings.mjs` — active controller ownership and process signal barrier.
 - `packages/zero-trust/scripts/zt-run-bindings.test.mjs` — actual subprocess signals and cleanup evidence.
 - `packages/zero-trust/src/controller/controller.ts` — interrupt-and-join using existing pause admission.
-- `packages/zero-trust/src/__tests__/controller.test.ts` — control-path regressions if needed.
+- `packages/zero-trust/src/controller/controller.test.ts` — verification-phase interruption and resume regression (corrected actual test path during implementation).
 - `docs/agent-traps.md` — record the ownership gap.
 
 ## Reusable Code

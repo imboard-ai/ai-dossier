@@ -56,20 +56,20 @@ function refuse(code) {
 }
 
 // Signals terminate a process, not one command facade. All facades share the
-// same ephemeral cleanup barrier; no credential or shutdown state is durable.
+// same cleanup barrier across preparation and broker-owned active invocations.
 const authorOwners = new Set();
 let stoppingAuthors = false;
 const stopAuthors = async (signal) => {
   if (stoppingAuthors) return;
   stoppingAuthors = true;
-  // Before broker adoption there is no durable credential ledger. Join every
-  // process-local owner before honoring termination, including an active start.
+  // Join every process-local owner, including controller pause/release after
+  // broker adoption. Repeated signals cannot shorten this barrier.
   const results = await Promise.allSettled([...authorOwners].map((owner) => owner.dispose()));
   if (results.some((result) => result.status === 'rejected'))
     process.stderr.write(
       'error: revoke_failed; revoke the App authorization at https://github.com/settings/applications\n'
     );
-  process.exit(signal === 'SIGINT' ? 130 : 143);
+  process.exit(signal === 'SIGINT' ? 130 : signal === 'SIGHUP' ? 129 : 143);
 };
 const interrupted = () => {
   void stopAuthors('SIGINT');
@@ -77,17 +77,22 @@ const interrupted = () => {
 const terminated = () => {
   void stopAuthors('SIGTERM');
 };
+const hungup = () => {
+  void stopAuthors('SIGHUP');
+};
 const releaseOwner = (owner) => {
   authorOwners.delete(owner);
   if (!authorOwners.size) {
     process.removeListener('SIGINT', interrupted);
     process.removeListener('SIGTERM', terminated);
+    process.removeListener('SIGHUP', hungup);
   }
 };
 const trackOwner = (owner) => {
   if (!authorOwners.size) {
     process.on('SIGINT', interrupted);
     process.on('SIGTERM', terminated);
+    process.on('SIGHUP', hungup);
   }
   authorOwners.add(owner);
   return owner;
@@ -114,6 +119,16 @@ export async function createCommands({ root, createController, onAuthorizationUr
   const pendingAuthors = new Map();
   const pendingPreparations = new Map();
   const authorOperations = new Set();
+  const withController = async (config, session, work) => {
+    if (stoppingAuthors) refuse('admission_closed');
+    const controller = createController(config, { onAuthorizationUrl }, session);
+    const owner = trackOwner({ dispose: () => controller.interrupt() });
+    try {
+      return await work(controller);
+    } finally {
+      releaseOwner(owner);
+    }
+  };
   const disposePreparation = async (key) => {
     const owner = pendingPreparations.get(key);
     if (!owner) return;
@@ -414,8 +429,8 @@ export async function createCommands({ root, createController, onAuthorizationUr
           if (!session) refuse('author_approval_missing');
           const approved = { ...config, authorApproval: session.approval };
           guard = acquireStart(approved);
-          const run = await createController(approved, { onAuthorizationUrl }, session).start(
-            approved
+          const run = await withController(approved, session, (controller) =>
+            controller.start(approved)
           );
           return status(run.runId);
         } finally {
@@ -452,10 +467,12 @@ export async function createCommands({ root, createController, onAuthorizationUr
       if (!config.authorApproval) refuse('author_approval_missing');
       // Locked controller reconciliation decides whether identity is needed.
       // Pending publication must reach read-back before any OAuth preflight.
-      const run = await createController(config, { onAuthorizationUrl }).resume(runId, {
-        revise: Boolean(revise),
-        ...(reviewers ? { reviewers } : {}),
-      });
+      const run = await withController(config, undefined, (controller) =>
+        controller.resume(runId, {
+          revise: Boolean(revise),
+          ...(reviewers ? { reviewers } : {}),
+        })
+      );
       return status(run.runId);
     },
     status,
@@ -490,7 +507,7 @@ export async function createCommands({ root, createController, onAuthorizationUr
         assertSecretFree(body);
         action = { kind: 'edit', title: request.title, body };
       }
-      return createController(config, { onAuthorizationUrl }).prAction(runId, action);
+      return withController(config, undefined, (controller) => controller.prAction(runId, action));
     },
     pause(runId, reason) {
       return withStore(
