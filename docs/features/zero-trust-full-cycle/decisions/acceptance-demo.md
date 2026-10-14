@@ -1,7 +1,7 @@
 # Decision record: live acceptance demo (#1115)
 
 - **Date:** 2026-10-13.
-- **Status:** **PASS, with open quality defects.** The owner's live run took the seeded issue through
+- **Status:** **PASS, with open quality defects.** (The post-fix re-run at the end of this record did not pass; see [Post-fix re-run](#post-fix-re-run-2026-10-14).) The owner's live run took the seeded issue through
   `awaiting_contributor`, then `submitted` with exactly one PR, then a maintainer review, then a
   revision on the same PR through a compare-and-swap push. `zt-acceptance-check` passed live both
   before and after the revision. Contributions mechanics work end to end. Candidate *quality* does
@@ -145,3 +145,132 @@ Defects filed as sub-issues of #1002 during the demo:
 Not filed as a product defect: the check script fails `pr-body` until the PR tracker has started,
 which happens on the `resume` after `submitted`. The runbook's stop B should say to run that second
 `resume` before the check.
+
+## Post-fix re-run (2026-10-14)
+
+- **Status: FAIL. #1002 stays open.** The fixes under test held live, but S5 (a verified revision
+  of the same PR) was not demonstrated, and a gpt-5-family model did not get past the gate. The
+  four new defects are #1219, #1220 and #1223, plus #1217 together with its contributing cause #1218.
+- **What it tested:** #1205 (review inventories test titles and reruns the original tests on the
+  patched source), #1186 (gpt-5-family request profiles and release of holds on rejected calls),
+  and #1191 (durable stop notices). None of these had run live before.
+- **Setup:** controller built from `main` at `70c5f2a`. Same upstream/fork pair, App, baked profile and
+  runbook as above. The package proxy was restarted for a fresh inspection CA. Issues #6 and #8 are
+  fresh copies of the fixture bug. `gpt-4.1-mini` was the baseline (run a, run c), and `gpt-5-mini` was
+  used for planning, implementation and decisions (run b). Every upstream PR was created by
+  `ydhidden`, and the maintainer posted the reviews.
+
+### Review now catches deleted tests (#1205: PASS)
+
+All three gpt-4.1-mini candidates fixed the divisor (`/ 100` → `/ 1000`) but rewrote
+`test/duration.test.js` and dropped the existing test `rejects text that is not a duration`. One
+plan even said "Keep existing tests intact". Review refused each one before anything was pushed:
+
+| Run | Paused | Stop notice |
+|---|---|---|
+| `ztc-18a12fe4c3e88ab2` | 10:54:20 | `paused_user`, review refused the candidate (`test_removed`) |
+| `ztc-57183f34c0f3951f` | 11:31:24 | same |
+| `ztc-4cc2feace7c94368` | 12:11:47 | same |
+
+The two later runs continued through the documented `edit --patch` path. A 4-line contributor
+edit restored the original test next to the model's new one, and the edited candidate passed a
+fresh review and verification. The PR body then lists "Includes contributor edits". The first run
+was cancelled instead.
+
+### S4: PASS (twice)
+
+| Run | Stop A `awaiting_contributor` | Stop B `submitted` | PR | Verified candidate |
+|---|---|---|---|---|
+| `ztc-57183f34c0f3951f` | 11:38:13 | 11:43:36 | https://github.com/imboard-ai/ztfc-upstream-fixture/pull/7 | `8819b9572dced4f54ad1a371cf0883d166d00554` |
+| `ztc-4cc2feace7c94368` | 12:19:23 | 12:21:34 | https://github.com/imboard-ai/ztfc-upstream-fixture/pull/9 | `4c6404a99a8119e55aabae454310a34fe3f024b5` |
+
+The base is `fda6f7fa90963590c25f87a52366d3207ef94d80` in both runs. In each, the fork branch matched
+`candidateSha` at stop A, no comment was posted on the issue, and exactly one PR existed for the head.
+`zt-acceptance-check` passed at stop B for both runs:
+
+```text
+zt-acceptance-check ztc-4cc2feace7c94368-run-1
+CHECK        RESULT  DETAIL
+receipts     PASS    1 receipt(s), 1 verified candidate(s)
+identity     PASS    imboard-ai/ztfc-upstream-fixture and ydhidden/ztfc-upstream-fixture match the signed IDs
+fork-branch  PASS    ztfc/ztc-4cc2feace7c94368 = 4c6404a99a8119e55aabae454310a34fe3f024b5
+single-pr    PASS    https://github.com/imboard-ai/ztfc-upstream-fixture/pull/9 (open)
+pr-body      PASS    2 command(s) for 4c6404a99a81
+pr-head      PASS    4c6404a99a8119e55aabae454310a34fe3f024b5
+ALL CHECKS PASSED
+```
+
+Run `ztc-57183f34c0f3951f` had the same six PASS rows for PR #7 and `8819b9572dce`.
+
+### S5: FAIL, not demonstrated
+
+The maintainer posted the same in-scope review on both PRs: replace the bare `1000` with
+`const MS_PER_SECOND = 1000` and keep both existing tests. The org membership is private, so both
+revisions ran with `--reviewers` (#1198).
+
+- **PR #7 (`ztc-57183f34c0f3951f`).** The screen admitted the review, and `revising` started at 11:46:43.
+  The revision repeated the #1115 failure: it replaced `ms` with a hand-written parser, changed
+  `TypeError` to `Error`, and dropped the original test again, including the one restored by the
+  contributor edit. Before review could rule on it, the contributor stopped the `resume` process in
+  the terminal: it had printed nothing for several minutes and looked hung (#1218). The controller exited without revoking the
+  user token it held and without destroying its verification VM. The next `resume` destroyed the
+  VM, could not settle the token, and moved the run to `blocked_cleanup` (11:51:30) (#1217). That
+  path ends in terminal `blocked`, so the revision cannot finish.
+- **PR #9 (`ztc-4cc2feace7c94368`).** The feedback screen's two passes disagreed: `hand_off`,
+  confidence 0.5, reason `disagreement`. That plan said "No refactoring or unrelated changes",
+  whereas the PR #7 plan, which admitted the same review at confidence 1.0, did not. The run went
+  `revising → paused_user` in 12 s with nothing implemented. The verdict is cached for the session, and
+  `resume --revise` is refused from `paused_user`, so the run could not revise its own PR (#1223).
+  This is the plan-scope question #1115 deferred, and here it decided the outcome.
+
+S5 in the #1115 record passed before #1205. That revision deleted the same test, which this
+re-run shows review now refuses. A revision that keeps the tests has not yet been shown live.
+
+### gpt-5-mini (#1186, #1191): FAIL at the gate
+
+Run `ztc-ac49377b173a99f1` (issue #8): `gating` at 11:55:35, then a hand-off with `ownership_unclear`
+at 11:56:37. Exit 0, with a durable stop notice in `status`.
+
+- **The calls work.** All nine decision calls succeeded and settled from `model_usage`. No hold was
+  left reserved or unsettled, and the estimate was $0.09. The request-profile and accounting fixes hold.
+- **The decisions do not.** Reproduced offline on the same `CONTRIBUTING.md`: gpt-5-mini returns
+  `invalid_pass` for 4 of 6 policy questions, while gpt-4.1-mini gets all 6 accepted. Every failing
+  pass used exactly 1,024 output tokens. That is the typed-decision cap, and `max_completion_tokens`
+  counts reasoning tokens against it, so the visible tool call is cut off (#1219).
+- **The notice explains nothing.** `status` shows no per-question results or citations, and it says
+  "no model work started" even though the nine calls were charged (#1220).
+
+### Cost
+
+| Contribution | Session 1 | Session 2 (revision) |
+|---|---|---|
+| `ztc-18a12fe4c3e88ab2` | $0.49 | n/a |
+| `ztc-57183f34c0f3951f` | $0.55 | $0.24 |
+| `ztc-ac49377b173a99f1` | $0.09 | n/a |
+| `ztc-4cc2feace7c94368` | $0.54 | $0.02 |
+
+That is $1.93 estimated and $0.70 observed. All 150 reservations settled.
+
+### Operator friction (not filed)
+
+- Each `zt-run` process asks for a fresh App authorization (#1213). This contribution flow needed
+  seven authorization clicks. Two links expired unclicked after about 10 minutes, which leaves
+  `start` at `authorization_expired`.
+- Revision reviewers from a private org need `--reviewers` on every `resume --revise`.
+
+### Defects filed
+
+| Issue | Summary |
+|---|---|
+| #1217 | Interrupting `zt-run` during an active phase strands the run in `blocked_cleanup` |
+| #1218 | `start`/`resume` print no progress during multi-minute phases |
+| #1219 | gpt-5 typed decisions exhaust the 1,024-token cap on reasoning and escalate as unclear |
+| #1220 | A policy hand-off at the gate keeps no decision evidence and says no model work ran |
+| #1223 | One split vote on revision feedback ends the revision for good |
+
+### Cleanup
+
+Runs `ztc-18a12fe4c3e88ab2`, `ztc-ac49377b173a99f1` and `ztc-4cc2feace7c94368` are `cancelled`.
+`ztc-57183f34c0f3951f` stays in `blocked_cleanup` until the contributor revokes the App
+authorization and its token is resolved with `resolve --confirm-dead`. VM reconcile reports nothing live in any store,
+and the proxy is down. PRs #7 and #9 remain open, and the maintainer will close them.
