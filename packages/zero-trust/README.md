@@ -2811,6 +2811,13 @@ consumed once; an injected adapter cannot replay a previously captured error.
 Subclasses and replaced complete methods have no release authority. More than
 one built-in completion invocation within a reservation also disqualifies release,
 even if a later invocation receives an otherwise recognized rejection.
+The injected `fetch` is trusted controller code and must perform exactly one HTTP
+attempt per call, with no hidden retries. Accounting helpers are internal host
+composition plumbing, not package exports or model/VM capabilities. This is not
+a sandbox for adversarial host JavaScript: such code already has ledger and
+filesystem authority. Response JSON, usage, proposals and worker code remain
+untrusted under the model-harness decision; transport implementations are
+controller-owned. The built-in adapter owns all admitted retries.
 keeps `max(estimate, observed)` as the existing ledger specifies; it never frees
 money, tokens or time merely because observed usage was lower. Per-call token
 commitment is `(wire bytes + maxOutputTokens) × attempts`; time commitment is

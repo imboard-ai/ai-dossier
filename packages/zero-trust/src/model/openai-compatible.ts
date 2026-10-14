@@ -188,6 +188,7 @@ export interface OpenAICompatibleOptions {
   /** API base URL, e.g. https://provider.example/v1; localhost HTTP is allowed. */
   endpoint: string;
   apiKeyEnv: string;
+  /** Trusted controller transport: exactly one HTTP attempt per call; no hidden retries. */
   fetch: typeof fetch;
   maxTokensParameter?: ModelRequestProfile['maxTokensParameter'];
   logprobs?: boolean;

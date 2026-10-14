@@ -51,3 +51,24 @@ authority to subclasses, and count completion entries across the entire metered
 scope. More than one invocation permanently disqualifies release; a replaced
 method cannot authenticate rejection provenance. Regressions cover both decorators
 and billed, unknown, caught-error and subclass inputs.
+
+## Final validity gate
+
+Conformance at 1105272 again found AC1–4 met. Two final security findings assumed
+arbitrary controller-host code imports internal registration/minting helpers, or
+implements hidden billed retries inside the injected fetch. Both are dismissed
+as `contradicts-project-rule`: the owner-authorized model-harness decision
+(`docs/features/zero-trust-full-cycle/decisions/model-harness.md:7–14,25–31,48–61`)
+chooses trusted controller-authored transport injection, with untrusted JSON/model
+proposals and VM code separated by the import graph. A same-process hostile
+transport has the API key and filesystem/ledger access already; treating that
+code as a sandboxed actor changes the project's chosen trust boundary. Fetch's
+single-attempt contract is now explicit in its JSDoc and the package reference;
+adapter-managed retries and accidental decorator/method replay remain fenced
+and covered by executable regressions. No review escalation remains.
+
+Final review totals: eight serial fixes; seven dismissed findings (five duplicates,
+two contrary to the documented trust boundary). Full package coverage at ef68e10:
+4976 passed, 14 opt-in VM tests skipped; subsequent accounting fences passed all
+125 model tests and three real-composition profile tests. No public package version
+changed; zero-trust is private.
