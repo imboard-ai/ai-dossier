@@ -442,10 +442,34 @@ test('policy gate status exposes retained decisions and citations read-only, wit
     onAuthorizationUrl: oauth,
   });
   assert.equal(commands.status(store.runId).policyGate, undefined); // legacy absence
+  const retain = (value) => {
+    artifacts.put('gate_assessment', value);
+    const digest = artifacts.digest('gate_assessment');
+    artifacts.put(STOP_NOTICE_KEY, {
+      state: 'gating',
+      historyLength: store.run.history.length,
+      reason: value.reasons.join(','),
+      nextPermittedAction: 'Policy hand-off.',
+      gateAssessmentDigest: digest,
+    });
+  };
+  // An assessment publication before its completed notice is not stop evidence.
   artifacts.put('gate_assessment', evidence);
+  assert.equal(commands.status(store.runId).policyGate, undefined);
+  retain(evidence);
   const eventsBefore = fs.readFileSync(journal.filePath);
   const ledgerBefore = fs.readFileSync(path.join(store.storeDirectory('budget'), 'ledger.json'));
+  const writes = [
+    vi.spyOn(fs, 'writeSync'),
+    vi.spyOn(fs, 'writeFileSync'),
+    vi.spyOn(fs, 'renameSync'),
+  ];
   const status = commands.status(store.runId);
+  assert.equal(
+    writes.reduce((n, spy) => n + spy.mock.calls.length, 0),
+    0
+  );
+  for (const spy of writes) spy.mockRestore();
   assert.deepEqual(status.policyGate, {
     baseSha: evidence.baseSha,
     reasons: evidence.reasons,
@@ -468,7 +492,7 @@ test('policy gate status exposes retained decisions and citations read-only, wit
       decisions: { assignment: { ...evidence.assessment.decisions.assignment, status: 'passed' } },
     },
   ]) {
-    artifacts.put('gate_assessment', { ...evidence, assessment });
+    retain({ ...evidence, assessment });
     assert.throws(() => commands.status(store.runId), { name: 'InvalidStatusError' });
   }
   assert.throws(
@@ -509,10 +533,47 @@ test('policy gate status exposes retained decisions and citations read-only, wit
     { sessionId: `${store.runId}-s2` },
     { outcome: 'proceed' },
   ]) {
-    artifacts.put('gate_assessment', { ...evidence, ...changed });
+    retain({ ...evidence, ...changed });
     assert.equal(commands.status(store.runId).policyGate, undefined);
   }
-  artifacts.put('gate_assessment', evidence);
+  retain(evidence);
+  artifacts.put(STOP_NOTICE_KEY, {
+    state: 'gating',
+    historyLength: store.run.history.length,
+    reason: 'budget_exhausted',
+    nextPermittedAction: 'No work was admitted.',
+  });
+  assert.equal(commands.status(store.runId).policyGate, undefined);
+  retain(evidence);
+  // Oversized but valid quotes and citation sets remain inspectable without
+  // preventing ordinary status. Full bytes stay in the diagnostic artifact.
+  const longQuote = `AI is welcome. ${'evidence '.repeat(2000)}`;
+  const large = {
+    ...evidence,
+    assessment: {
+      ...evidence.assessment,
+      decisions: {
+        assignment: {
+          ...evidence.assessment.decisions.assignment,
+          citations: Array.from({ length: 100 }, (_, i) => ({
+            sourceId: 'CONTRIBUTING.md',
+            line: i + 1,
+            quote: longQuote,
+          })),
+        },
+      },
+    },
+  };
+  retain(large);
+  const projected = commands.status(store.runId);
+  assert.equal(projected.policyGate.displayTruncated, true);
+  assert.equal(projected.policyGate.assessment.decisions.assignment.citations.length, 16);
+  assert.equal(projected.policyGate.assessment.decisions.assignment.citations[0].quote.length, 512);
+  assert.deepEqual(artifacts.get('gate_assessment'), large);
+  for (const output of [renderHuman(projected), renderJson(projected)])
+    assert.match(output, /displayTruncated/);
+  assert.equal(projected.estimatedSpend.amount, status.estimatedSpend.amount);
+  retain(evidence);
   store.persistRun(transitionRun(store.run, ReasonCode.GatePassed, new Date().toISOString()));
   assert.equal(commands.status(store.runId).policyGate, undefined);
   journal.close();

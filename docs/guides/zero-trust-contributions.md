@@ -426,15 +426,16 @@ answer stricter. Any disagreement, failure or uncertainty becomes a hand-off, ne
 - Unclear rules, competing work, or a maintainer answer that is not a plain yes end in a hand-off
   for you to decide.
 
-### Step 3: reproduce, plan and implement
-
 After a policy gate hand-off, inspect `policyGate` in either status format. Its
 `assessment.decisions` shows each dimension's status, reason, value, model and
 validated citations; `assessment.citations` also holds deterministic policy excerpts.
 An empty citation list means that no validated quote was produced, not permission.
 Policy decisions can incur model charges even though no implementation VM or code
 work started. The full assessment is retained as the `gate_assessment` step artifact;
-older runs without that evidence omit `policyGate`.
+older runs and stops before assessment omit `policyGate`. `displayTruncated: true`
+means status shows bounded citation excerpts; the complete quotes remain in the artifact.
+
+### Step 3: reproduce, plan and implement
 
 Inside a fresh VM (no credentials, no network except the package proxy during dependency
 installation), the run records the upstream base, runs the project's checks on it, reproduces the

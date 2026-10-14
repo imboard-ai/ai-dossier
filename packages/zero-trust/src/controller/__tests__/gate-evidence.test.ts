@@ -62,6 +62,9 @@ it('retains paid typed policy evidence before ownership hand-off and replaces it
   const action = stopNoticeAction(a.get('stop_notice'), a.store.run);
   expect(action).toContain('may already have run and been charged');
   expect(action).not.toContain('no model work');
+  expect(a.get<{ gateAssessmentDigest: string }>('stop_notice').gateAssessmentDigest).toMatch(
+    /^[a-f0-9]{64}$/u
+  );
   a.close();
 
   // Reopen through the real controller: an early unreadable issue must clear the
@@ -84,4 +87,23 @@ it('retains paid typed policy evidence before ownership hand-off and replaces it
   const c = h.artifacts(run.runId);
   expect(c.get<{ outcome: string }>('gate_assessment').outcome).toBe('proceed');
   c.close();
+}, 60000);
+
+it('finalizes retained policy evidence for a post-assessment real-name hand-off', async () => {
+  const h = rig({ realNameOnlyLogin: true });
+  const run = await h.authorize(h.controller.start(h.config));
+  expect(run.state).toBe('gating');
+  const a = h.artifacts(run.runId);
+  expect(a.get('gate_assessment')).toMatchObject({
+    outcome: 'hand_off',
+    reasons: ['real_name_required'],
+  });
+  expect(
+    Object.keys(
+      a.get<{ assessment: PolicyAssessment }>('gate_assessment').assessment.decisions ?? {}
+    )
+  ).toHaveLength(6);
+  expect(a.get('stop_notice')).toMatchObject({ reason: 'real_name_required' });
+  a.close();
+  noShipping();
 }, 60000);

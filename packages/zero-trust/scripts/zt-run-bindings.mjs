@@ -248,6 +248,7 @@ export async function createCommands({ root, createController, onAuthorizationUr
           return {
             gate: artifacts.get('gate'),
             gateAssessment: artifacts.get('gate_assessment'),
+            gateAssessmentDigest: artifacts.digest('gate_assessment'),
             candidate:
               artifacts.get('applied_user_edit') !== sourceEditCount(store)
                 ? (latestSourceEdit(store)?.candidate ?? artifacts.get('candidate'))
@@ -347,6 +348,8 @@ export async function createCommands({ root, createController, onAuthorizationUr
         if (
           run.state === 'gating' &&
           assessed?.outcome === 'hand_off' &&
+          stopNoticeAction(retained.stopNotice, run) &&
+          retained.stopNotice.gateAssessmentDigest === retained.gateAssessmentDigest &&
           assessed.historyLength === run.history.length &&
           assessed.sessionId === sessionId
         )
