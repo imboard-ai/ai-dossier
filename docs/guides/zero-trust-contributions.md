@@ -20,9 +20,9 @@ The specification is [PRD-ZTFC-001](../features/zero-trust-full-cycle/prd.md). T
 guide summarizes it for users and links to it where detail matters.
 
 > [!IMPORTANT]
-> The package is private and its release gates are still being worked through (PRD §9). Treat
-> runs against real upstream projects as early use: read every prepared comment and pull request
-> before you submit it.
+> All of PRD §9's pre-release gates have passed, and the engine runs from a source checkout (the
+> package itself is not published to npm). Treat runs against real upstream projects as early use:
+> read every prepared comment and pull request before you submit it.
 
 ## What it does and does not do
 

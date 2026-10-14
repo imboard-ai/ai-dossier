@@ -2,7 +2,7 @@
 
 > **Document ID:** PRD-ZTFC-001
 >
-> **Status:** Approved for implementation specification
+> **Status:** Implemented. All S1–S5 slices delivered and all four pre-release gates passed; the registry blueprint `imboard-ai/git/zero-trust-full-cycle@1.0.0` is published. A post-fix live acceptance re-run is pending (see §10).
 >
 > **Date:** 2026-10-05
 >
@@ -288,11 +288,11 @@ Demand/effort baselines are unknown. Establish them through actual use; no fixed
 
 ### Release slices
 
-- [ ] **S1 — Authority/isolation foundation:** disposable VM adapter, hardened images, constrained worker broker, credential/model separation, egress enforcement, budget ledger, adversarial fixtures. No external PRs until this gate passes.
-- [ ] **S2 — Supplied issue and community gate:** policy discovery, single engagement request, durable permission/checkpoint states, explicit reasons, no automatic reminders.
-- [ ] **S3 — Node/Python implementation and verification:** supported profile manifest, frozen provisioning, baseline/regression checks, localized repair cap, independent commit-bound receipts.
-- [ ] **S4 — Fork shipping:** least-privilege fork-side credential routing, sanitized artifact reconstruction, fork readiness, verified fork push, prefilled contributor hand-off with idempotent PR reconciliation, accurate upstream-template disclosure.
-- [ ] **S5 — Control and follow-up:** pause/edit/model changes, resumable maintainer revisions, outcome tracking, retention/export, contributor/student documentation. Same autonomous engine, optional checkpoints.
+- [x] **S1 — Authority/isolation foundation:** disposable VM adapter, hardened images, constrained worker broker, credential/model separation, egress enforcement, budget ledger, adversarial fixtures. No external PRs until this gate passes.
+- [x] **S2 — Supplied issue and community gate:** policy discovery, single engagement request, durable permission/checkpoint states, explicit reasons, no automatic reminders.
+- [x] **S3 — Node/Python implementation and verification:** supported profile manifest, frozen provisioning, baseline/regression checks, localized repair cap, independent commit-bound receipts.
+- [x] **S4 — Fork shipping:** least-privilege fork-side credential routing, sanitized artifact reconstruction, fork readiness, verified fork push, prefilled contributor hand-off with idempotent PR reconciliation, accurate upstream-template disclosure.
+- [x] **S5 — Control and follow-up:** pause/edit/model changes, resumable maintainer revisions, outcome tracking, retention/export, contributor/student documentation. Same autonomous engine, optional checkpoints.
 
 ### Gherkin acceptance scenarios
 
@@ -387,3 +387,4 @@ The owner approved publication on 2026-10-05 after the specification reached Rea
 - **Revision:** added §5.9, acceptance scenarios 15–20, actor/outcome mapping, and vertical acceptance increments.
 - **Iteration 2 — Ready for implementation specification:** independent critic identified no remaining substantive blocking product gaps. Runtime, provider, and credential integrations remain mandatory feasibility proofs, not assumed capabilities.
 - **Launch readiness — Not Ready:** capability is unimplemented; no security fixtures or external contribution runs have been executed. Specification approval does not authorize launch before the release gates pass.
+- **Update 2026-10-14 — implemented, final live re-run pending:** all S1–S5 slices are delivered and all four pre-release gates passed (decision records under `decisions/`). The first live acceptance demo ([record](decisions/acceptance-demo.md), #1115) proved the mechanics end to end and surfaced three defects: candidates deleting an existing test (#1205), reasoning-model calls failing and leaving budget holds reserved (#1186), and silent budget/time refusals (#1191). All three are fixed on `main`. One post-fix live acceptance re-run remains before the epic closes.
