@@ -65,6 +65,35 @@ test('resume with missing model rates refuses before OAuth/continuation and reta
   }
 });
 const cleanup = [];
+async function signalProcess(code, onOutput) {
+  const child = spawn(process.execPath, ['--input-type=module', '-e', code], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let output = '';
+  let errors = '';
+  child.stderr.on('data', (bytes) => {
+    errors += bytes;
+  });
+  child.stdout.on('data', (bytes) => {
+    output += bytes;
+    onOutput(output, child);
+  });
+  let timer;
+  try {
+    const exit = await new Promise((resolve, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`signal cleanup timed out: ${output} ${errors}`)),
+        15000
+      );
+      child.once('error', reject);
+      child.once('exit', (status, killedBy) => resolve({ status, killedBy }));
+    });
+    return { exit, output, errors };
+  } finally {
+    clearTimeout(timer);
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+  }
+}
 const env = { key: process.env.BINDING_APP_KEY, secret: process.env.BINDING_APP_SECRET };
 afterEach(() => {
   vi.restoreAllMocks();
@@ -604,51 +633,32 @@ test.each(
     if (stage.startsWith('facades')) await (await createCommands(options)).prepareAuthor({ ...${JSON.stringify(h.config)}, issueUrl: 'https://github.com/owner/repo/issues/2' });
     if (stage === 'confirmation' || stage.startsWith('facades')) process.stdout.write('AUTHOR_READY\\n');
   `;
-  const child = spawn(process.execPath, ['--input-type=module', '-e', code], {
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  let output = '';
-  let errors = '';
   let sent = false;
-  child.stderr.on('data', (bytes) => {
-    errors += bytes;
-  });
-  child.stdout.on('data', (bytes) => {
-    output += bytes;
+  const { exit, output, errors } = await signalProcess(code, (output, child) => {
     if (!sent && output.includes('AUTHOR_READY')) {
       sent = true;
       child.kill(signal);
     }
   });
-  try {
-    const exit = await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('signal cleanup timed out')), 10000);
-      child.once('error', reject);
-      child.once('exit', (status, killedBy) => {
-        clearTimeout(timer);
-        resolve({ status, killedBy });
-      });
-    });
-    assert.deepEqual(exit, { status: signal === 'SIGINT' ? 130 : 143, killedBy: null }, errors);
-    if (stage === 'callback') {
-      assert.ok(!output.includes('ISSUED'));
-      assert.ok(!output.includes('REVOKED'));
-    } else {
-      assert.match(output, /ISSUED\n/);
-      assert.match(output, /AUTHOR_READY\nREVOKED\n/);
-      if (stage === 'facades') assert.equal(output.match(/REVOKED/g).length, 2);
-      if (stage === 'facades-fail')
-        assert.match(errors, /error: revoke_failed; revoke the App authorization/);
-    }
-    assert.equal(fs.existsSync(h.root), false);
-  } finally {
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+  assert.deepEqual(exit, { status: signal === 'SIGINT' ? 130 : 143, killedBy: null }, errors);
+  if (stage === 'callback') {
+    assert.ok(!output.includes('ISSUED'));
+    assert.ok(!output.includes('REVOKED'));
+  } else {
+    assert.match(output, /ISSUED\n/);
+    assert.match(output, /AUTHOR_READY\nREVOKED\n/);
+    if (stage === 'facades') assert.equal(output.match(/REVOKED/g).length, 2);
+    if (stage === 'facades-fail')
+      assert.match(errors, /error: revoke_failed; revoke the App authorization/);
   }
+  assert.equal(fs.existsSync(h.root), false);
 });
 
 test.each(
   ['SIGINT', 'SIGTERM', 'SIGHUP'].flatMap((signal) =>
-    ['start', 'resume', 'vm-fail', 'token-fail'].map((mode) => ({ signal, mode }))
+    ['start', 'resume', 'vm-fail', 'token-fail', 'adopting', 'release', 'release-error'].map(
+      (mode) => ({ signal, mode })
+    )
   )
 )('active $mode $signal joins pause, VM destruction and broker revocation', async ({
   signal,
@@ -665,7 +675,8 @@ test.each(
   await Promise.all(h.callbacks);
   const approved = { ...h.config, authorApproval: approval };
   let runId;
-  if (mode !== 'start') {
+  const starting = ['start', 'adopting'].includes(mode);
+  if (!starting) {
     const store = h.seed(approved);
     runId = store.runId;
     const directory = path.join(store.storeDirectory('control'), 'controller');
@@ -733,34 +744,43 @@ test.each(
             onCleanupBlocked: () => { if(store.run.state !== 'blocked_cleanup')store.persistRun(transitionRun(store.run,ReasonCode.CleanupFailed,new Date().toISOString())); }
           });
           await broker.recover();
-          if (session) await session.adopt(broker,c.run,next);
+          fs.writeFileSync(path.join(config.executionProfile.stateDir,'active-run'), c.run.runId);
+          if (session) {
+            const adopting = session.adopt(broker,c.run,next);
+            if (mode === 'adopting') {
+              process.stdout.write('ADOPTING\\n');
+              await new Promise(r => setTimeout(r,150));
+            }
+            await adopting;
+          }
           else broker.registerUserToken('ghu_'+'c'.repeat(30),new Date(Date.now()+3600000).toISOString());
           await c.createVm({scope:'container'});
-          fs.writeFileSync(path.join(config.executionProfile.stateDir,'active-run'), c.run.runId);
+          if(mode === 'release-error')throw new Error('provider_failed');
+          if(mode === 'release')return {kind:'hand_off'};
           process.stdout.write('ACTIVE_READY\\n');
           await new Promise(r => c.signal.addEventListener('abort',r,{once:true}));
           return {kind:'proceed'};
         }, acquire: async () => { throw new Error('forbidden next phase'); } },
-        release: async () => { try { const result = await broker?.recover(); if(result?.report)throw new Error('cleanup_incomplete'); } finally { broker?.close();tokens?.close(); } }
+        release: async () => {
+          if(mode.startsWith('release')) {process.stdout.write('RELEASE_READY\\n');await new Promise(r => setTimeout(r,150));}
+          try { const result = await broker?.recover(); if(result?.report)throw new Error('cleanup_incomplete'); } finally { broker?.close();tokens?.close();broker=undefined;tokens=undefined; }
+        }
       });
     }});
     setInterval(() => {}, 1000);
-    if(mode === 'start') {await commands.prepareAuthor(config); await commands.start(config).catch(e=>process.stderr.write(String(e.stack)));}
+    if(['start','adopting'].includes(mode)) {await commands.prepareAuthor(config); await commands.start(config).catch(e=>process.stderr.write(String(e.stack)));}
     else await commands.resume(${JSON.stringify(runId)}).catch(e=>process.stderr.write(String(e.stack)));
   `;
-  const child = spawn(process.execPath, ['--input-type=module', '-e', code], {
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  let output = '';
-  let errors = '';
   let sent = false;
   let repeated = false;
-  child.stderr.on('data', (bytes) => {
-    errors += bytes;
-  });
-  child.stdout.on('data', (bytes) => {
-    output += bytes;
-    if (!sent && output.includes('ACTIVE_READY')) {
+  const { exit, output, errors } = await signalProcess(code, (output, child) => {
+    const marker =
+      mode === 'adopting'
+        ? 'ADOPTING'
+        : mode.startsWith('release')
+          ? 'RELEASE_READY'
+          : 'ACTIVE_READY';
+    if (!sent && output.includes(marker)) {
       sent = true;
       child.kill(signal);
     }
@@ -769,69 +789,137 @@ test.each(
       child.kill(signal);
     }
   });
+  assert.deepEqual(
+    exit,
+    { status: signal === 'SIGINT' ? 130 : signal === 'SIGHUP' ? 129 : 143, killedBy: null },
+    errors
+  );
+  assert.equal(repeated, mode !== 'adopting');
+  assert.equal(
+    fs.existsSync(path.join(h.dir, 'vm-dead')),
+    !['vm-fail', 'adopting'].includes(mode),
+    output
+  );
+  assert.equal(fs.existsSync(path.join(h.dir, 'token-dead')), mode !== 'token-fail', output);
+  const id = fs.readFileSync(path.join(h.dir, 'active-run'), 'utf8');
+  const store = RunStore.open(h.root, id);
   try {
-    const exit = await new Promise((resolve, reject) => {
-      const timer = setTimeout(
-        () => reject(new Error(`active signal timed out: ${output} ${errors}`)),
-        10000
-      );
-      child.once('error', reject);
-      child.once('exit', (status, killedBy) => {
-        clearTimeout(timer);
-        resolve({ status, killedBy });
-      });
-    });
-    assert.deepEqual(
-      exit,
-      { status: signal === 'SIGINT' ? 130 : signal === 'SIGHUP' ? 129 : 143, killedBy: null },
-      errors
+    assert.equal(store.run.state, mode.endsWith('fail') ? 'blocked_cleanup' : 'paused_user');
+    assert.equal(store.run.history.at(-1).from, mode === 'token-fail' ? 'paused_user' : 'gating');
+    assert.equal(readControlRequests(store).pending.length, 0);
+    const rows = fs
+      .readFileSync(path.join(store.storeDirectory('tokens'), 'events.jsonl'), 'utf8')
+      .trim()
+      .split('\n')
+      .map(JSON.parse);
+    assert.equal(
+      rows.filter((row) => row.type === 'token_revoked').length,
+      mode === 'token-fail' ? 0 : 1
     );
-    assert.ok(repeated);
-    assert.equal(fs.existsSync(path.join(h.dir, 'vm-dead')), mode !== 'vm-fail', output);
-    assert.equal(fs.existsSync(path.join(h.dir, 'token-dead')), mode !== 'token-fail', output);
-    const id = fs.readFileSync(path.join(h.dir, 'active-run'), 'utf8');
-    const store = RunStore.open(h.root, id);
-    try {
-      assert.equal(store.run.state, mode.endsWith('fail') ? 'blocked_cleanup' : 'paused_user');
-      assert.equal(store.run.history.at(-1).from, mode === 'token-fail' ? 'paused_user' : 'gating');
-      assert.equal(readControlRequests(store).pending.length, 0);
-      const rows = fs
-        .readFileSync(path.join(store.storeDirectory('tokens'), 'events.jsonl'), 'utf8')
-        .trim()
-        .split('\n')
-        .map(JSON.parse);
-      assert.equal(
-        rows.filter((row) => row.type === 'token_revoked').length,
-        mode === 'token-fail' ? 0 : 1
-      );
-    } finally {
-      store.close();
-    }
-    if (mode.endsWith('fail')) assert.match(errors, /error: revoke_failed/);
-    else {
-      const phases = [];
-      const vm = new FakeVmAdapter();
-      const controller = new RunController({
-        root: h.root,
-        vm,
-        recovery: new ScriptedRecovery(),
-        drivers: [],
-        now: () => new Date(),
-        steps: {
-          gate: async (c) => {
-            phases.push(c.run.state);
-            return { kind: 'blocked' };
-          },
-        },
-        estimateVm: () => assert.fail('resuming gating must not allocate in this fixture'),
-        observeVm: async () => assert.fail('no retained VM remains'),
-      });
-      assert.equal((await controller.resume(id)).state, 'blocked');
-      assert.deepEqual(phases, ['gating']);
-    }
   } finally {
-    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    store.close();
   }
+  if (mode.endsWith('fail')) {
+    assert.match(errors, /error: cleanup_failed; run ztc-[a-f0-9]{16}-run-1/);
+    assert.match(errors, /reconcile VM, credential and accounting cleanup/);
+  } else {
+    const phases = [];
+    const vm = new FakeVmAdapter();
+    const controller = new RunController({
+      root: h.root,
+      vm,
+      recovery: new ScriptedRecovery(),
+      drivers: [],
+      now: () => new Date(),
+      steps: {
+        gate: async (c) => {
+          phases.push(c.run.state);
+          return { kind: 'blocked' };
+        },
+      },
+      estimateVm: () => assert.fail('resuming gating must not allocate in this fixture'),
+      observeVm: async () => assert.fail('no retained VM remains'),
+    });
+    assert.equal((await controller.resume(id)).state, 'blocked');
+    assert.deepEqual(phases, ['gating']);
+  }
+});
+
+test('signal joins mixed active-controller and preparation owners despite one cleanup rejection', async () => {
+  const h = rig();
+  const prepare = await createCommands({
+    root: h.root,
+    createController,
+    onAuthorizationUrl: h.onAuthorizationUrl,
+  });
+  const approval = await prepare.prepareAuthor(h.config);
+  await prepare.discardAuthor(h.config);
+  await Promise.all(h.callbacks);
+  const ids = [1, 2].map((number) => {
+    const store = h.seed({
+      ...h.config,
+      authorApproval: approval,
+      issueUrl: `https://github.com/owner/repo/issues/${number}`,
+    });
+    const id = store.runId;
+    store.close();
+    return id;
+  });
+  const code = `
+    const {createCommands} = await import(${JSON.stringify(new URL('./zt-run-bindings.mjs', import.meta.url).href)});
+    const {RunStore} = await import(${JSON.stringify(new URL('../dist/controller/run-store.js', import.meta.url).href)});
+    const root = ${JSON.stringify(h.root)};
+    const nativeFetch = globalThis.fetch;
+    globalThis.fetch = async (input,init) => {
+      const url = new URL(String(input));
+      if(url.pathname === '/login/oauth/access_token')return new Response(JSON.stringify({access_token:'ghu_'+'a'.repeat(30),refresh_token:'ghr_'+'b'.repeat(30),expires_in:3600}));
+      if(url.pathname === '/user')return new Response(JSON.stringify({id:12,login:'contributor',name:'Verified Name'}));
+      if(url.pathname === '/user/emails')return new Response(JSON.stringify([{email:'verified@example.org',verified:true}]));
+      if(init.method === 'DELETE') {await new Promise(r=>setTimeout(r,350));process.stdout.write('AUTHOR_REVOKED\\n');return new Response(null,{status:204});}
+      throw new Error('unexpected_request');
+    };
+    let sequence=0;
+    const factory = () => {
+      const index=++sequence;
+      let finish, run;
+      return {
+        snapshot:()=>run,
+        resume:async id=> {const store=RunStore.open(root,id);run=store.run;store.close();return new Promise(r=>{finish=r;});},
+        interrupt:async()=> {
+          process.stdout.write('JOINING\\n');
+          await new Promise(r=>setTimeout(r,index===1?50:200));
+          process.stdout.write('OWNER_DONE_'+index+'\\n');finish(run);
+          if(index===2)throw new Error('cleanup_incomplete');
+        }
+      };
+    };
+    const options = {root,createController:factory,onAuthorizationUrl:value=> {
+      const url=new URL(value);const callback=new URL(url.searchParams.get('redirect_uri'));
+      callback.searchParams.set('state',url.searchParams.get('state'));callback.searchParams.set('code','approved');void nativeFetch(callback);
+    }};
+    const first=await createCommands(options), second=await createCommands(options), third=await createCommands(options);
+    await third.prepareAuthor({...${JSON.stringify(h.config)},issueUrl:'https://github.com/owner/repo/issues/3'});
+    void first.resume(${JSON.stringify(ids[0])});void second.resume(${JSON.stringify(ids[1])});
+    setInterval(()=>{},1000);process.stdout.write('MIXED_READY\\n');
+  `;
+  let sent = false,
+    repeated = false;
+  const { exit, output, errors } = await signalProcess(code, (output, child) => {
+    if (!sent && output.includes('MIXED_READY')) {
+      sent = true;
+      child.kill('SIGTERM');
+    }
+    if (!repeated && output.includes('JOINING')) {
+      repeated = true;
+      child.kill('SIGHUP');
+    }
+  });
+  assert.deepEqual(exit, { status: 143, killedBy: null }, errors);
+  assert.ok(repeated);
+  assert.match(output, /OWNER_DONE_1/);
+  assert.match(output, /OWNER_DONE_2/);
+  assert.match(output, /AUTHOR_REVOKED/);
+  assert.match(errors, new RegExp(`cleanup_failed; run ${ids[1]}`));
 });
 
 test('interrupt before store publication is latched and completed commands retire all signal handlers', async () => {

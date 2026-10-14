@@ -395,8 +395,9 @@ export class RunController {
   private needsAcquisition = false;
   private cached = new Map<string, Outcome>();
   private last?: RunRecord;
-  private control?: ControlRequest | 'invalid';
+  private control?: ControlRequest | 'invalid' | 'interrupt';
   private interruptRequested = false;
+  private controlApplied = false;
   private controlCleanup?: Promise<void>;
   private controlReconciled?: Promise<void>;
   private controlReconciledKind?: 'pause' | 'cancel';
@@ -418,8 +419,14 @@ export class RunController {
     if (!running) return;
     this.interruptRequested = true;
     this.observeControl();
-    const run = await running;
-    if (run.state === 'blocked_cleanup') throw new ControllerError('admission_closed');
+    try {
+      await running;
+    } catch (error) {
+      // A pre-interrupt phase error is still returned to its caller, but is not a
+      // cleanup failure when the finalizer independently completed the stop.
+      if (!this.controlApplied || !this.last || this.last.state === 'blocked_cleanup') throw error;
+    }
+    if (this.last?.state === 'blocked_cleanup') throw new ControllerError('admission_closed');
   }
   start(config: RunConfig): Promise<RunRecord> {
     return this.launch(async () => {
@@ -519,6 +526,8 @@ export class RunController {
       if (this.incident)
         await this.attemptRecovery(() => this.deps.recovery.killAll(this.context()), failures);
       if (this.incident) return this.cancel();
+      this.observeControl();
+      if (this.control) return this.applyControl();
       if (failures.length) throw failures[0];
       await this.recovered(
         await this.recover(() => this.deps.recovery.resumeIntents(this.context()))
@@ -527,6 +536,8 @@ export class RunController {
         await this.recovered(
           await this.recover(() => this.deps.recovery.resumeHandoff(this.context()))
         );
+      this.observeControl();
+      if (this.control) return this.applyControl();
       this.ensureRevisionSession();
       this.recovering = false;
       this.needsAcquisition = true;
@@ -617,6 +628,7 @@ export class RunController {
     this.cached.clear();
     this.control = undefined;
     this.interruptRequested = false;
+    this.controlApplied = false;
     this.controlCleanup = undefined;
     this.controlReconciled = undefined;
     this.controlReconciledKind = undefined;
@@ -633,19 +645,32 @@ export class RunController {
     const task = Promise.resolve()
       .then(work)
       .finally(async () => {
-        clearInterval(watcher);
         try {
           await this.deps.release?.();
         } finally {
+          // A signal can arrive while release awaits token revocation, after work
+          // has already resolved or rejected. Keep pins alive until its independent
+          // control cleanup is joined and the durable stop is applied.
           // Release can persist a cleanup block even when revocation rejects.
           // Publish that final durable state before the store pins are closed.
           try {
+            this.observeControl();
+            if (this.control && !this.controlApplied && this.store && this.journal) {
+              try {
+                await this.applyControl();
+              } finally {
+                // Observation-only reconciliation may reopen driver journals
+                // after release. Retire those resources before dropping pins.
+                await this.deps.release?.();
+              }
+            }
             if (this.store) {
               const final = this.store.run;
               if (!this.last || !sameRunRecord(this.last, final)) this.notify(final);
               else this.last = final;
             }
           } finally {
+            clearInterval(watcher);
             this.journal?.close();
             this.store?.close();
             this.store = undefined;
@@ -676,11 +701,16 @@ export class RunController {
       // A signal can precede initial store publication. Retain it until the
       // normal control path can durably record and apply the pause.
       if (this.interruptRequested) {
-        requestControl(
-          this.store,
-          { kind: 'pause', reason: 'Process interrupted' },
-          this.deps.now()
-        );
+        // No-compute states (including an existing pause during recovery) have
+        // no legal pause edge. Fence this invocation without inventing corruption
+        // or changing the durable state; independent cleanup still must finish.
+        if (controlRefusal(this.store.run, 'pause')) this.control = 'interrupt';
+        else
+          requestControl(
+            this.store,
+            { kind: 'pause', reason: 'Process interrupted' },
+            this.deps.now()
+          );
         this.interruptRequested = false;
       }
       const state = readControlRequests(this.store);
@@ -706,7 +736,7 @@ export class RunController {
     this.abort.abort();
     this.phaseLease = undefined;
     // Start destruction while the active command/provider promise is blocked.
-    if (this.control !== 'invalid' && this.control.kind === 'cancel')
+    if (typeof this.control === 'object' && this.control.kind === 'cancel')
       this.controlCleanup = this.reconcileControlOnce('cancel')
         .catch(() => {})
         .then(() => this.cleanup());
@@ -751,14 +781,12 @@ export class RunController {
     if (latest.invalid) selected = 'invalid';
     else if (selected !== 'invalid')
       selected = latest.pending.find((r) => r.kind === 'cancel') ?? selected;
+    const kind = typeof selected === 'object' ? selected.kind : 'pause';
     // Observation-only reconciliation is allowed after stop admission. Never
     // authenticate or authorize a new effect to discover an existing outcome.
     if (selected !== 'invalid') {
-      await this.attemptRecovery(
-        () => this.reconcileControlOnce(selected?.kind ?? 'pause'),
-        failures
-      );
-      if (selected?.kind === 'cancel')
+      await this.attemptRecovery(() => this.reconcileControlOnce(kind), failures);
+      if (kind === 'cancel')
         await this.attemptRecovery(
           () => this.deps.recovery.endRun?.(this.context()) ?? Promise.resolve(),
           failures
@@ -782,14 +810,14 @@ export class RunController {
         ? ReasonCode.CleanupFailed
         : selected === 'invalid'
           ? ReasonCode.PolicyBlocked
-          : selected?.kind === 'cancel'
+          : kind === 'cancel'
             ? ReasonCode.UserCancelled
             : ReasonCode.UserPaused;
       // Publication may have completed while pausing; no compute means no pause.
       if (reason !== ReasonCode.UserPaused || !controlRefusal(this.held.run, 'pause'))
         await this.persist(transitionRun(this.held.run, reason, this.deps.now().toISOString()));
     }
-    if (selected && selected !== 'invalid') {
+    if (typeof selected === 'object') {
       const refusal =
         selected.kind === 'pause' &&
         this.held.run.state !== 'paused_user' &&
@@ -810,6 +838,7 @@ export class RunController {
           acknowledgeControl(this.held, row, refusal ?? 'applied');
       }
     }
+    this.controlApplied = true;
     return this.held.run;
   }
   private get held(): RunStore {

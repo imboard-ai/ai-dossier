@@ -472,12 +472,17 @@ try {
 The command facade holds each configuration's author operation exclusively before
 any await. Competing prepare/start/discard calls return `busy` without touching its
 credential owner. Failed disposal retains the session for an explicit cleanup retry.
-While any command facade owns a preparation or unadopted session, a shared process-local
-SIGINT/SIGTERM barrier joins all their revocations before exiting (130/143).
+While any command facade owns a preparation, unadopted session or active controller,
+a shared process-local SIGINT/SIGTERM/SIGHUP barrier joins all cleanup before exiting
+(130/143/129). Active start/resume and PR-action invocations retain signal ownership
+through broker adoption and asynchronous release. Interruption requests the existing
+durable pause in a compute phase; an already-paused or no-compute state is preserved
+while invocation admission is fenced. Cleanup failures remain `blocked_cleanup`.
 Failed preparations remain keyed cleanup-only owners for explicit discard or a preparation
-retry; they cannot authorize a start. Adoption/disposal removes these scoped handlers;
-the broker's existing durable recovery owns credentials after adoption. Failed signal
-cleanup prints a fixed manual App-revocation instruction rather than claiming success.
+retry; they cannot authorize a start. Handlers retire only after the last owner finishes.
+Preparation revocation failures print manual App-revocation guidance; active-controller
+cleanup failures name the run and direct users to status and VM/credential/accounting
+reconciliation. SIGKILL cannot perform graceful cleanup and relies on durable recovery.
 
 The root validates closed config, creates the durable RunStore and BudgetLedger,
 preflights local QEMU before allocation, reads the private proxy endpoints file,

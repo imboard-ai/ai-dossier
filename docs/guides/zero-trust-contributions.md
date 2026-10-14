@@ -561,6 +561,7 @@ Artifact paths are relative to the run's directory in the run store (`<state-dir
 | Approve | `approve --run <id> --checkpoint <plan\|patch\|verification> --digest <sha256>` | The digest must match the open checkpoint exactly. Approval does not continue the run; `resume` does. |
 | Reject | `reject --run <id> --checkpoint <point> --digest <sha256> --reason <text>` | **Rejecting cancels the run.** |
 | Pause | `pause --run <id> --reason <text>` | Returns as soon as the request is saved (`pause_requested: "<id>"`). The controller stops admitting work, destroys the VM and keeps the held source and conversation. Refused in a state with no compute (`nothing_to_pause`). A request that reaches a dormant run is applied at the next `resume`; until then `status` shows `pause_requested`. |
+| Interrupt | Ctrl-C / SIGINT, SIGTERM or SIGHUP | Waits for all process-owned cleanup: active compute is paused, VMs are destroyed and held credentials are revoked before exit. An already-paused or no-compute run keeps its state. Inspect `status`, then `resume` to continue the interrupted phase. Repeated signals do not shorten cleanup. SIGKILL cannot run this cleanup. |
 | Resume | `resume --run <id>` | Provisions a fresh VM and returns to the interrupted phase. An open checkpoint must be approved first. |
 | Cancel | `cancel --run <id> --reason <text>` | Allowed in any non-terminal state except `blocked_cleanup`. Destroys VMs and revokes credentials. In a waiting state (paused, awaiting you or a maintainer, submitted) the request is queued: run `resume` to apply it; until then `status` shows `cancel_requested`. A submitted pull request cannot be recalled; the cancelled status gives you a prepared close comment to post yourself. |
 | Edit | `edit --run <id> --patch <file.diff>` | Only while paused from `implementing` or `verifying`. A text Git diff (at most 10 MiB); binary patches, symlinks and unsafe paths are refused. Every accepted edit needs fresh review and verification, and the pull request says **"Includes contributor edits"**. Refused while paused from `shipping` (`edit_after_verification`). |
@@ -576,6 +577,12 @@ Identity, contributor, issue, upstream and fork cannot change inside a run
 (`identity_change_requires_new_run`); start a new run.
 
 ### Kill switch and cleanup
+
+An interrupted active invocation reports `cleanup_failed` with its run ID when VM,
+credential or accounting cleanup remains uncertain. Check `status` and reconcile
+each outstanding obligation using the procedure below; App revocation alone cannot
+destroy a leftover VM. A successful compute-phase interruption leaves `paused_user`
+and can resume. A genuine cleanup failure keeps `blocked_cleanup` and fails closed.
 
 ```sh
 node scripts/zt-run.mjs kill-all --root <state-dir>/runs --reason "<why>"
@@ -634,6 +641,7 @@ is expected for either blocked state: inspect `status` to distinguish them.
 | 2 | Blocked, failed, unsupported, cancelled, cleanup blocked, or the operation was unavailable. |
 | 3 | Invalid input: a fixed `error: <code>` line plus the usage line. |
 | 4 | Another controller holds the run store (`store_locked`) or is busy. |
+| 130 / 143 / 129 | Process interrupted by SIGINT / SIGTERM / SIGHUP after joining cleanup. Inspect status for a resumable pause or cleanup block. |
 
 Errors print as `error: <code>` and never include provider messages or secrets. Common codes:
 `invalid_config`, `unknown_key`, `missing_rate`, `invalid_limits`, `invalid_signer_key`,

@@ -64,11 +64,21 @@ const stopAuthors = async (signal) => {
   stoppingAuthors = true;
   // Join every process-local owner, including controller pause/release after
   // broker adoption. Repeated signals cannot shorten this barrier.
-  const results = await Promise.allSettled([...authorOwners].map((owner) => owner.dispose()));
-  if (results.some((result) => result.status === 'rejected'))
-    process.stderr.write(
-      'error: revoke_failed; revoke the App authorization at https://github.com/settings/applications\n'
-    );
+  const owners = [...authorOwners];
+  const results = await Promise.allSettled(owners.map((owner) => owner.dispose()));
+  for (const [index, result] of results.entries()) {
+    if (result.status !== 'rejected') continue;
+    const owner = owners[index];
+    if (owner.kind === 'controller') {
+      const runId = owner.runId();
+      process.stderr.write(
+        `error: cleanup_failed${runId ? `; run ${runId}` : ''}; inspect zt-run status and reconcile VM, credential and accounting cleanup; revoke uncertain App authorization at https://github.com/settings/applications\n`
+      );
+    } else
+      process.stderr.write(
+        'error: revoke_failed; revoke the App authorization at https://github.com/settings/applications\n'
+      );
+  }
   process.exit(signal === 'SIGINT' ? 130 : signal === 'SIGHUP' ? 129 : 143);
 };
 const interrupted = () => {
@@ -122,7 +132,18 @@ export async function createCommands({ root, createController, onAuthorizationUr
   const withController = async (config, session, work) => {
     if (stoppingAuthors) refuse('admission_closed');
     const controller = createController(config, { onAuthorizationUrl }, session);
-    const owner = trackOwner({ dispose: () => controller.interrupt() });
+    const owner = trackOwner({
+      kind: 'controller',
+      dispose: () => controller.interrupt(),
+      runId: () => {
+        try {
+          const id = controller.snapshot().runId;
+          return /^ztc-[a-f0-9]{16}-run-1$/u.test(id) ? id : null;
+        } catch {
+          return null;
+        }
+      },
+    });
     try {
       return await work(controller);
     } finally {
