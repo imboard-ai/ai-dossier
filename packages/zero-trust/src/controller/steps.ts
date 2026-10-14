@@ -300,6 +300,9 @@ export class StepArtifacts {
     if (value === undefined) throw new Error('missing_step_artifact');
     return value;
   }
+  digest(key: string): string | undefined {
+    return this.values.get(key);
+  }
   put(key: string, value: unknown): void {
     assertSecretFree(value);
     if (!/^[a-z_]{1,64}$/u.test(key)) throw new Error('invalid_step_artifact');
@@ -473,8 +476,30 @@ export function createSteps(
   const steps: PhaseSteps = {
     async gate(c) {
       clearStopNotice(artifacts(c));
+      // Diagnostic evidence is separate from the admitted GateRecord. Retire the
+      // selection before reads so an early refusal cannot describe an older attempt.
+      artifacts(c).put('gate_assessment', null);
+      let assessed:
+        | {
+            historyLength: number;
+            sessionId: string;
+            baseSha: string;
+            assessment: PolicyAssessment;
+            outcome: string;
+            reasons: readonly string[];
+          }
+        | undefined;
       const handOff = (...reasons: string[]) => {
-        recordStopNotice(artifacts(c), c.run, gateHandoffNotice(reasons), false);
+        const notice = gateHandoffNotice(reasons);
+        if (assessed)
+          artifacts(c).put('gate_assessment', { ...assessed, outcome: 'hand_off', reasons });
+        const gateAssessmentDigest = assessed ? artifacts(c).digest('gate_assessment') : undefined;
+        recordStopNotice(
+          artifacts(c),
+          c.run,
+          { ...notice, ...(gateAssessmentDigest ? { gateAssessmentDigest } : {}) },
+          false
+        );
         return { kind: 'hand_off' as const };
       };
       const e = await assessIssue(services.read, c.store.config.upstream, c.run.contributor);
@@ -505,6 +530,15 @@ export function createSteps(
               signal: c.signal,
             });
       const decision = decideGate(p, e, c.run.contributor);
+      assessed = {
+        historyLength: c.run.history.length,
+        sessionId: c.sessionId,
+        baseSha,
+        assessment: p,
+        outcome: decision.kind,
+        reasons: 'reasons' in decision ? decision.reasons : [],
+      };
+      artifacts(c).put('gate_assessment', assessed);
       if (
         decision.kind === 'terminate' ||
         decision.kind === 'ineligible' ||

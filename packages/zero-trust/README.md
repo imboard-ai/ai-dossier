@@ -1835,6 +1835,27 @@ modules remain isolated, including type-only imports.
 
 ## Contribution policy (#1091)
 
+### Retained gate hand-off diagnostics (#1220)
+
+The composed gate retains `gate_assessment` in the digest-checked step journal before
+returning its policy decision. It contains the full `PolicyAssessment` (including all
+per-dimension decision metadata and validated citations), pinned `baseSha`, outcome,
+reasons, budget session and history length. A completed hand-off notice binds its
+exact assessment digest; controller refusals and incomplete attempts cannot select it.
+This is diagnostic evidence, separate
+from the admitted `gate` record, and grants no permission. A new gate attempt clears
+the selected diagnostic before any read; historical digest-named bytes remain retained.
+For an exact current gating hand-off, human and JSON `zt-run status` include
+`policyGate: { baseSha, reasons, assessment }`. Inspect `assessment.decisions` for
+`status: escalated` and the reason (`invalid_pass`, `disagreement`, `budget`, etc.).
+Empty citation lists mean no validated decision citation is available; deterministic
+floor citations remain in `assessment.citations`. Status never invents quotes or runs
+a model to recover them. Status bounds each citation list to 16 entries and each
+display quote/excerpt to 512 code points, with `displayTruncated: true` when reduced;
+the complete assessment and citation digests remain in the artifact. Early stops
+before assessment have no `policyGate`. Legacy runs without this artifact omit the field. Gate notices
+acknowledge that policy decision calls may have been charged before implementation starts.
+
 `discoverPolicy(read: GitHubRead, { owner, repo, ref })` performs credential-free
 Contents GETs at a **40-character lowercase commit SHA**. Supply `anonymousReader()`
 or an offline fake; no credential module is imported. `POLICY_PATHS` is the frozen
@@ -2779,6 +2800,13 @@ the profile's token cap and `stream: false`. Optional `maxTokensParameter`
 both by the adapter and each `ModelPhase`. Defaults for gpt-5 and o1/o3/o4
 families are `max_completion_tokens` and no logprobs; other models retain legacy
 defaults. A disabled profile omits likelihoods even if a caller requests them.
+Optional positive safe-integer `decisionOutputTokens` and `agentOutputTokens` select
+total reasoning-plus-visible completion caps before metering. Total-completion
+profiles default to 8,192 for typed decisions and 32,768 for planning/implementation/
+repair; legacy profiles retain 1,024 and 16,384. Explicit decision-provider caps win.
+Transport never widens an admitted request; insufficient budget prevents dispatch.
+These defaults provide headroom, not a completeness guarantee: reasoning-only
+truncation stays malformed, with known total completion usage settled once.
 The exact resolved profile is shared by wire-byte estimation and transport,
 and participates in decision cache identity. The API key goes only in Authorization.
 `apiKeyEnv` must be a shell environment identifier; model/endpoint strings pass

@@ -324,6 +324,16 @@ revision feedback use `implementing` when it is absent). Each phase has:
 | `apiKeyEnv` | Name of the environment variable that holds the key. |
 | `maxTokensParameter` | Optional `"max_tokens"` or `"max_completion_tokens"`. Defaults to `max_completion_tokens` for gpt-5 and o1/o3/o4 families, otherwise `max_tokens`. The completion allowance includes reasoning and visible output. |
 | `logprobs` | Optional boolean. Defaults to false for those reasoning families, otherwise true. False omits likelihood requests in policy/feedback decisions and execution. Profile overrides also work for compatible providers and custom model aliases. |
+| `decisionOutputTokens` | Optional positive safe integer: total completion cap for typed decisions. Defaults to 8,192 with `max_completion_tokens`, otherwise 1,024. |
+| `agentOutputTokens` | Optional positive safe integer: total completion cap for planning, implementation and repair tool turns. Defaults to 32,768 with `max_completion_tokens`, otherwise 16,384. |
+
+The larger total-completion defaults leave headroom for reasoning before the visible
+tool call. They do not guarantee a complete answer; truncated responses still fail
+closed. Caps are resolved before budget admission and the exact total is reserved,
+including each allowed retry. A small ceiling may therefore refuse a call before
+dispatch. Overrides are trusted profile configuration, never model-supplied settings;
+changing them also changes decision cache identity. No reasoning-effort parameter is
+sent, so compatible providers need only support their configured token parameter.
 
 Recognized first-attempt pre-generation OpenAI errors on `https://api.openai.com/v1`
 (400/401/403/404/422 with the matching typed error and no usage/choices) release the
@@ -425,6 +435,15 @@ answer stricter. Any disagreement, failure or uncertainty becomes a hand-off, ne
   assignment from an owner, member or collaborator.
 - Unclear rules, competing work, or a maintainer answer that is not a plain yes end in a hand-off
   for you to decide.
+
+After a policy gate hand-off, inspect `policyGate` in either status format. Its
+`assessment.decisions` shows each dimension's status, reason, value, model and
+validated citations; `assessment.citations` also holds deterministic policy excerpts.
+An empty citation list means that no validated quote was produced, not permission.
+Policy decisions can incur model charges even though no implementation VM or code
+work started. The full assessment is retained as the `gate_assessment` step artifact;
+older runs and stops before assessment omit `policyGate`. `displayTruncated: true`
+means status shows bounded citation excerpts; the complete quotes remain in the artifact.
 
 ### Step 3: reproduce, plan and implement
 

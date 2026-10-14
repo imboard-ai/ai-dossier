@@ -283,6 +283,8 @@ export async function createCommands({ root, createController, onAuthorizationUr
           );
           return {
             gate: artifacts.get('gate'),
+            gateAssessment: artifacts.get('gate_assessment'),
+            gateAssessmentDigest: artifacts.digest('gate_assessment'),
             candidate:
               artifacts.get('applied_user_edit') !== sourceEditCount(store)
                 ? (latestSourceEdit(store)?.candidate ?? artifacts.get('candidate'))
@@ -378,6 +380,20 @@ export async function createCommands({ root, createController, onAuthorizationUr
           authorApproval: store.config.authorApproval,
           authorizationRequired: retained.authorizationRequired,
         });
+        const assessed = retained.gateAssessment;
+        if (
+          run.state === 'gating' &&
+          assessed?.outcome === 'hand_off' &&
+          stopNoticeAction(retained.stopNotice, run) &&
+          retained.stopNotice.gateAssessmentDigest === retained.gateAssessmentDigest &&
+          assessed.historyLength === run.history.length &&
+          assessed.sessionId === sessionId
+        )
+          result.policyGate = {
+            baseSha: assessed.baseSha,
+            reasons: assessed.reasons,
+            assessment: assessed.assessment,
+          };
         // A producer's reason for exactly this stop; any later transition retires it.
         const noticed = stopNoticeAction(retained.stopNotice, run);
         if (noticed) result.nextPermittedAction = noticed;

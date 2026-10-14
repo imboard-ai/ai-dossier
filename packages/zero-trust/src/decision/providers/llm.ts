@@ -3,6 +3,7 @@ import {
   type ModelAdapter,
   type ModelRequest,
   type ModelResult,
+  modelOutputTokens,
   modelRequestProfile,
 } from '../../model/adapter';
 import {
@@ -27,7 +28,7 @@ export interface LlmDecisionOptions {
 export function createLlmDecisionProvider(options: LlmDecisionOptions): DecisionProvider {
   const {
     adapter,
-    maxOutputTokens = 1024,
+    maxOutputTokens = modelOutputTokens(adapter, 'decision'),
     timeoutMs = 30_000,
     logprobs = (adapter.requestProfile ?? modelRequestProfile(adapter.id)).logprobs,
     id = 'llm',

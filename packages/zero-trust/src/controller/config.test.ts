@@ -258,15 +258,25 @@ describe('validateRunConfig', () => {
     Object.assign(raw.modelProfile.phases.planning, {
       maxTokensParameter: 'max_completion_tokens',
       logprobs: false,
+      decisionOutputTokens: 9000,
+      agentOutputTokens: 40000,
     });
     expect(validateRunConfig(raw).modelProfile.phases.planning).toMatchObject({
       maxTokensParameter: 'max_completion_tokens',
       logprobs: false,
+      decisionOutputTokens: 9000,
+      agentOutputTokens: 40000,
     });
     for (const invalid of [
       { maxTokensParameter: 'max_output_tokens' },
       { logprobs: 'false' },
       { logprobs: null },
+      { decisionOutputTokens: 0 },
+      { decisionOutputTokens: null },
+      { decisionOutputTokens: '8192' },
+      { agentOutputTokens: -1 },
+      { agentOutputTokens: 1.5 },
+      { agentOutputTokens: Number.MAX_SAFE_INTEGER + 1 },
     ]) {
       const copy = structuredClone(raw);
       Object.assign(copy.modelProfile.phases.planning, invalid);
