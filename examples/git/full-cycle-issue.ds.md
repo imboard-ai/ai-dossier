@@ -4,10 +4,10 @@ description: 'Take a GitHub issue from start to merged PR autonomously — compo
 metadata:
   dossier.dossier_schema_version: '1.0.0'
   dossier.title: 'Full Cycle Issue Workflow'
-  dossier.version: '3.18.0'
+  dossier.version: '3.19.0'
   dossier.protocol_version: '"1.0"'
   dossier.status: 'Draft'
-  dossier.last_updated: '2026-10-09'
+  dossier.last_updated: '2026-10-14'
   dossier.objective: 'Take a GitHub issue from start to merged PR autonomously — composed from shared sub-dossiers: gate, setup, plan, implement, review, ship, and report'
   dossier.category: '["development"]'
   dossier.tags: '["github","issues","workflow","autonomous","full-cycle","pr","merge"]'
@@ -17,10 +17,10 @@ metadata:
   dossier.destructive_operations: '["Creates new git branch","Creates new git worktree","Pushes branch to remote","Creates pull request and applies the `auto-merge` label (a server-side watcher performs the merge — see Phase 5)","Deletes branch after merge (performed by the auto-merge watcher)","Phase 4 transitively launches the project''s app and drives it in a headless browser (review-issue Agent 8), writing to the data store only when that phase''s scratch-store assertion passed"]'
   dossier.content_scope: 'references-external'
   dossier.external_references: '[{"description":"GitHub CLI documentation","required":false,"trust_level":"trusted","type":"documentation","url":"https://cli.github.com/"}]'
-  dossier.inputs: '{"optional":[{"default":"imboard-ai/git/warm-worktree","description":"Which warm-worktree dossier to use for worktree warmup. Passed through to setup-issue-workflow. Override for project-specific warmup (e.g., imboard-ai/imboard/warm-worktree-pnpm-ssm for pnpm+SSM).","name":"warmup_dossier","type":"string"},{"default":"auto","description":"Target branch to branch from and merge into. Overrides issue body parsing. Use for epic sub-issues.","name":"base_branch","type":"string"},{"default":"attached","description":"attached (default) = Phase 5 drives the PR to a confirmed merge and deploy, then Phase 6 reports. detached = a REQUEST to park: Phase 5 parks the PR on auto-merge, posts the awaiting-merge milestone, and the run STOPS (a later run resumes at ship-teardown) ONLY when ship-issue Step 3c confirms a merge mechanism (watcher workflow, or a non-null autoMergeRequest read back after requesting native auto-merge) — otherwise the run falls back to attached and merges the PR itself. Fleet-cycle and sched pass the detected mechanism and dispatch detached only where it is confirmed.","name":"ship_mode","type":"string"}]}'
+  dossier.inputs: '{"optional":[{"default":"imboard-ai/git/warm-worktree","description":"Which warm-worktree dossier to use for worktree warmup. Passed through to setup-issue-workflow. Override for project-specific warmup (e.g., imboard-ai/imboard/warm-worktree-pnpm-ssm for pnpm+SSM).","name":"warmup_dossier","type":"string"},{"default":"auto","description":"Target branch to branch from and merge into. Overrides issue body parsing. Use for epic sub-issues.","name":"base_branch","type":"string"},{"description":"How to query this project''s production data for plan-issue''s reachability check — a read-only method such as a database MCP server, read replica, or analytics warehouse. No default: passed through to plan-issue only when set; when unset it is omitted and plan-issue applies its own generic default. Bind it in the project''s own invocation, never in this generic workflow.","name":"prod_data_access","type":"string"},{"default":"attached","description":"attached (default) = Phase 5 drives the PR to a confirmed merge and deploy, then Phase 6 reports. detached = a REQUEST to park: Phase 5 parks the PR on auto-merge, posts the awaiting-merge milestone, and the run STOPS (a later run resumes at ship-teardown) ONLY when ship-issue Step 3c confirms a merge mechanism (watcher workflow, or a non-null autoMergeRequest read back after requesting native auto-merge) — otherwise the run falls back to attached and merges the PR itself. Fleet-cycle and sched pass the detected mechanism and dispatch detached only where it is confirmed.","name":"ship_mode","type":"string"}]}'
   dossier.authors: '[{"name":"Yuval Dimnik"}]'
-  dossier.checksum: '{"algorithm":"sha256","hash":"065cbf0e5c174147ea6bb20d5e2530ed5d5d2019b559c5384f695b5b2ffb31b9"}'
-  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"PqMyKLv0Kw4WlAOi55ydOR5dFYWLCBnIeASY1gvFJmTf5Dg+hndmnE3OdF588lsy67eBiIR2uGDBrUQFfAayBA==","signed_at":"2026-10-09T05:59:35.801Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
+  dossier.checksum: '{"algorithm":"sha256","hash":"6f1fb456abd46fb944a27bf46fe05f0fba80497817db367549a4b9086de26a32"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"WWqK67/Juz1u5BYIRzT/4+f9D3hIamXSdAJMzawkFtfImTqXgZGU8AkZ2aTAgLoaZHh+T+UUINw2hqWPfQwwBg==","signed_at":"2026-10-14T11:56:06.928Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Full Cycle Issue Workflow
@@ -154,8 +154,8 @@ Always runs — it determines `resume_from`.
 
 **Skip if `resume_from` is later than this phase.**
 
-1. Run `ai-dossier run imboard-ai/git/plan-issue`, passing the issue number, base_branch, worktree path, `run_id`, and `prod_data_access` = "Use the `mongodb-prod` MCP (read-only `count`/`find`/`aggregate`) against the production cluster to confirm a new state/flow actually occurs before building it; 0 occurrences ⇒ don't build, escalate (retro #1632)" — this drives plan-issue's reachability check.
-2. **In full-cycle mode: proceed immediately.** Do not checkpoint with the user. If the issue is genuinely ambiguous, apply the Guiding Principle hand-off (stop, don't ask) rather than guessing. **Exception path is the same, not different:** a reachability escalation (new state, 0 prod occurrences) is also a hand-off case — stop and record the decision needed; do not build an unreachable state.
+1. Run `ai-dossier run imboard-ai/git/plan-issue`, passing the issue number, base_branch, worktree path, `run_id`, and `prod_data_access` **only if this run received one** — otherwise omit it so plan-issue applies its own generic default. This workflow binds no data source of its own: a project that has read-only production data access names it in its own invocation (its scheduler dispatch prompt or local skill parameters), never here.
+2. **In full-cycle mode: proceed immediately.** Do not checkpoint with the user. If the issue is genuinely ambiguous, apply the Guiding Principle hand-off (stop, don't ask) rather than guessing. **Exception path is the same, not different:** a reachability escalation (new state with 0 production occurrences, or reachability unverifiable) is also a hand-off case — stop and record the decision needed; do not build an unreachable state.
 
 ### Phase 3: Implement
 
