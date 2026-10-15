@@ -6,14 +6,14 @@
 # Config (env): REFRESH_FLEET_HOSTS = default comma-separated ssh host list (required unless --hosts or --local-only is given);
 #               REFRESH_FLEET_LOCAL_HOST = the name that denotes this machine in that list (default: localhost).
 #
-#   bash scripts/refresh-fleet.sh                    # CLI + dispatch profiles + default dossiers + every imboard-ai registry skill
+#   bash scripts/refresh-fleet.sh                    # CLI + dispatch profiles + every imboard-ai/git and imboard-ai/meta registry dossier + every imboard-ai registry skill
 #   bash scripts/refresh-fleet.sh --cli-only         # just bump the CLI everywhere
 #   bash scripts/refresh-fleet.sh --local-only       # just this machine
 #   bash scripts/refresh-fleet.sh --hosts host-a,host-b    # subset of machines
 #   bash scripts/refresh-fleet.sh --profiles-file path # use a different profile source
 #   bash scripts/refresh-fleet.sh --profile-projects a,b # also sync per-project scheduler profile maps
 #   bash scripts/refresh-fleet.sh --usage-sync       # afterwards merge the per-host token ledgers (#782)
-#   bash scripts/refresh-fleet.sh imboard-ai/git/ship-issue   # extra dossiers to pull, appended
+#   bash scripts/refresh-fleet.sh imboard-ai/security/scan-markdown-security   # extra dossiers to pull, appended
 #
 # WHY THIS EXISTS
 # `ai-dossier run <name> --pull` resolves the newest version at call time, but three things
@@ -36,6 +36,18 @@
 # line, but does not fail the run, because refreshing again cannot fix it. `--force` is
 # deliberately NOT passed, so a collision can never be silently overwritten. An install that
 # reports zero skills is treated as a failure (registry unreachable or owner filter wrong).
+#
+# DOSSIERS ARE NOT LISTED HERE EITHER (#1241)
+# The dossiers force-pulled into every cache are enumerated from the registry on each run
+# (`ai-dossier list --source registry --json`, once, on the driving host): every dossier under
+# DOSSIER_PREFIXES — imboard-ai/git (the issue-workflow family) and imboard-ai/meta (the
+# authoring dossiers), the dossier namespaces publish-dossier publishes to besides skills. A
+# newly published dossier there needs no edit to this script (the listing reads a cached index
+# that can lag a first publish by ~5 minutes; `pull` itself always resolves the newest version).
+# If the listing fails or names none of them, the run falls back to FALLBACK_DOSSIERS and says
+# so in a WARN line and on the final line (like the npm-latest lookup, a failed listing alone
+# does not fail the run). Each pull is its own step, so one failing pull is reported and the
+# rest still run; the summary counts refreshed vs failed dossiers per host.
 #
 # TRAPS THIS AVOIDS (each one cost real time before)
 # - A repo-local `node_modules/.bin/ai-dossier` or stray `~/node_modules` SHADOWS the global
@@ -69,10 +81,16 @@ PROFILE_FLEET_HOME="${SCHED_PROFILE_FLEET_HOME:-$HOME/.dossier/reset-fleet}"
 SKILL_OWNER="imboard-ai"
 MIN_SKILL_CLI="0.82.0"
 SEMVER_RE='^v?[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]*)?$'
+# owner/category/name — the only shape ever interpolated into a host's `pull` command, whether
+# it came from the command line or from the registry listing.
+TARGET_RE='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}/[A-Za-z0-9][A-Za-z0-9._-]{0,63}/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
 
-# The dossiers worth force-refreshing into the cache everywhere (skills come from
-# `install-skill --all`, not from a list).
-DOSSIERS=(
+# Every registry dossier under these prefixes is force-refreshed into the cache everywhere
+# (see the header; skills come from `install-skill --all`, not from here).
+DOSSIER_PREFIXES=("imboard-ai/git/" "imboard-ai/meta/")
+# Pulled instead only when that enumeration fails: the fixed list this script used before it
+# enumerated (#1241).
+FALLBACK_DOSSIERS=(
   "imboard-ai/git/member-cycle"
   "imboard-ai/git/batch-integrate"
   "imboard-ai/git/batch-issues-preparation"
@@ -99,7 +117,7 @@ while [ $# -gt 0 ]; do
 done
 
 for target in "${EXTRA_TARGETS[@]}"; do
-  if [[ ! "$target" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}/[A-Za-z0-9][A-Za-z0-9._-]{0,63}/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+  if [[ ! "$target" =~ $TARGET_RE ]]; then
     echo "unknown target syntax: $target (expected owner/category/name)" >&2
     exit 2
   fi
@@ -119,9 +137,13 @@ AD="$(npm root -g 2>/dev/null)/@ai-dossier/cli/bin/ai-dossier";
 [ -x "$AD" ] || AD="$(command -v ai-dossier || true)";
 [ -n "$AD" ] || { echo "    FAIL: no ai-dossier binary found"; exit 90; }'
 
-declare -A HOST_STATUS
+declare -A HOST_STATUS PULL_OK PULL_FAIL
 FAILED=0
 COLLISION_HOSTS=0
+PULLS_FAILED=0
+DOSSIERS=()        # enumerated from the registry, or FALLBACK_DOSSIERS (DOSSIER_FALLBACK=1)
+DOSSIER_FALLBACK=0
+PULL_TARGETS=()    # DOSSIERS, then any extra targets not already in it
 
 # $1 >= $2 ? (semver-ish; same comparison as fleet-cli-audit.sh)
 ver_ge() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" = "$2" ]; }
@@ -404,7 +426,7 @@ $cmd" 2>&1); RC=$?
   fi
 }
 
-run_on() {  # run_on <host> <label> <command>
+run_on() {  # run_on <host> <label> <command>; returns non-zero when the command failed
   local host="$1" label="$2" cmd="$3"
   host_exec "$host" "$cmd"
   if [ $RC -eq 0 ]; then
@@ -413,34 +435,41 @@ run_on() {  # run_on <host> <label> <command>
     echo "    FAIL $label (exit $RC)"
     print_tail "$OUT"
     HOST_STATUS[$host]="fail"; FAILED=1
+    return 1
   fi
 }
+
+# Prepended to each CLI-output parser below; reads the CLI output from stdin into `raw`.
+# findDoc(accept): the JSON document may be surrounded by stderr noise (merged 2>&1), so try
+# every line-start "{" against every "}" that ends a line until one parses and is accepted;
+# returns { doc, start, end } or undefined.
+# clean(v): remote-controlled text — strip control/bidi characters and fold newlines so it
+# cannot forge report lines or drive the terminal.
+REPORT_LIB_JS='
+const raw = require("node:fs").readFileSync(0, "utf8");
+const findDoc = (accept) => {
+  const starts = [...raw.matchAll(/^\{/gm)].map((m) => m.index);
+  const ends = [...raw.matchAll(/\}(?=\n|$)/g)].map((m) => m.index + 1);
+  for (const st of starts) {
+    for (const en of ends) {
+      if (en <= st) continue;
+      try {
+        const d = JSON.parse(raw.slice(st, en));
+        if (d && typeof d === "object" && accept(d)) return { doc: d, start: st, end: en };
+      } catch {}
+    }
+  }
+};
+const clean = (v) => String(v ?? "").replace(/\s*\n\s*/g, " / ").replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c\u2028\u2029]/g, "?").slice(0, 300);
+'
 
 # Parse `install-skill --all --json` output (stdin) into report lines. Prints
 # "SUMMARY ok=<n> skipped=<n> failed=<n> collisions=<n>" then one "FAIL|COLLISION <name> — <msg>"
 # line per problem row; a single "ERROR <msg>" line (exit 0) when the CLI reported {error} or
 # listed zero skills; exits 3 when no JSON document is found.
-SKILL_REPORT_JS='
-const raw = require("node:fs").readFileSync(0, "utf8");
-// The document may be surrounded by stderr noise (merged 2>&1): try every
-// line-start "{" against every "}" that ends a line until one parses.
-let doc;
-const starts = [...raw.matchAll(/^\{/gm)].map((m) => m.index);
-const ends = [...raw.matchAll(/\}(?=\n|$)/g)].map((m) => m.index + 1);
-for (const st of starts) {
-  for (const en of ends) {
-    if (en <= st) continue;
-    try {
-      const d = JSON.parse(raw.slice(st, en));
-      if (d && typeof d === "object" && (d.summary || d.error)) { doc = d; break; }
-    } catch {}
-  }
-  if (doc) break;
-}
+SKILL_REPORT_JS="$REPORT_LIB_JS"'
+const doc = findDoc((d) => d.summary || d.error)?.doc;
 if (!doc) process.exit(3);
-// Remote-controlled text: strip control/bidi characters and fold newlines so it cannot
-// forge report lines or drive the terminal.
-const clean = (v) => String(v ?? "").replace(/\s*\n\s*/g, " / ").replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069\u200e\u200f\u061c\u2028\u2029]/g, "?").slice(0, 300);
 const n = (v) => (Number.isInteger(v) && v >= 0 ? v : 0);
 if (!doc.summary) { console.log(`ERROR ${clean(doc.error) || "no summary in install-skill output"}`); process.exit(0); }
 const s = doc.summary;
@@ -509,7 +538,67 @@ refresh_skills() {
   fi
 }
 
+# Parse `list --source registry --json` output (stdin): one "DOSSIER <name>" line per listed
+# name under $DOSSIER_PREFIXES (space-separated) that matches $TARGET_RE, sorted and unique;
+# "INVALID <name>" for a name under a prefix that does not (it is never pulled); or a single
+# "ERROR <why>" line when there is no listing or it names nothing under the prefixes. The CLI
+# exits 0 with an empty listing when every registry failed, so "nothing listed" is the failure.
+DOSSIER_LIST_JS="$REPORT_LIB_JS"'
+const found = findDoc((d) => Array.isArray(d.dossiers));
+const note = (found ? raw.slice(0, found.start) + raw.slice(found.end) : raw)
+  .split("\n").map((l) => l.trim()).find(Boolean);
+const fail = (why) => {
+  console.log(`ERROR ${why}${note ? ` — ${clean(note)}` : ""}`);
+  process.exit(0);
+};
+if (!found) fail("no JSON listing in the CLI output");
+const prefixes = process.env.DOSSIER_PREFIXES.split(" ").filter(Boolean);
+const target = new RegExp(process.env.TARGET_RE);
+const names = new Set();
+for (const d of found.doc.dossiers) {
+  const name = d && typeof d.name === "string" ? d.name : "";
+  if (!prefixes.some((p) => name.startsWith(p))) continue;
+  if (target.test(name)) names.add(name);
+  else console.log(`INVALID ${clean(name)}`);
+}
+if (names.size === 0) fail(`the registry listed no dossier under ${prefixes.join(" ")}`);
+for (const name of [...names].sort()) console.log(`DOSSIER ${name}`);
+'
+
+# enumerate_dossiers: fill DOSSIERS from the registry listing, run with the driving host's own
+# CLI (resolved like every host command); on any failure use FALLBACK_DOSSIERS and say so.
+enumerate_dossiers() {
+  local report line reason=""
+  host_exec "$LOCAL_HOST" '"$AD" list --source registry --json --per-page 1000'
+  report=$(printf '%s\n' "$OUT" | DOSSIER_PREFIXES="${DOSSIER_PREFIXES[*]}" TARGET_RE="$TARGET_RE" \
+    node -e "$DOSSIER_LIST_JS" 2>/dev/null) || reason="listing parser crashed"
+  while IFS= read -r line; do
+    case "$line" in
+      # Re-checked here, where the name is about to become part of a shell command.
+      DOSSIER\ *) [[ "${line#DOSSIER }" =~ $TARGET_RE ]] && DOSSIERS+=("${line#DOSSIER }") ;;
+      INVALID\ *) echo "WARN registry name ${line#INVALID } is not owner/category/name — not pulled" ;;
+      ERROR\ *) reason="${reason:-${line#ERROR }}" ;;
+    esac
+  done <<< "$report"
+  if [ -z "$reason" ] && [ "$RC" -ne 0 ]; then reason="ai-dossier list exited $RC"; fi
+  if [ -z "$reason" ] && [ "${#DOSSIERS[@]}" -eq 0 ]; then reason="no dossier names in the listing"; fi
+  if [ -n "$reason" ]; then
+    DOSSIERS=("${FALLBACK_DOSSIERS[@]}"); DOSSIER_FALLBACK=1
+    echo "WARN dossier enumeration failed ($reason) — falling back to the fixed list of ${#FALLBACK_DOSSIERS[@]}"
+  else
+    echo "dossiers: ${#DOSSIERS[@]} listed under ${DOSSIER_PREFIXES[*]} in the registry"
+  fi
+}
+
 echo "refresh-fleet: hosts=$HOSTS  cli_only=$CLI_ONLY"
+if [ "$CLI_ONLY" -eq 0 ]; then
+  enumerate_dossiers
+  declare -A QUEUED
+  for d in "${DOSSIERS[@]}" "${EXTRA_TARGETS[@]}"; do
+    [ -n "${QUEUED[$d]:-}" ] && continue
+    QUEUED[$d]=1; PULL_TARGETS+=("$d")
+  done
+fi
 echo
 
 IFS=',' read -r -a HOST_LIST <<< "$HOSTS"
@@ -551,9 +640,13 @@ for host in "${HOST_LIST[@]}"; do
 
   if [ "$CLI_ONLY" -eq 0 ]; then
     run_on "$host" "sync user dispatch profiles" "$PROFILE_SYNC_CMD"
-    for d in "${DOSSIERS[@]}" "${EXTRA_TARGETS[@]:-}"; do
-      [ -z "$d" ] && continue
-      run_on "$host" "pull $d" "\"\$AD\" pull '$d' --force"
+    # One step per dossier: a failed pull is reported and counted, and the rest still run.
+    for d in "${PULL_TARGETS[@]}"; do
+      if run_on "$host" "pull $d" "\"\$AD\" pull '$d' --force"; then
+        PULL_OK[$host]=$((${PULL_OK[$host]:-0} + 1))
+      else
+        PULL_FAIL[$host]=$((${PULL_FAIL[$host]:-0} + 1)); PULLS_FAILED=$((PULLS_FAILED + 1))
+      fi
     done
     # install-skill --all writes wrappers for the skills it installs; orphan-wrapper pruning
     # (the old sync-skills step) is intentionally gone — see the header.
@@ -594,13 +687,28 @@ fi
 
 echo "== summary =="
 for host in "${HOST_LIST[@]}"; do
-  printf '  %-6s %s\n' "$host" "${HOST_STATUS[$host]:-unknown}"
+  pulls=""
+  [ -n "${PULL_OK[$host]:-}${PULL_FAIL[$host]:-}" ] && pulls="  dossiers: ${PULL_OK[$host]:-0} refreshed, ${PULL_FAIL[$host]:-0} failed"
+  printf '  %-6s %s%s\n' "$host" "${HOST_STATUS[$host]:-unknown}" "$pulls"
 done
+if [ "$CLI_ONLY" -eq 0 ]; then
+  list="${#DOSSIERS[@]} enumerated from the registry"
+  [ "$DOSSIER_FALLBACK" -eq 1 ] && list="${#DOSSIERS[@]} from the FIXED FALLBACK list"
+  extra=$((${#PULL_TARGETS[@]} - ${#DOSSIERS[@]}))
+  [ "$extra" -gt 0 ] && list+=" + $extra extra target(s)"
+  echo "  dossier list: $list"
+fi
+# Anything that must not hide behind a bare "all hosts refreshed".
+NOTES=()
+[ "$PULLS_FAILED" -gt 0 ] && NOTES+=("$PULLS_FAILED dossier pull(s) failed (see the FAIL pull lines)")
+[ "$COLLISION_HOSTS" -gt 0 ] && NOTES+=("$COLLISION_HOSTS host(s) have skill collisions needing manual attention (see WARN lines)")
+[ "$DOSSIER_FALLBACK" -eq 1 ] && NOTES+=("dossiers came from the fixed fallback list, not the registry (see the WARN line at the top)")
 if [ "$FAILED" -ne 0 ]; then
   echo "  ONE OR MORE HOSTS FAILED — see above"
-  [ "$COLLISION_HOSTS" -gt 0 ] && echo "  also: $COLLISION_HOSTS host(s) have skill collisions needing manual attention (see WARN lines)"
-elif [ "$COLLISION_HOSTS" -gt 0 ]; then
-  echo "  all hosts refreshed — but $COLLISION_HOSTS host(s) have skill collisions needing manual attention (see WARN lines)"
+  for note in "${NOTES[@]}"; do echo "  also: $note"; done
+elif [ "${#NOTES[@]}" -gt 0 ]; then
+  echo "  all hosts refreshed — but ${NOTES[0]}"
+  for note in "${NOTES[@]:1}"; do echo "  also: $note"; done
 else
   echo "  all hosts refreshed"
 fi
