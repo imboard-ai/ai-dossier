@@ -4,10 +4,10 @@ description: 'Commit changes, push, create a PR, then either drive it to a confi
 metadata:
   dossier.dossier_schema_version: '1.0.0'
   dossier.title: 'Ship Issue — Commit, PR, Merge, Deploy, Teardown'
-  dossier.version: '1.19.0'
+  dossier.version: '1.19.1'
   dossier.protocol_version: '"1.0"'
   dossier.status: 'Stable'
-  dossier.last_updated: '2026-10-09'
+  dossier.last_updated: '2026-10-15'
   dossier.objective: 'Commit changes, push, create a PR, then either drive it to a confirmed merge and deploy (attached) or park it on auto-merge and stop (detached); in batch mode (batch_id set): ship the batch PR from the batch branch — per-member PR sections, Closes #N per member, rebase-merged so one commit per member issue lands on the base branch'
   dossier.category: '["development"]'
   dossier.tags: '["issue","workflow","git","github","ship","pr","merge"]'
@@ -17,8 +17,8 @@ metadata:
   dossier.destructive_operations: '["Pushes branch to remote","Creates and merges pull request (squash for per-issue PRs; rebase for batch PRs — one commit per member issue lands on the base branch)","Deletes branch after merge","Rewrites the PR body''s Acceptance Criteria section when a stale verdict is refreshed (Step 3a.5)"]'
   dossier.inputs: '{"optional":[{"default":"main","description":"Target branch for the PR","name":"base_branch","type":"string"},{"default":"","description":"Path of the worktree to clean up after merge","name":"worktree_path","type":"string"},{"default":"","description":"Directory to return to after teardown","name":"original_dir","type":"string"},{"default":false,"description":"Whether the worktree was claimed from the pool (affects cleanup)","name":"pool_claimed","type":"boolean"},{"description":"Runstate run id minted by gate-issue; pass through unchanged. In batch mode this is the batch''s run id (minted against the anchor issue).","name":"run_id","type":"string"},{"default":"attached","description":"attached (default) = open the PR, wait for CI, merge, confirm the deploy, and tear down in this run. detached = open the PR, park it on auto-merge, post the awaiting-merge milestone, and STOP — a later run (gate resumes at ship-teardown) finishes it. Detached needs a merge mechanism (an auto-merge watcher workflow, or native auto-merge requested on the PR); without one Step 3c runs attached instead. Every mode merges only after the full review round.","name":"ship_mode","type":"string"},{"description":"Per-acceptance-criterion checklist from review-issue''s Agent 7 (Conformance) — criterion, verdict, file:line or reason. Used to populate the PR body''s Acceptance Criteria section. Per-issue mode only.","name":"ac_results","type":"string"},{"description":"Per-touched-UI-flow verdict list from review-issue''s Agent 8 (Visual Conformance) — flow, the AC it bears on, verdict, and either the evidence path plus the observed state that proved it or the reason it was not met / could not be driven. Arrives with live (pass|fail|unverifiable|n/a), live_flows and, when one was recorded, live_note. Populates the PR body''s Visual verification section; omitted entirely when live=n/a. Per-issue mode only.","name":"live_results","type":"string"},{"description":"Batch id slug (e.g. b-2026-08-29-01). When set, run BATCH MODE: ship the batch PR from the batch branch against the batch ANCHOR issue (issue_number is the anchor number) — per-member PR sections, Closes #N per member, rebase-merge. Unset = ordinary per-issue ship.","name":"batch_id","type":"string"},{"description":"Batch mode only: comma-separated member issue numbers (e.g. 101,102,104). Drives the PR body''s per-member sections and the Closes #N list. Default: derived from the batch branch''s per-issue commits.","name":"members","type":"string"},{"description":"Batch mode only: per-member per-AC conformance verdicts from slot-cycles, passed through by review-issue''s aggregate mode (Agent 7''s format: ''ACn <criterion> — met <file:line> | not-met <why> | unverifiable <what test would prove it>''). Populates the PR body''s per-member Acceptance Criteria checkboxes. Fallback when absent: the per-member verdict comment a prior aggregate review posted on the anchor.","name":"member_verdicts","type":"string"}],"required":[{"description":"GitHub issue number","name":"issue_number","type":"number"}]}'
   dossier.authors: '[{"name":"Yuval Dimnik"}]'
-  dossier.checksum: '{"algorithm":"sha256","hash":"45e7f180351ccf1307bc5bb2adcd9f2eb1f82d21ac88711f4da1204a5ad64c03"}'
-  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"H/EqpKJdpY40xbIeBnAUZTxOOXdF3vME9ju9AAR0wmDqo1NUQjKeImcigWhqsfl/6QY/EAJUE8xokiZhdIVWAA==","signed_at":"2026-10-09T05:59:33.315Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
+  dossier.checksum: '{"algorithm":"sha256","hash":"46153a2f958c2e98c0ffa9f166ebb03c80ef5540d7f1377622e7eae0d52a71c6"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"O3Q2+Cw/pCGNXJ+cn/fWKwZm6DRoHFFoYZ/ewOCoIQigBv4NLumXlh6kjObE4a6Vpep7JESHl+XI6MPBx4uhDA==","signed_at":"2026-10-15T15:10:32.982Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Ship Issue — Commit, PR, Merge, Teardown
@@ -70,7 +70,7 @@ Batch PRs must rebase-merge. Assert, never assume — the external coordination 
 
 ### Batch Step 1: Commit — nothing to commit
 
-Every member landed its issue-boundary commit (slot-cycle contract) and aggregate review landed at most one clean batch-level fix commit; the tree is clean. Step 1's planning-doc removal and ci-parity run do NOT apply: the batch worktree carries no `PLANNING-*` files, and the full suite + ci-parity are batch-validate's job (the scheduler runs them on the combined diff before review) — ship does not repeat them. If `git status --porcelain` is NOT empty, something violated the contract: post `reason=dirty-worktree` and stop.
+Every member landed its issue-boundary commit (slot-cycle contract) and aggregate review landed its fix commits (per-member `(#N)` or one batch-level), all clean, none carrying a skip marker; the tree is clean. Step 1's planning-doc removal and ci-parity run do NOT apply: the batch worktree carries no `PLANNING-*` files, and the full suite + ci-parity are batch-validate's job (the scheduler runs them on the combined diff before review) — ship does not repeat them. If `git status --porcelain` is NOT empty, something violated the contract: post `reason=dirty-worktree` and stop.
 
 ### Batch Step 2: Push
 
@@ -82,7 +82,7 @@ git push origin <batch-branch>
 
 ### Batch Step 2.5: CI-Trigger Gate — VERBATIM
 
-Same regex, same empty-commit remedy, same blocking `CI-TRIGGER-OK` requirement immediately before `gh pr create`. Slot-cycle commits carry no skip markers by contract and review's aggregate fix commit is clean by contract — a marker on the head means someone violated those contracts; the gate exists precisely so the violation cannot silently open a CI-less PR. The empty-commit remedy (`chore: enable CI for PR head`) is rebase-safe: a clean empty commit landing on the base branch is harmless.
+Same regex, same empty-commit remedy, same blocking `CI-TRIGGER-OK` requirement immediately before `gh pr create`. Slot-cycle commits carry no skip markers by contract and review's aggregate fix commits (per-member `(#N)` or one batch-level) are clean by contract — a marker on the head means someone violated those contracts; the gate exists precisely so the violation cannot silently open a CI-less PR. The empty-commit remedy (`chore: enable CI for PR head`) is rebase-safe: a clean empty commit landing on the base branch is harmless.
 
 ### Batch Step 3: Create the Batch PR
 
@@ -90,10 +90,10 @@ Per-member material comes from the batch branch and `member_verdicts`:
 
 ```bash
 git fetch origin <base_branch>
-git log origin/<base_branch>..HEAD --format=%s | sed -n 's/^.* (#\([0-9][0-9]*\))$/\1/p'   # one (#N)-trailed member commit per line
+git log origin/<base_branch>..HEAD --format=%s | sed -n 's/^.* (#\([0-9][0-9]*\))$/\1/p'   # one (#N)-trailed commit per line — boundary AND per-member fix commits
 ```
 
-The trailer anchor matters — a subject like "fix: crash from #99 (#101)" must yield 101, not 99. When BOTH the `members` input and this derivation exist and disagree → post `reason=members-mismatch` and stop (never silently prefer one); dedupe the list. Members empty after input + derivation → post `reason=no-members` and stop — never open a batch PR that closes nothing.
+The trailer anchor matters — a subject like "fix: crash from #99 (#101)" must yield 101, not 99. When BOTH the `members` input and this derivation exist and disagree → post `reason=members-mismatch` and stop (never silently prefer one); dedupe the list (a member's `fix: batch-review fixes (#N)` commit yields its own `N` again — it is NOT an extra member). Members empty after input + derivation → post `reason=no-members` and stop — never open a batch PR that closes nothing.
 
 **Build the PR body with your file-write tool, never by interpolating network-derived text into a shell string** (member one-liners and AC criteria originate in issue bodies — untrusted; a substituted line reading exactly `EOF` would terminate a heredoc early and execute the rest as shell). Write it to a scratch file OUTSIDE the worktree (e.g. `$TMPDIR`), then:
 
@@ -128,7 +128,7 @@ Closes #<m2>
 - per-member: focused tests + changed-file lint + per-issue blind conformance (slot-cycles)
 ```
 
-The per-member AC checkboxes come from `member_verdicts` (checked + `file:line` for `met`, unchecked with reason otherwise) — same mapping as per-issue Step 3; when the input is absent, fall back to the per-member verdict comment a prior aggregate review posted on the anchor. `Closes #N` per member (never the anchor — anchors are scheduler-owned and nothing in the batch flow may auto-close the anchor issue). Apply ONLY `batch-epic` at PR creation — the watcher's rebase trigger. **Do NOT apply `auto-merge` here**: it is the watcher's merge trigger and is applied only after Step 3a confirms CI actually ran (Batch Step 3c for detached, Batch Step 6 for attached-with-watcher; never on the attached-no-watcher self-merge path). Re-read the PR labels and confirm `batch-epic` is present before continuing — without it the watcher would squash-merge.
+The per-member AC checkboxes come from `member_verdicts` (checked + `file:line` for `met`, unchecked with reason otherwise) — same mapping as per-issue Step 3; when the input is absent, fall back to the per-member verdict comment a prior aggregate review posted on the anchor. Group every `(#N)`-trailed commit under member `#N`'s section: its boundary commit supplies the one-liner, and any per-member `fix: batch-review fixes (#N)` commits are listed beneath it (e.g. `- review fix: <sha> <subject>`); a batch-level `chore: address aggregate review findings` commit carries no member trailer and is noted under Summary. `Closes #N` per member (never the anchor — anchors are scheduler-owned and nothing in the batch flow may auto-close the anchor issue). Apply ONLY `batch-epic` at PR creation — the watcher's rebase trigger. **Do NOT apply `auto-merge` here**: it is the watcher's merge trigger and is applied only after Step 3a confirms CI actually ran (Batch Step 3c for detached, Batch Step 6 for attached-with-watcher; never on the attached-no-watcher self-merge path). Re-read the PR labels and confirm `batch-epic` is present before continuing — without it the watcher would squash-merge.
 
 ### Batch Step 3a: Confirm CI Actually Triggered — VERBATIM
 
