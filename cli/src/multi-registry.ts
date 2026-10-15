@@ -213,10 +213,8 @@ function contentDigestMismatch(reg: ResolvedRegistry, result: DossierContentResu
 
 /** A failure worth one retry: a digest mismatch or a not-found for content that may exist. */
 function isTransientContentFailure(reason: unknown): boolean {
-  const e = reason as { statusCode?: number; digestMismatch?: boolean; message?: string } | null;
-  if (!e) return false;
-  if (e.digestMismatch || e.statusCode === 404) return true;
-  return /not found/i.test(e.message ?? '');
+  const e = reason as { statusCode?: number; digestMismatch?: boolean } | null;
+  return Boolean(e && (e.digestMismatch || e.statusCode === 404));
 }
 
 async function fetchContentOnce(
