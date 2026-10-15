@@ -478,7 +478,7 @@ test('status explains a revision paused because its feedback was not admitted', 
   const status = commands.status(store.runId);
   assert.equal(status.state, 'paused_user');
   assert.match(status.nextPermittedAction, /feedback was judged out of scope or ambiguous/);
-  assert.match(status.nextPermittedAction, /new feedback.*resume --revise/);
+  assert.match(status.nextPermittedAction, /new or edited feedback.*resume --revise/);
 });
 
 test('policy gate status exposes retained decisions and citations read-only, with exact stop binding', async () => {

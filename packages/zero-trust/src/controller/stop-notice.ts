@@ -36,6 +36,26 @@ export function provisioningNotice(
   };
 }
 
+const REVISION_REFRESH_ACTIONS = Object.freeze({
+  unavailable:
+    'Revision feedback was not admitted, and GitHub could not be read while checking for newer maintainer feedback; nothing was recorded. Run resume --revise again later, or cancel the run.',
+  reopen_pending:
+    'Revision feedback was not admitted, and the pull request is closed. Reopen it on GitHub, then run resume --revise: the run confirms the reopen by reading it back before it looks for newer maintainer feedback.',
+  refreshed_unjudged:
+    'Newer maintainer feedback was selected for this revision but not yet judged. Run resume --revise to judge it; the refused feedback is never judged again.',
+} as const);
+
+/** Why an explicit --revise of a refused revision handed off again without new work (#1223). */
+export function revisionRefreshNotice(
+  reason: keyof typeof REVISION_REFRESH_ACTIONS
+): Omit<StopNotice, 'historyLength'> {
+  return {
+    state: 'paused_user',
+    reason: `revision_${reason}`,
+    nextPermittedAction: REVISION_REFRESH_ACTIONS[reason],
+  };
+}
+
 /** Structural view of the step artifact journal (`StepArtifacts`). */
 interface NoticeStore {
   get<T>(key: string): T | undefined;

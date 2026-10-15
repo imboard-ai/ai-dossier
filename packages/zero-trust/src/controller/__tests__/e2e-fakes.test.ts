@@ -1501,15 +1501,22 @@ describe('createController real composition', () => {
     expect(JSON.parse(original.verdict)).toMatchObject({ reason: 'disagreement' });
     const spent = readOutcomeBudget(refused.store);
     refused.close();
-    // The same, unchanged feedback is never re-judged: no model call, VM, push or session.
+    // The same, unchanged feedback is never re-judged, by plain resume or --revise, even though
+    // the screen would now admit it: no model call, VM allocation, push or session.
     h.admitFeedback();
     const calls = h.modelCalls();
-    expect(
-      ((await h.authorize(h.controller.resume(id, { revise: true }))) as { state: string }).state
-    ).toBe('paused_user');
+    const creates = () => h.vm.calls.filter((call) => call.op === 'create').length;
+    const vms = creates();
+    for (const revise of [false, true])
+      expect(
+        ((await h.authorize(h.controller.resume(id, { revise }))) as { state: string }).state
+      ).toBe('paused_user');
     expect(h.modelCalls()).toBe(calls);
+    expect(creates()).toBe(vms);
     expect(pushCalls()).toHaveLength(pushes);
-    expect(await h.vm.listByRun(id)).toEqual([]);
+    const unchanged = h.artifacts(id);
+    expect(readOutcomeBudget(unchanged.store).sessions).toHaveLength(spent.sessions.length);
+    unchanged.close();
     // A genuinely new maintainer review on the same PR is judged afresh on explicit --revise.
     h.advanceClock();
     h.addFeedback('Please declare const MS_PER_SECOND = 1000 and divide by it.', 12);

@@ -1,5 +1,5 @@
 /** Review prose is data. Only a confident typed answer may admit related work. */
-import { createHash } from 'node:crypto';
+import { sha256 } from '../canonical/export';
 import { decide } from '../decision/decide';
 import { createTypedQuestion, type DecisionDeps } from '../decision/types';
 import type { FeedbackItem } from '../github/track';
@@ -40,6 +40,8 @@ export interface FeedbackDecision {
   readonly admitted: boolean;
   /** The serialized typed verdict. */
   readonly verdict: string;
+  /** `feedback_refusals` only: the `feedback` artifact digest holding the refused prose. */
+  readonly feedbackDigest?: string;
 }
 
 /** What a verdict judged: the exact review items (id and edit time), never their prose, so
@@ -47,6 +49,5 @@ export interface FeedbackDecision {
 export function feedbackIdentity(
   feedback: readonly { readonly id: string; readonly updatedAt: string }[]
 ): string {
-  const refs = feedback.map((f) => [f.id, f.updatedAt]);
-  return createHash('sha256').update(JSON.stringify(refs)).digest('hex');
+  return sha256(JSON.stringify(feedback.map((f) => [f.id, f.updatedAt])));
 }

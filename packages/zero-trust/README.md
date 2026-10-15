@@ -2674,11 +2674,15 @@ plan. Unclear, unrelated or authority-changing feedback hands off before a new V
 is provisioned; the verdict and feedback remain inspectable, and `zt-run status`
 says the revision handed off because its feedback was not admitted. The verdict binds the
 exact items it judged (id and edit time): plain `resume` replays the refusal, and the same
-feedback is never judged again (#1223). A later `resume --revise` reads the PR again and
-judges only maintainer feedback that is new since (a new review or comment, or an edited
-one), under the same freshness, reviewer and head checks, in the same revision session. The
-refused items stay excluded from later revisions, and the refused verdict is retained as
-`feedback_refusals`. Feedback cannot alter
+feedback is never judged again (#1223). A later `resume --revise` reads the PR again
+(`PrTracker.refreshRefusedRevision()`, journaled as `revision_refreshed`) and judges only
+maintainer feedback that is new since (a new review or comment, or an edited one), under the
+same freshness, reviewer and head checks, in the same revision session. With nothing new
+the refusal stands and the run hands off again, with no model call, VM or new session; an
+unreadable PR or a closed one says so in `status` instead. The refused items stay excluded
+from later revisions. The `feedback` artifact then holds the new items, and the refused
+verdict is retained in `feedback_refusals`, bound to the identity of the items it judged and
+to the digest of the `feedback` artifact that held their text. Feedback cannot alter
 identities, targets, network policy, budget or checkpoints. Oversized/truncated
 maintainer feedback is unreadable, never silently clipped; an oversized remark from
 anyone else is skipped like any non-maintainer remark. `retainRevisionFeedback` on
@@ -2727,7 +2731,8 @@ node scripts/zt-run.mjs cancel-action --root state/runs --run ztc-0123456789abcd
 
 `PrTracker` (`src/github/track.ts`, #1068) takes over once the PR is observed
 (`trackFromHandoff(record, fork)`), in its own controller-owned journal. It reads
-GitHub only on an explicit `resume()`, `beginRevision()` or `shipRevision()`; nothing
+GitHub only on an explicit `resume()`, `beginRevision()`, `refreshRefusedRevision()` or
+`shipRevision()`; nothing
 polls, and `status()` reports CI as `not_observed` until a read in this process. It
 records PR outcomes, review and revision steps only from its own reads: `observeRun`
 accepts lifecycle progress made elsewhere (verification, pause, failures) and refuses
@@ -2758,7 +2763,8 @@ other drivers' `observeRun`; a restart may hand it an older copy of the run.
 - **Revisions.** `beginRevision()` reads the PR and keeps maintainer feedback
   (`MAINTAINER_ASSOCIATIONS`: OWNER, MEMBER, COLLABORATOR, or a login the contributor
   named with `resume --reviewers`) that is not by the contributor or a bot, carries no ai-dossier marker, is not an empty approval, and
-  was not addressed by a confirmed revision (an edited item is new). It rechecks
+  was neither addressed by a confirmed revision nor refused by the typed feedback screen
+  (`TrackState.refused`; an edited item is new in both cases). It rechecks
   freshness (`RevisionAdmission`: AI policy, issue, assignment, competing fixes and
   permission; contributor; fork binding) and moves the run to `revising`. A probe
   that answers no blocks; one that throws refuses without recording

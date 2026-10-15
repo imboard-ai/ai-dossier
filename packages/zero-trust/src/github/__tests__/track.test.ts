@@ -1189,6 +1189,11 @@ describe('refused revision feedback (#1223)', () => {
     ];
     expect(() => replayTrack(forged([{ id: 'review:9', updatedAt: 'x' }]))).toThrow(TrackError);
     expect(() => replayTrack(forged([]))).toThrow(TrackError);
+    // The same item twice is never a selection the tracker produces.
+    const twice = forged([{ id: 'review:1', updatedAt: '2026-10-06T11:00:00Z' }]);
+    const last = twice.at(-1) as { feedback: unknown[] };
+    last.feedback = [...last.feedback, ...last.feedback];
+    expect(() => replayTrack(twice)).toThrow(TrackError);
     expect(
       replayTrack(forged([{ id: 'review:1', updatedAt: '2026-10-06T11:00:00Z' }])).revision
     ).toEqual({ feedback: [{ id: 'review:2', updatedAt: '2026-10-06T12:00:00Z' }] });
@@ -1205,6 +1210,24 @@ describe('refused revision feedback (#1223)', () => {
       reason: 'admission_policy',
     });
     expect(t.snapshot().revision?.feedback.map((f) => f.id)).toEqual(['review:1']);
+  });
+
+  it('a closed PR yields its reopen hand-off, confirmed by a later read, never a revision', async () => {
+    const { up, t, resumeRefused } = await refusedRig();
+    resumeRefused();
+    up.reviews = [review(1), review(2, '2026-10-06T12:00:00Z')];
+    up.pulls[0] = { ...up.pulls[0], state: 'closed' } as Pull;
+    const closed = await t.refreshRefusedRevision();
+    expect(closed).toMatchObject({ kind: 'action', action: { kind: 'reopen' } });
+    // Still closed: the pending reopen is returned again, not refused as action_pending.
+    expect(await t.refreshRefusedRevision()).toMatchObject({ kind: 'action' });
+    expect(t.snapshot().revision?.feedback.map((f) => f.id)).toEqual(['review:1']);
+    up.pulls[0] = { ...up.pulls[0], state: 'open' } as Pull;
+    const reopened = await t.refreshRefusedRevision();
+    expect(t.snapshot().action).toBeUndefined();
+    expect(reopened.kind === 'revising' && reopened.feedback.map((f) => f.id)).toEqual([
+      'review:2',
+    ]);
   });
 
   it('a merge observed during the refused revision blocks instead of refreshing', async () => {
