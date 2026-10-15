@@ -1,3 +1,4 @@
+import { sha256Hex } from '@ai-dossier/core';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as config from '../config';
 import * as credentials from '../credentials';
@@ -124,7 +125,7 @@ describe('multi-registry', () => {
     it('should return content from first succeeding registry', async () => {
       mockClient.getDossierContent.mockResolvedValue({
         content: '# Test content',
-        digest: 'sha256:abc',
+        digest: `sha256:${sha256Hex('# Test content')}`,
       });
 
       const { result } = await multiRegistryGetContent('test');
@@ -138,10 +139,90 @@ describe('multi-registry', () => {
         Object.assign(new Error('Not found'), { statusCode: 404 })
       );
 
-      const { result, errors } = await multiRegistryGetContent('missing');
+      const { result, errors } = await multiRegistryGetContent('missing', null, {
+        retryDelayMs: 0,
+      });
       expect(result).toBeNull();
       expect(errors).toHaveLength(1);
       expect(errors[0].registry).toBe('public');
+    });
+
+    // #1240: transient not-found / digest mismatch on content fetch
+    const content = '# Dossier body';
+    const goodDigest = `sha256:${sha256Hex(content)}`;
+
+    it('retries once and succeeds after a transient not-found', async () => {
+      mockClient.getDossierContent
+        .mockRejectedValueOnce(Object.assign(new Error('Not found'), { statusCode: 404 }))
+        .mockResolvedValueOnce({ content, digest: goodDigest });
+
+      const { result, errors } = await multiRegistryGetContent('org/x', '1.0.0', {
+        retryDelayMs: 0,
+      });
+      expect(result?.content).toBe(content);
+      expect(errors).toEqual([]);
+      expect(mockClient.getDossierContent).toHaveBeenCalledTimes(2);
+    });
+
+    it('retries once and succeeds after a transient digest mismatch', async () => {
+      mockClient.getDossierContent
+        .mockResolvedValueOnce({ content: '# truncated', digest: goodDigest })
+        .mockResolvedValueOnce({ content, digest: goodDigest });
+
+      const { result } = await multiRegistryGetContent('org/x', '1.0.0', { retryDelayMs: 0 });
+      expect(result?.content).toBe(content);
+      expect(mockClient.getDossierContent).toHaveBeenCalledTimes(2);
+    });
+
+    it('reports url, status, expected and actual digest on a persistent mismatch', async () => {
+      mockClient.getDossierContent.mockResolvedValue({
+        content: '# truncated',
+        digest: goodDigest,
+        status: 200,
+        url: 'https://public.example.com/api/v1/dossiers/org/x/content?version=1.0.0',
+      });
+
+      const { result, errors } = await multiRegistryGetContent('org/x', '1.0.0', {
+        retryDelayMs: 0,
+      });
+      expect(result).toBeNull();
+      expect(mockClient.getDossierContent).toHaveBeenCalledTimes(2);
+      expect(errors).toHaveLength(1);
+      expect(errors[0].registry).toBe('public');
+      expect(errors[0].error).toContain('checksum mismatch');
+      expect(errors[0].error).toContain('url: https://public.example.com/api/v1/dossiers/org/x');
+      expect(errors[0].error).toContain('status: 200');
+      expect(errors[0].error).toContain(`expected sha256: ${sha256Hex(content)}`);
+      expect(errors[0].error).toContain(`actual sha256: ${sha256Hex('# truncated')}`);
+    });
+
+    it('does not retry a non-transient failure', async () => {
+      mockClient.getDossierContent.mockRejectedValue(
+        Object.assign(new Error('Internal error'), { statusCode: 500 })
+      );
+
+      const { result } = await multiRegistryGetContent('org/x', '1.0.0', { retryDelayMs: 0 });
+      expect(result).toBeNull();
+      expect(mockClient.getDossierContent).toHaveBeenCalledTimes(1);
+    });
+
+    it('reports every registry queried and its result when all fail', async () => {
+      vi.mocked(config.resolveRegistries).mockReturnValue([
+        { name: 'public', url: 'https://public.example.com' },
+        { name: 'private', url: 'https://private.example.com' },
+      ]);
+      mockClient.getDossierContent.mockRejectedValue(
+        Object.assign(new Error('Not found'), { statusCode: 404 })
+      );
+
+      const { result, errors } = await multiRegistryGetContent('org/x', '1.0.0', {
+        retryDelayMs: 0,
+      });
+      expect(result).toBeNull();
+      expect(errors).toEqual([
+        { registry: 'public', error: 'Not found' },
+        { registry: 'private', error: 'Not found' },
+      ]);
     });
   });
 

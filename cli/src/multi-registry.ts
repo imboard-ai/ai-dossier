@@ -4,6 +4,7 @@
  * and merges results with source labels.
  */
 
+import { sha256Hex } from '@ai-dossier/core';
 import type { ResolvedRegistry } from './config';
 import { resolveRegistries } from './config';
 import { loadCredentials } from './credentials';
@@ -191,27 +192,53 @@ async function multiRegistryGetDossier(
   return { result: null, errors };
 }
 
-/**
- * Get dossier content from the first registry that has it.
- * Returns error details when all registries fail.
- * When DOSSIER_DEBUG is set, logs which registry served the request to stderr.
- */
-async function multiRegistryGetContent(
-  name: string,
-  version: string | null = null
-): Promise<MultiRegistryGetContentResult> {
-  const registries = resolveRegistries();
+/** Delay before the single retry of a failed content fetch (#1240). */
+const CONTENT_RETRY_DELAY_MS = 500;
 
+/**
+ * Returns a diagnostic error message when `content` does not match the registry's
+ * `X-Dossier-Digest`, or null when it matches (or no digest was sent). The digest
+ * carries an algorithm prefix (`sha256:<hex>`); sha256Hex returns bare hex.
+ */
+function contentDigestMismatch(reg: ResolvedRegistry, result: DossierContentResult): string | null {
+  if (!result.digest) return null;
+  const expected = result.digest.replace(/^sha256:/i, '').toLowerCase();
+  const actual = sha256Hex(result.content).toLowerCase();
+  if (actual === expected) return null;
+  return (
+    `checksum mismatch after download (url: ${result.url ?? reg.url}, ` +
+    `status: ${result.status ?? 'unknown'}, expected sha256: ${expected}, actual sha256: ${actual})`
+  );
+}
+
+/** A failure worth one retry: a digest mismatch or a not-found for content that may exist. */
+function isTransientContentFailure(reason: unknown): boolean {
+  const e = reason as { statusCode?: number; digestMismatch?: boolean; message?: string } | null;
+  if (!e) return false;
+  if (e.digestMismatch || e.statusCode === 404) return true;
+  return /not found/i.test(e.message ?? '');
+}
+
+async function fetchContentOnce(
+  registries: ResolvedRegistry[],
+  name: string,
+  version: string | null
+): Promise<{ result: MultiRegistryGetContentResult; retryable: boolean }> {
   const results = await Promise.allSettled(
     registries.map(async (reg) => {
       const token = getTokenForRegistry(reg.name);
       const client = getClientForRegistry(reg.url, token);
       const result = await client.getDossierContent(name, version);
+      const mismatch = contentDigestMismatch(reg, result);
+      if (mismatch) {
+        throw Object.assign(new Error(mismatch), { digestMismatch: true });
+      }
       return { ...result, _registry: reg.name };
     })
   );
 
   const errors: Array<{ registry: string; error: string }> = [];
+  let retryable = false;
   for (let i = 0; i < results.length; i++) {
     const r = results[i];
     if (r.status === 'fulfilled') {
@@ -220,15 +247,42 @@ async function multiRegistryGetContent(
           `[multi-registry] getContent '${name}' served by '${r.value._registry}'\n`
         );
       }
-      return { result: r.value, errors: [] };
+      return { result: { result: r.value, errors: [] }, retryable: false };
     }
+    if (isTransientContentFailure(r.reason)) retryable = true;
     errors.push({
       registry: registries[i].name,
       error: r.reason?.message || String(r.reason),
     });
   }
 
-  return { result: null, errors };
+  return { result: { result: null, errors }, retryable };
+}
+
+/**
+ * Get dossier content from the first registry that has it, verifying the
+ * registry's digest. A registry whose content fails the digest check counts as
+ * failed. When every registry fails and at least one failure was a digest
+ * mismatch or not-found — both seen transiently (#1240) — the fetch is retried
+ * once after a short delay. Returns error details (one per registry queried)
+ * when all registries still fail.
+ * When DOSSIER_DEBUG is set, logs which registry served the request to stderr.
+ */
+async function multiRegistryGetContent(
+  name: string,
+  version: string | null = null,
+  { retryDelayMs = CONTENT_RETRY_DELAY_MS }: { retryDelayMs?: number } = {}
+): Promise<MultiRegistryGetContentResult> {
+  const registries = resolveRegistries();
+
+  const first = await fetchContentOnce(registries, name, version);
+  if (first.result.result || !first.retryable) return first.result;
+
+  if (process.env.DOSSIER_DEBUG) {
+    process.stderr.write(`[multi-registry] getContent '${name}' failed, retrying once\n`);
+  }
+  await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+  return (await fetchContentOnce(registries, name, version)).result;
 }
 
 /**

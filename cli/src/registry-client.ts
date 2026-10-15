@@ -29,6 +29,9 @@ interface SearchOptions {
 interface DossierContentResult {
   content: string;
   digest: string | null;
+  /** HTTP status and request URL, kept for diagnostics on a failed digest check. */
+  status?: number;
+  url?: string;
 }
 
 interface DossierEvidenceResult {
@@ -261,10 +264,8 @@ class RegistryClient {
       params.version = version;
     }
 
-    const response = await fetch(
-      this._buildUrl(`/dossiers/${this._encodeDossierPath(name)}/content`, params),
-      { headers: this._buildHeaders() }
-    );
+    const url = this._buildUrl(`/dossiers/${this._encodeDossierPath(name)}/content`, params);
+    const response = await fetch(url, { headers: this._buildHeaders() });
 
     if (!response.ok) {
       await this._throwForFailedDownload(response, `Failed to download dossier '${name}'`);
@@ -273,7 +274,7 @@ class RegistryClient {
     const content = await response.text();
     const digest = response.headers.get('X-Dossier-Digest');
 
-    return { content, digest };
+    return { content, digest, status: response.status, url };
   }
 
   /**
