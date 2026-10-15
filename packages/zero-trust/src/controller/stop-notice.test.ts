@@ -9,6 +9,7 @@ import {
   rebindControllerRefusalNotice,
   recordStopNotice,
   reviewHandoffNotice,
+  revisionRefreshNotice,
   STOP_NOTICE_KEY,
   stopNoticeAction,
   writeBlockedNotice,
@@ -137,5 +138,15 @@ describe('stop notices', () => {
     expect(stopNoticeAction(store.get(STOP_NOTICE_KEY), { state: 'gating', history: [] })).toBe(
       notice.nextPermittedAction
     );
+  });
+});
+
+describe('revision refresh notices (#1223)', () => {
+  it('name a fixed paused_user reason and the explicit --revise retry', () => {
+    for (const reason of ['unavailable', 'reopen_pending', 'refreshed_unjudged'] as const) {
+      const notice = revisionRefreshNotice(reason);
+      expect(notice).toMatchObject({ state: 'paused_user', reason: `revision_${reason}` });
+      expect(notice.nextPermittedAction).toContain('resume --revise');
+    }
   });
 });

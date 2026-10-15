@@ -611,6 +611,11 @@ export interface TrackState {
   readonly verifiedSha: string;
   /** Feedback id → the `updatedAt` a confirmed revision addressed (AC5). */
   readonly addressed: ReadonlyMap<string, string>;
+  /** Feedback id → the `updatedAt` of items a refused revision held when an explicit refresh
+   * replaced them (#1223). Never selected again unless edited since, so disagreement stays
+   * fail-closed for the same input. The revision currently paused on a refusal keeps its own
+   * feedback in `revision.feedback` until a refresh moves it here. */
+  readonly refused: ReadonlyMap<string, string>;
   readonly revision?: Revision;
   readonly action?: PendingAction;
   /** The head GitHub reported when the outcome was observed. */
@@ -687,6 +692,7 @@ type Event =
   | { v: 1; type: 'blocked'; reason: TrackBlockReason; run: RunRecord; observedMergeSha?: string }
   | { v: 1; type: 'rebound'; number: number; url: string; evidence?: RelocationEvidence }
   | { v: 1; type: 'revision_started'; feedback: FeedbackRef[]; run: RunRecord }
+  | { v: 1; type: 'revision_refreshed'; refused: FeedbackRef[]; feedback: FeedbackRef[] }
   | { v: 1; type: 'revision_pushing'; candidateSha: string }
   | { v: 1; type: 'revision_confirmed'; headSha: string; run: RunRecord }
   | { v: 1; type: 'action_issued'; action: PendingAction }
@@ -917,6 +923,7 @@ function reduce(state: TrackState | undefined, raw: unknown, directory: string |
       pr,
       verifiedSha: raw.verifiedSha,
       addressed: new Map(),
+      refused: new Map(),
     };
   }
   if (!state) fail('no_track');
@@ -971,18 +978,37 @@ function reduce(state: TrackState | undefined, raw: unknown, directory: string |
       }
       return { ...state, pr: trackedPr({ ...state.pr, number: raw.number, url: raw.url }) };
     case 'revision_started': {
-      if (state.revision || state.action || !Array.isArray(raw.feedback) || !raw.feedback.length)
-        fail('revision_started');
-      const feedback = raw.feedback.map((f) => {
-        if (!isRecord(f) || typeof f.id !== 'string' || typeof f.updatedAt !== 'string')
-          fail('revision_started');
-        return Object.freeze({ id: f.id, updatedAt: f.updatedAt });
-      });
+      if (state.revision || state.action) fail('revision_started');
+      const feedback = feedbackRefs(raw.feedback, 'revision_started');
       return {
         ...state,
         run: stepped(state, raw, ReasonCode.RevisionRequested),
         revision: Object.freeze({ feedback }),
       };
+    }
+    case 'revision_refreshed': {
+      // Only a revision explicitly resumed before it produced a candidate trades its
+      // refused input for later feedback; the refused refs must be exactly its own.
+      const revision = state.revision;
+      if (!revision || state.action || !refreshable(state)) fail('revision_refreshed');
+      const refused = feedbackRefs(raw.refused, 'revision_refreshed');
+      const feedback = feedbackRefs(raw.feedback, 'revision_refreshed');
+      // Exactly what the tracker selects: never the refused input, nothing already addressed
+      // or refused before, and no item twice.
+      if (
+        !sameRefs(refused, revision.feedback) ||
+        new Set(feedback.map((f) => f.id)).size !== feedback.length ||
+        feedback.some(
+          (f) =>
+            refused.some((r) => sameRef(r, f)) ||
+            state.addressed.get(f.id) === f.updatedAt ||
+            state.refused.get(f.id) === f.updatedAt
+        )
+      )
+        fail('revision_refreshed');
+      const held = new Map(state.refused);
+      for (const f of refused) held.set(f.id, f.updatedAt);
+      return { ...state, refused: held, revision: Object.freeze({ feedback }) };
     }
     case 'revision_pushing':
       if (
@@ -1024,6 +1050,35 @@ function reduce(state: TrackState | undefined, raw: unknown, directory: string |
   }
 }
 
+/** A revision explicitly resumed (from the pause its refusal left) with no candidate yet. */
+function refreshable(state: TrackState): boolean {
+  return (
+    !!state.revision &&
+    !state.revision.candidateSha &&
+    state.run.state === 'revising' &&
+    state.run.reasonCode === ReasonCode.ResumeRevising
+  );
+}
+
+/** A review item's identity: its id and the edit time a selection or verdict saw. */
+function toRef(f: FeedbackRef): FeedbackRef {
+  return Object.freeze({ id: f.id, updatedAt: f.updatedAt });
+}
+function sameRef(a: FeedbackRef, b: FeedbackRef): boolean {
+  return a.id === b.id && a.updatedAt === b.updatedAt;
+}
+function sameRefs(a: readonly FeedbackRef[], b: readonly FeedbackRef[]): boolean {
+  return a.length === b.length && a.every((f, i) => sameRef(f, b[i] as FeedbackRef));
+}
+
+function feedbackRefs(value: unknown, type: string): FeedbackRef[] {
+  if (!Array.isArray(value) || !value.length) fail(type);
+  return value.map((f) => {
+    if (!isRecord(f) || typeof f.id !== 'string' || typeof f.updatedAt !== 'string') fail(type);
+    return toRef({ id: f.id, updatedAt: f.updatedAt });
+  });
+}
+
 /** Rebuilds a `PrTracker` journal; throws `TrackError('invalid_journal')` on any event the
  * tracker would not have produced at that point. */
 export function replayTrack(events: readonly unknown[], bodyDirectory?: string): TrackState {
@@ -1035,7 +1090,8 @@ export function replayTrack(events: readonly unknown[], bodyDirectory?: string):
 }
 
 /** Remarks a revision should address: not the contributor's own, not the run's prepared
- * comments, and not already addressed by a confirmed revision unless edited since (AC5). */
+ * comments, and not already addressed by a confirmed revision, nor refused by the typed
+ * screen (#1223), unless edited since (AC5). */
 export function actionableFeedback(
   state: TrackState,
   feedback: readonly FeedbackItem[]
@@ -1044,7 +1100,8 @@ export function actionableFeedback(
     (f) =>
       !sameLogin(f.author, state.run.contributor) &&
       findHandoffMarkers(f.body).length === 0 &&
-      state.addressed.get(f.id) !== f.updatedAt
+      state.addressed.get(f.id) !== f.updatedAt &&
+      state.refused.get(f.id) !== f.updatedAt
   );
 }
 
@@ -1133,7 +1190,11 @@ export class PrTracker {
 
   /** The durable state, as replaying the journal yields it. */
   snapshot(): TrackState {
-    return { ...this.state, addressed: new Map(this.state.addressed) };
+    return {
+      ...this.state,
+      addressed: new Map(this.state.addressed),
+      refused: new Map(this.state.refused),
+    };
   }
 
   /** Record lifecycle progress made elsewhere (isolated revision and verification, pause,
@@ -1475,18 +1536,64 @@ export class PrTracker {
         return outcome;
       if (read.kind !== 'observed' || !read.feedback)
         return { kind: 'unknown', detail: 'feedback', status: this.status() };
-      const feedback = actionableFeedback(this.state, read.feedback);
-      if (!feedback.length) return { kind: 'nothing_to_revise', status: this.status() };
-      const stale = await this.fresh();
-      if (stale) return this.block(stale);
-      this.deps.retainRevisionFeedback?.(feedback);
-      this.persist({
+      return this.admitFeedback(actionableFeedback(this.state, read.feedback), (refs) => ({
         v: 1,
         type: 'revision_started',
-        feedback: feedback.map((f) => ({ id: f.id, updatedAt: f.updatedAt })),
+        feedback: refs,
         run: this.transition(ReasonCode.RevisionRequested),
-      });
-      return { kind: 'revising', feedback, status: this.status() };
+      }));
+    });
+  }
+
+  /** The shared admission tail of `beginRevision` and `refreshRefusedRevision`: nothing
+   * selected records nothing; otherwise freshness, then the write-ahead feedback, then the
+   * journal event that makes the selection durable. */
+  private async admitFeedback(
+    feedback: FeedbackItem[],
+    event: (refs: FeedbackRef[]) => Event
+  ): Promise<TrackOutcome> {
+    if (!feedback.length) return { kind: 'nothing_to_revise', status: this.status() };
+    const stale = await this.fresh();
+    if (stale) return this.block(stale);
+    this.deps.retainRevisionFeedback?.(feedback);
+    this.persist(event(feedback.map(toRef)));
+    return { kind: 'revising', feedback, status: this.status() };
+  }
+
+  /** Explicit `resume --revise` of a revision whose feedback the typed screen refused
+   * (#1223), before it produced a candidate. The refused input is never judged again: only
+   * maintainer feedback that is new since (a new id, or an item edited since) replaces it,
+   * under the same reads, head checks and freshness as `beginRevision`. Nothing new records
+   * nothing. The tracker cannot see verdicts: the controller calls this only for a refusal,
+   * and the journaled `revision_refreshed` names the revision's own feedback as refused
+   * (replay refuses any other set). A pending contributor action (the reopen of a closed PR)
+   * is confirmed by this read or returned, never revised past. */
+  refreshRefusedRevision(): Promise<TrackOutcome> {
+    return this.serial(async () => {
+      const settled = this.settled();
+      if (settled) return settled;
+      const revision = this.state.revision;
+      if (!revision || !refreshable(this.state))
+        throw new TrackError('admission_state', this.state.run.state);
+      const read = await this.observe();
+      const outcome = this.apply(read);
+      if (outcome.kind !== 'tracking') return outcome;
+      if (this.state.action)
+        return { kind: 'action', action: this.describe(this.state.action), status: this.status() };
+      if (read.kind !== 'observed' || !read.feedback)
+        return { kind: 'unknown', detail: 'feedback', status: this.status() };
+      // A closed PR is reopened through its own hand-off, never revised while closed.
+      if (read.state === 'closed') return { kind: 'tracking', status: this.status() };
+      // The revision's own refused feedback is not in `refused` until this refresh moves it.
+      const feedback = actionableFeedback(this.state, read.feedback).filter(
+        (f) => !revision.feedback.some((r) => sameRef(r, f))
+      );
+      return this.admitFeedback(feedback, (refs) => ({
+        v: 1,
+        type: 'revision_refreshed',
+        refused: revision.feedback.map(toRef),
+        feedback: refs,
+      }));
     });
   }
 

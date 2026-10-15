@@ -72,7 +72,7 @@ import {
   type WorkspaceEvidence,
 } from './evidence-runner';
 import { retainVerification } from './export-evidence';
-import { assessRevisionFeedback } from './feedback';
+import { assessRevisionFeedback, type FeedbackDecision, feedbackIdentity } from './feedback';
 import { OutputCollector } from './output-collector';
 import type { ShippingAuthorizeDeps } from './shipping';
 import {
@@ -85,6 +85,7 @@ import {
   type ReviewHandoffReason,
   recordStopNotice,
   reviewHandoffNotice,
+  revisionRefreshNotice,
 } from './stop-notice';
 import { loadVerification, type VerificationRecord } from './verification-record';
 import { verificationPlan, verifyCandidate } from './verifier';
@@ -226,6 +227,14 @@ export function reviewDiff(base: SourceManifest, next: SourceManifest): Buffer {
   assertSecretFree(bytes.toString('utf8'));
   return bytes;
 }
+/** The outcome of re-reading a refused revision's PR for new maintainer feedback (#1223). */
+export type RevisionRefresh =
+  | 'refreshed'
+  | 'nothing_new'
+  | 'unavailable'
+  | 'reopen_pending'
+  | 'stopped';
+
 export interface StepServices {
   readonly read: GitHubRead;
   readonly now: () => Date;
@@ -251,6 +260,15 @@ export interface StepServices {
     policy: PolicyAssessment
   ) => Promise<'contributor_handoff' | 'submitted' | 'blocked' | 'hand_off' | 'waiting'>;
   readonly track: (context: PhaseContext) => Promise<ControllerTrackOutcome>;
+  /** Explicit `--revise` of a revision whose feedback was refused (#1223): re-read the PR and
+   * select only maintainer feedback new since `refused`, retaining it as `feedback`.
+   * `refreshed` when new feedback replaced the refused input (including a replacement
+   * journaled before a crash that still awaits its verdict); anything else leaves the refusal
+   * standing (`stopped`: the tracker already moved the run, e.g. blocked). */
+  readonly refreshRefusedRevision: (
+    context: PhaseContext,
+    refused: FeedbackDecision
+  ) => Promise<RevisionRefresh>;
 }
 
 /** Every completed artifact is write-ahead journaled with its exact bytes digest.
@@ -473,6 +491,55 @@ export function createSteps(
     }
     return baselineEvidence({ ...workspace(c), manifest, plan });
   };
+  /** The typed revision-feedback screen, before any revision VM. A verdict binds its session
+   * and the exact feedback it judged (#1223): a refusal replays, fail-closed for the same
+   * input; only an explicit --revise that finds maintainer feedback new since replaces it,
+   * and that new feedback is judged afresh in the same session. */
+  const screenRevisionFeedback = async (c: PhaseContext): Promise<'admitted' | 'hand_off'> => {
+    let feedback = artifacts(c).require<FeedbackItem[]>('feedback');
+    const held = artifacts(c).get<FeedbackDecision>('feedback_decision');
+    const judged =
+      held?.sessionId === c.sessionId &&
+      (held.feedback === undefined || held.feedback === feedbackIdentity(feedback));
+    if (held?.sessionId === c.sessionId && !held.admitted) {
+      if (!c.revise) {
+        // A refresh was selected (journaled, or written ahead) but never judged.
+        if (!judged)
+          recordStopNotice(artifacts(c), c.run, revisionRefreshNotice('refreshed_unjudged'), true);
+        return 'hand_off';
+      }
+      const refreshed = await services.refreshRefusedRevision(c, held);
+      c.assertAdmission();
+      if (refreshed !== 'refreshed') {
+        if (refreshed !== 'nothing_new' && refreshed !== 'stopped')
+          recordStopNotice(artifacts(c), c.run, revisionRefreshNotice(refreshed), true);
+        return 'hand_off';
+      }
+      feedback = artifacts(c).require<FeedbackItem[]>('feedback');
+    } else if (judged) return 'admitted';
+    const result = await assessRevisionFeedback(
+      feedback,
+      gate(c),
+      artifacts(c).require<AgentPlan>('plan').text,
+      {
+        provider: createLlmDecisionProvider({ adapter: services.model('repair', c) }),
+        budget: {
+          ledger: c.ledger,
+          sessionId: c.sessionId,
+          rates: c.store.config.modelProfile.rates,
+        },
+        signal: c.signal,
+      }
+    );
+    artifacts(c).put('feedback_decision', {
+      sessionId: c.sessionId,
+      feedback: feedbackIdentity(feedback),
+      admitted: result.admitted,
+      verdict: JSON.stringify(result.verdict),
+    } satisfies FeedbackDecision);
+    c.assertAdmission();
+    return result.admitted ? 'admitted' : 'hand_off';
+  };
   const steps: PhaseSteps = {
     async gate(c) {
       clearStopNotice(artifacts(c));
@@ -666,34 +733,8 @@ export function createSteps(
     },
     async implement(c) {
       const author = await approval(c);
-      if (c.run.state === 'revising') {
-        const assessed = artifacts(c).get<{ sessionId: string; admitted: boolean }>(
-          'feedback_decision'
-        );
-        if (assessed?.sessionId !== c.sessionId) {
-          const result = await assessRevisionFeedback(
-            artifacts(c).require<FeedbackItem[]>('feedback'),
-            gate(c),
-            artifacts(c).require<AgentPlan>('plan').text,
-            {
-              provider: createLlmDecisionProvider({ adapter: services.model('repair', c) }),
-              budget: {
-                ledger: c.ledger,
-                sessionId: c.sessionId,
-                rates: c.store.config.modelProfile.rates,
-              },
-              signal: c.signal,
-            }
-          );
-          artifacts(c).put('feedback_decision', {
-            sessionId: c.sessionId,
-            admitted: result.admitted,
-            verdict: JSON.stringify(result.verdict),
-          });
-          c.assertAdmission();
-          if (!result.admitted) return { kind: 'hand_off' };
-        } else if (!assessed.admitted) return { kind: 'hand_off' };
-      }
+      if (c.run.state === 'revising' && (await screenRevisionFeedback(c)) === 'hand_off')
+        return { kind: 'hand_off' };
       const phaseKey = implementationPhaseKey(c.run);
       const edit = latestSourceEdit(c.store);
       const completion = artifacts(c).get<{ phaseKey: number; editCount: number }>(

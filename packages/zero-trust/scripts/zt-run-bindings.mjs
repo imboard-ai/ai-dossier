@@ -41,7 +41,7 @@ import { TokenJournal, UNRESOLVED } from '../dist/github/token-journal.js';
 import { Journal } from '../dist/journal.js';
 
 const FEEDBACK_NOT_ADMITTED =
-  'This revision handed off: the maintainer feedback was judged out of scope or ambiguous, so nothing was implemented or pushed (the typed verdict is retained). Address the feedback yourself on the pull request, or cancel the run.';
+  'This revision handed off: the maintainer feedback was judged out of scope or ambiguous, so nothing was implemented or pushed (the typed verdict is retained). The same feedback is never judged again. After a maintainer posts new or edited feedback on the pull request, `resume --revise` judges only that feedback; otherwise reply to the maintainer yourself, or cancel the run.';
 
 import { isGitHubLogin } from '../dist/github-login.js';
 import { parseJournalEvents } from '../dist/journal.js';

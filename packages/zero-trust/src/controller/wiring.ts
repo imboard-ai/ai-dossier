@@ -23,7 +23,7 @@ import { type HandoffAdmission, HandoffDriver } from '../github/handoff-driver';
 import { ForkPusher, type ForkPusherOptions } from '../github/push';
 import { anonymousReader, type GitHubRead, tokenReader } from '../github/reconcile';
 import { TokenJournal, TokenVault, UNRESOLVED } from '../github/token-journal';
-import { PrTracker, TrackError, trackFromHandoff } from '../github/track';
+import { type FeedbackItem, PrTracker, TrackError, trackFromHandoff } from '../github/track';
 import { IntentDriver, WriteBlockedError, WriteRefusedError } from '../intents';
 import { Journal } from '../journal';
 import { StoreLockedError } from '../lock';
@@ -69,6 +69,7 @@ import {
 } from './controller';
 import { ProvisioningFailedError } from './evidence-runner';
 import { retainPortfolio, retainReceipt } from './export-evidence';
+import { type FeedbackDecision, feedbackIdentity } from './feedback';
 import { readOutcomeBudget } from './outcome-records';
 import { ProxyCaError, preflightProxyCa } from './proxy-preflight';
 import { RunStore } from './run-store';
@@ -1389,6 +1390,66 @@ export function createController(
         )
           return { kind: 'awaiting_review' };
         return { kind: 'waiting' };
+      },
+      refreshRefusedRevision: async (c, refused) => {
+        const t = await openTracker(c);
+        const revision = t.snapshot().revision;
+        // A refusal belongs to its revision's session, before any candidate exists.
+        if (!revision || revision.candidateSha) return 'nothing_new';
+        const current = feedbackIdentity(revision.feedback);
+        // A verdict recorded before #1223 has no identity; it judged this revision's input.
+        const judged = refused.feedback ?? current;
+        // Keep the refused verdict, and the digest of the prose it refused, inspectable after
+        // the new feedback replaces both `feedback` and `feedback_decision`.
+        const recordRefusal = (feedbackDigest: string | undefined) => {
+          const refusals = artifacts(c).get<FeedbackDecision[]>('feedback_refusals') ?? [];
+          if (!refusals.some((r) => r.feedback === judged && r.sessionId === refused.sessionId))
+            artifacts(c).put('feedback_refusals', [
+              ...refusals,
+              { ...refused, feedback: judged, ...(feedbackDigest ? { feedbackDigest } : {}) },
+            ]);
+        };
+        if (judged !== current) {
+          // Only a refresh journaled before a crash moves a revision's feedback away from its
+          // verdict; that write-ahead feedback still awaits its first verdict. Anything else
+          // is an inconsistent run store, never a silent refusal.
+          const held = artifacts(c).get<FeedbackItem[]>('feedback');
+          if (!held || feedbackIdentity(held) !== current) throw new Error('invalid_step_artifact');
+          recordRefusal(undefined);
+          return 'refreshed';
+        }
+        // Bind a legacy verdict to what it judged (verdict unchanged) BEFORE the refresh, so a
+        // crash after the tracker journals it takes the branch above on the next --revise
+        // instead of replaying the old refusal against the new feedback.
+        if (refused.feedback === undefined)
+          artifacts(c).put('feedback_decision', { ...refused, feedback: judged });
+        const refusedDigest = artifacts(c).digest('feedback');
+        let result: Awaited<ReturnType<PrTracker['refreshRefusedRevision']>>;
+        try {
+          result = await t.refreshRefusedRevision();
+        } catch (error) {
+          // A freshness probe that cannot answer recorded nothing: retry later.
+          if (error instanceof TrackError && error.code === 'freshness_unavailable')
+            return 'unavailable';
+          throw error;
+        }
+        await syncTracker(c, t);
+        switch (result.kind) {
+          case 'revising':
+            recordRefusal(refusedDigest);
+            return 'refreshed';
+          case 'unknown':
+          case 'handoff':
+            return 'unavailable';
+          case 'action':
+            return 'reopen_pending';
+          case 'tracking':
+            return t.snapshot().action ? 'reopen_pending' : 'nothing_new';
+          case 'nothing_to_revise':
+            return 'nothing_new';
+          default:
+            return 'stopped';
+        }
       },
     },
     artifacts
