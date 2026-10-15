@@ -12,8 +12,13 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Worker } from 'node:worker_threads';
-import type { SchedConfig, TickResult } from '@ai-dossier/sched';
-import type { TickRequest, TickResponse, TickWorkerData } from './sched-tick-worker';
+import { releaseOwnStateLock, type SchedConfig, type TickResult } from '@ai-dossier/sched';
+import type {
+  SerializedError,
+  TickRequest,
+  TickResponse,
+  TickWorkerData,
+} from './sched-tick-worker';
 
 /** `DOSSIER_SCHED_INLINE_TICK=1` keeps the pre-#1233 inline (main-thread) tick. */
 export const INLINE_TICK_ENV = 'DOSSIER_SCHED_INLINE_TICK';
@@ -32,7 +37,7 @@ export function tickWorkerFile(dir: string = __dirname): string | null {
   return fs.existsSync(file) ? file : null;
 }
 
-function revive(error: { name: string; message: string; stack?: string }): Error {
+function revive(error: SerializedError): Error {
   const err = new Error(error.message);
   err.name = error.name;
   if (error.stack) err.stack = error.stack;
@@ -65,6 +70,13 @@ export function createWorkerTickRunner(
         };
         const drop = () => {
           if (worker === w) worker = null;
+          // A worker that died inside `withLock` left the state lock naming this
+          // (live) pid — nothing else would ever take it over (#1233).
+          if (releaseOwnStateLock(data.stateDir)) {
+            process.stderr.write(
+              '⚠ sched: tick worker died holding the state lock — released it\n'
+            );
+          }
         };
         const onMessage = (msg: TickResponse) => {
           if (msg.id !== id) return;

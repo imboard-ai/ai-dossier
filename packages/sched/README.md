@@ -388,7 +388,7 @@ what makes it come back by itself, so no session ever has to start, stop or baby
 
 ```bash
 ai-dossier sched service install [--alert-issue <n>]   # systemd user unit; cron watchdog if no systemd
-ai-dossier sched service status                         # supervised? engine live? heartbeat?
+ai-dossier sched service status                         # supervised? engine live? heartbeat? gates in flight (#1233)?
 ai-dossier sched service uninstall
 ```
 
@@ -490,15 +490,24 @@ adds a second line with its stack):
 | `stop-timeout` | a requested stop was still running at the deadline; forced exit | released |
 | `uncaught-exception` / `unhandled-rejection` | crash, stack in `detail`, exit code 70 | **kept** as the crash marker |
 | `process-exit` | a bare `process.exit()` nothing else logged | released |
-| *(no line)* | SIGKILL / OOM killer — unobservable | left stale |
+| *(no line)* | SIGKILL — the OOM killer, or a host process reaper (cron jobs killing long-lived TTY-less `node` processes); check `journalctl -k`, allowlist `ai-dossier sched` / `ai-dossier cap run` in reapers (#1233) — unobservable | left stale |
 
 The exit logger is installed immediately after the lease is acquired, so no later startup
 step can exit unlogged. A tick that is blocked in a synchronous call cannot run signal
 handlers, so every synchronous exec on the tick path is timeout-bounded (`defaultExec`: 120 s;
 the engine's own execs have explicit budgets) and the stop is therefore bounded too.
+Since #1233 the continuous `sched start` loop runs each tick in a worker thread
+(`DOSSIER_SCHED_INLINE_TICK=1` restores the inline tick; `--once` is always inline), so
+SIGTERM/SIGINT are handled and journaled at once even during a 25–55 min batch gate. The
+graceful stop still waits for the tick, so a stop mid-gate ends as `stop-timeout` after 120 s
+(or the supervisor's own stop timeout); the gate runs in its own process group, keeps
+running, and the next engine adopts it from `<state>/in-flight/` instead of launching a
+duplicate.
 
 The lease's `updated_at` is a heartbeat rewritten (compare-and-swap on the lease id) every
-tick; `sched status` shows it. A live pid whose heartbeat is older than the hung threshold
+tick and, since #1233, every 30 s while an off-thread tick is waiting on a live gate this
+engine launched or adopted, within that gate's own deadline (`waitingOnLiveGate`; a hard
+4 h ceiling backs it up) — a tick stuck anywhere else still goes stale; `sched status` shows it. A live pid whose heartbeat is older than the hung threshold
 (10 x the reconcile interval, never under 5 min; `$DOSSIER_SCHED_HUNG_INTERVALS` overrides
 the multiplier) with unfinished work is an `engine-hung` warning/alert. Visible alerts are
 journaled, printed to stderr, and posted as a comment when a tracking issue is given
@@ -511,6 +520,9 @@ journaled, printed to stderr, and posted as a comment when a tracking issue is g
   hung (`reason=engine-hung`) while work is unfinished. Once per episode (an `O_EXCL` marker
   file, so racing watchers cannot double-alert); raised by a watcher — `sched status --alert`
   (cron-able). An unwritable store never makes the watcher throw.
+- Since #1233 these alerts name the SIGKILL suspects (`SIGKILL_SUSPECTS_HINT`: oom-kill,
+  host process reapers) and list the gates recorded in `<state>/in-flight/`
+  (`describeInFlight`), which the next engine adopts instead of relaunching.
 
 **#920's silent exit:** the log ended in `nothing to do`, which is just an idle tick's line.
 Only SIGINT had a handler, so a SIGTERM/SIGHUP (another session's restart, a closing
@@ -1339,6 +1351,14 @@ import {
   tick,                  // one engine cycle: reconcile + verify + refill + spawn,
                          //   and since #468: park-watch, teardown, report dispatch
   runLoop,               // the sched start loop (tick, sleep, repeat)
+  type RunLoopOptions,   // #1233: runTick (off-thread tick) / heartbeatMs / maxTickHeartbeatMs / shouldHeartbeat
+  writeInFlight, readInFlight, removeInFlight, listInFlight, // #1233: <state>/in-flight/ gate registry
+  inFlightAlive, inFlightFinished, inFlightDir, ensureInFlightDir, describeInFlight,
+  waitingOnLiveGate, pidExists, IN_FLIGHT_RUN_FILES, IN_FLIGHT_RUN_DIR_PREFIX,
+  type InFlightCapRun, type InFlightListing,
+  SIGKILL_SUSPECTS_HINT, // #1233: alert text naming oom-kill / host reapers
+  releaseOwnStateLock,   // #1233: free a state lock a dead tick worker left naming this pid
+  procStatFields,        // /proc/<pid>/stat post-comm fields (state, pgrp, starttime)
   type TickResult,       // what one tick did (spawned/parked/merge-accepted/stale-reconciled/
                          //   dependents-unblocked/report-dispatched/teardown/completed/
                          //   redispatched/failed/blocked, and since #544

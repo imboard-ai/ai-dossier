@@ -1715,7 +1715,10 @@ per running parallel member) and stops unfinished members atomically. `abandon` 
   exact remedies (`sched requeue --issue <n>`, `sched abandon --issue <n>`); `--json`
   carries them as `parked_members`. The batches table marks a hand-back
   `#<n>(handed-back:<reason>)` apart from an eviction. `--json` emits the same report as
-  data.
+  data. Since #1233, each gate the engine launched but has not consumed prints as
+  `Gate in flight: <capability> pid … (STILL RUNNING | finished, not consumed | dead) …`, and
+  `--json` carries them as `gates_in_flight: [{capability, cwd, pid, pid_start, started_at,
+  timeout_ms, launcher_pid, waiter_pid?, run_dir, head, alive, finished}]`.
 - **`pause`/`resume`** gate *new* assignments only — live units keep running. A pause can
   be manual (`sched pause`) or automatic: `DISPATCH_UNHEALTHY_THRESHOLD` (2) consecutive
   suspect-dispatch exits from DIFFERENT units — an unverified agent exit within 60s of

@@ -1,8 +1,8 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import {
   buildStatusWarnings,
   checkStaleLeaseAlert,
@@ -97,16 +97,18 @@ describe('engine lease heartbeat, reclaim and alerts (#945)', () => {
 
   it('#1233: the DOWN and crash-restart alerts name SIGKILL suspects and in-flight gates', () => {
     withWork();
+    const gate = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' });
+    onTestFinished(() => process.kill(-(gate.pid as number), 'SIGKILL'));
     writeInFlight(inFlightDir(dir), {
       version: 1,
       capability: 'gate.batch',
       cwd: '/wt/batch-b1',
-      pid: process.pid,
+      pid: gate.pid as number,
       pid_start: null,
       started_at: '2026-09-29T11:00:00Z',
       timeout_ms: 3_600_000,
       launcher_pid: 99,
-      run_dir: path.join(dir, 'run-x'),
+      run_dir: path.join(inFlightDir(dir), 'run-x'),
       head: null,
     });
     const notify = vi.fn();

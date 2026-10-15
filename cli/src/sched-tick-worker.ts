@@ -23,6 +23,21 @@ export interface TickWorkerData {
   anchorRepo?: string;
 }
 
+/** Bounded retry for a full non-blocking stdout/stderr. */
+const WRITE_RETRY_BUDGET_MS = 1_000;
+
+/** An Error flattened for `postMessage` (structured clone keeps no prototype). */
+export interface SerializedError {
+  name: string;
+  message: string;
+  stack?: string;
+}
+
+export function serializeError(err: unknown): SerializedError {
+  const e = err instanceof Error ? err : new Error(String(err));
+  return { name: e.name, message: e.message, ...(e.stack ? { stack: e.stack } : {}) };
+}
+
 export interface TickRequest {
   id: number;
   config: SchedConfig;
@@ -30,7 +45,7 @@ export interface TickRequest {
 
 export type TickResponse =
   | { id: number; ok: true; result: TickResult }
-  | { id: number; ok: false; error: { name: string; message: string; stack?: string } };
+  | { id: number; ok: false; error: SerializedError };
 
 /**
  * A worker's stdout/stderr are forwarded to the parent over a message port, which
@@ -40,11 +55,19 @@ export type TickResponse =
  */
 function writeThrough(fd: number): typeof process.stdout.write {
   return ((chunk: string | Uint8Array, ...rest: unknown[]) => {
-    try {
-      if (typeof chunk === 'string') fs.writeSync(fd, chunk);
-      else fs.writeSync(fd, chunk);
-    } catch {
-      // a closed fd must never fail a tick
+    const data = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+    let offset = 0;
+    const giveUpAt = Date.now() + WRITE_RETRY_BUDGET_MS;
+    while (offset < data.length) {
+      try {
+        offset += fs.writeSync(fd, data, offset);
+      } catch (err) {
+        // A non-blocking pipe/journald socket can be momentarily full: retry
+        // briefly. Anything else (EBADF, EPIPE) drops the line — a closed fd
+        // must never fail a tick.
+        if ((err as NodeJS.ErrnoException).code !== 'EAGAIN' || Date.now() > giveUpAt) break;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+      }
     }
     const cb = rest.find((r) => typeof r === 'function') as (() => void) | undefined;
     cb?.();
@@ -75,12 +98,7 @@ if (parentPort !== null) {
     try {
       response = { id: msg.id, ok: true, result: tick(deps, msg.config) };
     } catch (err) {
-      const e = err instanceof Error ? err : new Error(String(err));
-      response = {
-        id: msg.id,
-        ok: false,
-        error: { name: e.name, message: e.message, ...(e.stack ? { stack: e.stack } : {}) },
-      };
+      response = { id: msg.id, ok: false, error: serializeError(err) };
     }
     port.postMessage(response);
   });

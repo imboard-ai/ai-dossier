@@ -118,6 +118,7 @@ export {
   priorWorkBranch,
   priorWorkInstruction,
   procStartTime,
+  procStatFields,
   type ResolvedDispatch,
   type ResolvedTierDispatch,
   reportTierFor,
@@ -226,6 +227,8 @@ export {
 } from './groundtruth';
 export {
   describeInFlight,
+  ensureInFlightDir,
+  IN_FLIGHT_RUN_DIR_PREFIX,
   IN_FLIGHT_RUN_FILES,
   type InFlightCapRun,
   type InFlightListing,
@@ -233,8 +236,10 @@ export {
   inFlightDir,
   inFlightFinished,
   listInFlight,
+  pidExists,
   readInFlight,
   removeInFlight,
+  waitingOnLiveGate,
   writeInFlight,
 } from './in-flight';
 export {
@@ -270,6 +275,7 @@ export {
   type EngineLeaseHolder,
   type EngineLeaseStatus,
   LockTimeoutError,
+  releaseOwnStateLock,
   SchedStore,
   writeAtomic,
 } from './persist';

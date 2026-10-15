@@ -44,14 +44,18 @@ const LEGACY_MARKER_FILE = '.stale-lease-alerted';
  * #1233: an engine that left no `engine-exit` line was SIGKILLed — name the
  * usual suspects so the next investigation starts in the right place.
  */
-export const SIGKILL_SUSPECTS_HINT =
-  'No `engine-exit` line in the journal means it was SIGKILLed: check `journalctl -k` for an oom-kill, and host process reapers (cron jobs that kill long-lived TTY-less `node` processes) — run the engine under `ai-dossier sched service install` and allowlist `ai-dossier sched` / `ai-dossier cap run` in any reaper.';
+/** #1233: the host-reaper advice shared by every engine-death alert. */
+const REAPER_HINT =
+  'host process reapers (cron jobs that kill long-lived TTY-less `node` processes) — run the engine under `ai-dossier sched service install` and allowlist `ai-dossier sched` / `ai-dossier cap run` in any reaper';
 
-/** #1233: gates the dead engine launched that are still running (or finished, unconsumed). */
-function inFlightSuffix(stateDir: string): string {
+export const SIGKILL_SUSPECTS_HINT = `No \`engine-exit\` line in the journal means it was SIGKILLed: check \`journalctl -k\` for an oom-kill, and ${REAPER_HINT}.`;
+
+/** #1233: gates recorded in this state dir that are still running (or finished, unconsumed). */
+function inFlightSuffix(stateDir: string | undefined): string {
+  if (stateDir === undefined) return '';
   const entries = listInFlight(inFlightDir(stateDir));
   if (entries.length === 0) return '';
-  return ` In-flight gate(s) from that engine — the next engine adopts these instead of launching duplicates: ${entries.map(describeInFlight).join('; ')}.`;
+  return ` In-flight gate(s) recorded in this state dir — the next engine adopts these instead of launching duplicates: ${entries.map(describeInFlight).join('; ')}.`;
 }
 
 export type StaleLeaseAlertOutcome =
@@ -125,7 +129,7 @@ export function checkStaleLeaseAlert(
 
   const queue = `${unfinished} queue entr${unfinished === 1 ? 'y is' : 'ies are'} unfinished and ${liveSlots} slot(s) live`;
   const message = hung
-    ? `sched engine looks HUNG: pid ${lease.pid} is alive but its last heartbeat was ${lease.updated_at} (${Math.round((hungFor ?? 0) / 60_000)} min ago) while ${queue} — a tick is probably wedged. Stop it (SIGTERM; SIGKILL if it ignores that) and run \`ai-dossier sched start\`.`
+    ? `sched engine looks HUNG: pid ${lease.pid} is alive but its last heartbeat was ${lease.updated_at} (${Math.round((hungFor ?? 0) / 60_000)} min ago) while ${queue} — a tick is probably wedged. Stop it (SIGTERM; SIGKILL if it ignores that) and run \`ai-dossier sched start\`.${inFlightSuffix(store.dir)}`
     : `sched engine is DOWN: lease holder pid ${lease.pid} is not running${lease.updated_at ? ` (last heartbeat ${lease.updated_at})` : ''} while ${queue} — nothing is ticking. Restart with \`ai-dossier sched start\`. ${SIGKILL_SUSPECTS_HINT}${inFlightSuffix(store.dir)}`;
   try {
     journal.append(
@@ -158,9 +162,10 @@ export function reportCrashRestart(
 ): void {
   const since = reclaimed.updated_at ? `; its last heartbeat was ${reclaimed.updated_at}` : '';
   const stopGoneWrong = stopping !== undefined && stopping !== null;
+  const inFlight = inFlightSuffix(opts.stateDir);
   const message = stopGoneWrong
-    ? `sched engine restarted after a stop that never finished: previous engine pid ${reclaimed.pid} began a graceful stop on ${stopping.signal} at ${stopping.at} and was then killed${since}. This is a wedged stop, not a crash — unless the kill came seconds after the signal, which is a SIGTERM-then-SIGKILL killer: check host process reapers (cron jobs that kill long-lived TTY-less \`node\` processes) and allowlist \`ai-dossier sched\` / \`ai-dossier cap run\` there.${opts.stateDir !== undefined ? inFlightSuffix(opts.stateDir) : ''}`
-    : `sched engine restarted after an unexpected exit: previous engine pid ${reclaimed.pid} died without releasing its lease${since}. Check the journal for its final \`engine-exit\` line. ${SIGKILL_SUSPECTS_HINT}${opts.stateDir !== undefined ? inFlightSuffix(opts.stateDir) : ''}`;
+    ? `sched engine restarted after a stop that never finished: previous engine pid ${reclaimed.pid} began a graceful stop on ${stopping.signal} at ${stopping.at} and was then killed${since}. This is a wedged stop, not a crash — unless the kill came seconds after the signal, which is a SIGTERM-then-SIGKILL killer (a supervisor's stop timeout, or ${REAPER_HINT}).${inFlight}`
+    : `sched engine restarted after an unexpected exit: previous engine pid ${reclaimed.pid} died without releasing its lease${since}. Check the journal for its final \`engine-exit\` line. ${SIGKILL_SUSPECTS_HINT}${inFlight}`;
   journal.append(
     {
       event: 'engine-restarted-after-crash',

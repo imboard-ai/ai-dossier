@@ -207,7 +207,7 @@ export function createBatchCapabilityRunner(opts?: {
     // Captured subprocess output — the evidence fallback on every path below.
     const captured = `${result.stdout ?? ''}${result.stderr ?? ''}`;
     if (result.error && !run.exitedWithVerdict) {
-      // #681: this runner's OWN timeout (spawnSync's, `BATCH_SUITE_TIMEOUT_MS`)
+      // #681: this runner's OWN timeout (`BATCH_SUITE_TIMEOUT_MS` — spawnSync's, or the tracked launcher's process-group kill with a synthetic ETIMEDOUT, #1233)
       // must be distinguishable from a genuine machinery failure — before, it
       // collapsed into the evidence-free `{outcome: 'automation-broken'}`
       // below, byte-for-byte the #679 shape. Emit the same
@@ -2594,7 +2594,7 @@ function resolveTickRunner(data: TickWorkerData): TickRunner | null {
     );
     return null;
   }
-  const file = tickWorkerFile(path.join(__dirname, '..'));
+  const file = tickWorkerFile();
   if (file === null) {
     console.error(
       '⚠ sched: tick worker entry not found next to the CLI build — ticks run on the main thread'
@@ -2616,20 +2616,20 @@ export function buildEngineDeps(opts: {
   getTickConfig: () => SchedConfig;
   repoDir?: string;
 }): EngineDeps {
-  const { store, journal: engineJournal, anchorRepo, getTickConfig } = opts;
+  const { store, journal, anchorRepo, getTickConfig } = opts;
   const repoDir = opts.repoDir ?? process.cwd();
   const gatesInFlightDir = inFlightDir(store.dir);
   return {
     store,
-    journal: engineJournal,
+    journal,
     groundTruth: createExecGroundTruth(undefined, {
-      repoDir: repoDir,
+      repoDir,
       ...(anchorRepo !== undefined ? { repo: anchorRepo } : {}),
     }),
     ...(anchorRepo !== undefined ? { anchorRepo } : {}),
     spawnDeps: createSpawnDeps(repoDir),
     now: () => new Date(),
-    repoDir: repoDir,
+    repoDir,
     teardownExec: createExecFn(TEARDOWN_TIMEOUT_MS, {
       onError: (file, args, err) =>
         process.stderr.write(
@@ -2658,7 +2658,7 @@ export function buildEngineDeps(opts: {
             `⚠ sched fence: '${file} ${args.join(' ')}' failed: ${err.message}\n`
           ),
       }),
-      { repoDir: repoDir }
+      { repoDir }
     ),
     // #840: a requeued parked batch member's first dispatch seeds its
     // resume trail (a `setup done` milestone on its member branch) so the
@@ -2671,7 +2671,7 @@ export function buildEngineDeps(opts: {
             `⚠ sched resume-seed: '${file} ${args.join(' ')}' failed: ${err.message}\n`
           ),
       }),
-      { repoDir: repoDir }
+      { repoDir }
     ),
     // #523: batch git/milestone-CLI operations (worktree claim, commit-range
     // recording, milestone posting, PR watch) and the aggregate suite runner

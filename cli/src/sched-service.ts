@@ -403,12 +403,15 @@ export function serviceStatus(project: string, io: ServiceIo): ServiceStatus {
  * under systemd (`INVOCATION_ID`). Null when supervised, or when supervision
  * cannot be determined (never block a start on the probe).
  */
+/** Set by systemd for every unit it runs — present means the engine IS supervised. */
+const SYSTEMD_INVOCATION_ENV = 'INVOCATION_ID';
+
 export function unsupervisedWarning(
   project: string,
   getStatus: () => ServiceStatus,
   env: NodeJS.ProcessEnv = process.env
 ): string | null {
-  if (env.INVOCATION_ID) return null;
+  if (env[SYSTEMD_INVOCATION_ENV]) return null;
   let status: ServiceStatus;
   try {
     status = getStatus();

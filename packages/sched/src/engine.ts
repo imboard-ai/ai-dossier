@@ -117,6 +117,7 @@ import {
   type PrTruth,
   prOfMilestone,
 } from './groundtruth';
+import { inFlightDir, waitingOnLiveGate } from './in-flight';
 import { issueOfUnit, type Journal, unitEvent } from './journal';
 import { labelBlockReason, labelOfBlockReason, pickHardBlockLabel } from './labels';
 import {
@@ -3672,9 +3673,11 @@ function mergeBatchResult(result: TickResult, batch: BatchTickResult): TickResul
 /** Default cadence of the in-tick heartbeat (#1233). */
 export const TICK_HEARTBEAT_MS = 30_000;
 /**
- * How long one tick may keep heartbeating (#1233). Longer than any gate's
- * budget, so a tick that is still running past it is wedged — the heartbeat
- * then stops and the stale-lease `engine-hung` detection (#945) takes over.
+ * Hard ceiling on how long one tick may keep heartbeating (#1233) — an
+ * operational backstop, not a derived budget: the heartbeat already runs only
+ * while this engine waits on a live gate within that gate's own deadline
+ * (`waitingOnLiveGate`), so a tick stuck anywhere else goes stale on the usual
+ * `engine-hung` schedule (#945).
  */
 export const MAX_TICK_HEARTBEAT_MS = 4 * 60 * 60 * 1000;
 
@@ -3682,13 +3685,20 @@ export interface RunLoopOptions {
   /**
    * Run one tick off this thread (#1233: a worker thread) and resolve with its
    * result. While it is pending the loop heartbeats the engine lease every
-   * {@link heartbeatMs}. Omitted → the tick runs inline (synchronously).
+   * {@link heartbeatMs} — but only while {@link shouldHeartbeat} says the tick
+   * is waiting on a live gate. Omitted → the tick runs inline (synchronously).
    */
   runTick?: (config: SchedConfig) => Promise<TickResult>;
   /** In-tick heartbeat cadence (default {@link TICK_HEARTBEAT_MS}). */
   heartbeatMs?: number;
   /** Stop heartbeating a tick older than this (default {@link MAX_TICK_HEARTBEAT_MS}). */
   maxTickHeartbeatMs?: number;
+  /**
+   * Whether the pending tick is making legitimate progress worth a heartbeat.
+   * Default: this engine launched (or is waiting on) a live gate still within
+   * its own deadline — `waitingOnLiveGate(<state>/in-flight)`.
+   */
+  shouldHeartbeat?: () => boolean;
 }
 
 async function withTickHeartbeat<T>(
@@ -3698,12 +3708,22 @@ async function withTickHeartbeat<T>(
 ): Promise<T> {
   const started = Date.now();
   const maxMs = opts.maxTickHeartbeatMs ?? MAX_TICK_HEARTBEAT_MS;
+  const shouldHeartbeat =
+    opts.shouldHeartbeat ??
+    (() => {
+      const dir = (deps.store as { dir?: string }).dir;
+      return dir !== undefined && waitingOnLiveGate(inFlightDir(dir), process.pid, deps.now());
+    });
   const timer = setInterval(() => {
     if (Date.now() - started > maxMs) {
       clearInterval(timer);
       return;
     }
-    deps.store.touchEngineLease?.(deps.now());
+    try {
+      if (shouldHeartbeat()) deps.store.touchEngineLease?.(deps.now());
+    } catch {
+      // the heartbeat is advisory — never fail the loop over it
+    }
   }, opts.heartbeatMs ?? TICK_HEARTBEAT_MS);
   try {
     return await work();
@@ -3714,7 +3734,9 @@ async function withTickHeartbeat<T>(
 
 /**
  * The long-running loop behind `sched start`: tick, sleep, repeat. Returns
- * when `shouldStop()` says so (the CLI wires SIGINT). A failed tick is
+ * when `shouldStop()` says so (the CLI wires SIGINT/SIGTERM via
+ * `installEngineExitLogging`). With `opts.runTick` the tick runs off this
+ * thread and the lease is heartbeated while it waits on a gate (#1233). A failed tick is
  * journaled (`tick-failed`, with the error name — `LockTimeoutError` and
  * `CorruptStateError` demand different operator actions) and reported on
  * stderr, and the loop continues — one bad tick (e.g. a transient gh
@@ -3750,7 +3772,8 @@ export async function runLoop(
   const runTick = opts.runTick;
   while (!shouldStop()) {
     // #945: heartbeat every tick, before the work — a wedged tick then shows as
-    // a stale `updated_at` on a live pid, and an idle one as a fresh one.
+    // a stale `updated_at` on a live pid, and an idle one as a fresh one. An
+    // off-thread tick (#1233) is also heartbeated while it waits on a live gate.
     deps.store.touchEngineLease?.(deps.now());
     try {
       // #1233: an off-thread tick (`runTick`) leaves this event loop free, so

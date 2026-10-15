@@ -49,6 +49,7 @@ describe('runLoop with an off-thread tick (#1233)', () => {
       },
       {
         heartbeatMs: 10,
+        shouldHeartbeat: () => true,
         runTick: async () => {
           await delay(120);
           duringTick = touch.mock.calls.length;
@@ -75,6 +76,7 @@ describe('runLoop with an off-thread tick (#1233)', () => {
       {
         heartbeatMs: 5,
         maxTickHeartbeatMs: 20,
+        shouldHeartbeat: () => true,
         runTick: async () => {
           await delay(150);
           return result;
@@ -83,6 +85,27 @@ describe('runLoop with an off-thread tick (#1233)', () => {
     );
     // ~1 pre-tick + a few in-tick beats inside the 20 ms cap — not the ~30 an uncapped tick gets.
     expect(touch.mock.calls.length).toBeLessThan(10);
+  });
+
+  it('no in-tick heartbeat when the tick is NOT waiting on a live gate (a stuck tick goes stale)', async () => {
+    let stop = false;
+    await runLoop(
+      deps,
+      config,
+      () => stop,
+      () => {
+        stop = true;
+      },
+      {
+        heartbeatMs: 5,
+        runTick: async () => {
+          await delay(80);
+          return result;
+        },
+      }
+    );
+    // Default predicate: no in-flight gate recorded in the state dir → only the pre-tick beat.
+    expect(touch.mock.calls.length).toBe(1);
   });
 
   it('a rejected tick (worker died) is journaled as tick-failed and the loop goes on', async () => {
