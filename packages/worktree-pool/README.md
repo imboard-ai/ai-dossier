@@ -180,6 +180,32 @@ Run 'worktree-pool gc --yes' to clear corrupted pool directories.
 Corrupted directories are reported, never removed silently — `gc` clears them
 under the same ownership rules as everything else.
 
+### Stale worktree links (self-heal)
+
+One step before corruption: the admin dir still exists, but its `gitdir`
+forward link names a folder that is gone — what a move or rename leaves when
+nobody ran `git worktree repair <new-path>`. The next bare `git worktree prune`
+deletes that admin dir and the entry becomes corrupted. `claim`, `status` and
+`replenish` (and the pool's own prune after a removal) first run
+`git worktree repair <folder>` on every `.pool-state.json` entry in that state,
+and say so:
+
+```bash
+$ worktree-pool status
+...
+Repaired stale worktree link(s): 1
+  pool-1787468026330-1079658 — admin gitdir pointed at /old/path/pool-1787468026330-1079658/.git
+```
+
+An entry whose folder is a copy of a live worktree (both link to the same admin
+dir) is reported as `NOT repaired` and left alone. `status --json` carries the
+same data as `healed[]` and `heal_errors[]`.
+
+`claim` renames the warm worktree to the branch's directory name. If a folder
+with that name already exists, the claim fails, naming both paths, and the warm
+worktree goes back to the pool untouched — it never hands out a folder that is
+not the claimed worktree.
+
 ### Broken entries (a failed `return`)
 
 Distinct from a corrupted *directory* above: a **broken entry** is a pool entry

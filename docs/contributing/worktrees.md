@@ -88,10 +88,14 @@ git worktree remove ../feature-name
 
 # Delete the remote branch if needed
 git push origin --delete feature/name
-
-# Clean up stale worktree metadata
-git worktree prune
 ```
+
+`git worktree remove` already deletes the worktree's metadata, so no prune is
+needed. **Never run a bare `git worktree prune`**: it also deletes the metadata
+of any worktree that was moved or renamed without `git worktree repair
+<new-path>`, and that folder then fails every git command
+(`fatal: not a git repository`). To clear leftover metadata safely, see
+[Safe prune](#safe-prune) below.
 
 **After removal, update the registry** - mark as completed or remove the row.
 
@@ -115,8 +119,8 @@ git worktree remove <path>
 # Remove a worktree (force, even if dirty)
 git worktree remove --force <path>
 
-# Clean up stale worktree metadata
-git worktree prune
+# Repair a worktree you moved or renamed (always pass the NEW path)
+git worktree repair <new-path>
 
 # Lock a worktree (prevent automatic removal)
 git worktree lock <path>
@@ -217,6 +221,27 @@ git worktree remove <path>
 ```
 
 ---
+
+### Safe prune
+
+`git worktree prune` deletes the metadata (`.git/worktrees/<id>/`) of every
+worktree whose recorded folder is gone — including one that was only moved or
+renamed. Repair moved worktrees first, then prune what is truly gone:
+
+```bash
+# From the main worktree. POOL_DIR: the worktree-pool directory, if you use one.
+COMMON=$(git rev-parse --path-format=absolute --git-common-dir)
+git worktree prune --dry-run -v 2>&1 | sed -n 's|^Removing worktrees/\([^:]*\):.*|\1|p' | while read -r id; do
+  for d in "$(git rev-parse --show-toplevel)"/worktrees/*/ ${POOL_DIR:+"$POOL_DIR"/*/}; do
+    [ -f "$d.git" ] && grep -q "^gitdir: $COMMON/worktrees/$id\$" "$d.git" && git worktree repair "$d"
+  done
+done
+git worktree prune --dry-run -v   # re-check: only entries with no folder anywhere may remain
+git worktree prune                # only once nothing listed still has a folder on disk
+```
+
+If a listed entry's folder may live somewhere the loop does not search, run
+`git worktree repair <that-folder>` by hand before pruning, or leave it.
 
 ### Can't find my code after restructuring
 

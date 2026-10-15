@@ -7,6 +7,7 @@ import {
   findMissingWarmEntries,
   formatAge,
   gc,
+  type HealedLink,
   init,
   type PoolDirEntryReport,
   ReturnFailure,
@@ -64,6 +65,30 @@ function reportCorrupted(corrupted: PoolDirEntryReport[]): void {
     console.error(`  ${b.name} — ${b.reason}`);
   }
   console.error("Run 'worktree-pool gc --yes' to clear corrupted pool directories.");
+}
+
+/**
+ * Print pool entries whose stale admin `gitdir` link was repaired before the
+ * command acted (#1232) — left stale, the next `git worktree prune` would have
+ * deleted their admin dirs. Never fatal.
+ */
+function reportHealed(
+  healed: HealedLink[],
+  errors: string[],
+  log: (line: string) => void = console.error
+): void {
+  if (healed.length > 0) {
+    log(`Repaired stale worktree link(s): ${healed.length}`);
+    for (const h of healed) {
+      log(`  ${h.name} — admin gitdir pointed at ${h.staleGitdir}`);
+    }
+  }
+  if (errors.length > 0) {
+    log(`Stale worktree link(s) NOT repaired: ${errors.length}`);
+    for (const e of errors) {
+      log(`  ${e}`);
+    }
+  }
 }
 
 /**
@@ -210,6 +235,10 @@ async function main(): Promise<void> {
           }
           console.log("Run 'worktree-pool gc --yes' to clear corrupted pool directories.");
         }
+        if (s.healed.length > 0 || s.heal_errors.length > 0) {
+          console.log('');
+          reportHealed(s.healed, s.heal_errors, console.log);
+        }
         break;
       }
 
@@ -217,6 +246,7 @@ async function main(): Promise<void> {
         const count = flags.count ? Number.parseInt(String(flags.count), 10) : undefined;
         console.error(`Replenishing pool${count ? ` (count: ${count})` : ''}...`);
         const result = await replenish(count);
+        reportHealed(result.healed, []);
         console.error(`Created ${result.created} worktree(s)`);
         if (result.errors.length > 0) {
           for (const err of result.errors) {
@@ -236,6 +266,7 @@ async function main(): Promise<void> {
         }
         const result = claim(issue, branch);
         if (result) {
+          reportHealed(result.healed, result.healErrors);
           reportCorrupted(result.broken);
           reportMissing(result.missing);
           console.log(result.path);
