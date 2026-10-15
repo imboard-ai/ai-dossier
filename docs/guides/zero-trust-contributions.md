@@ -574,7 +574,7 @@ admitted, and `resume` checks again after you have dealt with it.
 | Checkpoint `verification` | `user_paused` | Read `artifacts/verification/<candidateSha>.json`. | `approve`, then `resume` |
 | Stale checkpoint | `user_paused` | The content changed since the checkpoint opened (`checkpoint_stale`). The status shows the reject command only. | `reject` or `cancel` |
 | Review refused the candidate | `user_paused` | Status names the review codes (for example `test_removed`, `existing_tests_failed`). Read `artifacts/candidate.diff`. A plain `resume` repeats the same review. | `edit`, then `resume`; or start a new run |
-| Revision feedback not admitted | `user_paused` (run moves to `paused_user`) | The maintainer feedback was unclear, unrelated to the issue, or tried to change targets or authority. Nothing was implemented and no VM started. Decide yourself: reply to the maintainer, or cancel. | Your call |
+| Revision feedback not admitted | `user_paused` (run moves to `paused_user`) | The maintainer feedback was unclear, unrelated to the issue, or tried to change targets or authority. Nothing was implemented and no VM started. The same feedback is never judged again. Reply to the maintainer, or cancel. | After the maintainer posts new feedback, `resume --revise` judges only that new feedback |
 | Reauthorization needed | unchanged | The App user token expired or was revoked, and the run printed a new `authorization_url`. | Open it, or run `authorize`, then `resume` |
 
 Artifact paths are relative to the run's directory in the run store (`<state-dir>/runs/<contribution-id>/`).

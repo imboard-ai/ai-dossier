@@ -23,7 +23,7 @@ import { type HandoffAdmission, HandoffDriver } from '../github/handoff-driver';
 import { ForkPusher, type ForkPusherOptions } from '../github/push';
 import { anonymousReader, type GitHubRead, tokenReader } from '../github/reconcile';
 import { TokenJournal, TokenVault, UNRESOLVED } from '../github/token-journal';
-import { PrTracker, TrackError, trackFromHandoff } from '../github/track';
+import { type FeedbackItem, PrTracker, TrackError, trackFromHandoff } from '../github/track';
 import { IntentDriver, WriteBlockedError, WriteRefusedError } from '../intents';
 import { Journal } from '../journal';
 import { StoreLockedError } from '../lock';
@@ -69,6 +69,7 @@ import {
 } from './controller';
 import { ProvisioningFailedError } from './evidence-runner';
 import { retainPortfolio, retainReceipt } from './export-evidence';
+import { type FeedbackDecision, feedbackIdentity } from './feedback';
 import { readOutcomeBudget } from './outcome-records';
 import { ProxyCaError, preflightProxyCa } from './proxy-preflight';
 import { RunStore } from './run-store';
@@ -1389,6 +1390,37 @@ export function createController(
         )
           return { kind: 'awaiting_review' };
         return { kind: 'waiting' };
+      },
+      refreshRefusedRevision: async (c, refused) => {
+        const t = await openTracker(c);
+        const revision = t.snapshot().revision;
+        // A refusal belongs to its revision's session, before any candidate exists.
+        if (!revision || revision.candidateSha) return false;
+        const current = feedbackIdentity(revision.feedback);
+        // A verdict recorded before #1223 has no identity; it judged this revision's input.
+        const judged = refused.feedback ?? current;
+        // The refused verdict stays inspectable after the new feedback is judged.
+        const retain = () => {
+          const refusals = artifacts(c).get<FeedbackDecision[]>('feedback_refusals') ?? [];
+          if (!refusals.some((r) => r.feedback === judged && r.sessionId === refused.sessionId))
+            artifacts(c).put('feedback_refusals', [...refusals, { ...refused, feedback: judged }]);
+        };
+        if (judged !== current) {
+          // Only a refresh journaled before a crash moves a revision's feedback; that
+          // write-ahead feedback still awaits its first verdict.
+          const held = artifacts(c).get<FeedbackItem[]>('feedback');
+          if (!held || feedbackIdentity(held) !== current) return false;
+          retain();
+          return true;
+        }
+        // Bind a legacy verdict to what it judged, verdict unchanged, before the refresh.
+        if (refused.feedback === undefined)
+          artifacts(c).put('feedback_decision', { ...refused, feedback: judged });
+        const result = await t.refreshRefusedRevision();
+        await syncTracker(c, t);
+        if (result.kind !== 'revising') return false;
+        retain();
+        return true;
       },
     },
     artifacts

@@ -2672,7 +2672,13 @@ repair model, charged to that new session. Its fixed boolean question requires
 confident agreement on actionable work confined to the original issue/approved
 plan. Unclear, unrelated or authority-changing feedback hands off before a new VM
 is provisioned; the verdict and feedback remain inspectable, and `zt-run status`
-says the revision handed off because its feedback was not admitted. Feedback cannot alter
+says the revision handed off because its feedback was not admitted. The verdict binds the
+exact items it judged (id and edit time): plain `resume` replays the refusal, and the same
+feedback is never judged again (#1223). A later `resume --revise` reads the PR again and
+judges only maintainer feedback that is new since (a new review or comment, or an edited
+one), under the same freshness, reviewer and head checks, in the same revision session. The
+refused items stay excluded from later revisions, and the refused verdict is retained as
+`feedback_refusals`. Feedback cannot alter
 identities, targets, network policy, budget or checkpoints. Oversized/truncated
 maintainer feedback is unreadable, never silently clipped; an oversized remark from
 anyone else is skipped like any non-maintainer remark. `retainRevisionFeedback` on

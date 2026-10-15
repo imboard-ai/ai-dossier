@@ -72,7 +72,7 @@ import {
   type WorkspaceEvidence,
 } from './evidence-runner';
 import { retainVerification } from './export-evidence';
-import { assessRevisionFeedback } from './feedback';
+import { assessRevisionFeedback, type FeedbackDecision, feedbackIdentity } from './feedback';
 import { OutputCollector } from './output-collector';
 import type { ShippingAuthorizeDeps } from './shipping';
 import {
@@ -251,6 +251,13 @@ export interface StepServices {
     policy: PolicyAssessment
   ) => Promise<'contributor_handoff' | 'submitted' | 'blocked' | 'hand_off' | 'waiting'>;
   readonly track: (context: PhaseContext) => Promise<ControllerTrackOutcome>;
+  /** Explicit `--revise` of a revision whose feedback was refused (#1223): re-read the PR and
+   * select only maintainer feedback new since `refused`, retaining it as `feedback`. True
+   * when new feedback replaced the refused input; false leaves the refusal standing. */
+  readonly refreshRefusedRevision?: (
+    context: PhaseContext,
+    refused: FeedbackDecision
+  ) => Promise<boolean>;
 }
 
 /** Every completed artifact is write-ahead journaled with its exact bytes digest.
@@ -667,12 +674,20 @@ export function createSteps(
     async implement(c) {
       const author = await approval(c);
       if (c.run.state === 'revising') {
-        const assessed = artifacts(c).get<{ sessionId: string; admitted: boolean }>(
-          'feedback_decision'
-        );
-        if (assessed?.sessionId !== c.sessionId) {
+        let feedback = artifacts(c).require<FeedbackItem[]>('feedback');
+        const held = artifacts(c).get<FeedbackDecision>('feedback_decision');
+        let assessed = held?.sessionId === c.sessionId ? held : undefined;
+        // A refusal replays for its session (fail-closed for the same input). Only an explicit
+        // --revise that finds feedback new since replaces it, to be judged afresh (#1223).
+        if (assessed && !assessed.admitted && c.revise && services.refreshRefusedRevision) {
+          if (!(await services.refreshRefusedRevision(c, assessed))) return { kind: 'hand_off' };
+          c.assertAdmission();
+          feedback = artifacts(c).require<FeedbackItem[]>('feedback');
+          assessed = undefined;
+        }
+        if (!assessed) {
           const result = await assessRevisionFeedback(
-            artifacts(c).require<FeedbackItem[]>('feedback'),
+            feedback,
             gate(c),
             artifacts(c).require<AgentPlan>('plan').text,
             {
@@ -687,6 +702,7 @@ export function createSteps(
           );
           artifacts(c).put('feedback_decision', {
             sessionId: c.sessionId,
+            feedback: feedbackIdentity(feedback),
             admitted: result.admitted,
             verdict: JSON.stringify(result.verdict),
           });

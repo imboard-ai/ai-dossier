@@ -1433,6 +1433,60 @@ describe('createController real composition', () => {
     expect(a.get<{ admitted: boolean }>('feedback_decision').admitted).toBe(false);
     a.close();
   }, 30000);
+  it.each([
+    'feedback',
+    'revision_refreshed',
+  ] as const)('a crash after the refreshed %s write judges the new review on the next --revise (#1223)', async (point) => {
+    const h = rig({ revisionDecisionReject: true });
+    const id = await published(h);
+    h.feedback('Please change unrelated network credentials.');
+    expect(
+      ((await h.authorize(h.controller.resume(id, { revise: true }))) as { state: string }).state
+    ).toBe('paused_user');
+    h.advanceClock();
+    h.addFeedback('Please declare const MS_PER_SECOND = 1000 and divide by it.', 12);
+    h.admitFeedback();
+    const pushes = pushCalls().length;
+    let interrupted = false;
+    const crash = () => {
+      interrupted = true;
+      throw new Error('process interruption');
+    };
+    const put = StepArtifacts.prototype.put;
+    const append = Journal.prototype.append;
+    const faults = [
+      vi.spyOn(StepArtifacts.prototype, 'put').mockImplementation(function (
+        this: StepArtifacts,
+        key,
+        value
+      ) {
+        put.call(this, key, value);
+        if (!interrupted && point === 'feedback' && key === 'feedback') crash();
+      }),
+      vi.spyOn(Journal.prototype, 'append').mockImplementation(function (this: Journal, event) {
+        append.call(this, event);
+        if (
+          !interrupted &&
+          point === 'revision_refreshed' &&
+          (event as { type?: string }).type === 'revision_refreshed'
+        )
+          crash();
+      }),
+    ];
+    await expect(h.authorize(h.controller.resume(id, { revise: true }))).rejects.toThrow();
+    for (const fault of faults) fault.mockRestore();
+    expect(interrupted).toBe(true);
+    expect(pushCalls()).toHaveLength(pushes);
+    expect(
+      ((await h.authorize(h.controller.resume(id, { revise: true }))) as { state: string }).state
+    ).toBe('submitted');
+    expect(pushCalls()).toHaveLength(pushes + 1);
+    const a = h.artifacts(id);
+    expect(a.get<{ id: string }[]>('feedback').map((f) => f.id)).toEqual(['comment:12']);
+    expect(a.get<{ admitted: boolean }>('feedback_decision').admitted).toBe(true);
+    expect(a.get<unknown[]>('feedback_refusals')).toHaveLength(1);
+    a.close();
+  }, 30000);
   it('re-judges a new maintainer review after a split feedback vote, never the refused input (#1223)', async () => {
     const h = rig({ revisionAmbiguous: true });
     const id = await published(h);
@@ -1471,8 +1525,17 @@ describe('createController real composition', () => {
     expect(budget.sessions[0]).toEqual(spent.sessions[0]);
     const candidate = a.get<{ record: { candidateSha: string } }>('candidate');
     expect((h.pr()?.head as { sha: string }).sha).toBe(candidate.record.candidateSha);
+    // The refused verdict stays inspectable beside the new one.
+    const refusals = a.get<{ admitted: boolean; verdict: string }[]>('feedback_refusals');
+    expect(refusals).toHaveLength(1);
+    expect(refusals[0]).toMatchObject({ admitted: false, verdict: original.verdict });
     a.close();
     expect(await h.vm.listByRun(id)).toEqual([]);
+    // The refused review is never revisited: a later --revise finds nothing to revise.
+    const after = h.modelCalls();
+    await h.authorize(h.controller.resume(id, { revise: true }));
+    expect(h.modelCalls()).toBe(after);
+    expect(pushCalls()).toHaveLength(pushes + 1);
   }, 30000);
   it('withdrawal and cancel-action are contributor handoffs, declined only after observed close', async () => {
     const h = rig();

@@ -1118,3 +1118,103 @@ describe('durable tracker journal', () => {
     expect(t.snapshot().run.state).toBe('awaiting_review');
   });
 });
+
+describe('refused revision feedback (#1223)', () => {
+  /** A revision started on review 1, refused by the typed screen, then explicitly resumed. */
+  async function refusedRig(admission = admitAll()) {
+    const up = new Upstream();
+    up.reviews = [review(1)];
+    const { t, j } = tracker(up, { admission });
+    expect(kind(await t.beginRevision())).toBe('revising');
+    const resumeRefused = () =>
+      t.observeRun(step(t.snapshot().run, ReasonCode.UserPaused, ReasonCode.ResumeRevising));
+    admission.calls.length = 0;
+    return { up, t, j, admission, resumeRefused };
+  }
+
+  it('re-reads the PR and selects only maintainer feedback new since the refusal', async () => {
+    const { up, t, j, admission, resumeRefused } = await refusedRig();
+    resumeRefused();
+    const recorded = j.read().length;
+    // The unchanged refused input is never selected again; nothing is probed or journaled.
+    expect(kind(await t.refreshRefusedRevision())).toBe('nothing_to_revise');
+    expect(j.read()).toHaveLength(recorded);
+    expect(admission.calls).toEqual([]);
+    up.reviews = [review(1), review(2, '2026-10-06T12:00:00Z')];
+    const refreshed = await t.refreshRefusedRevision();
+    expect(refreshed.kind === 'revising' && refreshed.feedback.map((f) => f.id)).toEqual([
+      'review:2',
+    ]);
+    expect(admission.calls).toEqual(['policy', 'contributor', 'fork']);
+    const state = t.snapshot();
+    expect(state.revision?.feedback).toEqual([
+      { id: 'review:2', updatedAt: '2026-10-06T12:00:00Z' },
+    ]);
+    expect([...state.refused]).toEqual([['review:1', '2026-10-06T11:00:00Z']]);
+    expect(state.run.state).toBe('revising');
+    expect(replayTrack(j.read())).toEqual(state);
+  });
+
+  it('a refused item stays out of every later selection unless it is edited', async () => {
+    const { up, t, resumeRefused } = await refusedRig();
+    resumeRefused();
+    up.reviews = [review(1), review(2, '2026-10-06T12:00:00Z')];
+    expect(kind(await t.refreshRefusedRevision())).toBe('revising');
+    // Review 2 is refused in its turn: neither 1 nor 2 is selected again unchanged.
+    resumeRefused();
+    expect(kind(await t.refreshRefusedRevision())).toBe('nothing_to_revise');
+    up.reviews = [review(1, '2026-10-06T13:00:00Z'), review(2, '2026-10-06T12:00:00Z')];
+    const edited = await t.refreshRefusedRevision();
+    expect(edited.kind === 'revising' && edited.feedback.map((f) => f.id)).toEqual(['review:1']);
+  });
+
+  it('is refused outside an explicitly resumed revision that has no candidate', async () => {
+    const { t, j } = await refusedRig();
+    // Still in the revision that just started: not a resumed refusal.
+    await expect(t.refreshRefusedRevision()).rejects.toThrow(/admission_state/u);
+    const fresh = tracker(new Upstream(), { j: trackJournal() }).t;
+    await expect(fresh.refreshRefusedRevision()).rejects.toThrow(/admission_state/u);
+    // A forged refresh of feedback the revision never held does not replay.
+    const events = j.read();
+    const resumed = step(t.snapshot().run, ReasonCode.UserPaused, ReasonCode.ResumeRevising);
+    const forged = (refused: unknown[]) => [
+      ...events,
+      { v: 1, type: 'run_update', run: resumed },
+      {
+        v: 1,
+        type: 'revision_refreshed',
+        refused,
+        feedback: [{ id: 'review:2', updatedAt: '2026-10-06T12:00:00Z' }],
+      },
+    ];
+    expect(() => replayTrack(forged([{ id: 'review:9', updatedAt: 'x' }]))).toThrow(TrackError);
+    expect(() => replayTrack(forged([]))).toThrow(TrackError);
+    expect(
+      replayTrack(forged([{ id: 'review:1', updatedAt: '2026-10-06T11:00:00Z' }])).revision
+    ).toEqual({ feedback: [{ id: 'review:2', updatedAt: '2026-10-06T12:00:00Z' }] });
+  });
+
+  it('stale freshness blocks before any new feedback is retained', async () => {
+    const admission = admitAll();
+    const { up, t, resumeRefused } = await refusedRig(admission);
+    resumeRefused();
+    admission.policyFresh = async () => false;
+    up.reviews = [review(1), review(2, '2026-10-06T12:00:00Z')];
+    expect(await t.refreshRefusedRevision()).toMatchObject({
+      kind: 'blocked',
+      reason: 'admission_policy',
+    });
+    expect(t.snapshot().revision?.feedback.map((f) => f.id)).toEqual(['review:1']);
+  });
+
+  it('a merge observed during the refused revision blocks instead of refreshing', async () => {
+    const { up, t, resumeRefused } = await refusedRig();
+    resumeRefused();
+    up.reviews = [review(1), review(2, '2026-10-06T12:00:00Z')];
+    up.pulls[0] = { ...up.pulls[0], state: 'closed', merged: true } as Pull;
+    expect(await t.refreshRefusedRevision()).toMatchObject({
+      kind: 'blocked',
+      reason: 'merged_during_revision',
+    });
+  });
+});

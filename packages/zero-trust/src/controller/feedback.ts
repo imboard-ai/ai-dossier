@@ -1,4 +1,5 @@
 /** Review prose is data. Only a confident typed answer may admit related work. */
+import { createHash } from 'node:crypto';
 import { decide } from '../decision/decide';
 import { createTypedQuestion, type DecisionDeps } from '../decision/types';
 import type { FeedbackItem } from '../github/track';
@@ -29,4 +30,23 @@ export async function assessRevisionFeedback(
     floor: () => ({ escalate: feedback.length === 0 || feedback.some((f) => !f.body.trim()) }),
   });
   return { admitted: verdict.status === 'accepted' && verdict.value === true, verdict };
+}
+
+/** The `feedback_decision` step artifact: one typed verdict per session and feedback set. */
+export interface FeedbackDecision {
+  readonly sessionId: string;
+  /** `feedbackIdentity()` of the judged feedback; absent on verdicts recorded before #1223. */
+  readonly feedback?: string;
+  readonly admitted: boolean;
+  /** The serialized typed verdict. */
+  readonly verdict: string;
+}
+
+/** What a verdict judged: the exact review items (id and edit time), never their prose, so
+ * the same input replays its verdict and new or edited feedback is judged afresh (#1223). */
+export function feedbackIdentity(
+  feedback: readonly { readonly id: string; readonly updatedAt: string }[]
+): string {
+  const refs = feedback.map((f) => [f.id, f.updatedAt]);
+  return createHash('sha256').update(JSON.stringify(refs)).digest('hex');
 }
