@@ -9,7 +9,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import {
   defaultExec,
+  describeInFlight,
+  inFlightDir,
   Journal,
+  listInFlight,
   resolveProjectRepo,
   resolveProjectSlug,
   SchedStore,
@@ -75,7 +78,8 @@ export function readCrontabStrict(): string {
   throw new Error(`crontab -l exited ${res.status}: ${stderr || 'no output'}`);
 }
 
-function realIo(opts: ServiceOptions): ServiceIo {
+/** Real process I/O for the supervisor helpers — also used by `sched start`'s unsupervised check (#1233). */
+export function serviceIo(opts: ServiceOptions = {}): ServiceIo {
   return {
     run,
     unitDir: opts.unitDir ?? defaultUnitDir(),
@@ -182,7 +186,7 @@ export function registerSchedServiceCommands(sched: Command): void {
     .action((opts: ServiceOptions) => {
       const project = projectOf(opts);
       const spec = buildSpec(opts, project);
-      const io = realIo(opts);
+      const io = serviceIo(opts);
       const mode = chooseMode(opts.mode, io);
       if (opts.print) {
         console.log(mode === 'systemd' ? renderSystemdUnit(spec) : renderCronBlock(spec));
@@ -217,7 +221,7 @@ export function registerSchedServiceCommands(sched: Command): void {
     .option('--no-activate', 'Only remove files — never call systemctl or crontab')
     .action((opts: ServiceOptions) => {
       const project = projectOf(opts);
-      const { removed, errors } = uninstallService(project, realIo(opts));
+      const { removed, errors } = uninstallService(project, serviceIo(opts));
       if (errors.length > 0) {
         console.error(
           `✗ [${project}] uninstall incomplete${removed.length ? ` (removed: ${removed.join(', ')})` : ''}`
@@ -240,7 +244,7 @@ export function registerSchedServiceCommands(sched: Command): void {
     .option('--json', 'Output as JSON')
     .action((opts: ServiceOptions) => {
       const project = projectOf(opts);
-      const status = serviceStatus(project, realIo(opts));
+      const status = serviceStatus(project, serviceIo(opts));
       const lease = new SchedStore(schedStateDir(project)).engineLeaseStatus();
       if (opts.json) {
         console.log(JSON.stringify({ ...status, engine_lease: lease }, null, 2));
@@ -256,6 +260,10 @@ export function registerSchedServiceCommands(sched: Command): void {
       console.log(
         `engine: ${lease ? `pid ${lease.pid} ${lease.alive ? 'live' : 'STALE'}${lease.updated_at ? `, heartbeat ${lease.updated_at}` : ''}` : 'no lease (not running)'}`
       );
+      // #1233: an engine can be dead while the gate it launched still runs.
+      for (const g of listInFlight(inFlightDir(schedStateDir(project)))) {
+        console.log(`gate in flight: ${describeInFlight(g)}`);
+      }
       if (!status.supervised) {
         console.log(
           '⚠ NOT supervised — a crash or reboot leaves the queue unattended. Run `ai-dossier sched service install`.'

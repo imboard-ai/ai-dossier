@@ -634,7 +634,8 @@ function describeInconclusive(gate: {
  * this repo's own machinery, at exactly two sites: `cli/src/capability.ts`'s
  * `classifySpawnResult` (the capability entry's own `timeout_ms`) and
  * `cli/src/commands/sched.ts`'s `createBatchCapabilityRunner` (the runner's
- * own `spawnSync` timeout, `BATCH_SUITE_TIMEOUT_MS`). The gate classifies on
+ * own timeout, `BATCH_SUITE_TIMEOUT_MS` — `spawnSync`'s or, for engine gates
+ * since #1233, the tracked launcher's synthetic ETIMEDOUT). The gate classifies on
  * it to tell "the harness needed more time than it was given" (#681 — a
  * statement about DURATION, not about the harness's reliability) apart from a
  * genuine machinery failure (missing tool, broken manifest, evidence-free

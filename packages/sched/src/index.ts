@@ -118,6 +118,7 @@ export {
   priorWorkBranch,
   priorWorkInstruction,
   procStartTime,
+  procStatFields,
   type ResolvedDispatch,
   type ResolvedTierDispatch,
   reportTierFor,
@@ -137,12 +138,20 @@ export {
   wrongProcedureDirective,
 } from './dispatch';
 export { findDossierRoot, projectRootFor, worktreesDirFor } from './dossier-root';
-export { type EngineDeps, recordTickFailure, runLoop, type TickResult, tick } from './engine';
+export {
+  type EngineDeps,
+  type RunLoopOptions,
+  recordTickFailure,
+  runLoop,
+  type TickResult,
+  tick,
+} from './engine';
 export {
   type AlertNotifier,
   checkStaleLeaseAlert,
   type EngineAlert,
   reportCrashRestart,
+  SIGKILL_SUSPECTS_HINT,
   type StaleLeaseAlertOutcome,
 } from './engine-alert';
 export {
@@ -217,6 +226,23 @@ export {
   wrongProcedureShippedPr,
 } from './groundtruth';
 export {
+  describeInFlight,
+  ensureInFlightDir,
+  IN_FLIGHT_RUN_DIR_PREFIX,
+  IN_FLIGHT_RUN_FILES,
+  type InFlightCapRun,
+  type InFlightListing,
+  inFlightAlive,
+  inFlightDir,
+  inFlightFinished,
+  listInFlight,
+  pidExists,
+  readInFlight,
+  removeInFlight,
+  waitingOnLiveGate,
+  writeInFlight,
+} from './in-flight';
+export {
   appendJsonl,
   batchOfUnit,
   issueOfUnit,
@@ -249,6 +275,7 @@ export {
   type EngineLeaseHolder,
   type EngineLeaseStatus,
   LockTimeoutError,
+  releaseOwnStateLock,
   SchedStore,
   writeAtomic,
 } from './persist';

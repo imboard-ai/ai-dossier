@@ -107,6 +107,27 @@ export class CorruptStateError extends Error {
   }
 }
 
+/**
+ * #1233: release the state lock in `dir` when THIS process holds it. A tick
+ * runs in a worker thread; a worker that dies inside `withLock` (a
+ * `process.exit` in the tick ends only the thread, skipping `finally`) leaves
+ * the lock naming the still-live engine pid, so stale-lock takeover never
+ * fires. The main thread never holds the lock while a tick is pending, so the
+ * tick runner calls this when its worker dies mid-tick. Returns whether a lock
+ * was released.
+ */
+export function releaseOwnStateLock(dir: string): boolean {
+  const lockPath = path.join(dir, LOCK_DIR);
+  try {
+    const pid = Number.parseInt(fs.readFileSync(path.join(lockPath, 'pid'), 'utf-8').trim(), 10);
+    if (pid !== process.pid) return false;
+    fs.rmSync(lockPath, { recursive: true, force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Write `contents` to `filePath` atomically (tmp + fsync + rename, same directory). */
 export function writeAtomic(filePath: string, contents: string): void {
   const dir = path.dirname(filePath);

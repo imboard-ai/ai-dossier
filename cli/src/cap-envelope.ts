@@ -31,6 +31,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { runTrackedCapRun } from './cap-run-tracked';
 import {
   CAP_ENVELOPE_FILE_ENV,
   CAPABILITY_EXIT_CODES,
@@ -172,7 +173,8 @@ export interface CapRunSpawn {
    * `cap run` exited on its own with a trusted verdict. When this is `true`
    * a spawn error (ETIMEDOUT) is NOT the gate timing out: a descendant still
    * held the inherited stdout pipe, so `spawnSync` kept waiting past its
-   * timeout after `cap run` had already recorded its exit status.
+   * timeout after `cap run` had already recorded its exit status. (The tracked
+   * path, #1233, writes output to files, so this case does not arise there.)
    */
   exitedWithVerdict: boolean;
   /** Human-readable account of how the envelope was (or was not) recovered — for `detail`/`reason`. */
@@ -187,12 +189,49 @@ export interface CapRunSpawn {
  * environment) and uses {@link CAP_RUN_MAX_BUFFER_BYTES} as `maxBuffer`. The
  * temp directory — and any stray temp file a killed `cap run` left in it — is
  * always removed.
+ *
+ * With `opts.inFlightDir` (non-Windows; #1233) the run goes through
+ * `runTrackedCapRun` instead: the run directory lives under the in-flight
+ * registry and is removed only once the verdict is consumed,
+ * {@link CAP_RUN_MAX_BUFFER_BYTES} caps only the stdout/stderr TAIL read back
+ * (no ENOBUFS), a timeout kills the whole process group, and a live or
+ * same-HEAD finished run already recorded for this worktree + capability is
+ * adopted instead of re-launched.
  */
 export function spawnCapRun(
   capabilityId: string,
   cwd: string,
-  opts: { timeoutMs: number; env?: NodeJS.ProcessEnv }
+  opts: {
+    timeoutMs: number;
+    env?: NodeJS.ProcessEnv;
+    /**
+     * #1233: the sched state's in-flight registry. When set, the run is
+     * launched in its own process group and recorded there (pid, start, HEAD)
+     * before waiting, and a live/finished run already recorded for this
+     * worktree + capability is adopted instead of duplicated — see
+     * `cap-run-tracked.ts`. Unset → the plain `spawnSync` path.
+     */
+    inFlightDir?: string;
+  }
 ): CapRunSpawn {
+  // Windows has no process groups / `/bin/sh`: the tracked launcher is POSIX-only,
+  // and a win32 engine keeps the plain path (no in-flight tracking).
+  if (opts.inFlightDir !== undefined && process.platform !== 'win32') {
+    const tracked = runTrackedCapRun(capabilityId, cwd, {
+      timeoutMs: opts.timeoutMs,
+      env: opts.env,
+      inFlightDir: opts.inFlightDir,
+      maxBuffer: CAP_RUN_MAX_BUFFER_BYTES,
+    });
+    try {
+      const verdict = resolveVerdict(tracked.spawned, readCapEnvelopeFile(tracked.envelopeFile));
+      return tracked.notes.length > 0
+        ? { ...verdict, diagnostics: `${verdict.diagnostics}; ${tracked.notes.join('; ')}` }
+        : verdict;
+    } finally {
+      tracked.release();
+    }
+  }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-dossier-cap-'));
   const envelopeFile = path.join(dir, 'envelope.json');
   try {

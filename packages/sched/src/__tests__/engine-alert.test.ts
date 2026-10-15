@@ -1,18 +1,21 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import {
   buildStatusWarnings,
   checkStaleLeaseAlert,
   createEmptyState,
   enqueueEntries,
   HUNG_INTERVALS_ENV,
+  inFlightDir,
   Journal,
   reportCrashRestart,
   resolveHungAfterMs,
   SchedStore,
+  SIGKILL_SUSPECTS_HINT,
+  writeInFlight,
 } from '../index';
 
 const NOW = new Date('2026-09-29T12:00:00Z');
@@ -92,6 +95,38 @@ describe('engine lease heartbeat, reclaim and alerts (#945)', () => {
     );
   });
 
+  it('#1233: the DOWN and crash-restart alerts name SIGKILL suspects and in-flight gates', () => {
+    withWork();
+    const gate = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' });
+    onTestFinished(() => process.kill(-(gate.pid as number), 'SIGKILL'));
+    writeInFlight(inFlightDir(dir), {
+      version: 1,
+      capability: 'gate.batch',
+      cwd: '/wt/batch-b1',
+      pid: gate.pid as number,
+      pid_start: null,
+      started_at: '2026-09-29T11:00:00Z',
+      timeout_ms: 3_600_000,
+      launcher_pid: 99,
+      run_dir: path.join(inFlightDir(dir), 'run-x'),
+      head: null,
+    });
+    const notify = vi.fn();
+    writeDeadLease('ep-kill');
+    expect(checkStaleLeaseAlert(store, journal, notify, NOW)).toBe('alerted');
+    const down = notify.mock.calls[0][0].message as string;
+    expect(down).toContain(SIGKILL_SUSPECTS_HINT);
+    expect(down).toMatch(/journalctl -k/);
+    expect(down).toMatch(/gate\.batch pid \d+ \(STILL RUNNING\).*\/wt\/batch-b1/);
+
+    reportCrashRestart(journal, { pid: 99, pid_start: null, updated_at: 'T' }, notify, NOW, null, {
+      stateDir: dir,
+    });
+    const restart = notify.mock.calls[1][0].message as string;
+    expect(restart).toContain('oom-kill');
+    expect(restart).toContain('adopts these instead of launching duplicates');
+  });
+
   it('a stale lease with unfinished work alerts ONCE per episode, and re-arms for the next', () => {
     withWork();
     const notify = vi.fn();
@@ -165,7 +200,8 @@ describe('engine lease heartbeat, reclaim and alerts (#945)', () => {
     expect(journal.read()[0]).toMatchObject({ reason: 'stop-interrupted' });
     expect(notify).toHaveBeenCalledWith(
       expect.objectContaining({ kind: 'engine-restarted-after-stop-timeout' })
-    );
+    ); // #1233: a reaper's SIGTERM-then-SIGKILL also lands here — say so.
+    expect(notify.mock.calls[0][0].message).toContain('SIGTERM-then-SIGKILL killer');
   });
 
   it('two racing watchers cannot both alert (O_EXCL episode marker)', () => {

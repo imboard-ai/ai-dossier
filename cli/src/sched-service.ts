@@ -396,3 +396,32 @@ export function serviceStatus(project: string, io: ServiceIo): ServiceStatus {
     supervised: (installed && (active === 'active' || io.render)) || cronInstalled,
   };
 }
+
+/**
+ * #1233: the warning `sched start` prints when nothing would restart the
+ * engine — no active systemd unit, no cron watchdog, and not itself running
+ * under systemd (`INVOCATION_ID`). Null when supervised, or when supervision
+ * cannot be determined (never block a start on the probe).
+ */
+/** Set by systemd for every unit it runs — present means the engine IS supervised. */
+const SYSTEMD_INVOCATION_ENV = 'INVOCATION_ID';
+
+export function unsupervisedWarning(
+  project: string,
+  getStatus: () => ServiceStatus,
+  env: NodeJS.ProcessEnv = process.env
+): string | null {
+  if (env[SYSTEMD_INVOCATION_ENV]) return null;
+  let status: ServiceStatus;
+  try {
+    status = getStatus();
+  } catch {
+    return null;
+  }
+  if (status.supervised) return null;
+  return (
+    `⚠ sched: the engine for ${project} is NOT supervised (systemd unit: ${status.systemd.installed ? `installed, ${status.systemd.active ?? 'unknown'}` : 'not installed'}; cron watchdog: ${status.cron.installed ? 'installed' : 'not installed'}). ` +
+    'Nothing restarts it if it dies — OOM, a reboot, or a host process reaper that kills long-lived TTY-less node processes. ' +
+    'Install a supervisor with `ai-dossier sched service install`, or pass --unsupervised to acknowledge.'
+  );
+}

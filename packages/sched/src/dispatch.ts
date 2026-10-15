@@ -1399,25 +1399,32 @@ export const STOP_POLL_MIN_MS = 100;
 export const STOP_POLL_MAX_MS = 1000;
 
 /**
+ * `/proc/<pid>/stat` fields AFTER the parenthesized comm (field 3 = index 0:
+ * state; index 2: pgrp; index 19: starttime). Null when /proc is unavailable
+ * (macOS/Windows) or the process is gone. comm may contain spaces and parens —
+ * everything after the LAST ')' is fields 3..N, space-separated.
+ */
+export function procStatFields(pid: number): string[] | null {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf-8');
+    const close = stat.lastIndexOf(')');
+    if (close === -1) return null;
+    return stat.slice(close + 2).split(' ');
+  } catch {
+    return null;
+  }
+}
+
+/**
  * `/proc/<pid>/stat` start-time (field 22, clock ticks since boot) — stable
  * process identity for the lifetime of the pid, so a recycled pid is
  * detectable. Null when /proc is unavailable (macOS/Windows) or the process
  * is gone.
  */
 export function procStartTime(pid: number): number | null {
-  try {
-    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf-8');
-    // comm (field 2) is parenthesized and may contain spaces — everything
-    // after the LAST ')' is fields 3..N, space-separated.
-    const close = stat.lastIndexOf(')');
-    if (close === -1) return null;
-    const fields = stat.slice(close + 2).split(' ');
-    // field 22 (starttime) -> index 19 in the post-comm array (field 3 = index 0)
-    const start = Number.parseInt(fields[19] ?? '', 10);
-    return Number.isInteger(start) && start >= 0 ? start : null;
-  } catch {
-    return null;
-  }
+  // field 22 (starttime) -> index 19 in the post-comm array (field 3 = index 0)
+  const start = Number.parseInt(procStatFields(pid)?.[19] ?? '', 10);
+  return Number.isInteger(start) && start >= 0 ? start : null;
 }
 
 /**
