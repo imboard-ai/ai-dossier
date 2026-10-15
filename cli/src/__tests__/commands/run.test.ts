@@ -354,6 +354,29 @@ describe('run command', () => {
     );
   });
 
+  it('run --pull reports each registry queried and its result when the fetch fails (#1240)', async () => {
+    vi.mocked(cacheResolver.resolveCachedVersion).mockResolvedValue({
+      version: '1.1.0',
+      source: 'registry',
+      registry: 'public',
+    });
+    mockedFs.existsSync.mockReturnValue(false);
+    const errors = [
+      { registry: 'public', error: 'checksum mismatch after download (url: u, status: 200)' },
+      { registry: 'private', error: 'Not found' },
+    ];
+    vi.mocked(multiRegistry.multiRegistryGetContent).mockResolvedValue({ result: null, errors });
+
+    const program = createTestProgram();
+    registerRunCommand(program);
+
+    await expect(
+      program.parseAsync(['node', 'dossier', 'run', 'org/test', '--pull'])
+    ).rejects.toThrow();
+
+    expect(helpers.printRegistryNotFoundError).toHaveBeenCalledWith('org/test', errors);
+  });
+
   it('uses cached content when resolver returns a version that is already on disk', async () => {
     vi.mocked(cacheResolver.resolveCachedVersion).mockResolvedValue({
       version: '1.2.3',

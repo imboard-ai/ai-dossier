@@ -70,8 +70,12 @@ export function registerPullCommand(program: Command): void {
             // and compare case-insensitively so a valid download is not rejected
             // purely because of the `sha256:` label.
             const expected = digest.replace(/^sha256:/i, '');
+            // multiRegistryGetContent already verifies and retries; this is a last guard.
             if (actual.toLowerCase() !== expected.toLowerCase()) {
               console.error(`❌ ${dossierName}@${version}: checksum mismatch after download`);
+              console.error(
+                `   ${result._registry}: url: ${result.url ?? 'unknown'}, status: ${result.status ?? 'unknown'}, expected sha256: ${expected.toLowerCase()}, actual sha256: ${actual.toLowerCase()}`
+              );
               failures++;
               continue;
             }
