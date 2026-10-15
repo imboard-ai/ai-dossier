@@ -50,6 +50,7 @@ import {
   DispatchProfileError,
   defaultExec,
   defaultKeptWorktreeReader,
+  describeInFlight,
   dispatchSummary,
   type EngineDeps,
   EngineTooOldError,
@@ -62,6 +63,7 @@ import {
   formatBatchStatus,
   GIT_OID_RE,
   IllegalTransitionError,
+  inFlightDir,
   installEngineExitLogging,
   isLandedResumableBlock,
   issueCloseReader,
@@ -71,6 +73,7 @@ import {
   LockTimeoutError,
   labelBlockReason,
   labelOfBlockReason,
+  listInFlight,
   MAX_FULL_REVIEW_MEMBERS,
   memberDispatchTier,
   OPENCODE_DISPATCH_COMMAND,
@@ -160,9 +163,17 @@ import {
   type IssueCost,
   summarizeBatchJournal,
 } from '../sched-run-stats';
+import { serviceStatus, unsupervisedWarning } from '../sched-service';
+import {
+  createWorkerTickRunner,
+  INLINE_TICK_ENV,
+  type TickRunner,
+  tickWorkerFile,
+} from '../sched-tick-runner';
+import type { TickWorkerData } from '../sched-tick-worker';
 import { renderTable } from '../table';
 import { batchPrepTokens, currentSessionId, recordBatchPrep } from '../usage/batch-prep';
-import { registerSchedServiceCommands } from './sched-service';
+import { registerSchedServiceCommands, serviceIo } from './sched-service';
 
 /**
  * Batch-worktree `ai-dossier cap run <id>` runner for the per-member
@@ -182,10 +193,16 @@ import { registerSchedServiceCommands } from './sched-service';
 export function createBatchCapabilityRunner(opts?: {
   /** Overridable so tests can exercise the ETIMEDOUT branch cheaply (mirrors `createBatchSuiteRunner`). */
   timeoutMs?: number;
+  /** #1233: track the gate in the sched state's in-flight registry (adopt, never duplicate). */
+  inFlightDir?: string;
 }): (worktree: string, capabilityId: string) => CapabilityGateResult {
   const timeoutMs = opts?.timeoutMs ?? BATCH_SUITE_TIMEOUT_MS;
+  const inFlightDir = opts?.inFlightDir;
   return (worktree, capabilityId) => {
-    const run = spawnCapRun(capabilityId, worktree, { timeoutMs });
+    const run = spawnCapRun(capabilityId, worktree, {
+      timeoutMs,
+      ...(inFlightDir !== undefined ? { inFlightDir } : {}),
+    });
     const result = run.spawned;
     // Captured subprocess output — the evidence fallback on every path below.
     const captured = `${result.stdout ?? ''}${result.stderr ?? ''}`;
@@ -291,6 +308,7 @@ interface ReprioritizeOptions extends SchedOptions {
 
 interface StartOptions extends SchedOptions {
   alertIssue?: string;
+  unsupervised?: boolean;
   interval?: number;
   once?: boolean;
   autoUpgrade?: boolean;
@@ -1582,10 +1600,28 @@ function registerStatusSubcommand(cmd: Command): void {
           // — it reads whatever `sched start` last cached rather than risking
           // a multi-second hang on an unreachable npm registry.
           const staleness = await checkEngineStaleness({ noFetch: true });
+          // #1233: gates the engine launched and has not consumed — after an
+          // engine death this is where "gate pid N is still running" shows.
+          const gatesInFlight = listInFlight(inFlightDir(store.dir));
           if (opts.json) {
-            console.log(JSON.stringify({ ...report, engine_staleness: staleness }, null, 2));
+            console.log(
+              JSON.stringify(
+                {
+                  ...report,
+                  engine_staleness: staleness,
+                  gates_in_flight: gatesInFlight.map((g) => ({
+                    ...g.record,
+                    alive: g.alive,
+                    finished: g.finished,
+                  })),
+                },
+                null,
+                2
+              )
+            );
           } else {
             console.log(renderReport(report, staleness));
+            for (const g of gatesInFlight) console.log(`Gate in flight: ${describeInFlight(g)}`);
           }
         } catch (err) {
           handleKnownError(err);
@@ -1638,8 +1674,9 @@ function resumeBatchGate(opts: PauseResumeOptions): void {
           `⚠ sched resume --batch: '${file} ${args.join(' ')}' failed: ${err.message}\n`
         ),
     }),
-    runSuite: createBatchSuiteRunner(config),
-    runCapability: createBatchCapabilityRunner(),
+    // #1233: adopt (never duplicate) a gate the engine already has in flight here.
+    runSuite: createBatchSuiteRunner(config, { inFlightDir: inFlightDir(store.dir) }),
+    runCapability: createBatchCapabilityRunner({ inFlightDir: inFlightDir(store.dir) }),
   };
   try {
     const result = resumeBlockedGate(
@@ -2544,6 +2581,125 @@ export function reexecUpdatedCli(execveOverride?: ExecveFn | null): boolean {
   }
 }
 
+/**
+ * #1233: the off-thread tick runner for the continuous loop, or null for the
+ * inline tick (`DOSSIER_SCHED_INLINE_TICK=1`, or no compiled worker entry —
+ * running from sources). The inline fallback is announced: it is the mode in
+ * which a long gate freezes the heartbeat and defers signals.
+ */
+function resolveTickRunner(data: TickWorkerData): TickRunner | null {
+  if (process.env[INLINE_TICK_ENV] === '1') {
+    console.error(
+      `⚠ sched: ${INLINE_TICK_ENV}=1 — ticks run on the main thread; a long gate freezes the lease heartbeat and defers SIGTERM/SIGINT`
+    );
+    return null;
+  }
+  const file = tickWorkerFile(path.join(__dirname, '..'));
+  if (file === null) {
+    console.error(
+      '⚠ sched: tick worker entry not found next to the CLI build — ticks run on the main thread'
+    );
+    return null;
+  }
+  return createWorkerTickRunner(file, data);
+}
+
+/**
+ * The engine's dependencies for `sched start` — one place, so the inline tick
+ * and the tick worker (#1233, `sched-tick-worker.ts`) build identical engines.
+ */
+export function buildEngineDeps(opts: {
+  store: SchedStore;
+  journal: Journal;
+  anchorRepo: string | undefined;
+  /** The config snapshot of the tick in progress (the suite runner reads it per run). */
+  getTickConfig: () => SchedConfig;
+  repoDir?: string;
+}): EngineDeps {
+  const { store, journal: engineJournal, anchorRepo, getTickConfig } = opts;
+  const repoDir = opts.repoDir ?? process.cwd();
+  const gatesInFlightDir = inFlightDir(store.dir);
+  return {
+    store,
+    journal: engineJournal,
+    groundTruth: createExecGroundTruth(undefined, {
+      repoDir: repoDir,
+      ...(anchorRepo !== undefined ? { repo: anchorRepo } : {}),
+    }),
+    ...(anchorRepo !== undefined ? { anchorRepo } : {}),
+    spawnDeps: createSpawnDeps(repoDir),
+    now: () => new Date(),
+    repoDir: repoDir,
+    teardownExec: createExecFn(TEARDOWN_TIMEOUT_MS, {
+      onError: (file, args, err) =>
+        process.stderr.write(
+          `⚠ sched teardown: '${file} ${args.join(' ')}' failed: ${err.message}\n`
+        ),
+    }),
+    // #945: takeover rescue (git commit-tree + push of a dead agent's WIP), run
+    // OUTSIDE the state lock. Bounded like every other engine exec; failures
+    // are per-call diagnostics — a failed rescue never blocks the respawn.
+    rescueExec: createExecFn(RESCUE_TIMEOUT_MS, {
+      // A push that wants credentials must fail, never hang on a prompt.
+      env: { GIT_TERMINAL_PROMPT: '0' },
+      onError: (file, args, err) =>
+        process.stderr.write(
+          `⚠ sched rescue: '${file} ${args.slice(0, 2).join(' ')}…' failed: ${err.message}\n`
+        ),
+    }),
+    // #504: the ladder fences a superseded run before respawning its takeover.
+    // Its own exec rather than the ground-truth one: a fence is a WRITE, and
+    // borrowing `groundTruthExec` would file the only diagnostic for a failed write
+    // under `sched ground truth`, where nobody debugging a fence would look.
+    fencer: createExecRunFencer(
+      createExecFn(FENCE_TIMEOUT_MS, {
+        onError: (file, args, err) =>
+          process.stderr.write(
+            `⚠ sched fence: '${file} ${args.join(' ')}' failed: ${err.message}\n`
+          ),
+      }),
+      { repoDir: repoDir }
+    ),
+    // #840: a requeued parked batch member's first dispatch seeds its
+    // resume trail (a `setup done` milestone on its member branch) so the
+    // full-cycle gate resumes ON that branch. A write, so its own exec +
+    // diagnostic prefix, on the fence's budget (two short CLI calls).
+    resumeSeeder: createExecResumeSeeder(
+      createExecFn(FENCE_TIMEOUT_MS, {
+        onError: (file, args, err) =>
+          process.stderr.write(
+            `⚠ sched resume-seed: '${file} ${args.join(' ')}' failed: ${err.message}\n`
+          ),
+      }),
+      { repoDir: repoDir }
+    ),
+    // #523: batch git/milestone-CLI operations (worktree claim, commit-range
+    // recording, milestone posting, PR watch) and the aggregate suite runner
+    // that gates `executing → reviewing`. Reuses the same timeout as teardown
+    // (worktree/git ops). The cold-path warm-up install/build (#561) does
+    // NOT reuse this — see `batchWarmExec` below — a real `npm ci`+build
+    // routinely exceeds this budget.
+    batchExec: createExecFn(TEARDOWN_TIMEOUT_MS, {
+      onError: (file, args, err) =>
+        process.stderr.write(`⚠ sched batch: '${file} ${args.join(' ')}' failed: ${err.message}\n`),
+    }),
+    // #561: batch-setup's cold-path warm-up (install + build) on its own
+    // budget, matching `@ai-dossier/worktree-pool`'s own per-issue warm-up
+    // budget for the identical work (`WARM_COMMAND_TIMEOUT_MS`) rather than
+    // the git-op-tuned `batchExec` above.
+    batchWarmExec: createExecFn(WARM_COMMAND_TIMEOUT_MS, {
+      onError: (file, args, err) =>
+        process.stderr.write(
+          `⚠ sched batch warm-up: '${file} ${args.join(' ')}' failed: ${err.message}\n`
+        ),
+    }),
+    // One config per tick: the suite runner reads the snapshot the tick started with.
+    // #1233: engine gates are tracked in the in-flight registry (adopted, never duplicated).
+    runBatchSuite: createBatchSuiteRunner(getTickConfig, { inFlightDir: gatesInFlightDir }),
+    runBatchCapability: createBatchCapabilityRunner({ inFlightDir: gatesInFlightDir }),
+  };
+}
+
 function registerStartSubcommand(cmd: Command): void {
   cmd
     .command('start')
@@ -2564,6 +2720,10 @@ function registerStartSubcommand(cmd: Command): void {
     .option(
       '--alert-issue <n>',
       'Comment on this issue when the engine restarts after a crash (#945); default $DOSSIER_SCHED_ALERT_ISSUE. The alert is always journaled and printed to stderr'
+    )
+    .option(
+      '--unsupervised',
+      'Acknowledge running without a supervisor (no `sched service install`) and silence the warning (#1233)'
     )
     .option('--project <slug>', 'Project slug (default: owner-repo of the current directory)')
     .option('--json', 'Output tick results as JSON')
@@ -2637,7 +2797,8 @@ function registerStartSubcommand(cmd: Command): void {
           new Date(),
           previousStop !== null && previousStop.pid === acquisition.reclaimed.pid
             ? previousStop
-            : null
+            : null,
+          { stateDir: store.dir }
         );
       }
       try {
@@ -2762,86 +2923,12 @@ function registerStartSubcommand(cmd: Command): void {
             `▶ sched anchor close: off — the current directory is not ${project}'s GitHub repository`
           );
         }
-        const deps: EngineDeps = {
+        const deps: EngineDeps = buildEngineDeps({
           store,
           journal: engineJournal,
-          groundTruth: createExecGroundTruth(undefined, {
-            repoDir: process.cwd(),
-            ...(anchorRepo !== undefined ? { repo: anchorRepo } : {}),
-          }),
-          ...(anchorRepo !== undefined ? { anchorRepo } : {}),
-          spawnDeps: createSpawnDeps(process.cwd()),
-          now: () => new Date(),
-          repoDir: process.cwd(),
-          teardownExec: createExecFn(TEARDOWN_TIMEOUT_MS, {
-            onError: (file, args, err) =>
-              process.stderr.write(
-                `⚠ sched teardown: '${file} ${args.join(' ')}' failed: ${err.message}\n`
-              ),
-          }),
-          // #945: takeover rescue (git commit-tree + push of a dead agent's WIP), run
-          // OUTSIDE the state lock. Bounded like every other engine exec; failures
-          // are per-call diagnostics — a failed rescue never blocks the respawn.
-          rescueExec: createExecFn(RESCUE_TIMEOUT_MS, {
-            // A push that wants credentials must fail, never hang on a prompt.
-            env: { GIT_TERMINAL_PROMPT: '0' },
-            onError: (file, args, err) =>
-              process.stderr.write(
-                `⚠ sched rescue: '${file} ${args.slice(0, 2).join(' ')}…' failed: ${err.message}\n`
-              ),
-          }),
-          // #504: the ladder fences a superseded run before respawning its takeover.
-          // Its own exec rather than the ground-truth one: a fence is a WRITE, and
-          // borrowing `groundTruthExec` would file the only diagnostic for a failed write
-          // under `sched ground truth`, where nobody debugging a fence would look.
-          fencer: createExecRunFencer(
-            createExecFn(FENCE_TIMEOUT_MS, {
-              onError: (file, args, err) =>
-                process.stderr.write(
-                  `⚠ sched fence: '${file} ${args.join(' ')}' failed: ${err.message}\n`
-                ),
-            }),
-            { repoDir: process.cwd() }
-          ),
-          // #840: a requeued parked batch member's first dispatch seeds its
-          // resume trail (a `setup done` milestone on its member branch) so the
-          // full-cycle gate resumes ON that branch. A write, so its own exec +
-          // diagnostic prefix, on the fence's budget (two short CLI calls).
-          resumeSeeder: createExecResumeSeeder(
-            createExecFn(FENCE_TIMEOUT_MS, {
-              onError: (file, args, err) =>
-                process.stderr.write(
-                  `⚠ sched resume-seed: '${file} ${args.join(' ')}' failed: ${err.message}\n`
-                ),
-            }),
-            { repoDir: process.cwd() }
-          ),
-          // #523: batch git/milestone-CLI operations (worktree claim, commit-range
-          // recording, milestone posting, PR watch) and the aggregate suite runner
-          // that gates `executing → reviewing`. Reuses the same timeout as teardown
-          // (worktree/git ops). The cold-path warm-up install/build (#561) does
-          // NOT reuse this — see `batchWarmExec` below — a real `npm ci`+build
-          // routinely exceeds this budget.
-          batchExec: createExecFn(TEARDOWN_TIMEOUT_MS, {
-            onError: (file, args, err) =>
-              process.stderr.write(
-                `⚠ sched batch: '${file} ${args.join(' ')}' failed: ${err.message}\n`
-              ),
-          }),
-          // #561: batch-setup's cold-path warm-up (install + build) on its own
-          // budget, matching `@ai-dossier/worktree-pool`'s own per-issue warm-up
-          // budget for the identical work (`WARM_COMMAND_TIMEOUT_MS`) rather than
-          // the git-op-tuned `batchExec` above.
-          batchWarmExec: createExecFn(WARM_COMMAND_TIMEOUT_MS, {
-            onError: (file, args, err) =>
-              process.stderr.write(
-                `⚠ sched batch warm-up: '${file} ${args.join(' ')}' failed: ${err.message}\n`
-              ),
-          }),
-          // One config per tick: the suite runner reads the snapshot the tick started with.
-          runBatchSuite: createBatchSuiteRunner(() => tickConfig),
-          runBatchCapability: createBatchCapabilityRunner(),
-        };
+          anchorRepo,
+          getTickConfig: () => tickConfig,
+        });
 
         const describe = (result: TickResult): string => {
           const parts: string[] = [];
@@ -2929,11 +3016,26 @@ function registerStartSubcommand(cmd: Command): void {
           return;
         }
 
+        // #1233: an unsupervised engine dies for good the first time anything
+        // kills it (the 2026-09-29 engine sat dead for 15 days). Say so loudly.
+        if (!opts.unsupervised) {
+          const warning = unsupervisedWarning(project, () => serviceStatus(project, serviceIo()));
+          if (warning !== null) console.error(warning);
+        }
+
         const interval =
           (engineConfig.reconcile_interval_ms ?? DEFAULT_RECONCILE_INTERVAL_MS) / 1000;
         console.log(
           `▶ Scheduler engine running for ${project} (tick every ${interval}s, Ctrl-C to stop)`
         );
+        // #1233: run each tick in a worker thread so this event loop stays free
+        // during a long gate — the lease keeps its heartbeat and SIGTERM/SIGINT
+        // are handled (and journaled) instead of piling up behind a spawnSync.
+        const tickRunner = resolveTickRunner({
+          stateDir: store.dir,
+          repoDir: process.cwd(),
+          ...(anchorRepo !== undefined ? { anchorRepo } : {}),
+        });
         let upgradeHandoff = false;
         await runLoop(
           deps,
@@ -2959,8 +3061,10 @@ function registerStartSubcommand(cmd: Command): void {
               upgradeHandoff = true;
               stopping = true;
             }
-          }
+          },
+          tickRunner !== null ? { runTick: (cfg) => tickRunner.runTick(cfg) } : {}
         );
+        await tickRunner?.close();
         if (upgradeHandoff) {
           exitLogger.logNormalExit('auto-upgrade handoff');
           releaseLease();

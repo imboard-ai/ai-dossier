@@ -216,7 +216,8 @@ function runCapabilitySuite(
   capabilityId: string,
   worktree: string,
   capabilityTimeoutMs: number,
-  env?: NodeJS.ProcessEnv
+  env?: NodeJS.ProcessEnv,
+  inFlightDir?: string
 ): RunOutcome | 'unavailable' {
   const source = `cap run ${capabilityId}`;
   const start = Date.now();
@@ -229,6 +230,7 @@ function runCapabilitySuite(
     // The inner capability owns this budget; the outer watchdog has bounded setup grace.
     timeoutMs: capabilityTimeoutMs + CAP_RUN_SETUP_GRACE_MS,
     env,
+    ...(inFlightDir !== undefined ? { inFlightDir } : {}),
   });
   const { spawned } = run;
   if (spawned.error && !run.exitedWithVerdict) {
@@ -363,7 +365,11 @@ function capabilityTimeout(
  */
 export function createBatchSuiteRunner(
   configSource: SchedConfig | (() => SchedConfig),
-  opts: { timeoutMs?: number } = {}
+  opts: {
+    timeoutMs?: number;
+    /** #1233: track engine gates in the sched state's in-flight registry (adopt, never duplicate). */
+    inFlightDir?: string;
+  } = {}
 ): (worktree: string, ctx?: BatchSuiteContext) => SuiteResult {
   const defaultTimeoutMs = opts.timeoutMs ?? BATCH_SUITE_TIMEOUT_MS;
   return (worktree, ctx) => {
@@ -381,7 +387,8 @@ export function createBatchSuiteRunner(
         BATCH_GATE_CAPABILITY,
         worktree,
         capabilityTimeout(manifest, BATCH_GATE_CAPABILITY, defaultTimeoutMs),
-        env
+        env,
+        opts.inFlightDir
       );
       // #793: the manifest declares the batch gate active but the capability
       // layer cannot see it (older `ai-dossier` on PATH, stale shadow copy).
@@ -404,7 +411,8 @@ export function createBatchSuiteRunner(
         FULL_SUITE_CAPABILITY,
         worktree,
         capabilityTimeout(manifest, FULL_SUITE_CAPABILITY, defaultTimeoutMs),
-        env
+        env,
+        opts.inFlightDir
       );
     }
     if (cap !== 'unavailable') {

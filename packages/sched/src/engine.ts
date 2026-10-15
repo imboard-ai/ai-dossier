@@ -3669,6 +3669,49 @@ function mergeBatchResult(result: TickResult, batch: BatchTickResult): TickResul
   };
 }
 
+/** Default cadence of the in-tick heartbeat (#1233). */
+export const TICK_HEARTBEAT_MS = 30_000;
+/**
+ * How long one tick may keep heartbeating (#1233). Longer than any gate's
+ * budget, so a tick that is still running past it is wedged — the heartbeat
+ * then stops and the stale-lease `engine-hung` detection (#945) takes over.
+ */
+export const MAX_TICK_HEARTBEAT_MS = 4 * 60 * 60 * 1000;
+
+export interface RunLoopOptions {
+  /**
+   * Run one tick off this thread (#1233: a worker thread) and resolve with its
+   * result. While it is pending the loop heartbeats the engine lease every
+   * {@link heartbeatMs}. Omitted → the tick runs inline (synchronously).
+   */
+  runTick?: (config: SchedConfig) => Promise<TickResult>;
+  /** In-tick heartbeat cadence (default {@link TICK_HEARTBEAT_MS}). */
+  heartbeatMs?: number;
+  /** Stop heartbeating a tick older than this (default {@link MAX_TICK_HEARTBEAT_MS}). */
+  maxTickHeartbeatMs?: number;
+}
+
+async function withTickHeartbeat<T>(
+  deps: EngineDeps,
+  opts: RunLoopOptions,
+  work: () => Promise<T>
+): Promise<T> {
+  const started = Date.now();
+  const maxMs = opts.maxTickHeartbeatMs ?? MAX_TICK_HEARTBEAT_MS;
+  const timer = setInterval(() => {
+    if (Date.now() - started > maxMs) {
+      clearInterval(timer);
+      return;
+    }
+    deps.store.touchEngineLease?.(deps.now());
+  }, opts.heartbeatMs ?? TICK_HEARTBEAT_MS);
+  try {
+    return await work();
+  } finally {
+    clearInterval(timer);
+  }
+}
+
 /**
  * The long-running loop behind `sched start`: tick, sleep, repeat. Returns
  * when `shouldStop()` says so (the CLI wires SIGINT). A failed tick is
@@ -3683,30 +3726,40 @@ export function runLoop(
   deps: EngineDeps,
   configSource: SchedConfig | (() => SchedConfig),
   shouldStop: () => boolean,
-  onTick?: (result: TickResult) => void
+  onTick?: (result: TickResult) => void,
+  opts?: RunLoopOptions
 ): Promise<void>;
 export function runLoop(
   deps: EngineDeps,
   configSource: SchedConfig | (() => SchedConfig),
   shouldStop: () => boolean,
-  onTick: (result: TickResult) => Promise<void>
+  onTick: (result: TickResult) => Promise<void>,
+  opts?: RunLoopOptions
 ): Promise<void>;
 export async function runLoop(
   deps: EngineDeps,
   configSource: SchedConfig | (() => SchedConfig),
   shouldStop: () => boolean,
-  onTick?: (result: TickResult) => unknown
+  onTick?: (result: TickResult) => unknown,
+  opts: RunLoopOptions = {}
 ): Promise<void> {
   // #883: a function source is consulted at the top of EVERY tick, so a config
   // edit applies from the next tick on. The sleep interval is fixed at start.
   const resolveConfig = typeof configSource === 'function' ? configSource : () => configSource;
   const interval = resolveDispatch(resolveConfig()).reconcileIntervalMs;
+  const runTick = opts.runTick;
   while (!shouldStop()) {
     // #945: heartbeat every tick, before the work — a wedged tick then shows as
     // a stale `updated_at` on a live pid, and an idle one as a fresh one.
     deps.store.touchEngineLease?.(deps.now());
     try {
-      const result = tick(deps, resolveConfig());
+      // #1233: an off-thread tick (`runTick`) leaves this event loop free, so
+      // the lease keeps its heartbeat — and SIGTERM/SIGINT handlers keep
+      // running — through a 25–55 min batch gate.
+      const result =
+        runTick === undefined
+          ? tick(deps, resolveConfig())
+          : await withTickHeartbeat(deps, opts, () => runTick(resolveConfig()));
       await onTick?.(result);
     } catch (err) {
       const detail = `${(err as Error).name}: ${(err as Error).message}`;

@@ -31,6 +31,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { runTrackedCapRun } from './cap-run-tracked';
 import {
   CAP_ENVELOPE_FILE_ENV,
   CAPABILITY_EXIT_CODES,
@@ -191,8 +192,35 @@ export interface CapRunSpawn {
 export function spawnCapRun(
   capabilityId: string,
   cwd: string,
-  opts: { timeoutMs: number; env?: NodeJS.ProcessEnv }
+  opts: {
+    timeoutMs: number;
+    env?: NodeJS.ProcessEnv;
+    /**
+     * #1233: the sched state's in-flight registry. When set, the run is
+     * launched in its own process group and recorded there (pid, start, HEAD)
+     * before waiting, and a live/finished run already recorded for this
+     * worktree + capability is adopted instead of duplicated — see
+     * `cap-run-tracked.ts`. Unset → the plain `spawnSync` path.
+     */
+    inFlightDir?: string;
+  }
 ): CapRunSpawn {
+  if (opts.inFlightDir !== undefined && process.platform !== 'win32') {
+    const tracked = runTrackedCapRun(capabilityId, cwd, {
+      timeoutMs: opts.timeoutMs,
+      env: opts.env,
+      inFlightDir: opts.inFlightDir,
+      maxBuffer: CAP_RUN_MAX_BUFFER_BYTES,
+    });
+    try {
+      const verdict = resolveVerdict(tracked.spawned, readCapEnvelopeFile(tracked.envelopeFile));
+      return tracked.notes.length > 0
+        ? { ...verdict, diagnostics: `${verdict.diagnostics}; ${tracked.notes.join('; ')}` }
+        : verdict;
+    } finally {
+      tracked.release();
+    }
+  }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ai-dossier-cap-'));
   const envelopeFile = path.join(dir, 'envelope.json');
   try {

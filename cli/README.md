@@ -1454,7 +1454,7 @@ respectively; `get --json` includes the comment's `author`.
 ```bash
 ai-dossier sched enqueue --issues 101,105..109 [--mode full|slot] [--batch b1] [--more-members-expected] [--deps 100,104] [--tier mechanical|mid|strong] [--priority <n>] [--repo owner/name]
 ai-dossier sched enqueue --from-manifest batch-prep.json [--repo owner/name]
-ai-dossier sched start [--interval <seconds>] [--once] [--auto-upgrade] [--alert-issue <n>] [--json]
+ai-dossier sched start [--interval <seconds>] [--once] [--auto-upgrade] [--alert-issue <n>] [--unsupervised] [--json]
 ai-dossier sched service install [--mode systemd|cron] [--alert-issue <n>] [--no-auto-upgrade] | uninstall | status   # THE way to run the engine (#945): systemd user unit or cron watchdog, restarts it by itself
 ai-dossier sched ensure-running [--disable|--enable]   # the cron watchdog: start the engine if no live one holds the lease
 ai-dossier sched status [--json] [--anchors] [--alert]   # ⚠ health warnings: long pause, stale lease, stuck / stale-closed slots (#776), kept worktrees on done batches (#791)
@@ -1666,6 +1666,22 @@ per running parallel member) and stops unfinished members atomically. `abandon` 
   cannot replace the process directly, the engine exits with code 75 so the service/watchdog
   restarts the updated entry point. Install failures are journaled as
   `engine-auto-upgrade-failed`; attempts are recorded before installation begins.
+  **Gates and engine liveness (#1233).** The continuous engine runs each tick in a worker
+  thread, so a 25–55 min batch gate never freezes the main thread: the lease is
+  heartbeated every 30 s while a tick runs (up to 4 h — a tick older than that is treated
+  as wedged and goes stale), and SIGTERM/SIGINT are handled and journaled at once
+  (`DOSSIER_SCHED_INLINE_TICK=1` restores the old inline tick). Each `cap run` gate runs
+  in its own process group and is recorded under `~/.dossier/sched/<project>/in-flight/`
+  before the engine waits on it; when the engine dies mid-gate the gate keeps running,
+  `status` lists it as `Gate in flight: … (STILL RUNNING)`, and the next engine (or
+  `sched resume --batch`) waits for it and adopts its verdict instead of launching a
+  duplicate. **Host process reapers:** an unattended engine is a long-lived, TTY-less
+  `node` process — exactly what "kill orphaned node processes older than N hours" cron
+  jobs target. Allowlist `ai-dossier sched` and `ai-dossier cap run` in any such reaper,
+  and run the engine under `sched service install` so it is restarted; `start` warns when
+  no supervisor is installed (`--unsupervised` acknowledges it). An engine that left no
+  `engine-exit` line in the journal was SIGKILLed — check `journalctl -k` for an oom-kill
+  and the host's reapers.
 - **`status`** renders the queue (with `priority`, `pr`, and `cleanup` columns — a
   slot-mode member's own `priority` cell reads `-`, since the scheduler never reads it;
   the BATCH's `priority` in the batches table below is what governs assignment, #565),

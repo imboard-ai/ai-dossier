@@ -137,12 +137,20 @@ export {
   wrongProcedureDirective,
 } from './dispatch';
 export { findDossierRoot, projectRootFor, worktreesDirFor } from './dossier-root';
-export { type EngineDeps, recordTickFailure, runLoop, type TickResult, tick } from './engine';
+export {
+  type EngineDeps,
+  type RunLoopOptions,
+  recordTickFailure,
+  runLoop,
+  type TickResult,
+  tick,
+} from './engine';
 export {
   type AlertNotifier,
   checkStaleLeaseAlert,
   type EngineAlert,
   reportCrashRestart,
+  SIGKILL_SUSPECTS_HINT,
   type StaleLeaseAlertOutcome,
 } from './engine-alert';
 export {
@@ -216,6 +224,19 @@ export {
   type SetupInfo,
   wrongProcedureShippedPr,
 } from './groundtruth';
+export {
+  describeInFlight,
+  IN_FLIGHT_RUN_FILES,
+  type InFlightCapRun,
+  type InFlightListing,
+  inFlightAlive,
+  inFlightDir,
+  inFlightFinished,
+  listInFlight,
+  readInFlight,
+  removeInFlight,
+  writeInFlight,
+} from './in-flight';
 export {
   appendJsonl,
   batchOfUnit,
