@@ -1,6 +1,6 @@
 {
   "name": "@ai-dossier/worktree-pool",
-  "version": "0.7.6",
+  "version": "0.7.7",
   "description": "Pre-warmed Git worktree pool for agent orchestration: instant, isolated checkouts for coding agents running signed, versioned agent skills in parallel.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

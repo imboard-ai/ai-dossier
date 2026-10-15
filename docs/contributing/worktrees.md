@@ -88,10 +88,14 @@ git worktree remove ../feature-name
 
 # Delete the remote branch if needed
 git push origin --delete feature/name
-
-# Clean up stale worktree metadata
-git worktree prune
 ```
+
+`git worktree remove` already deletes the worktree's metadata, so no prune is
+needed. **Never run a bare `git worktree prune`**: it also deletes the metadata
+of any worktree that was moved or renamed without `git worktree repair
+<new-path>`, and that folder then fails every git command
+(`fatal: not a git repository`). To clear leftover metadata safely, see
+[Safe prune](#safe-prune) below.
 
 **After removal, update the registry** - mark as completed or remove the row.
 
@@ -115,8 +119,8 @@ git worktree remove <path>
 # Remove a worktree (force, even if dirty)
 git worktree remove --force <path>
 
-# Clean up stale worktree metadata
-git worktree prune
+# Repair a worktree you moved or renamed (always pass the NEW path)
+git worktree repair <new-path>
 
 # Lock a worktree (prevent automatic removal)
 git worktree lock <path>
@@ -217,6 +221,39 @@ git worktree remove <path>
 ```
 
 ---
+
+### Safe prune
+
+`git worktree prune` deletes the metadata (`.git/worktrees/<id>/`) of every
+worktree whose recorded folder is gone — including one that was only moved or
+renamed. Repair moved worktrees first, then prune what is truly gone:
+
+```bash
+# From the main worktree. POOL_DIR: the pool directory `worktree-pool status` prints, if the repo uses one.
+COMMON=$(git rev-parse --path-format=absolute --git-common-dir)
+LC_ALL=C git worktree prune --dry-run -v 2>&1 | sed -n 's|^Removing worktrees/\([^:]*\):.*|\1|p' | while read -r id; do
+  ADMIN=$(realpath "$COMMON/worktrees/$id")
+  OLD_PARENT=$(dirname "$(dirname "$(cat "$ADMIN/gitdir")")")   # a rename usually stays in the same parent
+  MATCHES=$(for d in "$OLD_PARENT"/*/ "$(git rev-parse --show-toplevel)"/worktrees/*/ ${POOL_DIR:+"$POOL_DIR"/*/}; do
+    [ -f "$d.git" ] || continue
+    t=$(sed -n 's/^gitdir: //p' "$d.git")
+    [ "$(cd "$d" && realpath -m "$t")" = "$ADMIN" ] && realpath "$d"
+  done | sort -u)
+  case $(printf '%s' "$MATCHES" | grep -c .) in
+    0) echo "gone: $id (no folder links to it)" ;;
+    1) git worktree repair "$MATCHES" >/dev/null 2>&1 && echo "repaired: $id -> $MATCHES" || echo "FAILED to repair $MATCHES — do not prune" ;;
+    *) echo "SKIP: $id is claimed by several folders (a copy?) — resolve by hand:"; echo "$MATCHES" ;;
+  esac
+done
+LC_ALL=C git worktree prune --dry-run -v   # re-check: prune only if every id still listed printed "gone:"
+```
+
+Then run `git worktree prune` only if every id the re-check still lists printed
+`gone:`. A `SKIP:` line means two folders claim one worktree (one is a copy):
+remove the copy, then re-run. A moved worktree living outside the searched
+directories needs `git worktree repair <that-folder>` by hand first. When in
+doubt, skip the prune — leftover metadata is harmless; a pruned admin dir is not.
+`realpath -m` is GNU coreutils (Linux; `brew install coreutils` on macOS).
 
 ### Can't find my code after restructuring
 

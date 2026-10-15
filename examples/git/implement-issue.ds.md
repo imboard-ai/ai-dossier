@@ -4,10 +4,10 @@ description: 'Implement the solution described in the planning document, run tes
 metadata:
   dossier.dossier_schema_version: '1.0.0'
   dossier.title: 'Implement Issue — Code and Test'
-  dossier.version: '1.8.2'
+  dossier.version: '1.8.3'
   dossier.protocol_version: '"1.0"'
   dossier.status: 'Stable'
-  dossier.last_updated: '2026-09-09'
+  dossier.last_updated: '2026-10-15'
   dossier.objective: 'Implement the solution described in the planning document, run tests, and auto-fix lint issues'
   dossier.category: '["development"]'
   dossier.tags: '["issue","workflow","git","github","implement","test"]'
@@ -16,8 +16,8 @@ metadata:
   dossier.requires_approval: 'false'
   dossier.inputs: '{"optional":[{"default":"main","description":"Base branch for comparing pre-existing test failures","name":"base_branch","type":"string"},{"description":"Runstate run id minted by gate-issue; pass through unchanged","name":"run_id","type":"string"}],"required":[{"description":"Path to the PLANNING-{number}-{slug}.md file","name":"planning_file","type":"string"}]}'
   dossier.authors: '[{"name":"Yuval Dimnik"}]'
-  dossier.checksum: '{"algorithm":"sha256","hash":"fcac6c28b4efc509e335fa7f445d2decc4d2f0a752124afb2bb306c54f88cd71"}'
-  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"NGku30LYMCJdiP8v6xrL0FcMKUHj0wAxlmN8drhDidVZKK/O+2n0OSDUMsWfvvHWIEqqft7CevL047I1z6bxAw==","signed_at":"2026-10-07T11:59:28.401Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
+  dossier.checksum: '{"algorithm":"sha256","hash":"9ac0ae0360eb18033c809fb4a9899eaa4945a263cc08cae750345c8331cd7d01"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"YUIue4PCMxiXogwRtfXcP+PA4kIHlk7fWoc9JWqEa7mOLpv48GLpfPj9+T6uVEMmo12j7B0kY9WlJfx8V96kAA==","signed_at":"2026-10-15T07:05:51.447Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Implement Issue — Code and Test
@@ -87,7 +87,7 @@ done
 BASE_RESULT=$?
 git worktree remove "$TMP" --force
 ```
-`--detach` at the resolved commit (not a branch checkout) avoids two failure modes: it never contends with `<base_branch>` being checked out elsewhere (a plain `git worktree add "$TMP" <base_branch>` blocks on this, and would also break item 5's own `git checkout <base_branch>` fallback below), and if the process dies mid-item, the stray `$TMP` worktree carries no branch lock — reconcile a leftover with `git worktree list` + `git worktree remove --force` (or `git worktree prune`) before retrying. Use this mechanism, not `git stash push --keep-index` — stash loses the staged/unstaged distinction and pops back into the live worktree, risking the in-progress change; a throwaway detached `git worktree add` runs fully isolated and a single `git worktree remove` cleans it up with nothing to lose. If the stack needs installed dependencies to run at all (most Node/Python projects), copy or symlink the live worktree's `node_modules`/venv into `$TMP` before running the test command — a fresh checkout with no dependencies fails to run the test at all, which is not evidence of anything; if that isn't feasible within the cost guard below, use the `no-repro` outcome instead of trusting a spurious result.
+`--detach` at the resolved commit (not a branch checkout) avoids two failure modes: it never contends with `<base_branch>` being checked out elsewhere (a plain `git worktree add "$TMP" <base_branch>` blocks on this, and would also break item 5's own `git checkout <base_branch>` fallback below), and if the process dies mid-item, the stray `$TMP` worktree carries no branch lock — reconcile a leftover with `git worktree list` + `git worktree remove --force <leftover-path>` before retrying — it clears the metadata even when the folder is already gone. Never a bare `git worktree prune` instead: it also deletes the admin dir of any OTHER worktree that was moved or renamed without `git worktree repair <new-path>`, corrupting that checkout (`fatal: not a git repository`, ai-dossier#1232). If leftover metadata must be pruned, use the safe prune (full-cycle-issue Phase 1 step 1): `git worktree prune --dry-run -v`; for each listed `worktrees/<id>`, if exactly one folder on disk — in the old folder's parent directory, `<repo>/worktrees/*` or the pool directory — has a `.git` file linking to that admin dir, run `git worktree repair <that-folder>` instead (two folders = a copy: resolve by hand, never repair both); prune only once every entry still listed has no folder anywhere. Use this mechanism, not `git stash push --keep-index` — stash loses the staged/unstaged distinction and pops back into the live worktree, risking the in-progress change; a throwaway detached `git worktree add` runs fully isolated and a single `git worktree remove` cleans it up with nothing to lose. If the stack needs installed dependencies to run at all (most Node/Python projects), copy or symlink the live worktree's `node_modules`/venv into `$TMP` before running the test command — a fresh checkout with no dependencies fails to run the test at all, which is not evidence of anything; if that isn't feasible within the cost guard below, use the `no-repro` outcome instead of trusting a spurious result.
 
 Record the outcome (used in Step 7's `repro=` key):
 - Base run failed (`BASE_RESULT != 0`, and not `124` — see the cost guard) and the same test passes once run against HEAD in item 4 → `repro=red-then-green`.

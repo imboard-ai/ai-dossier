@@ -7,6 +7,7 @@ import {
   findMissingWarmEntries,
   formatAge,
   gc,
+  type HealedLink,
   init,
   type PoolDirEntryReport,
   ReturnFailure,
@@ -67,6 +68,30 @@ function reportCorrupted(corrupted: PoolDirEntryReport[]): void {
 }
 
 /**
+ * Print pool entries whose stale admin `gitdir` link was repaired before the
+ * command acted (#1232) — left stale, the next `git worktree prune` would have
+ * deleted their admin dirs. Never fatal.
+ */
+function reportHealed(
+  healed: HealedLink[],
+  errors: string[],
+  log: (line: string) => void = console.error
+): void {
+  if (healed.length > 0) {
+    log(`Repaired stale worktree link(s): ${healed.length}`);
+    for (const h of healed) {
+      log(`  ${h.name} — admin gitdir pointed at ${h.staleGitdir ?? '(empty)'}`);
+    }
+  }
+  if (errors.length > 0) {
+    log(`Stale worktree link(s) NOT repaired: ${errors.length}`);
+    for (const e of errors) {
+      log(`  ${e}`);
+    }
+  }
+}
+
+/**
  * Print warm entries whose directory is gone from disk — removed outside the
  * pool. Never fatal: claim skips them; `gc` drops the stale state entries.
  */
@@ -98,6 +123,12 @@ Commands:
 The pool only ever removes worktrees it created. Worktrees sharing the pool
 directory that the pool did not create are reported as "foreign, skipped" and
 are never touched. gc and reap require --yes when stdin is not a TTY.
+
+'status', 'claim' and 'replenish' first repair pool entries whose git admin
+dir records a stale path (a folder moved without 'git worktree repair <new>'),
+so a later 'git worktree prune' cannot delete it; they report what they did.
+'claim' fails, renaming nothing, if a folder named after the branch exists.
+The pool never runs a repo-wide 'git worktree prune'.
 
 A failed 'return' leaves its pool entry marked 'broken' (never 'assigned' or
 'warm') and exits non-zero naming the step that failed — except for a path that
@@ -210,6 +241,10 @@ async function main(): Promise<void> {
           }
           console.log("Run 'worktree-pool gc --yes' to clear corrupted pool directories.");
         }
+        if (s.healed.length > 0 || s.heal_errors.length > 0) {
+          console.log('');
+          reportHealed(s.healed, s.heal_errors, console.log);
+        }
         break;
       }
 
@@ -217,6 +252,7 @@ async function main(): Promise<void> {
         const count = flags.count ? Number.parseInt(String(flags.count), 10) : undefined;
         console.error(`Replenishing pool${count ? ` (count: ${count})` : ''}...`);
         const result = await replenish(count);
+        reportHealed(result.healed, result.healErrors);
         console.error(`Created ${result.created} worktree(s)`);
         if (result.errors.length > 0) {
           for (const err of result.errors) {
@@ -236,6 +272,7 @@ async function main(): Promise<void> {
         }
         const result = claim(issue, branch);
         if (result) {
+          reportHealed(result.healed, result.healErrors);
           reportCorrupted(result.broken);
           reportMissing(result.missing);
           console.log(result.path);

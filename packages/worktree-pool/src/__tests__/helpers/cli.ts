@@ -46,6 +46,11 @@ export function readPoolState(poolDir: string): PoolState | null {
   return JSON.parse(fs.readFileSync(statePath, 'utf-8'));
 }
 
+/** Overwrite `.pool-state.json` — for tests that hand-craft a pool state. */
+export function writePoolState(poolDir: string, state: PoolState): void {
+  fs.writeFileSync(path.join(poolDir, '.pool-state.json'), `${JSON.stringify(state, null, 2)}\n`);
+}
+
 /** Write `.worktree-pool.json` pointing at `poolDir`, so the CLI never prompts. */
 export function writePoolConfig(
   gitRoot: string,
