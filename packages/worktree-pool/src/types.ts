@@ -85,7 +85,8 @@ export interface PoolWorktree {
  * attributed to exactly one of these; the name is printed and, for every step
  * after `lookup`, recorded on the broken entry (#453). `lookup` fails before
  * there is an entry to mark, and `unknown` is the fallback for a throw that
- * escaped the step wrappers.
+ * escaped the step wrappers. `claim-revert` is not a `return` step: it marks
+ * an entry whose failed `claim` could not be undone (#1232).
  */
 export type ReturnStep =
   | 'lookup'
@@ -99,6 +100,7 @@ export type ReturnStep =
   | 'warm-commands'
   | 'commit-state'
   | 'verify'
+  | 'claim-revert'
   | 'unknown';
 
 export interface PoolState {

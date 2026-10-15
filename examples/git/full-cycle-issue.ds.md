@@ -4,10 +4,10 @@ description: 'Take a GitHub issue from start to merged PR autonomously — compo
 metadata:
   dossier.dossier_schema_version: '1.0.0'
   dossier.title: 'Full Cycle Issue Workflow'
-  dossier.version: '3.19.1'
+  dossier.version: '3.19.2'
   dossier.protocol_version: '"1.0"'
   dossier.status: 'Draft'
-  dossier.last_updated: '2026-10-14'
+  dossier.last_updated: '2026-10-15'
   dossier.objective: 'Take a GitHub issue from start to merged PR autonomously — composed from shared sub-dossiers: gate, setup, plan, implement, review, ship, and report'
   dossier.category: '["development"]'
   dossier.tags: '["github","issues","workflow","autonomous","full-cycle","pr","merge"]'
@@ -19,8 +19,8 @@ metadata:
   dossier.external_references: '[{"description":"GitHub CLI documentation","required":false,"trust_level":"trusted","type":"documentation","url":"https://cli.github.com/"}]'
   dossier.inputs: '{"optional":[{"default":"imboard-ai/git/warm-worktree","description":"Which warm-worktree dossier to use for worktree warmup. Passed through to setup-issue-workflow. Override for project-specific warmup (e.g., imboard-ai/imboard/warm-worktree-pnpm-ssm for pnpm+SSM).","name":"warmup_dossier","type":"string"},{"default":"auto","description":"Target branch to branch from and merge into. Overrides issue body parsing. Use for epic sub-issues.","name":"base_branch","type":"string"},{"description":"How to query this project''s production data for plan-issue''s reachability check — a read-only method such as a database MCP server, read replica, or analytics warehouse. No default: passed through to plan-issue only when set; when unset it is omitted and plan-issue applies its own generic default. Use exactly `none` for a project that deliberately grants no production access — plan-issue then skips the production query instead of escalating as unverifiable. Bind it in the project''s own invocation, never in this generic workflow.","name":"prod_data_access","type":"string"},{"default":"attached","description":"attached (default) = Phase 5 drives the PR to a confirmed merge and deploy, then Phase 6 reports. detached = a REQUEST to park: Phase 5 parks the PR on auto-merge, posts the awaiting-merge milestone, and the run STOPS (a later run resumes at ship-teardown) ONLY when ship-issue Step 3c confirms a merge mechanism (watcher workflow, or a non-null autoMergeRequest read back after requesting native auto-merge) — otherwise the run falls back to attached and merges the PR itself. Fleet-cycle and sched pass the detected mechanism and dispatch detached only where it is confirmed.","name":"ship_mode","type":"string"}]}'
   dossier.authors: '[{"name":"Yuval Dimnik"}]'
-  dossier.checksum: '{"algorithm":"sha256","hash":"d4dc6b605d1ba0b124f5864d870208f05ea93b56c542aeb35f513a8d9facdfa4"}'
-  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"3NCtaS9Aaw5oXxakSyXMl2qEc1TZvdUHBiVFrNy39DGEPexGdBj5V7oIbnSBpGjmfqs08fXSuhH5S6ekL6g+CQ==","signed_at":"2026-10-14T12:23:26.070Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
+  dossier.checksum: '{"algorithm":"sha256","hash":"da4b3e00a667721057bcdc3acb9d28e9502db70d843e09329e4045c75f254d4e"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"egaV99pk+0DyB539LgakNTWtFdxIiTq1o+KtnYNVzRTVyIMJ6OJ6T8NUnhu67s5viIPSG8WDsTmhNi6oNJWsCw==","signed_at":"2026-10-15T07:05:48.527Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Full Cycle Issue Workflow
@@ -133,7 +133,28 @@ Always runs — it determines `resume_from`.
 
 **Skip if `resume_from` is later than this phase.**
 
-1. **Pre-flight: clean stale worktrees.** `git worktree list`; a worktree is stale ONLY if ALL hold: its branch is gone from the remote (`git ls-remote --exit-code origin <branch>` fails) AND `git -C <wt> status --porcelain` is empty AND it is not pool-managed (not in `.pool-state.json`) AND its issue has no mid-run runstate trail. In squash-merge repos `merge-base --is-ancestor` is meaningless — never use it as a staleness signal. When unsure, leave the worktree; `git worktree prune` alone is always safe.
+1. **Pre-flight: clean stale worktrees.** `git worktree list`; a worktree is stale ONLY if ALL hold: its branch is gone from the remote (`git ls-remote --exit-code origin <branch>` fails) AND `git -C <wt> status --porcelain` is empty AND it is not pool-managed (not in `.pool-state.json`) AND its issue has no mid-run runstate trail. In squash-merge repos `merge-base --is-ancestor` is meaningless — never use it as a staleness signal. Remove a stale worktree with `git worktree remove --force <wt>` (it also clears the metadata of one whose folder is already gone). When unsure, leave the worktree.
+   **Never run a bare `git worktree prune`.** It deletes the admin dir (`.git/worktrees/<id>/`) of every worktree whose recorded folder is missing — including one that was only moved or renamed without `git worktree repair <new-path>` — and that folder then fails every git command with `fatal: not a git repository` (ai-dossier#443, #1232). To clear leftover metadata, use the **safe prune** — repair every listed entry that still has a folder, prune only what is truly gone:
+   ```bash
+   # From the main worktree. POOL_DIR: the pool directory `worktree-pool status` prints, if the repo uses one.
+   COMMON=$(git rev-parse --path-format=absolute --git-common-dir)
+   LC_ALL=C git worktree prune --dry-run -v 2>&1 | sed -n 's|^Removing worktrees/\([^:]*\):.*|\1|p' | while read -r id; do
+     ADMIN=$(realpath "$COMMON/worktrees/$id")
+     OLD_PARENT=$(dirname "$(dirname "$(cat "$ADMIN/gitdir")")")   # a rename usually stays in the same parent
+     MATCHES=$(for d in "$OLD_PARENT"/*/ "$(git rev-parse --show-toplevel)"/worktrees/*/ ${POOL_DIR:+"$POOL_DIR"/*/}; do
+       [ -f "$d.git" ] || continue
+       t=$(sed -n 's/^gitdir: //p' "$d.git")
+       [ "$(cd "$d" && realpath -m "$t")" = "$ADMIN" ] && realpath "$d"
+     done | sort -u)
+     case $(printf '%s' "$MATCHES" | grep -c .) in
+       0) echo "gone: $id (no folder links to it)" ;;
+       1) git worktree repair "$MATCHES" >/dev/null 2>&1 && echo "repaired: $id -> $MATCHES" || echo "FAILED to repair $MATCHES — do not prune" ;;
+       *) echo "SKIP: $id is claimed by several folders (a copy?) — resolve by hand:"; echo "$MATCHES" ;;
+     esac
+   done
+   LC_ALL=C git worktree prune --dry-run -v   # re-check: prune only if every id still listed printed "gone:"
+   ```
+   Run `git worktree prune` only if every id the re-check still lists printed `gone:`. `SKIP:` means two folders claim one worktree (one is a copy) — remove the copy, then re-run; never repair both. A moved worktree outside the searched directories needs `git worktree repair <that-folder>` by hand first. If in doubt, skip the prune — leftover metadata is harmless; a pruned admin dir is not.
 2. **Claim the issue** — make it visible that work is in progress:
    ```bash
    gh label create "in-progress" --color "FBCA04" --description "Actively being worked on" --force

@@ -4,18 +4,18 @@ description: 'Reference guide for the issue workflow family — explains when to
 metadata:
   dossier.dossier_schema_version: '1.0.0'
   dossier.title: 'Issue Workflows Guide'
-  dossier.version: '1.6.2'
+  dossier.version: '1.6.3'
   dossier.protocol_version: '"1.0"'
   dossier.status: 'Stable'
-  dossier.last_updated: '2026-10-06'
+  dossier.last_updated: '2026-10-15'
   dossier.objective: 'Reference guide for the issue workflow family — explains when to use each workflow, how they compose from shared sub-dossiers, and available flags'
   dossier.category: '["documentation"]'
   dossier.tags: '["issue","workflow","git","github","guide","reference"]'
   dossier.risk_level: 'low'
   dossier.requires_approval: 'false'
   dossier.authors: '[{"name":"Yuval Dimnik"}]'
-  dossier.checksum: '{"algorithm":"sha256","hash":"4cc19d5b0b729240bf53eab378600a93bfbcee8d64e30c662fd9f83d1c99269c"}'
-  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"/64G2SpcwaLUdcGc5ZTgODVmQq3mhg1q0IbUcWo+qwbZV4aPImyw87+gwgOBmENKVIGnHhjgQYrlRuBapnPbBw==","signed_at":"2026-10-07T11:59:48.780Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
+  dossier.checksum: '{"algorithm":"sha256","hash":"ab9eaa57caf7c4f9c6c4d515c14a6c4081868beb44e5247de468520607783765"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"X7/vBgjXWy7roRffHAYqR/XPkusPIyGF7+rakB16VfpN7Y4h6MJz7bgsP5BXs4yH7T9NbTJJ+Ruiy1gsAL7tCw==","signed_at":"2026-10-15T07:05:57.358Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Issue Workflows Guide
@@ -143,7 +143,7 @@ The dossiers carry the rules; the reasons live here.
 - **Why `[skip ci]` on WIP commits is right and on the PR head is fatal.** WIP commits carry `[skip ci]` so a long run does not fire a full CI suite on every intermediate push — that part is deliberate, keep it. But GitHub evaluates skip keywords (`[skip ci]`, `[ci skip]`, `[no ci]`, `[skip actions]`, `[actions skip]`, `skip-checks: true`) **per commit, against the head commit only**. If the last `wip(...)` commit is still the branch head when `gh pr create` runs, the `pull_request` event is suppressed entirely: the PR opens with ZERO `pull_request` runs. It fails silently — no red check, no failed run — so an auto-merge watcher that gates on absence-of-failure merges it untested. 8 of 200 merged PRs did exactly this (imboard#3799, 2026-08-25), all with a `wip(review): … [skip ci]` head. Hence ship-issue Step 2.5 (blocking gate before `gh pr create`) and Step 3a (post-create proof a `pull_request` run exists). The remedy is an **empty commit on top, never `git commit --amend`** — amending rewrites the head sha and the `head=` shas in earlier milestones stop being ancestors, breaking gate-issue's remote check on resume. The repo-side half shipped in imboard#3803 (2026-08-26): the imboard watcher now blocks when a required check-run is *absent*, not just failing. Keep the dossier-side gates anyway — a generic dossier may run in a repo whose watcher lacks that guard.
 - **Why milestones are CLI-posted, never hand-written.** The comment is the only run state surviving the session, so it must parse. A hand-written milestone that looks right but parses wrong makes the run unresumable; the raw `<!-- runstate:v1 -->` format is reader documentation, not a template.
 - **Pool `gc` deleted 29 developer worktrees** (2026-08-23): the pool directory is shared with developer worktrees and `@ai-dossier/worktree-pool` ≤ 0.5.0 removed everything it did not create (ai-dossier#453). Hence `status`/`claim`/`return`/`replenish`/`detect` only, always `@^0.5.1`; maintenance is a human task.
-- **Rename-then-repair.** Repurposing renames a worktree's directory, breaking git's internal tracking; `git worktree repair` fixes it.
+- **Rename-then-repair.** Repurposing renames a worktree's directory, breaking git's internal tracking; `git worktree repair <new-path>` fixes it. Always pass the new path: a pathless repair from the main worktree leaves `.git/worktrees/<id>/gitdir` naming the old folder, and the next `git worktree prune` deletes that admin dir (ai-dossier#443, #1232). Never run a bare `git worktree prune` — use the safe prune in full-cycle-issue Phase 1 step 1.
 - **Merged is not shipped.** Where a bot token merges, GitHub does not fire `on: push`, so the deploy never runs on its own — four PRs merged green, zero deploys, 2026-07-17 (imboard#2714). That release gap is why ship-issue has Step 6c and the report's `Shipped` line is mandatory.
 - **Review is report-then-apply because parallel writers collide.** Two agents each "fixing" one problem add their own helper; the loser's ships uncalled as dead code (ai-dossier#447). One serial applier is the fix.
 - **Cleanup and duration must be verified, not claimed.** A 63-second "full review" and an untrue `cleanup=pool_returned` both looked fine in the trail (imboard#3692) — hence review's duration floor and ship's confirm-before-claiming rule.

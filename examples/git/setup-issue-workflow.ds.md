@@ -4,10 +4,10 @@ description: 'Create a workflow for GitHub issues: fetch issue details, create a
 metadata:
   dossier.dossier_schema_version: '1.0.0'
   dossier.title: 'Setup Issue Workflow'
-  dossier.version: '1.14.6'
+  dossier.version: '1.14.8'
   dossier.protocol_version: '"1.0"'
   dossier.status: 'Stable'
-  dossier.last_updated: '2026-10-09'
+  dossier.last_updated: '2026-10-15'
   dossier.objective: 'Create a workflow for GitHub issues: fetch issue details, create appropriately named branches, set up git worktrees with environment warmup (or claim from a pre-warmed pool), and generate planning files; in batch mode (batch_id) it creates the shared batch branch for the batch anchor instead'
   dossier.category: '["development"]'
   dossier.risk_level: 'low'
@@ -17,8 +17,8 @@ metadata:
   dossier.external_references: '[{"description":"GitHub CLI documentation","required":false,"trust_level":"trusted","type":"documentation","url":"https://cli.github.com/"},{"description":"Official git documentation","required":false,"trust_level":"trusted","type":"documentation","url":"https://git-scm.com/docs/git-worktree"},{"description":"GitHub CLI documentation","required":false,"trust_level":"trusted","type":"documentation","url":"https://cli.github.com/manual/"},{"description":"External reference: conventionalcommits.org","required":false,"trust_level":"trusted","type":"documentation","url":"https://www.conventionalcommits.org/"}]'
   dossier.inputs: '{"optional":[{"default":"imboard-ai/git/warm-worktree","description":"Which warm-worktree dossier to run for worktree warmup. Override this to use a project-specific warmup (e.g., imboard-ai/imboard/warm-worktree-pnpm-ssm for pnpm+SSM projects).","name":"warmup_dossier","type":"string"},{"default":"auto","description":"Target branch to branch from and merge into. Overrides issue body parsing (''merges into `<branch>`''). Use for epic sub-issues or when the target is not main.","name":"base_branch","type":"string"},{"description":"Runstate run id minted by gate-issue; pass through unchanged. In batch mode this is the batch''s run id (minted against the anchor issue).","name":"run_id","type":"string"},{"description":"Batch id slug (e.g. b-2026-08-29-01). When set, run in BATCH MODE: one run per batch against the batch ANCHOR issue — creates the shared branch batch/<batch_id>-<date> from base, skips per-issue branch naming and the planning scaffold, and posts phase=batch-setup on the anchor. Unset = ordinary per-issue mode.","name":"batch_id","type":"string"}]}'
   dossier.authors: '[{"name":"Yuval Dimnik"}]'
-  dossier.checksum: '{"algorithm":"sha256","hash":"86193d85713c5351f0dfe0dc7e891587c4f9436e585f960227a5b3350755f296"}'
-  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"sT3E9JMibDuxyo5bYZlhn1stHfYEGucpmOlQLjZhN7YNJ7QsG2H8nrLvA6nYLtmOe9DXeQMAcho4Ap+Vku+cBg==","signed_at":"2026-10-09T21:37:39.680Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
+  dossier.checksum: '{"algorithm":"sha256","hash":"8646f02203a885d2179d0ae1d56ac1c68a4fe61fa31302315d38d25406a436e4"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"d8EBWZl4pSM++MQ/ExAv3yNGcgrTbSKZg8sqDxae4t+kpaC4cAv7CSr/KxIcQpdM8EmtLiwaM0e1eY3hw+OrDA==","signed_at":"2026-10-15T07:07:41.010Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Setup Issue Workflow
@@ -165,10 +165,12 @@ git fetch origin
 git checkout -b <new-branch-name> origin/$BASE_BRANCH
 cd "$REPO_ROOT/worktrees"
 mv <old-worktree-name> <new-worktree-name>   # <type>-<issue-number>-<slugified-title>
-git worktree repair                          # fix git's internal worktree tracking
+git worktree repair "$REPO_ROOT/worktrees/<new-worktree-name>"   # the NEW path — a pathless repair leaves the admin gitdir stale
 cd "$REPO_ROOT/worktrees/<new-worktree-name>"
 git status  # Check for uncommitted files from previous work — ask the user whether to discard stale files
 ```
+
+Always repair by the new path. A pathless `git worktree repair` run from the main worktree only fixes back-links of worktrees still where git recorded them; the moved one's `.git/worktrees/<id>/gitdir` keeps naming the old folder, and the next `git worktree prune` deletes that admin dir — the checkout then fails every git command (ai-dossier#443, #1232). Confirm with `git worktree prune --dry-run -v`: it must not list the repurposed worktree.
 
 **Options 3 and 4 — Current directory / Custom path.** For option 4, first prompt `? Enter the path where you want to work:` and `mkdir -p <custom-path>` if it does not exist. Both create and checkout the branch in place, then push it (WIP sync rule, as in Step 7):
 
@@ -360,7 +362,7 @@ Let the CLI stamp `at=` and compute `next=plan` — do not pass either; never ha
 
 **Repurpose worktree mode only:**
 - [ ] Existing worktree listed and selected; switched to a new branch created from origin/$BASE_BRANCH
-- [ ] Directory renamed to match the new issue; `git worktree repair` completed without errors and `git worktree list` shows the correct path and branch
+- [ ] Directory renamed to match the new issue; `git worktree repair <new-path>` (never pathless) completed without errors, `git worktree list` shows the correct path and branch, and `git worktree prune --dry-run -v` does not list it
 - [ ] Stale files handled (discarded or user acknowledged); warm-up skipped (dependencies already present)
 
 **Current directory and custom path modes only:** branch checked out · custom directory created if needed.

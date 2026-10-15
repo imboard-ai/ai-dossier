@@ -1,9 +1,11 @@
 export {
+  ClaimTargetExistsError,
   claim,
   detect,
   formatAge,
   type GcResult,
   gc,
+  type HealedLink,
   init,
   type ReapCandidate,
   type ReapOptions,

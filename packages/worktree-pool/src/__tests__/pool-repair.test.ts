@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { PoolState } from '../types';
+import { writePoolState } from './helpers/cli';
 import { createTempRepo, type TempRepo } from './helpers/setup';
 
 /**
@@ -30,6 +31,7 @@ describe.sequential('worktree repair after rename (#443)', () => {
       cwd: cwd || repo.root,
       encoding: 'utf-8',
       env: { ...process.env, FORCE_COLOR: '0' },
+      stdio: ['pipe', 'pipe', 'pipe'],
       timeout: 30_000,
     });
   }
@@ -209,6 +211,191 @@ describe.sequential('worktree repair after rename (#443)', () => {
       expect(output).toContain('Corrupted (no git admin dir, skipped): 1');
       expect(output).toContain('No warm worktrees available');
       expect(output).not.toContain('fatal:');
+    });
+  });
+
+  /**
+   * imboard-ai/ai-dossier#1232: an entry whose admin `gitdir` forward link went
+   * stale some way other than the pool's own renames (a move nobody repaired
+   * by its new path). The admin dir still exists, so it is not yet corrupted —
+   * but the next bare `git worktree prune` deletes it. `claim`, `status` and
+   * `replenish` must repair it before acting.
+   */
+  describe('stale gitdir links (#1232)', () => {
+    /** Admin dirs a bare prune would delete right now. */
+    function pruneDryRun(): string {
+      return execSync('git worktree prune --dry-run -v 2>&1', {
+        cwd: repo.root,
+        encoding: 'utf-8',
+      });
+    }
+
+    /**
+     * Rename entry `index`'s folder without repairing it and record the new
+     * name in `.pool-state.json` — the state an outside rename leaves.
+     * Asserts the precondition: a bare prune WOULD delete its admin dir.
+     */
+    function staleEntry(index: number): string {
+      const state = readPoolState();
+      const entry = state.worktrees[index];
+      const oldPath = path.join(poolDir, entry.path);
+      const newName = `${entry.path}-renamed`;
+      const newPath = path.join(poolDir, newName);
+      fs.renameSync(oldPath, newPath);
+      entry.path = newName;
+      writePoolState(poolDir, state);
+      expect(pruneDryRun()).toContain('gitdir file points to non-existent location');
+      return newPath;
+    }
+
+    it('status repairs a stale link, and a following prune leaves the entry intact', () => {
+      runPool('replenish --count 1');
+      const stalePath = staleEntry(0);
+
+      const output = runPoolCombined('status');
+      expect(output).toContain('Repaired stale worktree link(s): 1');
+      expect(output).toContain(path.basename(stalePath));
+      expect(pruneDryRun()).toBe('');
+
+      pruneFromGitRoot();
+      expectUsableWorktree(stalePath);
+    });
+
+    it('replenish repairs a stale link before creating spares', () => {
+      runPool('replenish --count 1');
+      const stalePath = staleEntry(0);
+
+      const output = runPoolCombined('replenish --count 1');
+      expect(output).toContain('Repaired stale worktree link(s): 1');
+
+      pruneFromGitRoot();
+      expectUsableWorktree(stalePath);
+      expect(readPoolState().worktrees).toHaveLength(2);
+    });
+
+    it('claim repairs a stale link on an entry it does not hand out', () => {
+      runPool('replenish --count 2');
+      // claim takes the first warm entry, so the stale one survives only if healed.
+      const stalePath = staleEntry(1);
+
+      const output = runPoolCombined('claim --issue 1232 --branch fix/1232-heal');
+      expect(output).toContain('Repaired stale worktree link(s): 1');
+      const claimedPath = output.trim().split('\n').pop() as string;
+
+      pruneFromGitRoot();
+      expectUsableWorktree(stalePath);
+      expectUsableWorktree(claimedPath);
+    });
+
+    it('leaves a copy that shares a live worktree admin dir alone', () => {
+      runPool('replenish --count 1');
+      const state = readPoolState();
+      const original = path.join(poolDir, state.worktrees[0].path);
+      const copyName = `${state.worktrees[0].path}-copy`;
+      execSync(`cp -r "${original}" "${path.join(poolDir, copyName)}"`);
+      state.worktrees.push({ ...state.worktrees[0], id: copyName, path: copyName });
+      writePoolState(poolDir, state);
+
+      const output = runPoolCombined('status');
+      expect(output).toContain('Stale worktree link(s) NOT repaired: 1');
+      expect(output).toContain('shares its git admin dir');
+      expect(output).not.toContain('Repaired stale worktree link(s)');
+
+      pruneFromGitRoot();
+      expectUsableWorktree(original);
+    });
+
+    it('refuses an entry whose recorded path escapes the pool directory', () => {
+      runPool('replenish --count 1');
+      const state = readPoolState();
+      state.worktrees.push({ ...state.worktrees[0], id: 'escaped', path: '../main' });
+      writePoolState(poolDir, state);
+
+      const output = runPoolCombined('status');
+      expect(output).toContain('../main: path is outside the pool directory; not repaired');
+      expect(output).not.toContain('Repaired stale worktree link(s)');
+    });
+
+    it('gc never deletes the admin dir of a worktree that was only moved', () => {
+      runPool('replenish --count 1');
+      const stalePool = staleEntry(0);
+      // A developer's own worktree outside the pool, renamed without a repair.
+      const foreign = path.join(repo.root, '..', 'elsewhere', 'feature');
+      execSync(`git worktree add -q -b feature "${foreign}"`, { cwd: repo.root, stdio: 'pipe' });
+      const foreignMoved = `${foreign}-moved`;
+      fs.renameSync(foreign, foreignMoved);
+
+      runPoolCombined('gc --yes');
+
+      // The pool's moved entry was repaired, not pruned...
+      expectUsableWorktree(stalePool);
+      // ...and the foreign one's admin dir is still there for a repair.
+      expect(pruneDryRun()).toContain('gitdir file points to non-existent location');
+      execSync(`git worktree repair "${foreignMoved}"`, { cwd: repo.root, stdio: 'pipe' });
+      expectUsableWorktree(foreignMoved);
+    });
+  });
+
+  it('the pool never runs a repo-wide git worktree prune', () => {
+    const srcDir = path.resolve(__dirname, '..');
+    for (const f of fs.readdirSync(srcDir).filter((n) => n.endsWith('.ts'))) {
+      expect(fs.readFileSync(path.join(srcDir, f), 'utf-8'), f).not.toMatch(
+        /\[\s*'worktree',\s*'prune'/
+      );
+    }
+  });
+
+  /**
+   * imboard-ai/ai-dossier#1232: `claim` used to skip its rename when the
+   * target folder already existed — yet still return that folder and record it
+   * as the entry's path, handing the caller something that was not the
+   * claimed worktree.
+   */
+  describe('claim rename target already exists (#1232)', () => {
+    it('fails naming both paths, and leaves the entry warm and the folder untouched', () => {
+      runPool('replenish --count 1');
+      const before = readPoolState().worktrees[0];
+      const warmPath = path.join(poolDir, before.path);
+      const target = path.join(poolDir, 'fix-1232-taken');
+      fs.mkdirSync(target);
+      fs.writeFileSync(path.join(target, 'sentinel.txt'), 'not a worktree');
+
+      let failed = false;
+      let stdout = '';
+      let stderr = '';
+      try {
+        runPool('claim --issue 1232 --branch fix/1232-taken');
+      } catch (err) {
+        failed = true;
+        stdout = String((err as { stdout?: string }).stdout ?? '');
+        stderr = String((err as { stderr?: string }).stderr ?? '');
+      }
+
+      expect(failed).toBe(true);
+      expect(stdout).not.toContain(target);
+      expect(stderr).toContain('Claim target already exists');
+      expect(stderr).toContain(target);
+      expect(stderr).toContain(warmPath);
+
+      const after = readPoolState().worktrees[0];
+      expect(after.status).toBe('warm');
+      expect(after.path).toBe(before.path);
+      expect(after.assigned_to_issue).toBeNull();
+      expect(after.assigned_branch).toBeNull();
+      expect(fs.readFileSync(path.join(target, 'sentinel.txt'), 'utf-8')).toBe('not a worktree');
+
+      // The warm worktree is still on its temp branch, and no issue branch leaked.
+      expect(
+        execSync('git branch --show-current', { cwd: warmPath, encoding: 'utf-8' }).trim()
+      ).toBe(before.temp_branch);
+      expect(
+        execSync('git branch --list fix/1232-taken', { cwd: repo.root, encoding: 'utf-8' }).trim()
+      ).toBe('');
+
+      // And the entry can still be claimed under another name.
+      const claimed = runPool('claim --issue 1232 --branch fix/1232-free').trim();
+      expect(claimed).toBe(path.join(poolDir, 'fix-1232-free'));
+      expectUsableWorktree(claimed);
     });
   });
 
