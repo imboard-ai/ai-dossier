@@ -4,7 +4,7 @@ description: 'Implement the solution described in the planning document, run tes
 metadata:
   dossier.dossier_schema_version: '1.0.0'
   dossier.title: 'Implement Issue — Code and Test'
-  dossier.version: '1.8.3'
+  dossier.version: '1.8.4'
   dossier.protocol_version: '"1.0"'
   dossier.status: 'Stable'
   dossier.last_updated: '2026-10-15'
@@ -16,8 +16,8 @@ metadata:
   dossier.requires_approval: 'false'
   dossier.inputs: '{"optional":[{"default":"main","description":"Base branch for comparing pre-existing test failures","name":"base_branch","type":"string"},{"description":"Runstate run id minted by gate-issue; pass through unchanged","name":"run_id","type":"string"}],"required":[{"description":"Path to the PLANNING-{number}-{slug}.md file","name":"planning_file","type":"string"}]}'
   dossier.authors: '[{"name":"Yuval Dimnik"}]'
-  dossier.checksum: '{"algorithm":"sha256","hash":"9ac0ae0360eb18033c809fb4a9899eaa4945a263cc08cae750345c8331cd7d01"}'
-  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"YUIue4PCMxiXogwRtfXcP+PA4kIHlk7fWoc9JWqEa7mOLpv48GLpfPj9+T6uVEMmo12j7B0kY9WlJfx8V96kAA==","signed_at":"2026-10-15T07:05:51.447Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
+  dossier.checksum: '{"algorithm":"sha256","hash":"27b8db6a5668ee6d7bde4484b228c9d34e5fb036683c50302f4c3fd9159b7edf"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"adQEtj1Bw1IbrvrOYkSQe9DF4gEHM819d54hotjgvumlHnISJtCQQb7ZBUlv1Q4exV+UejcI/G2EtwTBukB9Cg==","signed_at":"2026-10-15T15:09:49.807Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Implement Issue — Code and Test
@@ -91,7 +91,7 @@ git worktree remove "$TMP" --force
 
 Record the outcome (used in Step 7's `repro=` key):
 - Base run failed (`BASE_RESULT != 0`, and not `124` — see the cost guard) and the same test passes once run against HEAD in item 4 → `repro=red-then-green`.
-- Base run passed (`BASE_RESULT == 0`) — the test does not prove the bug existed. Strengthen the test until it fails on base, or record `repro_note=<short-reason-slug>` naming why no executable repro is possible; this is a REQUIRED companion, not optional prose (see the Validation contract below), and is intended as an input to a future review-phase consumer (not yet wired up in review-issue) → `repro=green-on-base`.
+- Base run passed (`BASE_RESULT == 0`) — the test does not prove the bug existed. Strengthen the test until it fails on base, or record `repro_note=<short-reason-slug>` naming why no executable repro is possible; this is a REQUIRED companion, not optional prose (see the Validation contract below), and is consumed by review-issue Step 2b.5 (Agent 7 input) since review-issue@1.15.0 → `repro=green-on-base`.
 - No executable test could be constructed at all (e.g. the bug needs infra unavailable in this environment, or either setup step above failed) → `repro=no-repro`, with `repro_note=<short-reason-slug>` naming the reason — REQUIRED alongside it, same as `green-on-base`.
 
 **Cost guard**: scope the base-branch run to the targeted test file(s) only — never the full suite. `timeout 300` in the command above enforces the ~5-minute cap mechanically; `BASE_RESULT=124` means it fired — record `repro=no-repro-timeout` (self-explanatory, no `repro_note=` needed) and still run `git worktree remove "$TMP" --force` to clean up.
