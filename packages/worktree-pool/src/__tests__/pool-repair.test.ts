@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { PoolState } from '../types';
+import { writePoolState } from './helpers/cli';
 import { createTempRepo, type TempRepo } from './helpers/setup';
 
 /**
@@ -221,13 +222,6 @@ describe.sequential('worktree repair after rename (#443)', () => {
    * `replenish` must repair it before acting.
    */
   describe('stale gitdir links (#1232)', () => {
-    function writePoolState(state: PoolState): void {
-      fs.writeFileSync(
-        path.join(poolDir, '.pool-state.json'),
-        `${JSON.stringify(state, null, 2)}\n`
-      );
-    }
-
     /** Admin dirs a bare prune would delete right now. */
     function pruneDryRun(): string {
       return execSync('git worktree prune --dry-run -v 2>&1', {
@@ -249,7 +243,7 @@ describe.sequential('worktree repair after rename (#443)', () => {
       const newPath = path.join(poolDir, newName);
       fs.renameSync(oldPath, newPath);
       entry.path = newName;
-      writePoolState(state);
+      writePoolState(poolDir, state);
       expect(pruneDryRun()).toContain('gitdir file points to non-existent location');
       return newPath;
     }
@@ -300,7 +294,7 @@ describe.sequential('worktree repair after rename (#443)', () => {
       const copyName = `${state.worktrees[0].path}-copy`;
       execSync(`cp -r "${original}" "${path.join(poolDir, copyName)}"`);
       state.worktrees.push({ ...state.worktrees[0], id: copyName, path: copyName });
-      writePoolState(state);
+      writePoolState(poolDir, state);
 
       const output = runPoolCombined('status');
       expect(output).toContain('Stale worktree link(s) NOT repaired: 1');
@@ -310,6 +304,45 @@ describe.sequential('worktree repair after rename (#443)', () => {
       pruneFromGitRoot();
       expectUsableWorktree(original);
     });
+
+    it('refuses an entry whose recorded path escapes the pool directory', () => {
+      runPool('replenish --count 1');
+      const state = readPoolState();
+      state.worktrees.push({ ...state.worktrees[0], id: 'escaped', path: '../main' });
+      writePoolState(poolDir, state);
+
+      const output = runPoolCombined('status');
+      expect(output).toContain('../main: path is outside the pool directory; not repaired');
+      expect(output).not.toContain('Repaired stale worktree link(s)');
+    });
+
+    it('gc never deletes the admin dir of a worktree that was only moved', () => {
+      runPool('replenish --count 1');
+      const stalePool = staleEntry(0);
+      // A developer's own worktree outside the pool, renamed without a repair.
+      const foreign = path.join(repo.root, '..', 'elsewhere', 'feature');
+      execSync(`git worktree add -q -b feature "${foreign}"`, { cwd: repo.root, stdio: 'pipe' });
+      const foreignMoved = `${foreign}-moved`;
+      fs.renameSync(foreign, foreignMoved);
+
+      runPoolCombined('gc --yes');
+
+      // The pool's moved entry was repaired, not pruned...
+      expectUsableWorktree(stalePool);
+      // ...and the foreign one's admin dir is still there for a repair.
+      expect(pruneDryRun()).toContain('gitdir file points to non-existent location');
+      execSync(`git worktree repair "${foreignMoved}"`, { cwd: repo.root, stdio: 'pipe' });
+      expectUsableWorktree(foreignMoved);
+    });
+  });
+
+  it('the pool never runs a repo-wide git worktree prune', () => {
+    const srcDir = path.resolve(__dirname, '..');
+    for (const f of fs.readdirSync(srcDir).filter((n) => n.endsWith('.ts'))) {
+      expect(fs.readFileSync(path.join(srcDir, f), 'utf-8'), f).not.toMatch(
+        /\[\s*'worktree',\s*'prune'/
+      );
+    }
   });
 
   /**

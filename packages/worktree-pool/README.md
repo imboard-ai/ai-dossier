@@ -30,9 +30,9 @@ Requires Node.js >= 20.0.0.
 
 | Command | Description |
 |---------|-------------|
-| `worktree-pool status [--json]` | Show pool inventory (warm/assigned/broken counts); `--json` prints the whole inventory, including per-entry `status`, for callers |
-| `worktree-pool replenish [--count N]` | Pre-warm spares up to target count |
-| `worktree-pool claim --issue N --branch B` | Claim a warm worktree, print path |
+| `worktree-pool status [--json]` | Show pool inventory (warm/assigned/broken counts); `--json` prints the whole inventory, including per-entry `status`, for callers. Not strictly read-only: first repairs [stale worktree links](#stale-worktree-links-self-heal) of pool entries (git metadata only) |
+| `worktree-pool replenish [--count N]` | Pre-warm spares up to target count, after repairing [stale worktree links](#stale-worktree-links-self-heal) |
+| `worktree-pool claim --issue N --branch B` | Claim a warm worktree, print path (repairs [stale worktree links](#stale-worktree-links-self-heal) first); exits non-zero, renaming nothing, if a folder named after the branch already exists |
 | `worktree-pool return --path P [--json]` | Return worktree to pool for reuse; kills any process still running out of it first, self-checks on success, and on failure marks the entry `broken` and exits non-zero naming the step |
 | `worktree-pool refresh` | Fetch origin + rebuild in all warm worktrees |
 | `worktree-pool gc [--dry-run] [--yes]` | Remove stale/orphaned pool worktrees (never anything else), killing any process still running out of one first |
@@ -186,9 +186,8 @@ One step before corruption: the admin dir still exists, but its `gitdir`
 forward link names a folder that is gone — what a move or rename leaves when
 nobody ran `git worktree repair <new-path>`. The next bare `git worktree prune`
 deletes that admin dir and the entry becomes corrupted. `claim`, `status` and
-`replenish` (and the pool's own prune after a removal) first run
-`git worktree repair <folder>` on every `.pool-state.json` entry in that state,
-and say so:
+`replenish` first run `git worktree repair <folder>` on every
+`.pool-state.json` entry in that state (under the pool lock), and say so:
 
 ```bash
 $ worktree-pool status
@@ -198,13 +197,25 @@ Repaired stale worktree link(s): 1
 ```
 
 An entry whose folder is a copy of a live worktree (both link to the same admin
-dir) is reported as `NOT repaired` and left alone. `status --json` carries the
-same data as `healed[]` and `heal_errors[]`.
+dir), or whose recorded path escapes the pool directory, is reported as
+`NOT repaired` and left alone. `status --json` carries the same data as
+`healed[]` and `heal_errors[]`; the `replenish` JSON and the library's
+`ClaimResult` carry `healed` and `healErrors`.
+
+**The pool never runs a repo-wide `git worktree prune`.** It would also delete
+the admin dir of any worktree in the repo — the pool's or yours — that was
+moved without a repair. Removing a pool worktree clears only that worktree's
+metadata, and `gc`'s final cleanup only touches admin dirs whose recorded folder
+was directly inside the pool directory and is gone; a folder in the pool
+directory that still links to one is repaired instead.
 
 `claim` renames the warm worktree to the branch's directory name. If a folder
-with that name already exists, the claim fails, naming both paths, and the warm
-worktree goes back to the pool untouched — it never hands out a folder that is
-not the claimed worktree.
+with that name already exists, the claim fails (exit 1; `ClaimTargetExistsError`
+for library callers, with `worktreePath` and `targetPath`), naming both paths,
+and the warm worktree goes back to the pool — under its pool name, on its temp
+branch. It never hands out a folder that is not the claimed worktree. If that
+revert itself fails, the entry is marked `broken` (`broken_step: claim-revert`)
+rather than `warm`.
 
 ### Broken entries (a failed `return`)
 
@@ -286,6 +297,21 @@ try {
     // The entry is 'broken' and the directory was NOT destroyed — unless
     // err.markError is non-null, which means the marking write itself failed
     // and pool state should be re-checked before the next claim.
+  }
+}
+```
+
+`claim` throws `ClaimTargetExistsError` when its rename target exists:
+
+```ts
+import { claim, ClaimTargetExistsError } from '@ai-dossier/worktree-pool';
+
+try {
+  const result = claim(1232, 'fix/1232-example'); // null when no warm entry is usable
+  // result.path, result.broken, result.missing, result.healed, result.healErrors
+} catch (err) {
+  if (err instanceof ClaimTargetExistsError) {
+    // err.worktreePath (still a warm pool entry), err.targetPath (the folder in the way)
   }
 }
 ```

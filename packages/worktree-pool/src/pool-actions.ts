@@ -525,35 +525,45 @@ export interface HealedLink {
   name: string;
   /** Absolute path of the repaired worktree. */
   path: string;
-  /** What `.git/worktrees/<id>/gitdir` recorded before the repair. */
-  staleGitdir: string;
+  /**
+   * What `.git/worktrees/<id>/gitdir` recorded before the repair, with control
+   * characters stripped; `null` when the file was empty.
+   */
+  staleGitdir: string | null;
 }
 
 export interface HealResult {
   healed: HealedLink[];
-  /** Entries with a stale link that were deliberately left alone, or failed. */
+  /**
+   * Stale links that were NOT repaired — deliberately left alone (a copy that
+   * shares a live worktree's admin dir, an entry path outside the pool dir) or
+   * whose repair failed — plus a note when the check itself could not run.
+   * One human-readable line each.
+   */
   errors: string[];
 }
 
 /** Absolute `<common-dir>/worktrees`, where this repo keeps linked worktrees' admin dirs. */
-function worktreeAdminRoot(gitRoot: string): string | null {
-  try {
-    const common = git(['rev-parse', '--git-common-dir'], { cwd: gitRoot });
-    return realpathOrSelf(path.join(path.resolve(gitRoot, common), 'worktrees'));
-  } catch {
-    return null;
-  }
+function worktreeAdminRoot(gitRoot: string): string {
+  const common = git(['rev-parse', '--git-common-dir'], { cwd: gitRoot });
+  return realpathOrSelf(path.join(path.resolve(gitRoot, common), 'worktrees'));
 }
 
-/** The worktree path an admin dir's `gitdir` file records, or `null`. */
+/**
+ * The worktree path an admin dir's `gitdir` file records. `null` = the file is
+ * empty or missing (a link worth repairing); throws on any other read error,
+ * which the caller reports rather than guessing.
+ */
 function readAdminGitdir(adminDir: string): string | null {
+  let raw: string;
   try {
-    const raw = fs.readFileSync(path.join(adminDir, 'gitdir'), 'utf-8').trim();
-    if (raw.length === 0) return null;
-    return path.isAbsolute(raw) ? raw : path.resolve(adminDir, raw);
-  } catch {
-    return null;
+    raw = fs.readFileSync(path.join(adminDir, 'gitdir'), 'utf-8').trim();
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw err;
   }
+  if (raw.length === 0) return null;
+  return path.isAbsolute(raw) ? raw : path.resolve(adminDir, raw);
 }
 
 /**
@@ -567,31 +577,54 @@ function readAdminGitdir(adminDir: string): string | null {
  * pool repairs after its own renames; this heals links that went stale some
  * other way, before `claim`, `status`, `replenish` or the pool's own prune act.
  *
- * Only `.pool-state.json` entries are touched. An entry whose admin dir is
- * already gone is not healable here — it stays with the "corrupted" reporting.
- * If the recorded path is a live folder that still links to the same admin
- * dir (a copy of a worktree), the entry is left alone: repairing it would take
- * the admin dir away from the worktree that owns it.
+ * Only `.pool-state.json` entries directly inside the pool directory are
+ * touched. An entry whose admin dir is already gone is not healable here — it
+ * stays with the "corrupted" reporting. If the recorded path is a live folder
+ * that still links to the same admin dir (a copy of a worktree), the entry is
+ * left alone: repairing it would take the admin dir away from the worktree
+ * that owns it. Callers hold the pool lock, so a concurrent `claim` rename
+ * cannot be healed from a stale snapshot.
  */
 function healStaleWorktreeLinks(gitRoot: string, poolDir: string, state: PoolState): HealResult {
   const result: HealResult = { healed: [], errors: [] };
-  const adminRoot = worktreeAdminRoot(gitRoot);
-  if (adminRoot === null) return result;
+  let adminRoot: string;
+  try {
+    adminRoot = worktreeAdminRoot(gitRoot);
+  } catch (err) {
+    result.errors.push(
+      `could not resolve the git common dir (${sanitizeReason(messageOf(err))}); ` +
+        'stale worktree links were NOT checked'
+    );
+    return result;
+  }
 
   for (const entry of state.worktrees) {
+    const name = sanitizeReason(entry.path);
     const absPath = toAbs(poolDir, entry.path);
-    const dotGit = path.join(absPath, '.git');
-    try {
-      if (!fs.statSync(dotGit).isFile()) continue;
-    } catch {
-      continue; // gone from disk, or not a linked worktree
+    // State paths are contractually bare names inside the pool dir; a
+    // hand-edited `../elsewhere` must not make the pool repair a foreign folder.
+    if (relativePoolPath(poolDir, absPath, '') === '') {
+      result.errors.push(`${name}: path is outside the pool directory; not repaired`);
+      continue;
     }
+    const dotGit = path.join(absPath, '.git');
     const adminDir = resolveWorktreeAdminDir(absPath);
-    if (adminDir === null || !fs.existsSync(adminDir)) continue; // corrupted: reported elsewhere
+    // null: gone from disk or no `.git` link. `.git` itself: a whole repo, not
+    // a linked worktree. Missing admin dir: corrupted, reported elsewhere.
+    if (adminDir === null || adminDir === dotGit || !fs.existsSync(adminDir)) continue;
     const adminReal = realpathOrSelf(adminDir);
     if (path.dirname(adminReal) !== adminRoot) continue; // another repository's worktree
 
-    const recorded = readAdminGitdir(adminDir);
+    let recorded: string | null;
+    try {
+      recorded = readAdminGitdir(adminDir);
+    } catch (err) {
+      result.errors.push(
+        `${name}: cannot read ${path.join(adminDir, 'gitdir')} ` +
+          `(${sanitizeReason(messageOf(err))}); not repaired`
+      );
+      continue;
+    }
     if (recorded !== null && realpathOrSelf(recorded) === realpathOrSelf(dotGit)) continue;
 
     if (recorded !== null && fs.existsSync(recorded)) {
@@ -599,7 +632,9 @@ function healStaleWorktreeLinks(gitRoot: string, poolDir: string, state: PoolSta
       const otherAdmin = resolveWorktreeAdminDir(otherFolder);
       if (otherAdmin !== null && realpathOrSelf(otherAdmin) === adminReal) {
         result.errors.push(
-          `${entry.path}: shares its git admin dir with ${otherFolder}; not repaired`
+          `${name}: shares its git admin dir (${adminReal}) with ${sanitizeReason(otherFolder)}; ` +
+            'not repaired. One of the two folders is a copy: remove the copy, or run ' +
+            `'git worktree repair ${absPath}' once you have confirmed it is the live checkout`
         );
         continue;
       }
@@ -607,12 +642,107 @@ function healStaleWorktreeLinks(gitRoot: string, poolDir: string, state: PoolSta
 
     try {
       git(['worktree', 'repair', absPath], { cwd: gitRoot });
-      result.healed.push({ name: entry.path, path: absPath, staleGitdir: recorded ?? '(empty)' });
+      result.healed.push({
+        name,
+        path: absPath,
+        staleGitdir: recorded === null ? null : sanitizeReason(recorded),
+      });
     } catch (err) {
-      result.errors.push(`${entry.path}: git worktree repair failed: ${messageOf(err)}`);
+      result.errors.push(`${name}: git worktree repair failed: ${sanitizeReason(messageOf(err))}`);
     }
   }
   return result;
+}
+
+/**
+ * `healStaleWorktreeLinks` under the pool lock, for commands that do not
+ * otherwise take it. Never fatal: a busy lock or a pool with no state file
+ * yet means nothing is healed this time, and the reason is reported.
+ */
+function healUnderLock(gitRoot: string, poolDir: string): HealResult {
+  if (!fs.existsSync(getStatePath(poolDir))) return { healed: [], errors: [] };
+  try {
+    return withLock(poolDir, (state) => ({
+      state,
+      result: healStaleWorktreeLinks(gitRoot, poolDir, state),
+    }));
+  } catch (err) {
+    return {
+      healed: [],
+      errors: [`stale-link check skipped: ${sanitizeReason(messageOf(err))}`],
+    };
+  }
+}
+
+/**
+ * Drop the git metadata of pool worktrees whose folder is gone — the job a
+ * repo-wide `git worktree prune` used to do here, scoped so it cannot repeat
+ * #1232. It never runs `git worktree prune`: that also deletes the admin dir
+ * of any worktree in the repo that was moved without a repair, the pool's or
+ * not. Instead, per admin dir of this repo:
+ *
+ * - its recorded folder must be directly inside the pool directory (worktrees
+ *   elsewhere are never touched) and gone from disk;
+ * - if a folder in the pool directory still links to that admin dir, it was
+ *   moved, not removed: repair it by its path instead;
+ * - only then is the metadata cleared, with `git worktree remove --force` on
+ *   the recorded path (which works on a missing folder).
+ *
+ * Callers heal pool entries first (`healStaleWorktreeLinks`); this catches the
+ * rest. Returns one line per action or refusal, for the caller to report.
+ */
+function pruneGonePoolWorktrees(gitRoot: string, poolDir: string): string[] {
+  const notes: string[] = [];
+  let adminRoot: string;
+  try {
+    adminRoot = worktreeAdminRoot(gitRoot);
+  } catch (err) {
+    return [`metadata cleanup skipped: ${sanitizeReason(messageOf(err))}`];
+  }
+  if (!fs.existsSync(adminRoot)) return notes;
+  const poolReal = realpathOrSelf(poolDir);
+
+  // Which admin dir each folder in the pool dir links to.
+  const linkedFrom = new Map<string, string>();
+  if (fs.existsSync(poolDir)) {
+    for (const d of fs.readdirSync(poolDir, { withFileTypes: true })) {
+      if (!d.isDirectory()) continue;
+      const folder = path.join(poolDir, d.name);
+      const admin = resolveWorktreeAdminDir(folder);
+      if (admin !== null && admin !== path.join(folder, '.git')) {
+        linkedFrom.set(realpathOrSelf(admin), folder);
+      }
+    }
+  }
+
+  for (const d of fs.readdirSync(adminRoot, { withFileTypes: true })) {
+    if (!d.isDirectory()) continue;
+    const adminDir = path.join(adminRoot, d.name);
+    let recorded: string | null;
+    try {
+      recorded = readAdminGitdir(adminDir);
+    } catch {
+      continue; // unreadable: leave it for a human
+    }
+    if (recorded === null) continue;
+    const folder = path.dirname(recorded);
+    if (realpathOrSelf(path.dirname(folder)) !== poolReal || fs.existsSync(folder)) continue;
+
+    const movedTo = linkedFrom.get(realpathOrSelf(adminDir));
+    try {
+      if (movedTo !== undefined) {
+        git(['worktree', 'repair', movedTo], { cwd: gitRoot });
+        notes.push(`repaired moved worktree ${sanitizeReason(movedTo)} instead of pruning it`);
+      } else {
+        git(['worktree', 'remove', '--force', folder], { cwd: gitRoot });
+      }
+    } catch (err) {
+      notes.push(
+        `could not clean up metadata for ${sanitizeReason(folder)}: ${sanitizeReason(messageOf(err))}`
+      );
+    }
+  }
+  return notes;
 }
 
 /**
@@ -772,12 +902,16 @@ function destroyWorktree(ctx: OwnershipContext, tempBranch: string | null, absPa
     git(['worktree', 'remove', absPath, '--force'], { cwd: ctx.gitRoot });
   } catch {
     fs.rmSync(absPath, { recursive: true, force: true });
+    // Clear just this worktree's metadata — `remove` accepts a missing folder.
+    // Never a repo-wide `git worktree prune`: it would also delete the admin
+    // dir of every other worktree moved without a repair (#1232).
+    try {
+      git(['worktree', 'remove', absPath, '--force'], { cwd: ctx.gitRoot });
+    } catch {
+      // not a registered worktree after all; nothing left to clear
+    }
   }
   deletePoolTempBranch(ctx.gitRoot, tempBranch);
-  // The prune below is repo-wide: heal stale links on the pool's other entries
-  // first, or it would delete their admin dirs too (#1232).
-  healStaleWorktreeLinks(ctx.gitRoot, ctx.poolDir, ctx.state);
-  git(['worktree', 'prune'], { cwd: ctx.gitRoot });
 }
 
 /**
@@ -795,20 +929,30 @@ function deletePoolTempBranch(gitRoot: string, branch: string | null | undefined
 
 // --- Public operations ---
 
-export async function replenish(
-  count?: number,
-  _parallel = false
-): Promise<{ created: number; errors: string[]; healed: HealedLink[] }> {
+export interface ReplenishResult {
+  created: number;
+  /** Spare-creation failures. */
+  errors: string[];
+  /** Pool entries whose stale admin `gitdir` link was repaired first (#1232). */
+  healed: HealedLink[];
+  /** Stale links found but not repaired, or a check that could not run. */
+  healErrors: string[];
+}
+
+/**
+ * Pre-warm spares up to the target (or `count`). Repairs pool entries with a
+ * stale admin `gitdir` link before creating anything (#1232) — see
+ * `healStaleWorktreeLinks`; what it did is in `healed` / `healErrors`.
+ */
+export async function replenish(count?: number, _parallel = false): Promise<ReplenishResult> {
   const gitRoot = findGitRoot();
   const cfg = readPoolFileConfig(gitRoot);
   const poolDir = await resolvePoolDir(gitRoot, { interactive: true });
   fs.mkdirSync(poolDir, { recursive: true });
 
-  const heal = withLock(poolDir, (state) => ({
-    state,
-    result: healStaleWorktreeLinks(gitRoot, poolDir, state),
-  }));
+  const heal = healUnderLock(gitRoot, poolDir);
   const healed = heal.healed;
+  const healErrors = heal.errors;
 
   git(['fetch', remoteForBaseRef(cfg.base_ref)], { cwd: gitRoot });
 
@@ -821,10 +965,10 @@ export async function replenish(
   }
 
   if (toCreate <= 0) {
-    return { created: 0, errors: heal.errors, healed };
+    return { created: 0, errors: [], healed, healErrors };
   }
 
-  const errors: string[] = [...heal.errors];
+  const errors: string[] = [];
   let created = 0;
 
   const createOne = (): void => {
@@ -897,7 +1041,7 @@ export async function replenish(
     createOne();
   }
 
-  return { created, errors, healed };
+  return { created, errors, healed, healErrors };
 }
 
 export interface ClaimResult {
@@ -944,6 +1088,14 @@ export function findMissingWarmEntries(): string[] {
     .map((w) => w.path);
 }
 
+/**
+ * Hand out a warm worktree on a new `branch`, renamed to the branch's
+ * directory name. Repairs stale worktree links of pool entries first (#1232).
+ * Returns `null` when no usable warm entry exists.
+ *
+ * @throws ClaimTargetExistsError when a folder with the target name already
+ *   exists; the entry goes back to `warm`, unrenamed, on its temp branch.
+ */
 export function claim(issue: number, branch: string): ClaimResult | null {
   const gitRoot = findGitRoot();
   const cfg = readPoolFileConfig(gitRoot);
@@ -984,6 +1136,7 @@ export function claim(issue: number, branch: string): ClaimResult | null {
   const branchDir = branch.replace(/\//g, '-');
   const newAbsPath = toAbs(poolDir, branchDir);
   let createdBranch = false;
+  let renamed = false;
 
   try {
     // Never hand out a folder that is not the claimed worktree (#1232). Checked
@@ -1020,8 +1173,14 @@ export function claim(issue: number, branch: string): ClaimResult | null {
       if (fs.existsSync(newAbsPath)) {
         throw new ClaimTargetExistsError(absPath, newAbsPath);
       }
-      fs.renameSync(absPath, newAbsPath);
-      git(['worktree', 'repair', newAbsPath], { cwd: gitRoot });
+      // Under the pool lock, so another command's stale-link heal never sees
+      // the window between the rename and the repair.
+      withLock(poolDir, (state) => {
+        fs.renameSync(absPath, newAbsPath);
+        renamed = true;
+        git(['worktree', 'repair', newAbsPath], { cwd: gitRoot });
+        return { state, result: undefined };
+      });
     }
 
     // Delete temp branch
@@ -1049,26 +1208,48 @@ export function claim(issue: number, branch: string): ClaimResult | null {
       healErrors: heal.errors,
     };
   } catch (err) {
-    // Revert claim on failure. A target collision fails before the rename, so
-    // the worktree is still at `absPath`: put it back on its temp branch and
-    // drop the issue branch this claim created, or the next claim of the same
-    // branch would collide on it.
-    if (createdBranch && err instanceof ClaimTargetExistsError) {
-      try {
+    // Revert the claim: move the folder back if it was renamed, put it back on
+    // its temp branch and drop the issue branch this claim created — or the
+    // next claim of the same branch collides on it. If any of that fails the
+    // entry is in an unknown state: mark it broken rather than warm.
+    let revertError: string | null = null;
+    try {
+      if (renamed) {
+        fs.renameSync(newAbsPath, absPath);
+        git(['worktree', 'repair', absPath], { cwd: gitRoot });
+      }
+      if (createdBranch) {
         git(['checkout', worktree.temp_branch], { cwd: absPath });
         git(['branch', '-D', branch], { cwd: absPath });
-      } catch {
-        // best effort; the claim error below is what the caller needs
       }
+    } catch (revertErr) {
+      revertError = sanitizeReason(messageOf(revertErr));
     }
     withLock(poolDir, (state) => ({
-      state: updateWorktree(state, worktree.id, {
-        status: 'warm',
-        assigned_to_issue: null,
-        assigned_branch: null,
-      }),
+      state: updateWorktree(
+        state,
+        worktree.id,
+        revertError === null
+          ? { status: 'warm', assigned_to_issue: null, assigned_branch: null }
+          : {
+              status: 'broken',
+              path: relativePoolPath(
+                poolDir,
+                fs.existsSync(absPath) ? absPath : newAbsPath,
+                worktree.path
+              ),
+              broken_step: 'claim-revert',
+              broken_reason: `claim failed (${sanitizeReason(messageOf(err))}); revert failed: ${revertError}`,
+            }
+      ),
       result: undefined,
     }));
+    if (revertError !== null) {
+      throw new Error(
+        `${messageOf(err)} — reverting the claim also failed (${revertError}); ` +
+          `pool entry ${worktree.id} is marked broken`
+      );
+    }
     throw err;
   }
 }
@@ -1773,7 +1954,8 @@ export async function gc(opts: GcOptions = {}): Promise<GcResult> {
     }
   }
 
-  git(['worktree', 'prune'], { cwd: gitRoot });
+  // Scoped to the pool directory, never a repo-wide prune (#1232).
+  errors.push(...pruneGonePoolWorktrees(gitRoot, poolDir));
 
   return { ...base, removed, dryRun: false, aborted: false };
 }
@@ -1982,9 +2164,12 @@ export function status(): ReturnType<typeof getPoolStatus> & {
 } {
   const gitRoot = findGitRoot();
   const poolDir = resolvePoolDirSync(gitRoot);
+  // Not read-only since #1232: repairs stale worktree links of pool entries
+  // (git metadata only, under the pool lock) before classifying, so the
+  // report below sees the repaired worktrees. `heal_errors` is snake_case
+  // because it is part of the `status --json` contract.
+  const heal = healUnderLock(gitRoot, poolDir);
   const state = readState(poolDir);
-  // Heal first so the classification below sees the repaired worktrees.
-  const heal = healStaleWorktreeLinks(gitRoot, poolDir, state);
   const { foreign, broken } = reportPoolDirEntries(gitRoot, poolDir, state);
   return {
     ...getPoolStatus(state),
