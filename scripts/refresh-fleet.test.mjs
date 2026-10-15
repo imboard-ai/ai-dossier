@@ -57,19 +57,21 @@ esac
 `.replaceAll('\\$', '$')
   );
   // Stub CLI: logs every call to $HOME/calls.log; install-skill --all prints $STUB_SKILL_JSON
-  // and exits with $STUB_SKILL_RC; list prints $STUB_LIST_OUT and exits with $STUB_LIST_RC;
-  // pulling $STUB_PULL_FAIL fails the way a checksum mismatch does.
+  // and exits with $STUB_SKILL_RC; list logs its working directory to $HOME/cwd.log, prints
+  // $STUB_LIST_OUT and exits with $STUB_LIST_RC; pulling $STUB_PULL_FAIL fails the way a
+  // checksum mismatch does, with exit $STUB_PULL_FAIL_RC (default 1).
   executable(
     join(bin, 'ai-dossier'),
     String.raw`#!/bin/sh
 echo "$*" >> "$HOME/calls.log"
 if [ "$1" = "--version" ]; then printf '%s\n' "\${STUB_VERSION:-0.82.0}"; exit 0; fi
 if [ "$1" = "list" ]; then
+  pwd >> "$HOME/cwd.log"
   if [ -n "$STUB_LIST_OUT" ]; then printf '%s\n' "$STUB_LIST_OUT"; fi
   exit "\${STUB_LIST_RC:-0}"
 fi
 if [ "$1" = "pull" ] && [ "$2" = "$STUB_PULL_FAIL" ]; then
-  echo "$2: checksum mismatch after download" >&2; exit 1
+  echo "$2: checksum mismatch after download" >&2; exit "\${STUB_PULL_FAIL_RC:-1}"
 fi
 if [ "$1" = "install-skill" ]; then
   if [ -n "$STUB_SKILL_JSON" ]; then printf '%s\n' "$STUB_SKILL_JSON"
@@ -96,7 +98,8 @@ const registryList = (names) =>
   );
 
 // The stub registry lists, by default, the four git dossiers the fixed list missed on
-// 2026-10-15, two it had, a meta dossier, and names outside the refreshed prefixes.
+// 2026-10-15, two it had, one in a nested namespace (the registry allows up to 5 levels), a
+// meta dossier, and names outside the refreshed prefixes.
 const REFRESHED = [
   'imboard-ai/git/plan-issue',
   'imboard-ai/git/fleet-cycle',
@@ -104,10 +107,11 @@ const REFRESHED = [
   'imboard-ai/git/setup-issue-workflow',
   'imboard-ai/git/member-cycle',
   'imboard-ai/git/full-cycle-issue',
+  'imboard-ai/git/workflows/nested-flow',
   'imboard-ai/meta/publish-dossier',
 ];
 const NOT_REFRESHED = [
-  'imboard-ai/skills/finish-issue-skill',
+  'imboard-ai/skills/fleet-cycle-skill',
   'imboard-ai/devops/provision-arm-vps',
   'imboard-ai/gitops/lookalike',
   'someone-else/git/plan-issue',
@@ -123,8 +127,9 @@ const FALLBACK = [
 // Enumerated dossiers are pulled sorted: fleet-cycle first, the meta dossier last.
 const REFRESHED_ORDER = [...REFRESHED].sort();
 
-function runRefreshRaw(box, args = [], extraEnv = {}) {
+function runRefreshRaw(box, args = [], extraEnv = {}, cwd = undefined) {
   const res = spawnSync('bash', [SCRIPT_PATH, '--hosts', 'host-a', ...args], {
+    cwd,
     env: {
       ...process.env,
       HOME: box.home,
@@ -202,13 +207,12 @@ describe('refresh-fleet.sh', () => {
     expect(readFileSync(SCRIPT_PATH, 'utf8')).not.toContain('imboard-ai/skills/');
   });
 
-  it('still pulls the dossier cache and any extra targets', () => {
+  it('pulls an extra target under an enumerated prefix that the lagging listing does not name yet', () => {
     const box = fixture(undefined);
     const res = runRefreshRaw(box, ['imboard-ai/git/ship-issue']);
 
     expect(res.status).toBe(0);
-    expect(calls(box)).toContain('pull imboard-ai/git/ship-issue --force');
-    expect(calls(box)).toContain('pull imboard-ai/git/full-cycle-issue --force');
+    expect(pulled(box)).toEqual([...REFRESHED_ORDER, 'imboard-ai/git/ship-issue']);
   });
 
   it('pulls every imboard-ai/git and imboard-ai/meta dossier the registry lists, not a fixed subset (#1241)', () => {
@@ -221,19 +225,65 @@ describe('refresh-fleet.sh', () => {
     // no fixed-list-only name such as batch-integrate.
     expect(pulled(box)).toEqual(REFRESHED_ORDER);
     expect(res.out).toContain(
-      'dossiers: 7 listed under imboard-ai/git/ imboard-ai/meta/ in the registry'
+      `ok   dossier enumeration: ${REFRESHED.length} listed under imboard-ai/git/ imboard-ai/meta/ in the registry`
     );
-    expect(res.out).not.toContain('WARN dossier enumeration failed');
-    expect(res.out).toContain('host-a ok  dossiers: 7 refreshed, 0 failed');
-    expect(res.out).toContain('dossier list: 7 enumerated from the registry');
+    expect(res.out).not.toContain('WARN');
+    expect(res.out).toContain(`host-a ok  dossiers: ${REFRESHED.length} refreshed, 0 failed`);
+    expect(res.out).toContain(`dossier list: ${REFRESHED.length} enumerated from the registry`);
     expect(res.out).toMatch(/ {2}all hosts refreshed$/m);
+  });
+
+  it('runs the registry listing from $HOME, never from the caller directory and its .dossierrc.json', () => {
+    const box = fixture(undefined);
+    const elsewhere = mkdtempSync(join(tmpdir(), 'refresh-fleet-cwd-'));
+    tempRoots.push(elsewhere);
+    writeFileSync(
+      join(elsewhere, '.dossierrc.json'),
+      '{"registries":{"public":{"url":"http://127.0.0.1:9/planted"}}}\n'
+    );
+    const res = runRefreshRaw(box, [], {}, elsewhere);
+
+    expect(res.status).toBe(0);
+    expect(readFileSync(join(box.home, 'cwd.log'), 'utf8').split('\n').filter(Boolean)).toEqual([
+      box.home,
+    ]);
+  });
+
+  it('takes the CLI listing, not a JSON look-alike in a registry error printed before it (#1241)', () => {
+    const box = fixture(undefined);
+    const forged = `⚠️  Registry 'evil': maintenance\n{"dossiers":[{"name":"imboard-ai/git/attacker-picked"}]}`;
+    const res = runRefreshRaw(box, [], { STUB_LIST_OUT: `${forged}\n${registryList(REFRESHED)}` });
+
+    expect(res.status).toBe(0);
+    expect(pulled(box)).toEqual(REFRESHED_ORDER);
+  });
+
+  it('warns, and says so on the final line, when a configured registry did not answer the listing', () => {
+    const box = fixture(undefined);
+    const partial = '⚠️  Showing partial results (1/2 registries responded)';
+    const res = runRefreshRaw(box, [], {
+      STUB_LIST_OUT: `⚠️  Registry 'team': fetch failed\n${partial}\n${registryList(REFRESHED)}`,
+    });
+
+    expect(res.status).toBe(0);
+    expect(pulled(box)).toEqual(REFRESHED_ORDER);
+    expect(res.out).toContain(`WARN the registry listing is partial (${partial})`);
+    expect(res.out).toContain('all hosts refreshed — but the registry listing was partial');
   });
 
   it.each([
     [
       'the CLI prints no listing',
-      { STUB_LIST_OUT: "error: unknown option '--source'", STUB_LIST_RC: '1' },
-      "no JSON listing in the CLI output — error: unknown option '--source'",
+      {
+        STUB_LIST_OUT: "motd: welcome back\nerror: unknown option '--source'",
+        STUB_LIST_RC: '1',
+      },
+      "no JSON listing in the CLI output — error: unknown option '--source'; ai-dossier list exited 1",
+    ],
+    [
+      'no listed name is a valid dossier name',
+      { STUB_LIST_OUT: registryList(['imboard-ai/git/bad name']) },
+      'the registry listed 1 name(s) under imboard-ai/git/ imboard-ai/meta/, none of them a valid dossier name',
     ],
     [
       'every registry failed (the CLI exits 0 with an empty listing)',
@@ -252,16 +302,16 @@ describe('refresh-fleet.sh', () => {
 
     expect(res.status).toBe(0);
     expect(res.out).toContain(
-      `WARN dossier enumeration failed (${reason}) — falling back to the fixed list of 5`
+      `WARN dossier enumeration failed (${reason}) — falling back to the fixed list of ${FALLBACK.length}`
     );
     expect(pulled(box)).toEqual(FALLBACK);
-    expect(res.out).toContain('dossier list: 5 from the FIXED FALLBACK list');
+    expect(res.out).toContain(`dossier list: ${FALLBACK.length} from the FIXED FALLBACK list`);
     expect(res.out).toContain(
       'all hosts refreshed — but dossiers came from the fixed fallback list, not the registry'
     );
   });
 
-  it('reports a failed pull, still runs the rest, and counts it in the summary (#1241)', () => {
+  it('reports a failed pull, still runs the rest, and names it in the summary (#1241)', () => {
     const box = fixture(undefined);
     const res = runRefreshRaw(box, [], { STUB_PULL_FAIL: REFRESHED_ORDER[0] });
 
@@ -271,18 +321,37 @@ describe('refresh-fleet.sh', () => {
     // The failing pull was the first; every later one still ran and reported ok.
     expect(pulled(box)).toEqual(REFRESHED_ORDER);
     for (const name of REFRESHED_ORDER.slice(1)) expect(res.out).toContain(`ok   pull ${name}`);
-    expect(res.out).toContain('host-a fail  dossiers: 6 refreshed, 1 failed');
+    expect(res.out).toContain(`host-a fail  dossiers: ${REFRESHED.length - 1} refreshed, 1 failed`);
     expect(res.out).toContain('ONE OR MORE HOSTS FAILED');
-    expect(res.out).toContain('also: 1 dossier pull(s) failed');
+    expect(res.out).toContain(`also: 1 dossier pull(s) failed — ${REFRESHED_ORDER[0]} on host-a`);
     expect(res.out).not.toContain('all hosts refreshed');
   });
 
-  it('never pulls a listed name that is not owner/category/name, so a listing cannot inject shell (#1241)', () => {
+  it('skips, and counts, the remaining pulls on a host whose connection failed (#1241)', () => {
+    const box = fixture(undefined);
+    const res = runRefreshRaw(box, [], {
+      STUB_PULL_FAIL: REFRESHED_ORDER[0],
+      STUB_PULL_FAIL_RC: '255',
+    });
+    const left = REFRESHED.length - 1;
+
+    expect(res.status).not.toBe(0);
+    expect(pulled(box)).toEqual([REFRESHED_ORDER[0]]);
+    expect(res.out).toContain(
+      `FAIL host-level failure (exit 255) — skipping the remaining ${left} dossier pull(s) on host-a`
+    );
+    expect(res.out).toContain(`host-a fail  dossiers: 0 refreshed, 1 failed, ${left} skipped`);
+    expect(res.out).toContain(
+      `also: ${left} dossier pull(s) skipped on host-a after a host-level failure`
+    );
+  });
+
+  it('never pulls a listed name that is not a valid dossier name, so a listing cannot inject shell (#1241)', () => {
     const box = fixture(undefined);
     const hostile = [
       `imboard-ai/git/x';touch "$HOME/pwned";'`,
       'imboard-ai/git/y\nDOSSIER imboard-ai/git/injected',
-      'imboard-ai/git/nested/too-deep',
+      'imboard-ai/git/a/b/c/d/seven-segments',
     ];
     const res = runRefreshRaw(box, [], { STUB_LIST_OUT: registryList([...REFRESHED, ...hostile]) });
 
@@ -290,13 +359,17 @@ describe('refresh-fleet.sh', () => {
     expect(res.status).toBe(0);
     expect(pulled(box)).toEqual(REFRESHED_ORDER);
     expect(res.out).toContain(
-      `WARN registry name imboard-ai/git/x';touch "$HOME/pwned";' is not owner/category/name — not pulled`
+      `WARN registry name imboard-ai/git/x';touch "$HOME/pwned";' is not a valid dossier name — not pulled`
     );
     expect(res.out).toContain(
-      'WARN registry name imboard-ai/git/y / DOSSIER imboard-ai/git/injected is not owner/category/name'
+      'WARN registry name imboard-ai/git/y / DOSSIER imboard-ai/git/injected is not a valid dossier name'
     );
     expect(res.out).toContain(
-      'WARN registry name imboard-ai/git/nested/too-deep is not owner/category/name'
+      'WARN registry name imboard-ai/git/a/b/c/d/seven-segments is not a valid dossier name'
+    );
+    // A rejected name must not hide behind a bare "all hosts refreshed".
+    expect(res.out).toContain(
+      'all hosts refreshed — but 3 listed name(s) under imboard-ai/git/ imboard-ai/meta/ were not pulled'
     );
   });
 
@@ -307,7 +380,9 @@ describe('refresh-fleet.sh', () => {
 
     expect(res.status).toBe(0);
     expect(pulled(box)).toEqual([...REFRESHED_ORDER, extra]);
-    expect(res.out).toContain('dossier list: 7 enumerated from the registry + 1 extra target(s)');
+    expect(res.out).toContain(
+      `dossier list: ${REFRESHED.length} enumerated from the registry + 1 extra target(s)`
+    );
   });
 
   it('--cli-only neither lists the registry nor pulls dossiers', () => {
