@@ -414,6 +414,13 @@ node scripts/zt-run.mjs start --config run-config.json --root <state-dir>/runs
    setup step 3 the run cannot read your email list, so in practice only the noreply address is
    accepted. The identity is recorded once and never changes on resume.
 3. The run then works until it reaches a durable stop and prints its status.
+   `start` and `resume` explain the expected wait and print each live lifecycle
+   transition immediately, for example `11:48:27Z verifying / candidate_ready`
+   (UTC). Work continues after authorization. Phases can take several minutes:
+   3–6 minutes each in a recent run, with timing varying by model, project and host.
+   Keep the command running; inspect `status` from another terminal if needed.
+   Resume shows the current state and new transitions, without replaying old history.
+   Read-only `status --json` and `metrics --json` remain single JSON objects.
 
 A second `start` with the same configuration while the first is still running exits with code 4,
 after its own authorization and author confirmation (the guard is checked when the run is created).
@@ -663,6 +670,7 @@ is expected for either blocked state: inspect `status` to distinguish them.
 | Exit | Meaning |
 |---|---|
 | 0 | A durable stop, including every hand-off. |
+| 1 | Output stream failed (for example a closed pipe); process-owned cleanup was joined before exit. Inspect `status` before resuming. |
 | 2 | Blocked, failed, unsupported, cancelled, cleanup blocked, or the operation was unavailable. |
 | 3 | Invalid input: a fixed `error: <code>` line plus the usage line. |
 | 4 | Another controller holds the run store (`store_locked`) or is busy. |

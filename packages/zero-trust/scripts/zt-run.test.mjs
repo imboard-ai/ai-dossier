@@ -128,6 +128,139 @@ const valid = {
   export: ['--run', run, '--out', 'export.json'],
   start: ['--config', 'config.json'],
 };
+for (const command of ['start', 'resume']) {
+  test(`${command}: progress is live before deferred work finishes, deduplicated without history replay`, async () => {
+    const h = rig();
+    const stdout = [];
+    let release;
+    const waiting = new Promise((resolve) => {
+      release = resolve;
+    });
+    let entered;
+    const ready = new Promise((resolve) => {
+      entered = resolve;
+    });
+    const running = main(
+      command === 'start'
+        ? ['start', '--root', h.root, '--config', h.file, '--confirm-author']
+        : ['resume', '--root', h.root, '--run', run, '--revise'],
+      {
+        out: (line) => stdout.push(line),
+        err: () => {},
+        createController: ({ onRun }) => ({
+          prepareAuthor: async () => approval,
+          [command]: async () => {
+            const record = {
+              runId: run,
+              state: 'revising',
+              reasonCode: 'revision_requested',
+              updatedAt: '2026-10-10T11:46:39.000Z',
+              history: Array(12),
+            };
+            onRun(record);
+            onRun(record);
+            onRun({
+              ...record,
+              state: 'verifying',
+              reasonCode: 'candidate_ready',
+              updatedAt: '2026-10-10T11:48:27.000Z',
+              history: Array(13),
+            });
+            entered(true);
+            await waiting;
+            return status;
+          },
+        }),
+      }
+    );
+    assert.equal(
+      await Promise.race([ready, running.then(() => false)]),
+      true,
+      'progress must arrive before completion'
+    );
+    assert.match(stdout[0], /Work continues after authorization.*3–6 minutes/);
+    assert.deepEqual(
+      stdout.filter((line) => /^\d\d:/u.test(line)),
+      ['11:46:39Z revising / revision_requested', '11:48:27Z verifying / candidate_ready']
+    );
+    assert.ok(!stdout.some((line) => line.includes('upstreamIssue:')));
+    release();
+    assert.equal(await running, 0);
+    assert.match(stdout.at(-1), /upstreamIssue:/);
+  });
+}
+test('progress snapshots getters once and refuses malformed/secret lifecycle text without echo', async () => {
+  for (const change of [
+    { state: 'verifying\nspoof' },
+    { reasonCode: 'Bearer synthetic-secret-value' },
+    { updatedAt: '2026-02-30T11:48:27.000Z' },
+    { history: { length: -1 } },
+  ]) {
+    const result = await invoke(
+      ['resume', '--root', 'runs', '--run', run],
+      {},
+      {
+        createController: ({ onRun }) => ({
+          resume: async () => {
+            onRun({
+              runId: run,
+              state: 'verifying',
+              reasonCode: 'candidate_ready',
+              updatedAt: '2026-10-10T11:48:27.000Z',
+              history: [1],
+              ...change,
+            });
+            return status;
+          },
+        }),
+      }
+    );
+    assert.notEqual(result.code, 0);
+    assert.ok(!result.stdout.join('\n').includes('spoof'));
+    assert.ok(!result.stdout.join('\n').includes('synthetic-secret-value'));
+    assert.equal(result.stdout.filter((line) => /^\d\d:/u.test(line)).length, 0);
+  }
+  let reads = 0;
+  const result = await invoke(
+    ['resume', '--root', 'runs', '--run', run],
+    {},
+    {
+      createController: ({ onRun }) => ({
+        resume: async () => {
+          onRun({
+            runId: run,
+            get state() {
+              reads++;
+              return reads === 1 ? 'verifying' : 'Bearer synthetic-secret-value';
+            },
+            reasonCode: 'candidate_ready',
+            updatedAt: '2026-10-10T11:48:27.000Z',
+            history: [1],
+          });
+          return status;
+        },
+      }),
+    }
+  );
+  assert.equal(result.code, 0);
+  assert.equal(reads, 1);
+  assert.ok(result.stdout.includes('11:48:27Z verifying / candidate_ready'));
+});
+test('read-only JSON commands never receive progress callbacks or wait messages', async () => {
+  const r = await invoke(['status', '--root', 'runs', '--run', run, '--json'], {
+    status: async () => status,
+  });
+  assert.equal(r.code, 0);
+  assert.equal(r.stdout.length, 1);
+  assert.equal(JSON.parse(r.stdout[0]).state, status.state);
+  assert.equal(r.factories[0].onRun, undefined);
+  const metrics = aggregate([]);
+  const m = await invoke(['metrics', '--root', 'runs', '--json'], { metrics: async () => metrics });
+  assert.equal(m.code, 0);
+  assert.equal(m.stdout.length, 1);
+  assert.deepEqual(JSON.parse(m.stdout[0]), JSON.parse(JSON.stringify(metrics)));
+  assert.equal(m.factories[0].onRun, undefined);
+});
 for (const [command, args] of Object.entries(valid)) {
   test(`${command}: closed parser refuses missing/unknown/duplicate/positional arguments before effects`, async () => {
     for (const argv of [
@@ -355,7 +488,7 @@ test('start displays author and records explicit/interactive consent; absent or 
   ]) {
     const r = await invoke(extra.argv, controller, extra.deps);
     assert.equal(r.code, 0);
-    assert.match(r.stdout[0], /^author_identity:/u);
+    assert.match(r.stdout[1], /^author_identity:/u);
   }
   assert.equal(calls.length, 2);
   assert.deepEqual(calls[0].authorApproval, approval);

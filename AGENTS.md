@@ -57,6 +57,10 @@ make lint         # exactly CI's lint gate, read-only: errors AND warnings fail
 - Changing a publishable package's `src/`/`bin/` requires bumping that package's `package.json`
   version — CI's `version-bump` job fails the PR otherwise (label `no-release-needed` opts out)
 - MCP integration: see `mcp-server/README.md`
+- Issue workflows: this project deliberately grants no production data access. Pass
+  `prod_data_access=none` to `full-cycle-issue`, `fleet-cycle` and `plan-issue`, so plan-issue's
+  reachability check (Step 4b, case B) records the traced trigger and proceeds instead of
+  escalating as unverifiable
 
 ## Publishing dossiers and skills
 

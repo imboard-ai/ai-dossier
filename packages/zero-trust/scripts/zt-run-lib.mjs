@@ -6,6 +6,7 @@ import { MAX_PR_TITLE_LENGTH } from '../dist/github/handoff.js';
 import { MAX_WITHDRAWAL_EXPLANATION, WITHDRAWAL_REASONS } from '../dist/github/track.js';
 import { renderMetricsHuman, renderMetricsJson } from '../dist/metrics/outcomes.js';
 import { assertSecretFree } from '../dist/redaction.js';
+import { ReasonCode, TRANSITIONS } from '../dist/state.js';
 import { renderHuman, renderJson } from '../dist/status.js';
 
 export const COMMANDS = Object.freeze({
@@ -252,9 +253,48 @@ export async function main(argv, { createController, out, err, confirmAuthor } =
     const { command, opts } = parsed;
     // Invalid configuration must fail before any OAuth, controller or store effects.
     const config = command === 'start' ? readConfig(opts.config) : undefined;
+    const progress = command === 'start' || command === 'resume';
+    let lastProgress;
+    if (progress)
+      out(
+        'Work continues after authorization until a durable stop. Phases can take several minutes (3–6 minutes each in a recent run); timing varies. Keep this command running; use zt-run status in another terminal to inspect it.'
+      );
     const controller = await createController({
       root: opts.root,
       onAuthorizationUrl: (url) => out(authorizationLine(url)),
+      ...(progress
+        ? {
+            onRun: (run) => {
+              // Snapshot only public lifecycle primitives once; never render provider text.
+              const facts = {
+                runId: run.runId,
+                state: run.state,
+                reasonCode: run.reasonCode,
+                timestamp: run.updatedAt,
+                sequence: run.history.length,
+              };
+              assertSecretFree(facts);
+              if (
+                typeof facts.runId !== 'string' ||
+                !/^ztc-[a-f0-9]{16}-run-1$/u.test(facts.runId) ||
+                typeof facts.state !== 'string' ||
+                !Object.hasOwn(TRANSITIONS, facts.state) ||
+                !Object.values(ReasonCode).includes(facts.reasonCode) ||
+                typeof facts.timestamp !== 'string' ||
+                !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(facts.timestamp) ||
+                !Number.isFinite(Date.parse(facts.timestamp)) ||
+                new Date(facts.timestamp).toISOString() !== facts.timestamp ||
+                !Number.isSafeInteger(facts.sequence) ||
+                facts.sequence < 0
+              )
+                refuse('operation_failed');
+              const key = JSON.stringify(facts);
+              if (key === lastProgress) return;
+              out(`${facts.timestamp.slice(11, 19)}Z ${facts.state} / ${facts.reasonCode}`);
+              lastProgress = key;
+            },
+          }
+        : {}),
     });
     let status;
     switch (command) {

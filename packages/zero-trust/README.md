@@ -75,6 +75,20 @@ Publication remains gated on S1 feasibility.
 
 ## Controller CLI (#1109)
 
+`ControllerOverrides.onRun` is an optional observational UI callback for durable
+lifecycle notifications. The repository CLI passes it only for `start`/`resume`,
+prints a UTC timestamp, closed state and reason code per notification (identical
+notifications are deduplicated), and explains the multi-minute wait before OAuth.
+It projects only lifecycle primitives, never config, provider text or credentials.
+The callback is a separate controller driver: output failure cannot skip mandatory
+driver synchronization or cleanup. Signal ownership and interruption stay unchanged.
+Read-only JSON commands receive no callback or progress lines.
+The callback is synchronous and must not return asynchronous work. A synchronous
+exception fails the invocation after every driver has been attempted; observational
+means it supplies UI evidence, not that its exceptions are ignored.
+An asynchronous stdout/stderr failure (including a closed pipe) joins the same
+process-owned cleanup barrier before exit 1, rather than crashing past cleanup.
+
 ### Active pause and cancellation (#1110)
 
 #### Lifecycle gate evidence (#1113)
