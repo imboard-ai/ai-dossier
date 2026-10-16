@@ -76,6 +76,8 @@ describe('scheduler CLI self-upgrade (two-version process integration)', () => {
     expect(fs.readFileSync(versionFile, 'utf8')).toBe('0.89.6');
     expect(fs.readFileSync(timelineFile, 'utf8').trim().split('\n')).toEqual([
       'old-start:0.89.5',
+      'upgrade-deferred:two-owned-agents',
+      'agents-reaped:before-install',
       'install-complete:0.89.6',
       `new-load:0.89.6:schema=${SCHEMA_VERSION}:unreachable=null`,
       `new-write:0.89.6:schema=${SCHEMA_VERSION}`,

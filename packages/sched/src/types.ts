@@ -1935,6 +1935,8 @@ export type JournalEventName =
   // an upgrade attempted, and did it work?" from events.jsonl alone.
   | 'engine-auto-upgrade-attempted'
   | 'engine-auto-upgrade-failed'
+  | 'engine-auto-upgrade-deferred'
+  | 'engine-auto-upgrade-drained'
   // #565: `sched reprioritize` mutates state.json directly with no other
   // trace — `updated_at` is deliberately NOT bumped (it is the readiness-age
   // tiebreak in `compareByPriority`, and a manual priority edit must not also

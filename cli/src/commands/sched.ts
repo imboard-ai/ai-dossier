@@ -80,6 +80,7 @@ import {
   ORPHAN_SWEEP_MAX_ANCHORS,
   orphanAnchorListArgs,
   parseManifest,
+  procChildren,
   pruneMemberBranches,
   pruneRescueRefs,
   readJsonl,
@@ -96,6 +97,7 @@ import {
   resolveProjectSlug,
   resumeBlockedGate,
   resumeLandedBatch,
+  resumeUnkillableBatch,
   runLoop,
   SAFE_REF_RE,
   SchedNotFoundError,
@@ -1651,6 +1653,26 @@ function resumeBatchGate(opts: PauseResumeOptions): void {
   // blocks) resumes by re-running the gate + tail over its landed members —
   // routed before the config load, which only the gate recheck needs.
   const blockedOn = findBatch(store.load(), opts.batch as string)?.blocked_reason ?? null;
+  if (blockedOn === 'agent-unkillable') {
+    try {
+      const result = resumeUnkillableBatch(
+        store,
+        createSpawnDeps(process.cwd()),
+        opts.batch as string
+      );
+      new Journal(store.dir).append(
+        unitEvent('batch-resumed', `batch:${opts.batch}`, { reason: 'agent-unkillable' })
+      );
+      console.log(
+        opts.json
+          ? JSON.stringify(result)
+          : `▶ Batch ${opts.batch} resumed — recorded agents are gone; the next tick reconciles the retained members.`
+      );
+    } catch (err) {
+      handleKnownError(err);
+    }
+    return;
+  }
   if (isLandedResumableBlock(blockedOn)) {
     resumeLandedBatchCommand(store, opts);
     return;
@@ -1769,14 +1791,14 @@ function registerPauseResumeSubcommand(cmd: Command, pause: boolean): void {
     .description(
       pause
         ? 'Prevent every new agent process, including recovery takeovers; live agents keep running'
-        : 'Resume making new slot assignments; with --batch <id>, re-run the incremental gate for a batch blocked on gate-inconclusive (#583), or re-run the gate + tail over the landed members of a batch blocked over landed work — dissolve-refused / tail-blocked / members-mismatch / respawn-cap:tail (#822)'
+        : 'Resume making new slot assignments; with --batch <id>, recover agent-unkillable after agent exit, recheck an inconclusive gate, or re-run the gate + tail over landed work'
     )
     .option('--project <slug>', 'Project slug (default: owner-repo of the current directory)')
     .option('--json', 'Output the result as JSON');
   if (!pause) {
     sub.option(
       '--batch <id>',
-      'Batch id blocked on gate-inconclusive:<cap> (re-run that gate) or over landed work (dissolve-refused / tail-blocked / members-mismatch / respawn-cap:tail — ship the landed members)'
+      'Batch id blocked on agent-unkillable (resume once agents are dead), gate-inconclusive:<cap>, or over landed work'
     );
   }
   sub.action((opts: PauseResumeOptions) => {
@@ -2488,18 +2510,58 @@ function createUpgradeExec(): ExecFn {
   };
 }
 
-/**
- * #537/#945: after a tick, compare the installed scheduler library and CLI
- * executable against npm latest. Each stale package is journaled once per
- * distinct (installed, latest) pair and warned on stderr. When auto-upgrade is
- * enabled, either stale package requests an install of the latest CLI. The
- * caller awaits this AFTER a completed tick and stops the old loop on success;
- * live agents are detached and the restarted engine reattaches to their pids.
+/** Include every slot role, plus children whose slots were already released.
+ * The worker supplies its own unreaped-child fence at the completed tick boundary.
  */
+export function upgradeHasAgents(deps: Pick<EngineDeps, 'store' | 'spawnDeps'>): boolean {
+  return engineChildBoundary(deps).kind === 'defer';
+}
+
+/** Unknown waitable children cannot be reaped by a replacement libuv image.
+ * Exit (rather than execve) once every agent drains: the OS reparent/reaper
+ * collects them, and the supervisor starts a fresh engine on retained state.
+ */
+export function needsChildReaperRestart(
+  deps: Pick<EngineDeps, 'store' | 'spawnDeps'>,
+  workerHasChildren = false
+): boolean {
+  return engineChildBoundary(deps, workerHasChildren).kind === 'restart';
+}
+
+/** One snapshot decides all three outcomes. In particular a live inherited
+ * child turning Z between two scans must never fall through to execve.
+ */
+export function engineChildBoundary(
+  deps: Pick<EngineDeps, 'store' | 'spawnDeps'>,
+  worker = false
+): { kind: 'defer' | 'restart' | 'eligible'; detail: string | null } {
+  const slots = deps.store.load().slots.filter((slot) => slot.pid !== null);
+  const liveSlot = slots.some((slot) =>
+    deps.spawnDeps.isAlive(slot.pid as number, slot.pid_start ?? undefined)
+  );
+  const owned = deps.spawnDeps.hasUnreapedChildren?.() ?? false;
+  const children = procChildren() ?? [];
+  if (worker || owned || liveSlot || children.some((child) => child.state !== 'Z')) {
+    const recorded = slots.map((slot) => `${slot.unit}@${slot.pid}`).join(',') || 'none';
+    const childPids = children.map((child) => child.pid).join(',') || 'none';
+    return {
+      kind: 'defer',
+      detail: `recorded slots=${recorded}; children=${childPids}; owned callbacks=${owned}; worker callbacks=${worker} — retrying after drain`,
+    };
+  }
+  return { kind: children.length > 0 ? 'restart' : 'eligible', detail: null };
+}
+
+/** #537/#945/#1244: compare installed packages after a completed tick. Callers
+ * allow installation only after recorded agents and owned children drain.
+ * Success ends the old loop before it can write state after installation.
+ */
+
 async function checkAndHandleEngineStaleness(
   journal: Journal,
   autoUpgradeEnabled: boolean,
-  upgradeExec: ExecFn
+  upgradeExec: ExecFn,
+  deferred: string | null = null
 ): Promise<boolean> {
   const [engine, cli] = await Promise.all([checkEngineStaleness(), checkCliStaleness()]);
   const events = journal.read();
@@ -2524,7 +2586,28 @@ async function checkAndHandleEngineStaleness(
     }
     stalePackages.push(`${packageName}@${check.installed}->${check.latest}`);
   }
+  const lastDrain = [...events]
+    .reverse()
+    .find(
+      (event) =>
+        event.event === 'engine-auto-upgrade-deferred' ||
+        event.event === 'engine-auto-upgrade-drained'
+    );
+  if (
+    autoUpgradeEnabled &&
+    deferred === null &&
+    lastDrain?.event === 'engine-auto-upgrade-deferred'
+  ) {
+    journal.append({ event: 'engine-auto-upgrade-drained', detail: 'agent drain complete' });
+  }
   if (stalePackages.length === 0 || !autoUpgradeEnabled) return false;
+  if (deferred !== null) {
+    if (lastDrain?.event !== 'engine-auto-upgrade-deferred' || lastDrain.detail !== deferred) {
+      journal.append({ event: 'engine-auto-upgrade-deferred', detail: deferred });
+      process.stderr.write(`▶ sched auto-upgrade deferred: ${deferred}\n`);
+    }
+    return false;
+  }
 
   process.stderr.write('⚠ sched: auto-upgrading (npm i -g @ai-dossier/cli@latest)…\n');
   // Record the attempt before npm can replace this CLI. After a successful
@@ -2715,7 +2798,7 @@ function registerStartSubcommand(cmd: Command): void {
     .option('--once', 'Run a single reconcile+refill tick and exit (cron-style)')
     .option(
       '--auto-upgrade',
-      'After a completed tick, install and re-exec @ai-dossier/cli@latest when this engine is stale'
+      'After a completed tick and agent/child drain, install and re-exec @ai-dossier/cli@latest when stale'
     )
     .option(
       '--alert-issue <n>',
@@ -2996,10 +3079,17 @@ function registerStartSubcommand(cmd: Command): void {
             handleKnownError(err);
             fail([`sched tick failed: ${(err as Error).name}: ${(err as Error).message}`]);
           }
+          const boundary = engineChildBoundary(deps);
+          if (boundary.kind === 'restart') {
+            exitLogger.logNormalExit('orphaned child reaper restart');
+            process.exitCode = UPGRADE_RESTART_EXIT_CODE;
+            return;
+          }
           const upgradeHandoff = await checkAndHandleEngineStaleness(
             deps.journal,
             autoUpgradeEnabled && !stopping,
-            upgradeExec
+            upgradeExec,
+            boundary.detail
           );
           if (upgradeHandoff) {
             exitLogger.logNormalExit('auto-upgrade handoff');
@@ -3037,6 +3127,7 @@ function registerStartSubcommand(cmd: Command): void {
           ...(anchorRepo !== undefined ? { anchorRepo } : {}),
         });
         let upgradeHandoff = false;
+        let reaperRestart = false;
         await runLoop(
           deps,
           () => {
@@ -3047,6 +3138,15 @@ function registerStartSubcommand(cmd: Command): void {
           async (result) => {
             if (!opts.json) console.log(`✓ [${new Date().toISOString()}] ${describe(result)}`);
             else console.log(JSON.stringify({ ts: new Date().toISOString(), ...result }));
+            const boundary = engineChildBoundary(
+              deps,
+              tickRunner?.hasUnreapedChildren?.() ?? false
+            );
+            if (boundary.kind === 'restart') {
+              reaperRestart = true;
+              stopping = true;
+              return;
+            }
             if (!autoUpgradeEnabled || stopping) {
               // Preserve the non-blocking advisory check when upgrades are
               // disabled (or shutdown was requested during the tick).
@@ -3056,7 +3156,12 @@ function registerStartSubcommand(cmd: Command): void {
             // #945: await the complete upgrade after this tick. On success,
             // `shouldStop` becomes true before `runLoop` can start another tick,
             // so the old package cannot write state after the install lands.
-            const requested = await checkAndHandleEngineStaleness(deps.journal, true, upgradeExec);
+            const requested = await checkAndHandleEngineStaleness(
+              deps.journal,
+              true,
+              upgradeExec,
+              boundary.detail
+            );
             if (requested) {
               upgradeHandoff = true;
               stopping = true;
@@ -3065,6 +3170,14 @@ function registerStartSubcommand(cmd: Command): void {
           tickRunner !== null ? { runTick: (cfg) => tickRunner.runTick(cfg) } : {}
         );
         await tickRunner?.close();
+        if (reaperRestart) {
+          exitLogger.logNormalExit('orphaned child reaper restart');
+          process.stderr.write(
+            `⚠ sched: drained inherited zombie children — requesting supervisor process restart (${UPGRADE_RESTART_EXIT_CODE}) to reap them\n`
+          );
+          process.exitCode = UPGRADE_RESTART_EXIT_CODE;
+          return;
+        }
         if (upgradeHandoff) {
           exitLogger.logNormalExit('auto-upgrade handoff');
           releaseLease();

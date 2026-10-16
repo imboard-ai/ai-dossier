@@ -44,7 +44,7 @@ export interface TickRequest {
 }
 
 export type TickResponse =
-  | { id: number; ok: true; result: TickResult }
+  | { id: number; ok: true; result: TickResult; unreapedChildren?: boolean }
   | { id: number; ok: false; error: SerializedError };
 
 /**
@@ -96,7 +96,13 @@ if (parentPort !== null) {
     tickConfig = msg.config;
     let response: TickResponse;
     try {
-      response = { id: msg.id, ok: true, result: tick(deps, msg.config) };
+      const result = tick(deps, msg.config);
+      response = {
+        id: msg.id,
+        ok: true,
+        result,
+        unreapedChildren: deps.spawnDeps.hasUnreapedChildren?.() ?? false,
+      };
     } catch (err) {
       response = { id: msg.id, ok: false, error: serializeError(err) };
     }

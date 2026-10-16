@@ -26,6 +26,7 @@ export const INLINE_TICK_ENV = 'DOSSIER_SCHED_INLINE_TICK';
 export interface TickRunner {
   runTick(config: SchedConfig): Promise<TickResult>;
   close(): Promise<void>;
+  hasUnreapedChildren?(): boolean;
 }
 
 /**
@@ -52,6 +53,7 @@ export function createWorkerTickRunner(
 ): TickRunner {
   let worker: Worker | null = null;
   let nextId = 1;
+  let unreapedChildren = false;
 
   const ensure = (): Worker => {
     if (worker === null) worker = makeWorker(workerFile, data);
@@ -81,8 +83,10 @@ export function createWorkerTickRunner(
         const onMessage = (msg: TickResponse) => {
           if (msg.id !== id) return;
           cleanup();
-          if (msg.ok) resolve(msg.result);
-          else reject(revive(msg.error));
+          if (msg.ok) {
+            unreapedChildren = msg.unreapedChildren ?? false;
+            resolve(msg.result);
+          } else reject(revive(msg.error));
         };
         const onError = (err: Error) => {
           cleanup();
@@ -107,5 +111,6 @@ export function createWorkerTickRunner(
       worker = null;
       if (w !== null) await w.terminate();
     },
+    hasUnreapedChildren: () => unreapedChildren,
   };
 }

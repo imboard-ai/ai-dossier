@@ -202,6 +202,31 @@ where every mechanical supervision decision is code, not remembered prose:
    tick; a runnable unit never waits while a slot is idle (pinned by a regression test).
    Refill was always synchronous; what previously had no journal trace was the release
    itself — see `slot-released` below (#525).
+   **Auto-upgrade and child supervision (#1244):** `sched start --auto-upgrade`
+   (including `--once`) defers installation and process replacement while any
+   recorded slot agent is alive, or this engine/its tick worker still owns a child
+   awaiting its exit callback. This includes parallel members, tail, fix and report
+   agents, even after their slot is released. Upgrades retry at later tick boundaries
+   once those agents drain; the old engine never writes after installing the update.
+   On Linux a `/proc/<pid>/stat` state of `Z` is dead for reconciliation, not an
+   unkillable agent. Owned children are reaped by libuv when their event loop runs;
+   detecting `Z` alone does not reap a child adopted from an older engine image.
+   If Linux reports inherited zombies after all live agents and known child
+   callbacks drain (including after a tick-worker crash), the engine exits with
+   code 75 instead of re-executing: the OS reaper collects the children and the
+   service/watchdog starts a fresh process on retained state. An unsupervised
+   engine must be started again by its operator. A deliberate upgrade deferral
+   is journaled as `engine-auto-upgrade-deferred` with recorded slot/PID and child
+   information; unchanged deferrals are deduplicated, and drain is recorded once.
+
+   To recover an existing `agent-unkillable` batch without abandoning its work:
+   `ai-dossier sched resume --batch <id> --project <slug>`. It rechecks every
+   recorded batch/member agent's PID and start identity under the state lock and
+   refuses while any is genuinely alive. Once all are dead (including zombies),
+   it resumes the retained executing position. Members, landed commits, worktrees,
+   branches and dispatch profile stay intact; the next tick finishes the original
+   member decision. This does not toggle the global pause state. Avoid `abandon`
+   when the goal is to keep the batch.
 6. **Journal (AC6)** — every event (assigned, spawned, exit-detected, external-advance,
    progress, stalled, redispatched, fence-written, fence-failed, unit-failed,
    dependents-blocked, slot-released, suspect-dispatch, dispatch-unhealthy, dispatch-failure,
@@ -403,8 +428,8 @@ ai-dossier sched service uninstall
   node / entry-point / repo paths that are missing, relative, or under a temp or `worktrees/`
   directory, and warns that an nvm node path must be re-pinned (re-run `install`) after a node
   upgrade. It runs `sched start --auto-upgrade` (opt out with `--no-auto-upgrade`); after a
-  completed tick, a stale engine installs the latest CLI and re-execs the same command before
-  another state write. Detached agents keep running and the new engine reattaches by pid. The
+   completed tick and after all recorded agents and owned children drain, a stale engine
+   installs the latest CLI and re-execs the same command before another state write. The
   new version migrates state on load; older engines reject newer schemas. If the Node runtime
   cannot replace the process directly, exit code 75 asks systemd/the watchdog to restart the
   updated entry point.

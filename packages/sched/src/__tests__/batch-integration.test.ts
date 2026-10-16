@@ -64,11 +64,13 @@ import {
   parsePreambleLine,
   patchBatch,
   patchSlot,
+  procStatFields,
   readJsonl,
   requeueParkedMember,
   resolveDispatch,
   resumeBlockedGate,
   resumeLandedBatch,
+  resumeUnkillableBatch,
   runBatchTick,
   runnableUnits,
   type SchedConfig,
@@ -6812,6 +6814,77 @@ describe('#844 item 1: crash recovery finishes what the eviction would have done
 });
 
 describe('#844 item 2: a member agent that ignores SIGTERM is SIGKILLed after the bound', () => {
+  it.skipIf(process.platform !== 'linux')(
+    '#1244 a real zombie past both kill bounds never blocks agent-unkillable and is reaped',
+    async () => {
+      const repo = scratchRepo();
+      const id = 'b-1244-zombie';
+      const h = batchHarness(
+        repo,
+        ['--mode=batch', '--commit-file=f-{issue}.txt', '--wrong-procedure-members=12441'],
+        { maxSlots: 1 }
+      );
+      h.enqueue([{ issue: 12441, mode: 'slot', batch: id, anchor: 12440, tier: 'mid' }]);
+      await tickUntil(h, id, (b) => b.status === 'executing' && batchSlotPid(h, id) !== undefined);
+      const slot = h.state().slots.find((s) => s.unit === `batch:${id}`);
+      if (!slot?.pid) throw new Error('missing member slot');
+      expect(await waitUntilDead(h.spawnDeps, slot.pid)).toBe(true);
+      const pid = h.spawnDeps.spawn(
+        [process.execPath, '-e', 'process.exit(0)'],
+        '',
+        path.join(h.store.runsDir, 'zombie.log')
+      );
+      const start = h.spawnDeps.processStart(pid);
+      const pastBound = Date.now() - KILL_ESCALATION_MS - 1_000;
+      h.store.withLock((state) => ({
+        state: patchSlot(state, slot.id, {
+          pid,
+          pid_start: start,
+          spawned_at: new Date(pastBound - 2_000).toISOString(),
+          kill_sent_at: new Date(pastBound - 1_000).toISOString(),
+          kill_escalated_at: new Date(pastBound).toISOString(),
+        }),
+        result: undefined,
+      }));
+      const signals: number[] = [];
+      h.deps.spawnDeps = {
+        ...h.spawnDeps,
+        kill: (...args) => {
+          signals.push(args[0]);
+          return h.spawnDeps.kill(...args);
+        },
+      };
+      try {
+        const deadline = Date.now() + 5_000;
+        while (procStatFields(pid)?.[0] !== 'Z' && Date.now() < deadline) {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+        }
+        expect(procStatFields(pid)?.[0]).toBe('Z');
+        expect(() => process.kill(pid, 0)).not.toThrow();
+        h.tick();
+        expect(findBatch(h.state(), id)?.blocked_reason).toBeNull();
+        expect(findBatch(h.state(), id)?.reprompted_members.map((m) => m.issue)).toEqual([12441]);
+        expect(signals).not.toContain(pid);
+        expect(
+          h.deps.journal
+            .read()
+            .filter(
+              (event) =>
+                event.event === 'kill-ineffective' ||
+                (event.event === 'batch-blocked' && event.detail === 'agent-unkillable')
+            )
+        ).toEqual([]);
+        for (let n = 0; n < 100 && procStatFields(pid) !== null; n++)
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(procStatFields(pid)).toBeNull();
+        await tickUntil(h, id, (batch) => batch.status === 'awaiting-merge');
+      } finally {
+        h.spawnDeps.kill(pid, start ?? undefined, 'SIGKILL');
+      }
+    },
+    60_000
+  );
+
   it('#862: blocks once when a stubbed agent remains alive after SIGKILL', async () => {
     const repo = scratchRepo();
     const id = 'b-862-unkillable';
@@ -6846,6 +6919,35 @@ describe('#844 item 2: a member agent that ignores SIGTERM is SIGKILLed after th
       [8621, slot.pid, slot.id],
     ]);
     expect(findBatch(h.state(), id)?.blocked_reason).toBe('agent-unkillable');
+    // Crash-prefix recovery: a previous image saved the ineffective stamp
+    // but died before persisting the batch block. The next tick completes it.
+    h.store.withLock((state) => ({
+      state: transitionBatch(state, id, 'executing', { blocked_reason: null }),
+      result: undefined,
+    }));
+    h.tick();
+    expect(findBatch(h.state(), id)?.blocked_reason).toBe('agent-unkillable');
+    expect(
+      h.deps.journal.read().filter((event) => event.event === 'kill-ineffective')
+    ).toHaveLength(1);
+    const blocked = h.state();
+    expect(() => resumeUnkillableBatch(h.store, h.deps.spawnDeps, id)).toThrow('still has live');
+    expect(h.state()).toEqual(blocked);
+    // The real agent already exited; remove the artificial unkillable stub.
+    expect(await waitUntilDead(h.spawnDeps, slot.pid as number)).toBe(true);
+    expect(resumeUnkillableBatch(h.store, h.spawnDeps, id).outcome).toBe('resumed');
+    const resumed = findBatch(h.state(), id);
+    expect(resumed).toEqual({
+      ...findBatch(blocked, id),
+      status: 'executing',
+      blocked_reason: null,
+      updated_at: resumed?.updated_at,
+    });
+    expect(h.state().entries).toEqual(blocked.entries);
+    expect(h.state().slots).toEqual(blocked.slots);
+    h.deps.spawnDeps = h.spawnDeps;
+    await tickUntil(h, id, (b) => b.status === 'awaiting-merge');
+    expect(memberDispatchCount(h, id, 1, 8621)).toBe(2); // one permitted wrong-procedure re-prompt
   }, 60_000);
 
   it('the wrong-procedure wait escalates to SIGKILL once past KILL_ESCALATION_MS, journals it once, then re-prompts', async () => {
@@ -6883,6 +6985,7 @@ describe('#844 item 2: a member agent that ignores SIGTERM is SIGKILLed after th
     expect(slot.kill_escalated_at).toBeNull();
     const stopRequests = h.deps.journal.read().filter((e) => e.event === 'member-stop-requested');
     expect(stopRequests.map((e) => [e.issue, e.pid])).toEqual([[885, pid]]);
+    expect(stopRequests[0].reason).toBe('wrong-procedure');
 
     // A FUTURE stamp (clock step, hand edit) must not switch the escalation
     // off: it is replaced by a fresh one on the next tick.
@@ -6953,6 +7056,11 @@ describe('#844 item 2: a member agent that ignores SIGTERM is SIGKILLed after th
     // and its worktree intact while the agent ignores it.
     h.tick();
     expect(h.spawnDeps.isAlive(pid)).toBe(true);
+    expect(
+      h.deps.journal
+        .read()
+        .find((event) => event.event === 'member-stop-requested' && event.issue === 8611)?.reason
+    ).toBe('member-complete');
     expect(findBatch(h.state(), id)?.member_runs.find((run) => run.issue === 8611)?.status).toBe(
       'running'
     );

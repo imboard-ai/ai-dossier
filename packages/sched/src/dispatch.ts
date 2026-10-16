@@ -1276,6 +1276,8 @@ export interface SpawnDeps {
    * pid-reuse guard as `kill`.
    */
   isAlive(pid: number, expectedStart?: number): boolean;
+  /** Owned children whose libuv exit callback has not run yet (even after slot release). */
+  hasUnreapedChildren?(): boolean;
   /**
    * `/proc/<pid>/stat` start-time (field 22) of a pid, when the platform
    * exposes it (Linux); null elsewhere. The engine persists this at spawn so
@@ -1427,6 +1429,34 @@ export function procStartTime(pid: number): number | null {
   return Number.isInteger(start) && start >= 0 ? start : null;
 }
 
+/** Direct children across ALL threads. A terminated worker's children become
+ * children of the main thread, but its libuv wait handles are gone. Linux's
+ * task children files let the engine find those inherited identities without
+ * scanning unrelated host processes. Null means the platform has no /proc.
+ */
+export function procChildren(): Array<{ pid: number; state: string }> | null {
+  try {
+    const pids = new Set<number>();
+    for (const tid of fs.readdirSync('/proc/self/task')) {
+      let children: string;
+      try {
+        children = fs.readFileSync(`/proc/self/task/${tid}/children`, 'utf8');
+      } catch {
+        continue; // a worker can finish between readdir and read
+      }
+      for (const pid of children.trim().split(/\s+/).map(Number)) {
+        if (Number.isInteger(pid) && pid > 1) pids.add(pid);
+      }
+    }
+    return [...pids].flatMap((pid) => {
+      const fields = procStatFields(pid);
+      return fields?.[1] === String(process.pid) ? [{ pid, state: fields[0] }] : [];
+    });
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Real process I/O: detached spawn with output to a log file, unref'd.
  *
@@ -1442,6 +1472,7 @@ export function procStartTime(pid: number): number | null {
 export function createSpawnDeps(cwd?: string): SpawnDeps {
   /** Pids spawned by THIS instance -> their /proc start-time (Linux). */
   const spawnedStarts = new Map<number, number>();
+  const children = new Set<number>();
 
   /** True when `pid` plausibly still names the process we recorded. */
   function matchesRecordedStart(pid: number, expectedStart: number | undefined): boolean {
@@ -1540,6 +1571,12 @@ export function createSpawnDeps(cwd?: string): SpawnDeps {
         }
         const start = procStartTime(child.pid);
         if (start !== null) spawnedStarts.set(child.pid, start);
+        const pid = child.pid;
+        children.add(pid);
+        child.once('exit', () => {
+          children.delete(pid);
+          spawnedStarts.delete(pid);
+        });
         return child.pid;
       } finally {
         // The child holds its own dups of the fd; the parent's copy must close.
@@ -1571,6 +1608,10 @@ export function createSpawnDeps(cwd?: string): SpawnDeps {
     },
     isAlive(pid: number, expectedStart?: number): boolean {
       if (!signallable(pid)) return false;
+      // Signal 0 succeeds for zombies: they cannot run and must not hold a
+      // member in the kill ladder. libuv reaps our own children when this
+      // thread yields; hasUnreapedChildren prevents execve before that happens.
+      if (procStatFields(pid)?.[0] === 'Z') return false;
       try {
         process.kill(pid, 0);
         return matchesRecordedStart(pid, expectedStart);
@@ -1586,5 +1627,6 @@ export function createSpawnDeps(cwd?: string): SpawnDeps {
     processStart(pid: number): number | null {
       return procStartTime(pid);
     },
+    hasUnreapedChildren: () => children.size > 0,
   };
 }

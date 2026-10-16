@@ -58,8 +58,8 @@ the next tick picks it up — there is no reload command.
 1. **Engine freshness.** Compares the installed `ai-dossier` CLI version against npm
    latest and, if npm has a newer release, upgrades unconditionally — before ticking
    any project, with no mid-dispatch check. (`ai-dossier sched start --auto-upgrade`
-   is the separate, safer in-engine equivalent that *does* gate on no unit being
-   mid-dispatch; `tick.sh` does not pass that flag.) Either way, the engine only ever
+   is the separate, safer in-engine equivalent that waits until recorded live agents
+   and engine/worker-owned children drain; `tick.sh` does not pass that flag.) Either way, the engine only ever
    runs code from a version an operator has actually npm-published.
 2. **Tick every project.** For each slug in `~/.dossier/reset-fleet/projects.txt`, runs
    `ai-dossier sched start --once --project <slug>` (one reconcile+refill pass: spawn
@@ -269,7 +269,7 @@ per-project. Most subcommands also take `--json` for machine-readable output.
 | Requeue a parked batch member (evicted / handed back, #810) — full-cycle from its member branch | `ai-dossier sched requeue --issue 42` |
 | Run the engine continuously (a human at a terminal ONLY — never inside an agent tool call) | `ai-dossier sched start` (Ctrl-C stops it; live agents keep running). An agent's bash call must not hold a foreground engine: the process dies with the call's process group the moment the call ends (`nohup` without `&` backgrounds nothing — see the trap row in [`docs/agent-traps.md`](../agent-traps.md)). Agents get engine progress from the tick cron, or run exactly one tick themselves: `ai-dossier sched start --once` |
 | Run one reconcile+refill tick (what cron does) | `ai-dossier sched start --once` |
-| Run one tick, self-upgrading the CLI first (gated on no mid-dispatch unit) | `ai-dossier sched start --once --auto-upgrade` |
+| Run one reconcile+refill tick, then upgrade/re-exec if stale after recorded agents and owned children drain | `ai-dossier sched start --once --auto-upgrade` |
 | Per-issue token/cost totals (global, not per-project) | `ai-dossier sched stats --issues 4..9` |
 | Restart after a deliberate halt | see [Restarting after a halt](#restarting-after-a-halt) — resume, reconcile, *then* cron |
 | Re-arm the tick cron (if it self-removed after all-done) | `(crontab -l 2>/dev/null \|\| true; echo "*/2 * * * * $HOME/.dossier/reset-fleet/tick.sh >> $HOME/.dossier/reset-fleet/tick.log 2>&1") \| crontab -` — the `\|\| true` is what stops a missing crontab from installing an empty one |

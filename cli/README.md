@@ -1659,9 +1659,9 @@ per running parallel member) and stops unfinished members atomically. `abandon` 
   package triggers the same handoff. `--auto-upgrade` (or
   `auto_upgrade: true` in `config.json`, the flag wins when both are set) lets either
   `sched start --once` or the continuous engine install `@ai-dossier/cli@latest` after a
-  completed tick. On success, the old loop stops before another state write and replaces
+  completed tick once recorded agents and engine/worker-owned children drain. On success, the old loop stops before another state write and replaces
   itself with the updated CLI, preserving its arguments, environment, and working directory;
-  detached agents continue running and the new engine reattaches by pid. State is migrated
+  no live child supervision is discarded. State is migrated
   by the new version on load, and an older engine refuses a newer schema. If the Node runtime
   cannot replace the process directly, the engine exits with code 75 so the service/watchdog
   restarts the updated entry point. Install failures are journaled as

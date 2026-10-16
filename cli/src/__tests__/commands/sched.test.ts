@@ -3,11 +3,18 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { RunLogEntry } from '@ai-dossier/core';
-import { CorruptStateError, patchBatch, SchedStore } from '@ai-dossier/sched';
+import * as scheduler from '@ai-dossier/sched';
+import {
+  assignToIdleSlot,
+  CorruptStateError,
+  patchBatch,
+  SchedStore,
+  transitionSlot,
+} from '@ai-dossier/sched';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { withBlockedBatch } from '../../../../packages/sched/src/__tests__/helpers/blocked-batch';
 import { graphqlIssueResponse } from '../../../../packages/sched/src/__tests__/helpers/graphql-fixtures';
-import { reexecUpdatedCli, registerSchedCommand } from '../../commands/sched';
+import { reexecUpdatedCli, registerSchedCommand, upgradeHasAgents } from '../../commands/sched';
 import { checkCliStaleness, checkEngineStaleness } from '../../engine-version';
 import { readRunLog } from '../../run-log';
 import { createTestProgram, type ExecStub, execHandles, execReturns } from '../helpers/test-utils';
@@ -803,7 +810,7 @@ describe('ai-dossier sched start (#537: engine-stale detection)', () => {
     expect(execve.calls).toHaveLength(1);
   });
 
-  it('the continuous service loop upgrades at a tick boundary even with a live unit', async () => {
+  it('the continuous service loop upgrades at a tick boundary with no live pid', async () => {
     await runSched(['sched', 'enqueue', '--issues', '101', '--project', 'test-proj']);
     const state = readState() as Record<string, unknown>;
     fs.writeFileSync(
@@ -874,9 +881,197 @@ describe('ai-dossier sched start (#537: engine-stale detection)', () => {
     const finalState = readState() as { slots: Array<Record<string, unknown>> };
     expect(finalState.slots[0]).toMatchObject({ status: 'running', unit: 'issue:101' });
   });
+
+  it.each([
+    true,
+    false,
+  ])('#1244 defers upgrade with a live agent (once=%s), then upgrades after drain', async (once) => {
+    await runSched(['sched', 'enqueue', '--issues', '101', '--project', 'test-proj']);
+    const store = new SchedStore(path.dirname(statePath()));
+    store.withLock((state) => {
+      const assigned = assignToIdleSlot(state, 'issue:101', null, new Date());
+      const running = transitionSlot(assigned.state, assigned.slotId, 'running', { pid: 41244 });
+      return { state: { ...running, paused: true }, result: undefined };
+    });
+    const kill = process.kill;
+    vi.spyOn(process, 'kill').mockImplementation((pid, signal) =>
+      pid === 41244 ? true : kill(pid, signal)
+    );
+    execHandles((file, args) => {
+      if (
+        (file === 'gh' && args[0] === 'issue') ||
+        (file === 'ai-dossier' && args[0] === 'runstate')
+      )
+        throw new Error('unreachable');
+      return '{"labels":[]}';
+    });
+    const stale = { installed: '0.12.1', latest: '0.13.0', stale: true };
+    vi.mocked(checkEngineStaleness)
+      .mockImplementationOnce(async () => {
+        // The guard already observed the live pid for this tick. Drain before
+        // the next tick; no install may happen during this first check.
+        store.withLock((s) => ({
+          state: { ...s, slots: s.slots.map((slot) => ({ ...slot, pid: null })) },
+          result: undefined,
+        }));
+        return stale;
+      })
+      .mockResolvedValue(stale);
+    vi.mocked(execFileSync).mockClear();
+    const execve = stubProcessExecve();
+    try {
+      await runSched([
+        'sched',
+        'start',
+        ...(once ? ['--once'] : ['--interval', '1']),
+        '--auto-upgrade',
+        '--project',
+        'test-proj',
+      ]);
+      const installs = () =>
+        vi
+          .mocked(execFileSync)
+          .mock.calls.filter(([file, args]) => file === 'npm' && (args as string[])[0] === 'i');
+      expect(installs()).toHaveLength(once ? 0 : 1);
+      expect(execve.calls).toHaveLength(once ? 0 : 1);
+      expect(
+        journalEvents().filter((event) => event.event === 'engine-auto-upgrade-deferred')
+      ).toHaveLength(1);
+      if (once) {
+        await runSched(['sched', 'start', '--once', '--auto-upgrade', '--project', 'test-proj']);
+        expect(installs()).toHaveLength(1);
+        expect(execve.calls).toHaveLength(1);
+      }
+      expect(
+        journalEvents().filter((event) => event.event === 'engine-auto-upgrade-drained')
+      ).toHaveLength(1);
+    } finally {
+      execve.restore();
+    }
+  });
+
+  it.each([
+    true,
+    false,
+  ])('#1244 a live-to-zombie boundary cannot authorize install or execve (once=%s)', async (once) => {
+    await runSched(['sched', 'pause', '--project', 'test-proj']);
+    let scans = 0;
+    vi.spyOn(scheduler, 'procChildren').mockImplementation(() => [
+      { pid: 41245, state: scans++ === 0 ? 'S' : 'Z' },
+    ]);
+    vi.mocked(checkEngineStaleness).mockResolvedValue({
+      installed: '0.12.1',
+      latest: '0.13.0',
+      stale: true,
+    });
+    const previousExitCode = process.exitCode;
+    const execve = stubProcessExecve();
+    vi.mocked(execFileSync).mockClear();
+    try {
+      await runSched([
+        'sched',
+        'start',
+        ...(once ? ['--once'] : ['--interval', '1']),
+        '--auto-upgrade',
+        '--project',
+        'test-proj',
+      ]);
+      if (once)
+        await runSched(['sched', 'start', '--once', '--auto-upgrade', '--project', 'test-proj']);
+      expect(scans).toBe(2);
+      expect(process.exitCode).toBe(75);
+      expect(execve.calls).toEqual([]);
+      expect(
+        vi
+          .mocked(execFileSync)
+          .mock.calls.filter(([file, args]) => file === 'npm' && (args as string[])[0] === 'i')
+      ).toEqual([]);
+    } finally {
+      process.exitCode = previousExitCode;
+      execve.restore();
+    }
+  });
+
+  it('#1244 guards parallel member/tail/report slots and released-but-unreaped children', () => {
+    const state = {
+      slots: [
+        { pid: 11, pid_start: 1, unit: 'batch:b:member:1' },
+        { pid: 12, pid_start: 2, unit: 'batch:b:member:2' },
+        { pid: 13, pid_start: 3, unit: 'batch:b' },
+        { pid: 14, pid_start: 4, unit: 'report:1' },
+      ],
+    };
+    const isAlive = vi.fn((pid: number, start?: number) => pid === 14 && start === 4);
+    const deps = {
+      store: { load: () => state },
+      spawnDeps: { isAlive, hasUnreapedChildren: () => false },
+    } as unknown as Parameters<typeof upgradeHasAgents>[0];
+    expect(upgradeHasAgents(deps)).toBe(true);
+    expect(isAlive.mock.calls).toEqual([
+      [11, 1],
+      [12, 2],
+      [13, 3],
+      [14, 4],
+    ]);
+    state.slots = [];
+    expect(upgradeHasAgents(deps)).toBe(false);
+    deps.spawnDeps.hasUnreapedChildren = () => true;
+    expect(upgradeHasAgents(deps)).toBe(true);
+  });
 });
 
 describe('ai-dossier sched status', () => {
+  it('#1244 resume --batch refuses a live identity, then preserves the batch on agent exit', async () => {
+    const store = new SchedStore(path.dirname(statePath()));
+    store.withLock((state) => {
+      const blocked = withBlockedBatch(state, {
+        batchId: 'b1244',
+        member: 12441,
+        anchor: 12440,
+        branch: 'batch/b1244',
+        at: new Date(),
+      });
+      const assigned = assignToIdleSlot(
+        patchBatch(blocked, 'b1244', { blocked_reason: 'agent-unkillable' }),
+        'batch:b1244',
+        null,
+        new Date()
+      );
+      return {
+        state: transitionSlot(assigned.state, assigned.slotId, 'running', { pid: 41244 }),
+        result: undefined,
+      };
+    });
+    const blocked = store.load();
+    const kill = process.kill;
+    const spy = vi
+      .spyOn(process, 'kill')
+      .mockImplementation((pid, signal) => (pid === 41244 ? true : kill(pid, signal)));
+    await expect(
+      runSched(['sched', 'resume', '--batch', 'b1244', '--project', 'test-proj', '--json'])
+    ).rejects.toThrow('process.exit(1)');
+    expect(store.load()).toEqual(blocked);
+    spy.mockImplementation((pid, signal) => {
+      if (pid === 41244) throw Object.assign(new Error('gone'), { code: 'ESRCH' });
+      return kill(pid, signal);
+    });
+    logs.length = 0;
+    await runSched(['sched', 'resume', '--batch', 'b1244', '--project', 'test-proj', '--json']);
+    expect(JSON.parse(logs.join(''))).toEqual({
+      batch: 'b1244',
+      outcome: 'resumed',
+      from: 'agent-unkillable',
+    });
+    expect(store.load().entries).toEqual(blocked.entries);
+    expect(store.load().slots).toEqual(blocked.slots);
+    expect(store.load().batches[0]).toMatchObject({
+      status: 'executing',
+      blocked_reason: null,
+      branch: 'batch/b1244',
+    });
+    expect(journalEvents().filter((e) => e.event === 'batch-resumed')).toHaveLength(1);
+  });
+
   it('renders queue, slots, batches, blocked, and runnable units after enqueue', async () => {
     await runSched(['sched', 'enqueue', '--issues', '101,102', '--project', 'test-proj']);
     await runSched(['sched', 'status', '--project', 'test-proj']);

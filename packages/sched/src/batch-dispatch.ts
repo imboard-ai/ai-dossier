@@ -510,6 +510,37 @@ function agentAlive(deps: BatchDispatchDeps, slot: SlotEntry): boolean {
   return slot.pid !== null && deps.spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined);
 }
 
+/** #1244: this block originates only in executing's member stop ladder.
+ * Keep slots and member runs so normal reconciliation finishes that exact
+ * decision, rather than redispatching members or discarding landed work.
+ * Liveness and transition share the state lock with dispatch/stop.
+ */
+export function resumeUnkillableBatch(
+  store: SchedStore,
+  spawnDeps: Pick<SpawnDeps, 'isAlive'>,
+  batchId: string,
+  now: Date = new Date()
+): { batch: string; outcome: 'resumed'; from: 'agent-unkillable' } {
+  return store.withLock((state) => {
+    const batch = findBatch(state, batchId);
+    if (batch?.status !== 'blocked' || batch.blocked_reason !== 'agent-unkillable') {
+      throw new SchedNotFoundError(`Batch ${batchId} is not blocked on agent-unkillable`);
+    }
+    const live = slotsForBatch(state, batchId).filter(
+      (slot) => slot.pid !== null && spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)
+    );
+    if (live.length > 0) {
+      throw new SchedNotFoundError(
+        `Batch ${batchId} still has live agent(s) in slot(s) ${live.map((s) => s.id).join(',')} — wait for them to exit before resuming`
+      );
+    }
+    return {
+      state: transitionBatch(state, batchId, 'executing', { blocked_reason: null }, now),
+      result: { batch: batchId, outcome: 'resumed' as const, from: 'agent-unkillable' as const },
+    };
+  });
+}
+
 /**
  * Stop the slot's agent if it is still alive (pid-start-safe: a reused pid is
  * never signalled). SIGTERM only — no wait, no escalation. A decision that
@@ -3762,8 +3793,8 @@ function currentDispatchStamp(
 
 /**
  * Stop the slot's agent before a decision that must not run alongside it
- * (#844). Returns `true` while it is still alive — the caller waits and
- * decides on a later tick — and `false` once it is gone (or never had a pid).
+ * (#844). Returns waiting while alive, gone once dead (or without a pid),
+ * and unkillable once SIGKILL's bound expires and the batch blocks.
  *
  * The first sight sends SIGTERM, stamps `kill_sent_at` and journals
  * `member-stop-requested` once; each later tick
@@ -3779,7 +3810,8 @@ function stopAgentBeforeDeciding(
   memberIssue: number,
   slot: SlotEntry,
   now: Date,
-  result: BatchTickResult
+  result: BatchTickResult,
+  reason: 'wrong-procedure' | 'member-complete'
 ): 'waiting' | 'gone' | 'unkillable' {
   if (!agentAlive(deps, slot)) return 'gone';
   const pid = slot.pid as number;
@@ -3807,8 +3839,10 @@ function stopAgentBeforeDeciding(
         slot: slot.id,
         detail: `agent remained alive ${KILL_ESCALATION_MS / 1000}s after SIGKILL — blocking for operator`,
       });
-      blockBatchForOperator(deps, config, batchId, { reason: 'agent-unkillable' }, now, result);
     }
+    // A crash after the stamp but before the block must finish the block on
+    // the next tick; the stamp deduplicates telemetry, not the transition.
+    blockBatchForOperator(deps, config, batchId, { reason: 'agent-unkillable' }, now, result);
     return 'unkillable';
   }
   const firstEscalation =
@@ -3836,6 +3870,7 @@ function stopAgentBeforeDeciding(
   }
   if (sentAt === null) {
     journalEvent(deps, 'member-stop-requested', unit(batchId), {
+      reason,
       issue: memberIssue,
       pid,
       slot: slot.id,
@@ -3882,7 +3917,18 @@ function repromptWrongProcedure(
   // dying full-cycle run could still push, post, or open a PR. Signal it and
   // decide on a later tick, once it is gone — and so the re-prompt's
   // `reprompted_at` fence postdates everything it could still post.
-  if (stopAgentBeforeDeciding(deps, config, batchId, memberIssue, slot, now, result) !== 'gone')
+  if (
+    stopAgentBeforeDeciding(
+      deps,
+      config,
+      batchId,
+      memberIssue,
+      slot,
+      now,
+      result,
+      'wrong-procedure'
+    ) !== 'gone'
+  )
     return 'waiting';
   const outcome = deps.store.withLock((s) => {
     const b = findBatch(s, batchId);
@@ -3963,7 +4009,18 @@ function decideWrongProcedure(
 ): 'waiting' | 'reprompted' | MemberFailure {
   const shipped = wrongProcedureShippedPr(milestone);
   if (shipped !== null) {
-    if (stopAgentBeforeDeciding(deps, config, batchId, memberIssue, slot, now, result) !== 'gone')
+    if (
+      stopAgentBeforeDeciding(
+        deps,
+        config,
+        batchId,
+        memberIssue,
+        slot,
+        now,
+        result,
+        'wrong-procedure'
+      ) !== 'gone'
+    )
       return 'waiting';
     // #844: the caller's eviction releases the slot in its own write.
     return wrongProcedureFailure(lastTool(), shipped);
@@ -6420,7 +6477,18 @@ function reconcileParallelMemberSlot(
     // The member's tree may be rebased or removed immediately after its slot
     // is released. Keep this slot draining until the agent is really gone so
     // the #844 SIGKILL bound remains available to a SIGTERM-ignoring agent.
-    if (stopAgentBeforeDeciding(deps, config, batchId, run.issue, slot, now, result) !== 'gone')
+    if (
+      stopAgentBeforeDeciding(
+        deps,
+        config,
+        batchId,
+        run.issue,
+        slot,
+        now,
+        result,
+        'member-complete'
+      ) !== 'gone'
+    )
       return;
     journalEvent(deps, 'external-advance', unit(batchId), {
       issue: run.issue,
