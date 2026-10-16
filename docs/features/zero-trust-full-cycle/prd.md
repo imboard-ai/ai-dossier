@@ -2,7 +2,7 @@
 
 > **Document ID:** PRD-ZTFC-001
 >
-> **Status:** Implemented. All S1–S5 slices delivered and all four pre-release gates passed; the registry blueprint `imboard-ai/git/zero-trust-full-cycle@1.0.0` is published. A post-fix live acceptance re-run is pending (see §10).
+> **Status:** Implemented. All S1–S5 slices delivered and all four pre-release gates passed; the registry blueprint `imboard-ai/git/zero-trust-full-cycle@1.0.0` is published. The post-fix live acceptance re-run passed on 2026-10-16 (see §10).
 >
 > **Date:** 2026-10-05
 >
@@ -388,3 +388,4 @@ The owner approved publication on 2026-10-05 after the specification reached Rea
 - **Iteration 2 — Ready for implementation specification:** independent critic identified no remaining substantive blocking product gaps. Runtime, provider, and credential integrations remain mandatory feasibility proofs, not assumed capabilities.
 - **Launch readiness — Not Ready:** capability is unimplemented; no security fixtures or external contribution runs have been executed. Specification approval does not authorize launch before the release gates pass.
 - **Update 2026-10-14 — implemented, final live re-run pending:** all S1–S5 slices are delivered and all four pre-release gates passed (decision records under `decisions/`). The first live acceptance demo ([record](decisions/acceptance-demo.md), #1115) proved the mechanics end to end and surfaced three defects: candidates deleting an existing test (#1205), reasoning-model calls failing and leaving budget holds reserved (#1186), and silent budget/time refusals (#1191). All three are fixed on `main`. One post-fix live acceptance re-run remains before the epic closes.
+- **Update 2026-10-16: live re-run passed, epic closed.** The second post-fix re-run ([record](decisions/acceptance-demo.md#post-fix-re-run-2-2026-10-16)) passed S4 and S5's delivery path: the review was admitted, the revision was verified and pushed to the same PR by compare-and-swap, and `zt-acceptance-check --after-revision` passed. gpt-5-mini passed the gate (#1219). The model's own revision still dropped existing tests, and review refused it, so the shipped revision is a contributor edit. That candidate-quality gap is tracked in #1252, not as a blocker.

@@ -1,7 +1,7 @@
 # Decision record: live acceptance demo (#1115)
 
 - **Date:** 2026-10-13.
-- **Status:** **PASS, with open quality defects.** (The post-fix re-run at the end of this record did not pass; see [Post-fix re-run](#post-fix-re-run-2026-10-14).) The owner's live run took the seeded issue through
+- **Status:** **PASS, with open quality defects.** (The first post-fix re-run did not pass; see [Post-fix re-run](#post-fix-re-run-2026-10-14). The second passed and closed #1002, with the candidate-quality gap left open as #1252; see [Post-fix re-run 2](#post-fix-re-run-2-2026-10-16).) The owner's live run took the seeded issue through
   `awaiting_contributor`, then `submitted` with exactly one PR, then a maintainer review, then a
   revision on the same PR through a compare-and-swap push. `zt-acceptance-check` passed live both
   before and after the revision. Contributions mechanics work end to end. Candidate *quality* does
@@ -274,3 +274,150 @@ Runs `ztc-18a12fe4c3e88ab2`, `ztc-ac49377b173a99f1` and `ztc-4cc2feace7c94368` a
 `ztc-57183f34c0f3951f` stays in `blocked_cleanup` until the contributor revokes the App
 authorization and its token is resolved with `resolve --confirm-dead`. VM reconcile reports nothing live in any store,
 and the proxy is down. PRs #7 and #9 remain open, and the maintainer will close them.
+
+## Post-fix re-run 2 (2026-10-16)
+
+- **Status: PASS. #1002 closes.** S4 passed. S5's delivery path passed end to end: the maintainer
+  review was admitted, and a verified revision was pushed to the same PR by compare-and-swap.
+  `zt-acceptance-check --after-revision` passed. No run ended blocked, every reservation settled,
+  and gpt-5-mini passed the gate. One quality gap remains, filed as a follow-up and not as a
+  blocker: the model's own revision dropped both existing tests again, review refused it, and the
+  revision that shipped is a contributor edit (#1252).
+- **What it tested:** #1217 (interrupt cleanup), #1218 (live progress output), #1219 (reasoning
+  headroom for typed decisions), #1220 (gate hand-off evidence) and #1223 (re-judging new revision
+  feedback). The fixes for #1217 and #1220 were not exercised: no `resume` was interrupted, and the
+  gate did not hand off.
+- **Setup:** controller built from `main` at `47018d2`. The VM profile was freshly baked (522 s
+  under KVM; smoke boot-to-broker 38.7 s). The package proxy was restarted for a fresh inspection
+  CA, and all 13 policy checks returned their expected outcome. The upstream was still at the seeded
+  base `fda6f7fa90963590c25f87a52366d3207ef94d80`, byte-identical to the fixture, so it was not
+  re-seeded. Issues #10 (main run) and #12 (gpt-5-mini) are fresh copies of the fixture bug.
+  `gpt-4.1-mini` ran the main contribution. `ydhidden` created the PR, and the maintainer posted
+  the review.
+
+### Timeline: `ztc-2047cf076b5ee46f` (gpt-4.1-mini, issue #10)
+
+| Time (UTC) | State / reason | Note |
+|---|---|---|
+| 07:54:10 | `gating` / `run_created` | authorized as `ydhidden`; author identity confirmed |
+| 07:54:32 | `planning` / `gate_passed` | gate 22 s |
+| 07:56:18 | `implementing` / `plan_approved` | planning 1 min 46 s; the plan said to add the new case "in the existing test file" |
+| 07:57:02 | `verifying` / `candidate_ready` | implementation 44 s |
+| 07:59:12 | `paused_user` / `user_paused` | review refused `46b2a3be7cc1` (`test_removed`) |
+| 08:18:51 | `verifying` / `resume_verifying` | after a 4-line `edit --patch` restoring the original test (`f51cb15e4c56`) |
+| 08:23:51 | `shipping` / `verification_passed` | review + verification 5 min |
+| 08:24:31 | **Stop A** `awaiting_contributor` / `contributor_handoff` | fork branch = `candidateSha`, no comment on the issue |
+| 08:31:41 | **Stop B** `submitted` / `publication_observed` | https://github.com/imboard-ai/ztfc-upstream-fixture/pull/11 by `ydhidden` |
+| 08:32:03 | `awaiting_review` / `review_awaited` | tracker started |
+| 08:32:26 | — | maintainer review, Request changes (below) |
+| 08:34:11 | `revising` / `revision_requested` | `resume --revise --reviewers <maintainer>`; feedback admitted |
+| 08:36:12 | `verifying` / `candidate_ready` | revision implemented in 2 min |
+| 08:38:37 | `paused_user` / `user_paused` | review refused `997fda46a1fe` (`existing_tests_failed`, `test_removed`) |
+| 08:54:13 | `verifying` / `resume_verifying` | after a contributor edit (`eff9248eecca`) |
+| 08:59:14 | `shipping` / `verification_passed` | |
+| 08:59:48 | **Stop C** `submitted` / `publication_observed` | same PR #11; head `f51cb15e4c56` → `eff9248eecca` by compare-and-swap |
+
+Every `resume` ran to its own durable stop. None was interrupted.
+
+### S4: PASS
+
+The first candidate fixed the divisor but replaced `test/duration.test.js` and dropped
+`rejects text that is not a duration`. All three gpt-4.1-mini candidates on 10-14 did the same.
+Review refused it before anything was pushed. The same 4-line contributor edit as on 10-14 restored
+the test next to the model's new one. The edited candidate passed a fresh review and verification,
+and the PR body lists "Includes contributor edits".
+
+```text
+zt-acceptance-check ztc-2047cf076b5ee46f-run-1
+CHECK        RESULT  DETAIL
+receipts     PASS    1 receipt(s), 1 verified candidate(s)
+identity     PASS    imboard-ai/ztfc-upstream-fixture and ydhidden/ztfc-upstream-fixture match the signed IDs
+fork-branch  PASS    ztfc/ztc-2047cf076b5ee46f = f51cb15e4c5646bf797e5021a8039676c6effeeb
+single-pr    PASS    https://github.com/imboard-ai/ztfc-upstream-fixture/pull/11 (open)
+pr-body      PASS    2 command(s) for f51cb15e4c56
+pr-head      PASS    f51cb15e4c5646bf797e5021a8039676c6effeeb
+ALL CHECKS PASSED
+```
+
+### S5: delivery PASS; the model's revision did not keep the tests
+
+The maintainer posted the same in-scope review as on 10-14:
+
+> Thanks, the fix is right. One change before merge: please replace the bare `1000` divisor in
+> `toSeconds()` with a named constant, `const MS_PER_SECOND = 1000;` declared at the top of
+> `src/duration.js`, and divide by `MS_PER_SECOND`. [...] Keep both existing tests as they are.
+
+- **Admission: PASS.** The feedback screen admitted the review on the first judgement, and the
+  revision opened session 2 in a fresh VM. The 10-14 PR #9 split vote did not recur.
+- **The model's revision: FAIL.** It repeated the #1115 failure. It replaced `ms` with a
+  hand-written `switch` parser, changed `TypeError` to `Error`, and rewrote the test file. That dropped both the
+  original test and the contributor-restored one. Review refused it (`existing_tests_failed`,
+  `test_removed`), and nothing was pushed. That is 3 of 3 gpt-4.1-mini revisions dropping a test
+  on this fixture, and 7 of 7 candidates overall (#1252).
+- **Delivery: PASS.** A contributor edit made exactly the requested change on top of the submitted
+  head (`MS_PER_SECOND` declared and used, both tests unchanged). It passed a fresh review and
+  verification. The run then pushed it to the same branch from the last verified head and returned to
+  `submitted`. Exactly one PR exists for the head, and its head is the new candidate.
+
+The edit needed two refused attempts first (`invalid_patch`). `artifacts/candidate.diff` shows
+a phantom empty line at the end of each file, so a patch built from it does not apply, and the
+error does not say which file or hunk failed (#1254).
+
+```text
+zt-acceptance-check ztc-2047cf076b5ee46f-run-1 (after revision)
+CHECK        RESULT  DETAIL
+receipts     PASS    2 receipt(s), 2 verified candidate(s)
+identity     PASS    imboard-ai/ztfc-upstream-fixture and ydhidden/ztfc-upstream-fixture match the signed IDs
+fork-branch  PASS    ztfc/ztc-2047cf076b5ee46f = eff9248eeccac2724835ea8c19c49cc4ef2f3868
+single-pr    PASS    https://github.com/imboard-ai/ztfc-upstream-fixture/pull/11 (open)
+pr-body      PASS    2 command(s) for f51cb15e4c56; head is eff9248eecca (body not updated after the revision)
+pr-head      PASS    f51cb15e4c56 -> eff9248eeccac2724835ea8c19c49cc4ef2f3868
+ALL CHECKS PASSED
+```
+
+**Why this closes the epic.** The owner decided to count the contributor-edited revision. Every
+workflow guarantee S5 names held live: admission, a fresh session and VM, review, independent
+verification, a compare-and-swap push to the same PR, and one PR. The safety net also held: review
+refused all three bad candidates of this run before anything reached GitHub. What did not hold is
+candidate quality. That is a model and prompt problem, and it is tracked in #1252 rather than
+holding this epic open.
+
+### gpt-5-mini gate (#1219, #1220): PASS
+
+Run `ztc-a5a3ecaab7a89d3c` (issue #12, `checkpoints: ["plan"]`): `gating` at 09:44:36,
+`planning` / `gate_passed` at 09:46:32, then the plan checkpoint at 09:49:55. The run was then cancelled.
+
+- **#1219: PASS.** All 12 typed policy decisions (6 questions × 2 passes) were `accepted`, with no
+  `invalid_pass`, and the gate outcome was `proceed`. On 10-14, 4 of 6 questions failed at the
+  1,024-token cap.
+- **Accounting: PASS.** All 17 reservations settled from `model_usage`, and none was left reserved.
+- **#1220: not exercised.** The gate passed, so no hand-off notice was produced. The stop-notice
+  evidence is covered by its tests only.
+- The plan proposed adding a new test file at `test/duration.test.js`, the path of the existing
+  file. This is the same pattern #1252 describes.
+
+### Cost
+
+| Contribution | Session 1 | Session 2 (revision) | Observed |
+|---|---|---|---|
+| `ztc-2047cf076b5ee46f` (gpt-4.1-mini) | $0.55 | $0.24 | $0.26 |
+| `ztc-a5a3ecaab7a89d3c` (gpt-5-mini, gate + plan) | $0.46 | n/a | $0.13 |
+
+Totals: $1.25 estimated and $0.39 observed. All 89 reservations settled (main run 72, gpt-5-mini 17).
+Active time for the main run was 10 min 42 s in session 1 and 10 min 1 s in session 2. Most of the
+wall-clock was operator waiting: seven App authorization clicks (#1213) plus four links that expired
+unclicked.
+
+### Defects filed
+
+| Issue | Summary |
+|---|---|
+| #1252 | Model candidates and revisions rewrite test files and drop existing upstream tests |
+| #1253 | `resume` reports an expired authorization link as `recovery_failed` (`start` says `authorization_expired`) |
+| #1254 | `candidate.diff` adds phantom trailing lines, so edit patches built from it fail with a bare `invalid_patch` |
+
+### Cleanup
+
+Both runs are `cancelled`. VM reconcile reports nothing live in either run store or the smoke
+store, and the proxy is down. PR #11 stays open for the maintainer to close. The contributor revoked the App
+authorization in `ydhidden`'s settings.
