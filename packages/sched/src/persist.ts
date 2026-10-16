@@ -1,12 +1,12 @@
 /**
  * Crash-safe persistence for the scheduler core.
  *
- * `state.json` is written atomically: contents land in `state.json.tmp` in the
+ * `state.json` is written atomically: contents land in an exclusive temporary file in the
  * SAME directory (rename is atomic only within a filesystem), get fsynced, and
  * are renamed over `state.json`. A process killed between writes therefore
  * leaves either the previous complete state or the new one — never a partial
- * file (AC2). A stray `.tmp` is ignored by `load()` and overwritten by the
- * next write.
+ * file (AC2). Stray temporary files are ignored; publication never opens an
+ * existing temporary pathname that could alias evidence or block on a FIFO.
  *
  * Reads/recovery and mutations share `.sched-lock`. Linux additionally pins a
  * permanent kernel guard, so stale-owner observation and reclamation cannot race
@@ -146,15 +146,23 @@ export function releaseOwnStateLock(dir: string): boolean {
 export function writeAtomic(filePath: string, contents: string): void {
   const dir = path.dirname(filePath);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const tmp = `${filePath}.tmp`;
-  const fd = fs.openSync(tmp, 'w', 0o600);
+  const tmp = path.join(dir, `.state-write-${randomUUID()}`);
+  const fd = fs.openSync(
+    tmp,
+    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
+    0o600
+  );
   try {
-    fs.writeFileSync(fd, contents, 'utf8');
-    fs.fsyncSync(fd);
+    try {
+      fs.writeFileSync(fd, contents, 'utf8');
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tmp, filePath);
   } finally {
-    fs.closeSync(fd);
+    fs.rmSync(tmp, { force: true });
   }
-  fs.renameSync(tmp, filePath);
   // Best-effort directory fsync so the rename itself is durable. Not available
   // on every platform/fs — a failure here never blocks the write.
   try {

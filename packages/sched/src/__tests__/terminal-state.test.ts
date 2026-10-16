@@ -182,6 +182,30 @@ describe('#1245 producer and current ownership', () => {
 
 describe('#1245 evidence-first terminal quarantine', () => {
   it.each([
+    'fifo',
+    'evidence-symlink',
+  ] as const)('state publication ignores a hostile fixed temporary %s and preserves exact evidence', (kind) => {
+    const { store, raw, evidence } = write(malformed());
+    const tmp = `${store.statePath}.tmp`;
+    if (kind === 'fifo') expect(spawnSync('mkfifo', [tmp]).status).toBe(0);
+    else fs.symlinkSync(evidence, tmp);
+    const child = spawnSync(
+      process.execPath,
+      [
+        '-e',
+        `new(require(${JSON.stringify(path.resolve('dist/index.js'))}).SchedStore)(${JSON.stringify(dir)}).load();`,
+      ],
+      { encoding: 'utf8', timeout: 5000 }
+    );
+    expect(child.error).toBeUndefined();
+    expect(child.status).toBe(0);
+    expect(fs.readFileSync(evidence, 'utf8')).toBe(raw);
+    expect(fs.lstatSync(store.statePath).isSymbolicLink()).toBe(false);
+    expect(store.load().batches[0].member_runs).toEqual([]);
+    expect(fs.lstatSync(tmp)[kind === 'fifo' ? 'isFIFO' : 'isSymbolicLink']()).toBe(true);
+  });
+
+  it.each([
     'done',
     'queued',
   ] as const)('missing historical members with %s entry is assessed at the batch-record boundary', (status) => {

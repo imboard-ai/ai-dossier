@@ -295,6 +295,12 @@ The full gate exposed CLI tests auto-mocking the new flock subprocess: update on
 `cli/src/__tests__/commands/{sched,batch}.test.ts` to keep real kernel locking while
 retaining recorded/mocked automation subprocesses and the no-model-call assertion.
 
+Final persistence probe found fixed `state.json.tmp` could alias quarantine evidence
+or block on a FIFO. Harden the shared atomic writer to exclusive, no-follow,
+UUID-named same-directory temporary files, leaving unrelated stale objects inert;
+retain mandatory evidence durability and existing atomic rename behavior. Add both
+hostile-temporary regression cases with real bounded subprocess loads.
+
 None unresolved. The prior observable trigger mismatch is resolved by current-code
 tracing and the bounded fixture; it is not a new handoff. Quarantine mechanism and
 current-ownership handling above are technical decisions within the authorized
