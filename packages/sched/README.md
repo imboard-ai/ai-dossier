@@ -410,7 +410,17 @@ ai-dossier sched service uninstall
   updated entry point.
   Output goes to the journal (`journalctl --user -u <unit>`) and the durable trail is the
   project's `events.jsonl`. Run `loginctl enable-linger $USER` once so it starts at boot without a
-  login. Re-running `install` is idempotent; a changed unit is restarted (agents keep running).
+  login. Re-running `install` restarts an existing unit (agents keep running), including after
+  a render-only update. Installation reloads the manager, enables and starts/restarts the unit,
+  then allows 10 seconds for loaded/active state and a live engine lease matching its MainPID.
+  Failed activation or readiness exits nonzero with systemd diagnostics; the unit may already
+  be enabled/running, so inspect `systemctl --user status <unit>` and
+  `journalctl --user -u <unit>` or remove it with `sched service uninstall`.
+  `WorkingDirectory=` is unquoted with percent specifiers escaped. Systemd mode refuses
+  paths containing `.` or `..` segments, quotes, backslashes, control characters and trailing whitespace;
+  ordinary interior spaces are supported. `service status` exposes load state and load errors
+  in human output and in JSON (`systemd.loadState`, `loadError`, `error`). Cron and render-only
+  installs do not perform the engine-readiness check.
 - **cron fallback** (no systemd): a tagged crontab block with `@reboot` and a per-minute
   `sched ensure-running` watchdog (`%` is escaped for cron). The watchdog starts a detached engine
   (output to `<sched-dir>/engine.log`) when no live engine holds the lease, after raising the

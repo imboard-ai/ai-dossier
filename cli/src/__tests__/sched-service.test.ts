@@ -204,7 +204,7 @@ describe('install / uninstall / status against temp dirs (never the real systemd
     expect(calls).toEqual([
       'systemctl --user daemon-reload',
       `systemctl --user enable ${unitName(spec.project)}`,
-      `systemctl --user start ${unitName(spec.project)}`,
+      `systemctl --user restart ${unitName(spec.project)}`,
     ]);
   });
 
@@ -381,6 +381,35 @@ describe('systemd readiness (#1243)', () => {
     expect(clock).toBe(250);
   });
 
+  it('retries a transient manager probe failure within the readiness budget', async () => {
+    let probes = 0;
+    io.run = (_file, args) => (args.includes('show') ? (++probes === 1 ? null : state) : '');
+    io.lastError = () => 'temporary bus timeout';
+    const result = await installAndVerifyService(
+      spec,
+      'systemd',
+      io,
+      readiness(() => ({ alive: true, pid: 42 }))
+    );
+    expect(result.ok).toBe(true);
+    expect(probes).toBe(2);
+  });
+
+  it('preserves the last readiness observation when the final probe times out', async () => {
+    let probes = 0;
+    io.run = (_file, args) => (args.includes('show') ? (++probes === 1 ? state : null) : '');
+    io.lastError = () => 'probe timeout';
+    const result = await installAndVerifyService(
+      spec,
+      'systemd',
+      io,
+      readiness(() => null)
+    );
+    expect(result.ok).toBe(false);
+    expect(result.notes.join(' ')).toContain('no live engine lease');
+    expect(clock).toBe(500);
+  });
+
   it('render-only never probes readiness', async () => {
     const lease = vi.fn(() => null);
     const run = vi.fn(io.run);
@@ -429,7 +458,7 @@ describe('systemd readiness (#1243)', () => {
     expect(result.notes.join(' ')).toContain(
       kind === 'failed' ? 'result=exit-code' : 'Failed to connect to bus'
     );
-    expect(clock).toBe(0);
+    expect(clock).toBe(kind === 'failed' ? 0 : 500);
   });
 });
 
@@ -579,10 +608,12 @@ describe('readCrontabStrict (fake crontab binary on PATH)', () => {
   let savedPath: string | undefined;
   beforeEach(() => {
     bin = fs.mkdtempSync(path.join(os.tmpdir(), 'fake-crontab-'));
+    vi.stubEnv('HOME', bin);
     savedPath = process.env.PATH;
   });
   afterEach(() => {
     process.env.PATH = savedPath;
+    vi.unstubAllEnvs();
     fs.rmSync(bin, { recursive: true, force: true });
   });
   const fake = (script: string) => {
