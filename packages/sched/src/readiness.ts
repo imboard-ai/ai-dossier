@@ -33,7 +33,8 @@ export const DISPATCHABLE_ISSUE_STATUSES: ReadonlySet<IssueStatus> = new Set([
 ]);
 
 function batchOf(state: SchedState, issue: number): BatchEntry | undefined {
-  return state.batches.find((b) => b.members.includes(issue));
+  const owner = state.entries.find((entry) => entry.issue === issue)?.batch;
+  return owner == null ? undefined : findBatch(state, owner);
 }
 
 /**
@@ -45,7 +46,7 @@ export function dependencyBlockers(state: SchedState, entry: QueueEntry): Depend
   const blockers: DependencyBlocker[] = [];
   const ownBatch = entry.batch !== null ? findBatch(state, entry.batch) : undefined;
   for (const dep of entry.deps) {
-    if (ownBatch?.members.includes(dep)) continue;
+    if (ownBatch && batchOf(state, dep)?.id === ownBatch.id) continue;
     const depEntry = state.entries.find((e) => e.issue === dep);
     if (!depEntry) {
       blockers.push({ issue: entry.issue, dep, reason: 'not-in-queue' });
@@ -63,9 +64,9 @@ export function batchBlockers(state: SchedState, batch: BatchEntry): DependencyB
   const blockers: DependencyBlocker[] = [];
   for (const member of batch.members) {
     const entry = state.entries.find((e) => e.issue === member);
-    if (!entry) continue; // validateState guarantees membership consistency
+    if (!entry || entry.batch !== batch.id) continue; // terminal history is not current ownership
     for (const dep of entry.deps) {
-      if (batch.members.includes(dep)) continue; // intra-batch edge
+      if (batchOf(state, dep)?.id === batch.id) continue; // current intra-batch edge
       const depBatch = batchOf(state, dep);
       if (depBatch && depBatch.id !== batch.id) {
         if (!MERGED_BATCH_STATUSES.has(depBatch.status)) {

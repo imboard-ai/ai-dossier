@@ -707,7 +707,7 @@ function validateBatchRecovery(batch: Record<string, unknown>, id: string): void
  * tracked before, so the zero/null values are exact, not a guess. The
  * state upgrades to the current schema on the next save.
  */
-export function validateState(data: unknown): SchedState {
+function validateStateHeader(data: unknown): Record<string, unknown> {
   if (!data || typeof data !== 'object') {
     throw new Error('Scheduler state must be an object');
   }
@@ -744,151 +744,192 @@ export function validateState(data: unknown): SchedState {
   if (!Array.isArray(obj.batches)) {
     throw new Error('Scheduler state must have a batches array');
   }
-  const seenBatches = new Set<string>();
-  for (const batch of obj.batches as BatchEntry[]) {
-    if (typeof batch.id !== 'string' || batch.id.length === 0) {
-      throw new Error('Batch id must be a non-empty string');
-    }
-    if (seenBatches.has(batch.id)) {
-      throw new Error(`Duplicate batch id ${batch.id}`);
-    }
-    seenBatches.add(batch.id);
-    if (!BATCH_STATUSES.has(String(batch.status))) {
-      throw new Error(`Batch ${batch.id}: unknown batch status ${String(batch.status)}`);
-    }
+  return obj;
+}
+
+/** Pure strict record validator, shared with persistence's terminal isolation. */
+export function validateBatchRecord(data: unknown): void {
+  if (data === null || typeof data !== 'object' || Array.isArray(data)) {
+    throw new Error('Batch record must be an object');
+  }
+  const batch = data as BatchEntry;
+  if (typeof batch.id !== 'string' || batch.id.length === 0) {
+    throw new Error('Batch id must be a non-empty string');
+  }
+  if (!BATCH_STATUSES.has(String(batch.status))) {
+    throw new Error(`Batch ${batch.id}: unknown batch status ${String(batch.status)}`);
+  }
+  if (
+    !Array.isArray(batch.members) ||
+    batch.members.some((m) => !Number.isInteger(m) || (m as number) <= 0)
+  ) {
+    throw new Error(`Batch ${batch.id}: members must be positive issue numbers`);
+  }
+  if (typeof batch.base_branch !== 'string' || batch.base_branch.length === 0) {
+    throw new Error(`Batch ${batch.id}: base_branch must be a non-empty string`);
+  }
+  // #707: null (or absent, backfilled below) is the default profile; a
+  // present value must match the same grammar the config validator and the
+  // enqueue path enforce, so a state file can never carry a profile name
+  // that only fails later, at resolution time.
+  if (
+    batch.dispatch_profile !== undefined &&
+    batch.dispatch_profile !== null &&
+    (typeof batch.dispatch_profile !== 'string' ||
+      !DISPATCH_PROFILE_RE.test(batch.dispatch_profile))
+  ) {
+    throw new Error(
+      `Batch ${batch.id}: dispatch_profile must match ${DISPATCH_PROFILE_RE} or be null, got ${String(batch.dispatch_profile)}`
+    );
+  }
+  // #809: absent (pre-1.23.0) and null are both "not decided yet".
+  if (
+    batch.member_dispatch !== undefined &&
+    batch.member_dispatch !== null &&
+    batch.member_dispatch !== 'serial' &&
+    batch.member_dispatch !== 'parallel'
+  ) {
+    throw new Error(
+      `Batch ${batch.id}: member_dispatch must be "serial", "parallel", or null, got ${String(batch.member_dispatch)}`
+    );
+  }
+  // #832: absent (pre-1.26.0) and null are both "no exit counted". A
+  // malformed count would make the respawn cap misfire (`'2' + 1` is '21').
+  if (batch.agent_exits !== undefined && batch.agent_exits !== null) {
+    const exits = batch.agent_exits as { phase?: unknown; count?: unknown };
     if (
-      !Array.isArray(batch.members) ||
-      batch.members.some((m) => !Number.isInteger(m) || (m as number) <= 0)
-    ) {
-      throw new Error(`Batch ${batch.id}: members must be positive issue numbers`);
-    }
-    if (typeof batch.base_branch !== 'string' || batch.base_branch.length === 0) {
-      throw new Error(`Batch ${batch.id}: base_branch must be a non-empty string`);
-    }
-    // #707: null (or absent, backfilled below) is the default profile; a
-    // present value must match the same grammar the config validator and the
-    // enqueue path enforce, so a state file can never carry a profile name
-    // that only fails later, at resolution time.
-    if (
-      batch.dispatch_profile !== undefined &&
-      batch.dispatch_profile !== null &&
-      (typeof batch.dispatch_profile !== 'string' ||
-        !DISPATCH_PROFILE_RE.test(batch.dispatch_profile))
+      typeof exits !== 'object' ||
+      (exits.phase !== 'tail' && exits.phase !== 'report') ||
+      !Number.isInteger(exits.count) ||
+      (exits.count as number) < 1
     ) {
       throw new Error(
-        `Batch ${batch.id}: dispatch_profile must match ${DISPATCH_PROFILE_RE} or be null, got ${String(batch.dispatch_profile)}`
+        `Batch ${batch.id}: agent_exits must be null or { phase: "tail"|"report", count: positive integer }, got ${JSON.stringify(batch.agent_exits)}`
       );
     }
-    // #809: absent (pre-1.23.0) and null are both "not decided yet".
-    if (
-      batch.member_dispatch !== undefined &&
-      batch.member_dispatch !== null &&
-      batch.member_dispatch !== 'serial' &&
-      batch.member_dispatch !== 'parallel'
-    ) {
-      throw new Error(
-        `Batch ${batch.id}: member_dispatch must be "serial", "parallel", or null, got ${String(batch.member_dispatch)}`
-      );
+  }
+  if (batch.worktree_kept !== undefined && typeof batch.worktree_kept !== 'boolean') {
+    throw new Error(`Batch ${batch.id}: worktree_kept must be a boolean`);
+  }
+  if (
+    batch.reprompted_members !== undefined &&
+    (!Array.isArray(batch.reprompted_members) ||
+      !(batch.reprompted_members as unknown[]).every((r) => {
+        const rec = r as {
+          issue?: unknown;
+          milestone_at?: unknown;
+          reprompted_at?: unknown;
+        } | null;
+        return (
+          rec !== null &&
+          typeof rec === 'object' &&
+          Number.isInteger(rec.issue) &&
+          (rec.issue as number) > 0 &&
+          isIsoDateString(rec.milestone_at) &&
+          isIsoDateString(rec.reprompted_at)
+        );
+      }))
+  ) {
+    throw new Error(
+      `Batch ${batch.id}: reprompted_members must be an array of { issue, milestone_at, reprompted_at } records`
+    );
+  }
+  if (batch.member_runs !== undefined) {
+    if (!Array.isArray(batch.member_runs)) {
+      throw new Error(`Batch ${batch.id}: member_runs must be an array`);
     }
-    // #832: absent (pre-1.26.0) and null are both "no exit counted". A
-    // malformed count would make the respawn cap misfire (`'2' + 1` is '21').
-    if (batch.agent_exits !== undefined && batch.agent_exits !== null) {
-      const exits = batch.agent_exits as { phase?: unknown; count?: unknown };
-      if (
-        typeof exits !== 'object' ||
-        (exits.phase !== 'tail' && exits.phase !== 'report') ||
-        !Number.isInteger(exits.count) ||
-        (exits.count as number) < 1
-      ) {
+    for (const [runIndex, run] of (batch.member_runs as unknown[]).entries()) {
+      if (run === null || typeof run !== 'object' || Array.isArray(run)) {
+        throw new Error(`Batch ${batch.id}: member_runs[${runIndex}] must be an object`);
+      }
+      const r = run as Record<string, unknown>;
+      // These values become git argv, spawn cwds and teardown targets —
+      // hold persisted state to the same shape the code that wrote it
+      // enforced (SAFE_REF_RE branch, absolute resolved path, a member of
+      // this batch), so a corrupt or hand-edited state.json cannot point a
+      // rebase/force-push/teardown somewhere else.
+      const worktree = r.worktree;
+      const checks: [string, boolean][] = [
+        [
+          'issue (must be a batch member)',
+          Number.isInteger(r.issue) &&
+            (r.issue as number) > 0 &&
+            batch.members.includes(r.issue as number),
+        ],
+        ['index', Number.isInteger(r.index) && (r.index as number) > 0],
+        ['branch', typeof r.branch === 'string' && SAFE_REF_RE.test(r.branch)],
+        [
+          'worktree',
+          typeof worktree === 'string' &&
+            path.isAbsolute(worktree) &&
+            path.resolve(worktree) === worktree &&
+            !worktree.includes('\0') &&
+            !worktree.includes('\n'),
+        ],
+        ['pool_claimed', r.pool_claimed === undefined || typeof r.pool_claimed === 'boolean'],
+        ['torn_down', r.torn_down === undefined || typeof r.torn_down === 'boolean'],
+        [
+          'teardown_failed_at',
+          r.teardown_failed_at == null || isIsoDateString(r.teardown_failed_at),
+        ],
+        [
+          'gate_inconclusive',
+          r.gate_inconclusive == null || typeof r.gate_inconclusive === 'string',
+        ],
+        ['status', MEMBER_RUN_STATUS_SET.has(String(r.status))],
+      ];
+      const failed = checks.filter(([, valid]) => !valid).map(([field]) => field);
+      if (failed.length > 0) {
         throw new Error(
-          `Batch ${batch.id}: agent_exits must be null or { phase: "tail"|"report", count: positive integer }, got ${JSON.stringify(batch.agent_exits)}`
+          `Batch ${batch.id}: malformed member_runs[${runIndex}] entry: invalid ${failed.join(', ')}`
         );
       }
     }
-    if (batch.worktree_kept !== undefined && typeof batch.worktree_kept !== 'boolean') {
-      throw new Error(`Batch ${batch.id}: worktree_kept must be a boolean`);
-    }
-    if (
-      batch.reprompted_members !== undefined &&
-      (!Array.isArray(batch.reprompted_members) ||
-        !(batch.reprompted_members as unknown[]).every((r) => {
-          const rec = r as {
-            issue?: unknown;
-            milestone_at?: unknown;
-            reprompted_at?: unknown;
-          } | null;
-          return (
-            rec !== null &&
-            typeof rec === 'object' &&
-            Number.isInteger(rec.issue) &&
-            (rec.issue as number) > 0 &&
-            isIsoDateString(rec.milestone_at) &&
-            isIsoDateString(rec.reprompted_at)
-          );
-        }))
-    ) {
-      throw new Error(
-        `Batch ${batch.id}: reprompted_members must be an array of { issue, milestone_at, reprompted_at } records`
-      );
-    }
-    if (batch.member_runs !== undefined) {
-      if (!Array.isArray(batch.member_runs)) {
-        throw new Error(`Batch ${batch.id}: member_runs must be an array`);
-      }
-      for (const run of batch.member_runs as unknown[]) {
-        const r = run as Record<string, unknown>;
-        // These values become git argv, spawn cwds and teardown targets —
-        // hold persisted state to the same shape the code that wrote it
-        // enforced (SAFE_REF_RE branch, absolute resolved path, a member of
-        // this batch), so a corrupt or hand-edited state.json cannot point a
-        // rebase/force-push/teardown somewhere else.
-        const worktree = r.worktree;
-        if (
-          typeof run !== 'object' ||
-          run === null ||
-          !Number.isInteger(r.issue) ||
-          (r.issue as number) <= 0 ||
-          !batch.members.includes(r.issue as number) ||
-          !Number.isInteger(r.index) ||
-          (r.index as number) <= 0 ||
-          typeof r.branch !== 'string' ||
-          !SAFE_REF_RE.test(r.branch) ||
-          typeof worktree !== 'string' ||
-          !path.isAbsolute(worktree) ||
-          path.resolve(worktree) !== worktree ||
-          worktree.includes('\0') ||
-          worktree.includes('\n') ||
-          (r.pool_claimed !== undefined && typeof r.pool_claimed !== 'boolean') ||
-          (r.torn_down !== undefined && typeof r.torn_down !== 'boolean') ||
-          (r.teardown_failed_at !== undefined &&
-            r.teardown_failed_at !== null &&
-            !isIsoDateString(r.teardown_failed_at)) ||
-          (r.gate_inconclusive !== undefined &&
-            r.gate_inconclusive !== null &&
-            typeof r.gate_inconclusive !== 'string') ||
-          !MEMBER_RUN_STATUS_SET.has(String(r.status))
-        ) {
-          throw new Error(`Batch ${batch.id}: malformed member_runs entry ${JSON.stringify(run)}`);
-        }
-      }
-    }
-    if (!Number.isInteger(batch.executing_member) || batch.executing_member < 0) {
-      throw new Error(`Batch ${batch.id}: executing_member must be a non-negative integer`);
-    }
-    // Absent (pre-#565/1.9.0) OR explicit null — both backfilled to
-    // DEFAULT_BATCH_PRIORITY below, same as a QueueEntry's priority above.
-    if (
-      batch.priority !== undefined &&
-      batch.priority !== null &&
-      !Number.isInteger(batch.priority)
-    ) {
-      throw new Error(
-        `Batch ${batch.id}: priority must be an integer, got ${String(batch.priority)}`
-      );
-    }
-    validateBatchRecovery(batch as unknown as Record<string, unknown>, batch.id);
-    if (!isIsoDateString(batch.created_at) || !isIsoDateString(batch.updated_at)) {
-      throw new Error(`Batch ${batch.id}: created_at/updated_at must be ISO date strings`);
+  }
+  if (!Number.isInteger(batch.executing_member) || batch.executing_member < 0) {
+    throw new Error(`Batch ${batch.id}: executing_member must be a non-negative integer`);
+  }
+  // Absent (pre-#565/1.9.0) OR explicit null — both backfilled to
+  // DEFAULT_BATCH_PRIORITY below, same as a QueueEntry's priority above.
+  if (
+    batch.priority !== undefined &&
+    batch.priority !== null &&
+    !Number.isInteger(batch.priority)
+  ) {
+    throw new Error(
+      `Batch ${batch.id}: priority must be an integer, got ${String(batch.priority)}`
+    );
+  }
+  validateBatchRecovery(batch as unknown as Record<string, unknown>, batch.id);
+  if (!isIsoDateString(batch.created_at) || !isIsoDateString(batch.updated_at)) {
+    throw new Error(`Batch ${batch.id}: created_at/updated_at must be ISO date strings`);
+  }
+}
+
+/** Record location is retained without echoing executable paths or whole runs. */
+export class BatchValidationError extends Error {
+  constructor(
+    readonly index: number,
+    readonly batchId: unknown,
+    cause: unknown
+  ) {
+    super(
+      `batches[${index}] (id ${JSON.stringify(batchId)}): ${cause instanceof Error ? cause.message : String(cause)}`
+    );
+    this.name = 'BatchValidationError';
+  }
+}
+
+export function validateState(data: unknown): SchedState {
+  const obj = validateStateHeader(data);
+  const seenBatches = new Set<string>();
+  for (const [index, batch] of (obj.batches as BatchEntry[]).entries()) {
+    try {
+      validateBatchRecord(batch);
+      if (seenBatches.has(batch.id)) throw new Error(`Duplicate batch id ${batch.id}`);
+      seenBatches.add(batch.id);
+    } catch (err) {
+      throw new BatchValidationError(index, batch?.id, err);
     }
   }
   for (const entry of obj.entries as QueueEntry[]) {

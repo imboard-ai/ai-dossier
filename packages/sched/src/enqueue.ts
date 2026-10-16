@@ -23,7 +23,12 @@ import type {
   ReviewLevel,
   SchedState,
 } from './types';
-import { DEFAULT_ISSUE_PRIORITY, MAX_FULL_REVIEW_MEMBERS, TERMINAL_ISSUE_STATUSES } from './types';
+import {
+  DEFAULT_ISSUE_PRIORITY,
+  MAX_FULL_REVIEW_MEMBERS,
+  TERMINAL_BATCH_STATUSES,
+  TERMINAL_ISSUE_STATUSES,
+} from './types';
 
 export class EnqueueError extends Error {
   constructor(message: string) {
@@ -608,19 +613,21 @@ export function enqueueEntries(
   // guaranteed terminal: the guard above already threw for any active match.
   const survivingEntries = state.entries.filter((e) => !seen.has(e.issue));
 
-  // A terminal member re-enqueued into a different batch (or dropped to
-  // full-cycle, batch null) leaves its OLD batch's `members` still naming the
-  // issue. validateState only checks entry.batch -> batch.members, never the
-  // reverse, so that stray membership sails through validation — then
-  // dissolveBatch/abandonBatch (which trust batch.members blindly) and
-  // batchOf (which returns the first batch whose members include the issue)
-  // would act on the OLD batch for an issue that has actually moved on
-  // (#502). Drop the issue from any batch its fresh entry no longer points at.
+  // Current ownership lives on the queue entry (#502). Retained runs still
+  // need historical membership for validation and verified teardown (#1245).
+  // Never erase that cleanup obligation or fabricate successful teardown here.
   const freshBatchOf = new Map(entries.map((e) => [e.issue, e.batch]));
   for (const batch of batches) {
     const stillMembers = batch.members.filter((issue) => {
       const target = freshBatchOf.get(issue);
-      return target === undefined || target === batch.id;
+      if (target === undefined || target === batch.id) return true;
+      if (!batch.member_runs.some((run) => run.issue === issue)) return false;
+      if (!TERMINAL_BATCH_STATUSES.has(batch.status)) {
+        throw new EnqueueError(
+          `Batch ${batch.id}: member_runs retains issue ${issue}; cannot move it until the batch is terminal (preserve its cleanup evidence)`
+        );
+      }
+      return true;
     });
     if (stillMembers.length !== batch.members.length) {
       batch.members = stillMembers;

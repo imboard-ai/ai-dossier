@@ -13,13 +13,21 @@
  * (acquireLock/releaseLock there) — the two copies must be kept in lockstep.
  */
 
-import * as fs from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import fs from 'node:fs';
 import * as path from 'node:path';
 import { DISPATCH_PROFILE_RE, procStartTime } from './dispatch';
 import { JOURNAL_FILE } from './journal';
-import { createEmptyState, validateState } from './state';
+import {
+  batchUnit,
+  createBatch,
+  createEmptyState,
+  validateBatchRecord,
+  validateState,
+} from './state';
 import {
   BATCH_PHASES,
+  type BatchEntry,
   CONFIG_SCHEMA_VERSION,
   DEFAULT_MAX_SLOTS,
   type DispatchConfig,
@@ -35,6 +43,8 @@ import {
   type SchedConfig,
   type SchedConfigFile,
   type SchedState,
+  TERMINAL_BATCH_STATUSES,
+  TERMINAL_ISSUE_STATUSES,
   type TierDispatchSpec,
 } from './types';
 
@@ -100,7 +110,8 @@ export class CorruptStateError extends Error {
     const reason = cause instanceof Error ? cause.message : String(cause);
     super(
       `Scheduler state file is corrupt: ${filePath} (${reason}). ` +
-        'Rename or remove it to reset the queue — GitHub remains the system of record.'
+        'Preserve the original file as evidence; repair only the named record/field, then retry. ' +
+        'For invalid JSON repair the JSON syntax; for unsupported schemas use a compatible engine; for I/O failures restore file access. Do not reset the queue.'
     );
     this.name = 'CorruptStateError';
     this.filePath = filePath;
@@ -155,6 +166,141 @@ export function writeAtomic(filePath: string, contents: string): void {
   }
 }
 
+const QUARANTINE_DIR = 'quarantine';
+const QUARANTINE_MARKER = 'terminal-quarantine:';
+
+interface QuarantinedBatch {
+  index: number;
+  id: string;
+  reason: string;
+}
+
+/** Build an entirely validated inert candidate BEFORE touching any evidence/state files. */
+function isolateTerminalBatches(
+  data: unknown,
+  evidence: string
+): {
+  state: SchedState;
+  records: QuarantinedBatch[];
+} {
+  if (!data || typeof data !== 'object') throw new Error('Scheduler state must be an object');
+  const obj = data as SchedState;
+  if (!Array.isArray(obj.batches) || !Array.isArray(obj.entries) || !Array.isArray(obj.slots)) {
+    throw new Error('Scheduler state must have batches, entries and slots arrays');
+  }
+  const ids = new Set<string>();
+  const records: QuarantinedBatch[] = [];
+  const batches = obj.batches.map((batch, index) => {
+    // Even a bad record must have one unambiguous identity. Never recover duplicates.
+    if (!batch || typeof batch.id !== 'string' || !batch.id || ids.has(batch.id)) {
+      throw new Error(`batches[${index}]: missing or duplicate batch id`);
+    }
+    ids.add(batch.id);
+    try {
+      validateBatchRecord(batch);
+      return batch;
+    } catch (err) {
+      const reason = `batches[${index}] (id ${JSON.stringify(batch.id)}): ${(err as Error).message}`;
+      if (!TERMINAL_BATCH_STATUSES.has(batch.status)) throw new Error(reason);
+      const references = obj.entries.filter((entry) => entry?.batch === batch.id);
+      if (references.some((entry) => !TERMINAL_ISSUE_STATUSES.has(entry.status))) {
+        throw new Error(
+          `${reason}; active/parked entry references this batch — repair only this record`
+        );
+      }
+      const unit = batchUnit(batch.id);
+      if (
+        obj.slots.some(
+          (slot) =>
+            slot?.status !== 'idle' &&
+            (slot?.unit === unit ||
+              (typeof slot?.unit === 'string' && slot.unit.startsWith(`${unit}#`)))
+        )
+      ) {
+        throw new Error(`${reason}; held batch/member slot — repair only this record`);
+      }
+      records.push({ index, id: batch.id, reason });
+      return {
+        ...createBatch(
+          batch.id,
+          references.map((entry) => entry.issue),
+          new Date(0)
+        ),
+        status: batch.status,
+        blocked_reason: `${QUARANTINE_MARKER}${evidence}; ${reason}; original cleanup obligations require record-local reconciliation`,
+      } satisfies BatchEntry;
+    }
+  });
+  // Also checks schema, entries, slots, referential integrity and all global fields.
+  // A terminal exception must never hide independently corrupt active/global state.
+  return { state: validateState({ ...obj, batches }), records };
+}
+
+function fsyncDirectory(dir: string): void {
+  const fd = fs.openSync(dir, 'r');
+  try {
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** Mandatory durable evidence; existing digest files are verified, never overwritten. */
+function preserveQuarantine(
+  dir: string,
+  digest: string,
+  raw: Buffer,
+  records: QuarantinedBatch[]
+): void {
+  const evidenceDir = path.join(dir, QUARANTINE_DIR);
+  fs.mkdirSync(evidenceDir, { recursive: true, mode: 0o700 });
+  if (!fs.lstatSync(evidenceDir).isDirectory() || fs.lstatSync(evidenceDir).isSymbolicLink()) {
+    throw new Error(`quarantine directory is not a store-owned directory: ${evidenceDir}`);
+  }
+  const manifest = Buffer.from(
+    `${JSON.stringify({ digest, state_file: STATE_FILE, records }, null, 2)}\n`
+  );
+  for (const [name, bytes] of [
+    [`${digest}.json`, raw],
+    [`${digest}.manifest.json`, manifest],
+  ] as const) {
+    const target = path.join(evidenceDir, name);
+    if (!fs.existsSync(target)) {
+      const tmp = path.join(evidenceDir, `.pending-${randomUUID()}`);
+      const fd = fs.openSync(
+        tmp,
+        fs.constants.O_WRONLY |
+          fs.constants.O_CREAT |
+          fs.constants.O_EXCL |
+          fs.constants.O_NOFOLLOW,
+        0o600
+      );
+      try {
+        try {
+          fs.writeFileSync(fd, bytes);
+          fs.fsyncSync(fd);
+        } finally {
+          fs.closeSync(fd);
+        }
+        fs.renameSync(tmp, target);
+      } finally {
+        fs.rmSync(tmp, { force: true });
+      }
+    }
+    const fd = fs.openSync(target, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    try {
+      if (!fs.fstatSync(fd).isFile() || !fs.readFileSync(fd).equals(bytes)) {
+        throw new Error(`quarantine evidence verification failed: ${target}`);
+      }
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
+  fsyncDirectory(evidenceDir);
+  fsyncDirectory(dir); // makes the new quarantine directory durable too
+}
+
 // --- Lock (directory mutex, worktree-pool protocol) ---
 
 function acquireLock(dir: string): void {
@@ -166,9 +312,17 @@ function acquireLock(dir: string): void {
   while (true) {
     try {
       fs.mkdirSync(lockPath);
-      fs.writeFileSync(path.join(lockPath, 'pid'), String(process.pid), { mode: 0o600 });
+      try {
+        fs.writeFileSync(path.join(lockPath, 'pid'), String(process.pid), { mode: 0o600 });
+      } catch (err) {
+        fs.rmSync(lockPath, { recursive: true, force: true });
+        throw err;
+      }
       return;
-    } catch {
+    } catch (err) {
+      // Permission/disk failures are not contention; retrying them hides the
+      // real I/O diagnosis and unnecessarily stalls read-only watchers (#1245).
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
       heldByPid = null;
       try {
         const pidFile = path.join(lockPath, 'pid');
@@ -263,6 +417,7 @@ export class SchedStore {
   readonly dir: string;
   /** The lease this store instance acquired (heartbeat target). */
   private heldLease: EngineLease | null = null;
+  private readonly warnedQuarantines = new Set<string>();
 
   constructor(
     dir: string,
@@ -397,13 +552,34 @@ export class SchedStore {
   }
 
   load(): SchedState {
+    acquireLock(this.dir);
+    try {
+      return this.loadLocked();
+    } finally {
+      releaseLock(this.dir);
+    }
+  }
+
+  private warnQuarantined(state: SchedState): void {
+    for (const batch of state.batches) {
+      if (
+        batch.blocked_reason?.startsWith(QUARANTINE_MARKER) &&
+        !this.warnedQuarantines.has(batch.blocked_reason)
+      ) {
+        console.error(`⚠ Scheduler ${this.statePath}: ${batch.blocked_reason}`);
+        this.warnedQuarantines.add(batch.blocked_reason);
+      }
+    }
+  }
+
+  private loadLocked(): SchedState {
     const statePath = this.statePath;
     if (!fs.existsSync(statePath)) {
       return createEmptyState();
     }
-    let raw: string;
+    let raw: Buffer;
     try {
-      raw = fs.readFileSync(statePath, 'utf-8');
+      raw = fs.readFileSync(statePath);
     } catch (err) {
       // An I/O failure (permissions, disk, read-only mount) is NOT corruption —
       // the destructive "rename to reset" advice must not attach to it.
@@ -414,14 +590,36 @@ export class SchedStore {
         )
       );
     }
+    let parsed: unknown;
     try {
-      return validateState(JSON.parse(raw));
+      parsed = JSON.parse(raw.toString('utf8'));
+      const state = validateState(parsed);
+      this.warnQuarantined(state);
+      return state;
     } catch (err) {
       // A newer-than-installed schema is not corruption (#537) — rethrow as
       // itself so callers (`handleKnownError`) can give the specific
       // upgrade-the-engine message instead of "rename or remove it".
       if (err instanceof EngineTooOldError) throw err;
-      throw new CorruptStateError(statePath, err);
+      if (parsed === undefined) throw new CorruptStateError(statePath, err);
+      const digest = createHash('sha256').update(raw).digest('hex');
+      const evidence = path.join(this.dir, QUARANTINE_DIR, `${digest}.json`);
+      try {
+        const isolated = isolateTerminalBatches(parsed, evidence);
+        if (isolated.records.length === 0) throw err;
+        preserveQuarantine(this.dir, digest, raw, isolated.records);
+        this.save(isolated.state);
+        this.warnQuarantined(isolated.state);
+        return isolated.state;
+      } catch (recoveryError) {
+        if (recoveryError instanceof EngineTooOldError) throw recoveryError;
+        throw new CorruptStateError(
+          statePath,
+          new Error(
+            `${(err as Error).message}; terminal quarantine refused (${(recoveryError as Error).message}); evidence location ${evidence}`
+          )
+        );
+      }
     }
   }
 
@@ -436,7 +634,7 @@ export class SchedStore {
   withLock<T>(fn: (state: SchedState) => { state: SchedState; result: T }): T {
     acquireLock(this.dir);
     try {
-      const current = this.load();
+      const current = this.loadLocked();
       const { state, result } = fn(current);
       this.save(state);
       return result;

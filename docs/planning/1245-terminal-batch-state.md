@@ -249,6 +249,25 @@ failure injection have not been run at planning time.
 
 ## Open Questions
 
+### Implementation layout adjustment
+
+Producer, ownership, strict-validation, physical persistence, refusal, fault-injection
+and process-death regressions are consolidated in the new
+`packages/sched/src/__tests__/terminal-state.test.ts` rather than spread across the
+four existing unit suites predicted above. Engine continuity and historical cleanup
+remain in `batch-integration.test.ts`, reusing its recording harness. The scheduler
+README persistence contract is updated because its old whole-queue-reset guidance
+would contradict AC3. These are mechanical layout/documentation adjustments; the
+safety contract is unchanged. No consumer range change is needed for patch 0.70.1
+within the existing ^0.70.0 range; the lockfile must match the workspace version.
+
+Full-suite compatibility discovery: `engine-alert.test.ts`'s existing unwritable-store
+watcher test now reaches a failed state-lock acquisition because public `load()` is
+serialized. Add `engine-alert.ts` to the prediction: catch an unavailable queue read
+and alert with explicitly unknown counts rather than silencing the independent
+dead-engine watcher or bypassing the new lock. Its existing regression is the
+verification boundary; this is required by the load contract change.
+
 None unresolved. The prior observable trigger mismatch is resolved by current-code
 tracing and the bounded fixture; it is not a new handoff. Quarantine mechanism and
 current-ownership handling above are technical decisions within the authorized
