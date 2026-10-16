@@ -489,6 +489,7 @@ describe('#1245 evidence-first terminal quarantine', () => {
       state.entries = enqueueEntries(createEmptyState(), [{ issue: 901 }], NOW).entries;
       Object.assign(state.entries[0], {
         batch: '../unsafe-id',
+        mode: 'slot',
         status: kind === 'parked' ? 'handed-back' : kind === 'invalid-entry' ? 'invalid' : 'queued',
       });
     }
@@ -509,7 +510,12 @@ describe('#1245 evidence-first terminal quarantine', () => {
     if (kind === 'schema') state.schema_version = '0.0.1' as typeof SCHEMA_VERSION;
     if (kind === 'newer-schema') state.schema_version = '99.0.0' as typeof SCHEMA_VERSION;
     const { store, raw } = write(state);
-    expect(() => store.load()).toThrow(kind === 'newer-schema' ? /newer|upgrade|npm i/ : /./);
+    const reason = ['entry', 'parked'].includes(kind)
+      ? /active\/parked entry references/
+      : kind === 'newer-schema'
+        ? /newer|upgrade|npm i/
+        : /./;
+    expect(() => store.load()).toThrow(reason);
     expect(fs.readFileSync(store.statePath, 'utf8')).toBe(raw);
     expect(fs.existsSync(path.join(dir, 'quarantine'))).toBe(false);
   });
