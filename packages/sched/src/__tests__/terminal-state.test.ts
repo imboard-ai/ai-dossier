@@ -181,6 +181,27 @@ describe('#1245 producer and current ownership', () => {
 });
 
 describe('#1245 evidence-first terminal quarantine', () => {
+  it('refuses a FIFO state file promptly and releases the state mutex', () => {
+    const store = new SchedStore(dir);
+    expect(spawnSync('mkfifo', [store.statePath]).status).toBe(0);
+    const child = spawnSync(
+      process.execPath,
+      [
+        '-e',
+        `try {new(require(${JSON.stringify(path.resolve('dist/index.js'))}).SchedStore)(${JSON.stringify(dir)}).load();process.exitCode=2;} catch(e){console.error(e.message);}`,
+      ],
+      { encoding: 'utf8', timeout: 5000 }
+    );
+    expect(child.error).toBeUndefined();
+    expect(child.status).toBe(0);
+    expect(child.stderr).toContain('regular file');
+    expect(child.stderr).toContain('I/O failure');
+    expect(fs.lstatSync(store.statePath).isFIFO()).toBe(true);
+    expect(fs.existsSync(path.join(dir, '.sched-lock'))).toBe(false);
+    fs.unlinkSync(store.statePath);
+    expect(store.load()).toEqual(createEmptyState());
+  });
+
   it.each([
     'fifo',
     'evidence-symlink',

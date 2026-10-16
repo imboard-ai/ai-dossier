@@ -653,13 +653,21 @@ export class SchedStore {
 
   private loadLocked(): SchedState {
     const statePath = this.statePath;
-    if (!fs.existsSync(statePath)) {
-      return createEmptyState();
-    }
     let raw: Buffer;
     try {
-      raw = fs.readFileSync(statePath);
+      const fd = fs.openSync(
+        statePath,
+        fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK
+      );
+      try {
+        if (!fs.fstatSync(fd).isFile())
+          throw new Error('state must be a regular file, not a special filesystem object');
+        raw = fs.readFileSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
     } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return createEmptyState();
       // An I/O failure (permissions, disk, read-only mount) is NOT corruption —
       // the destructive "rename to reset" advice must not attach to it.
       throw new CorruptStateError(

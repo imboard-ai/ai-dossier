@@ -5226,6 +5226,7 @@ function keptWorktreeReconcileHarness() {
 
   let execImpl: ExecFn = () => null;
   const execCalls: Array<{ file: string; args: string[] }> = [];
+  const killCalls: Array<Parameters<SpawnDeps['kill']>> = [];
   let fsExistsImpl: (p: string) => boolean = () => true;
 
   const config: SchedConfig = { max_slots: 1 };
@@ -5238,7 +5239,10 @@ function keptWorktreeReconcileHarness() {
       spawn: () => {
         throw new Error('must not spawn in this test');
       },
-      kill: () => true,
+      kill: (...args) => {
+        killCalls.push(args);
+        return true;
+      },
       isAlive: () => true,
       processStart: () => null,
     },
@@ -5257,6 +5261,7 @@ function keptWorktreeReconcileHarness() {
   return {
     store,
     execCalls,
+    killCalls,
     setExec: (fn: ExecFn) => {
       execImpl = fn;
     },
@@ -5682,8 +5687,8 @@ describe("#855: the terminal-batch safety net keeps a kept batch's member_runs[]
       worktree_kept: outcome === 'kept',
       member_runs: [memberRun({ issue: 901, worktree: tree, status: 'running' })],
     });
-    h.store.withLock((state) => ({
-      state: assignToIdleSlot(
+    h.store.withLock((state) => {
+      const assigned = assignToIdleSlot(
         enqueueEntries(
           state,
           [{ issue: 901, mode: 'slot', batch: 'fresh', more_members_expected: true }],
@@ -5692,9 +5697,18 @@ describe("#855: the terminal-batch safety net keeps a kept batch's member_runs[]
         'batch:fresh#901',
         'implement',
         new Date()
-      ).state,
-      result: null,
-    }));
+      );
+      return {
+        state: transitionSlot(
+          assigned.state,
+          assigned.slotId,
+          'running',
+          { pid: 99999999 },
+          new Date()
+        ),
+        result: null,
+      };
+    });
     const before = h.store.load();
     let removed = false;
     h.setExec((file, args) => {
@@ -5709,6 +5723,7 @@ describe("#855: the terminal-batch safety net keeps a kept batch's member_runs[]
     const after = h.store.load();
     expect(after.entries).toEqual(before.entries);
     expect(after.slots).toEqual(before.slots);
+    expect(h.killCalls).toEqual([]);
     expect(after.batches[0].member_runs[0].torn_down).toBe(outcome === 'success');
     if (outcome === 'failed')
       expect(after.batches[0].member_runs[0].teardown_failed_at).not.toBeNull();

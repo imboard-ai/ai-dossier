@@ -301,6 +301,15 @@ UUID-named same-directory temporary files, leaving unrelated stale objects inert
 retain mandatory evidence durability and existing atomic rename behavior. Add both
 hostile-temporary regression cases with real bounded subprocess loads.
 
+After all ACs were independently met, tighten the historical-cleanup negative
+test: seed a running fresh member PID, record every kill, and mutation-challenge
+that assertion. Also reject a special-file `state.json` via a nonblocking,
+no-follow, regular-file descriptor read so malformed I/O cannot hold the lock.
+The reviewer separately identified a pre-existing semantic worktree-ownership
+gap in the unmodified teardown path for syntactically valid but stale/edited
+cross-owner targets; that is tracked independently as #1256, not used to weaken
+terminal quarantine or erase retained cleanup evidence here.
+
 None unresolved. The prior observable trigger mismatch is resolved by current-code
 tracing and the bounded fixture; it is not a new handoff. Quarantine mechanism and
 current-ownership handling above are technical decisions within the authorized
