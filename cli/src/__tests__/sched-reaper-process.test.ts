@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { procStatFields } from '@ai-dossier/sched';
+import { createSpawnDeps, procStatFields } from '@ai-dossier/sched';
 import { describe, expect, it } from 'vitest';
 
 const fixture = fileURLToPath(new URL('./fixtures/sched-reaper-fixture.mjs', import.meta.url));
@@ -43,6 +43,13 @@ describe('#1244 inherited child recovery', () => {
     } finally {
       clearTimeout(timeout);
       child.kill('SIGKILL');
+      fs.writeFileSync(path.join(dir, 'release'), 'exit');
+      if (fs.existsSync(path.join(dir, 'pid')) && fs.existsSync(path.join(dir, 'start'))) {
+        const pid = Number(fs.readFileSync(path.join(dir, 'pid'), 'utf8'));
+        const start = Number(fs.readFileSync(path.join(dir, 'start'), 'utf8'));
+        createSpawnDeps().kill(pid, Number.isFinite(start) ? start : undefined, 'SIGKILL');
+        for (let n = 0; n < 100 && procStatFields(pid) !== null; n++) await delay(10);
+      }
       fs.rmSync(dir, { recursive: true, force: true });
     }
   }, 20_000);

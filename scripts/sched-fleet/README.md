@@ -247,8 +247,8 @@ single-operator reference install.
   on a single-user host; harden with `curl -K -` (config-from-stdin) before reusing this
   on a shared host.
 - **`tick.sh`'s self-upgrade duplicates the CLI's own `--auto-upgrade` flag** (see
-  `cli/src/engine-version.ts`/`cli/src/commands/sched.ts`), which additionally gates on no
-  unit being mid-dispatch — a check this hand-rolled version's own comment claims but does
+   `cli/src/engine-version.ts`/`cli/src/commands/sched.ts`), which waits until recorded live
+   agents, live Linux children and engine/worker-owned child callbacks drain — a check this hand-rolled version's own comment claims but does
   not actually implement. A future non-verbatim revision should delegate to
   `ai-dossier sched start --once --project "$P" --auto-upgrade` instead.
 - **Silent failure paths**: an unmapped `projects.txt` slug in `repo_dir()` returns empty

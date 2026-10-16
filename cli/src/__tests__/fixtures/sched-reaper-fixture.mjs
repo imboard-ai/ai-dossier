@@ -18,7 +18,7 @@ const runners = await import(
 );
 const store = new sched.SchedStore(path.join(dir, 'state'));
 const deps = { store, spawnDeps: sched.createSpawnDeps() };
-const agentCode = `setInterval(() => { if (require('node:fs').existsSync(${JSON.stringify(path.join(dir, 'release'))})) process.exit(0); }, 10)`;
+const agentCode = `setTimeout(() => process.exit(0), 10000); setInterval(() => { if (require('node:fs').existsSync(${JSON.stringify(path.join(dir, 'release'))})) process.exit(0); }, 10)`;
 
 if (mode === 'legacy') {
   const child = spawn(process.execPath, ['-e', agentCode], {
@@ -27,6 +27,7 @@ if (mode === 'legacy') {
   });
   child.unref();
   fs.writeFileSync(path.join(dir, 'pid'), String(child.pid));
+  fs.writeFileSync(path.join(dir, 'start'), String(sched.procStartTime(child.pid)));
   if (typeof process.execve !== 'function') throw new Error('execve unavailable');
   process.execve(
     process.execPath,
@@ -37,12 +38,13 @@ if (mode === 'legacy') {
 }
 
 let runner;
-if (mode === 'worker') {
-  const workerFile = path.join(dir, 'worker.cjs');
-  const dispatchModule = path.resolve(here, '../../../../packages/sched/dist/index.js');
-  fs.writeFileSync(
-    workerFile,
-    `
+try {
+  if (mode === 'worker') {
+    const workerFile = path.join(dir, 'worker.cjs');
+    const dispatchModule = path.resolve(here, '../../../../packages/sched/dist/index.js');
+    fs.writeFileSync(
+      workerFile,
+      `
     const { parentPort } = require('node:worker_threads');
     const { createSpawnDeps } = require(${JSON.stringify(dispatchModule)});
     const fs = require('node:fs');
@@ -51,22 +53,22 @@ if (mode === 'worker') {
       if (config.mode === 'spawn') {
         const pid = deps.spawn([process.execPath, '-e', ${JSON.stringify(agentCode)}], '', ${JSON.stringify(path.join(dir, 'agent.log'))});
         fs.writeFileSync(${JSON.stringify(path.join(dir, 'pid'))}, String(pid));
+        fs.writeFileSync(${JSON.stringify(path.join(dir, 'start'))}, String(require(${JSON.stringify(dispatchModule)}).procStartTime(pid)));
       }
       if (config.mode === 'crash') process.exit(17);
       parentPort.postMessage({ id, ok: true, result: {}, unreapedChildren: deps.hasUnreapedChildren() });
     });
   `
-  );
-  runner = runners.createWorkerTickRunner(workerFile, { stateDir: store.dir, repoDir: dir });
-  await runner.runTick({ mode: 'spawn' });
-  if (!runner.hasUnreapedChildren()) throw new Error('missing worker fence');
-  try {
-    await runner.runTick({ mode: 'crash' });
-  } catch {}
-  await runner.runTick({ mode: 'empty' }); // replacement has no wait handle
-}
+    );
+    runner = runners.createWorkerTickRunner(workerFile, { stateDir: store.dir, repoDir: dir });
+    await runner.runTick({ mode: 'spawn' });
+    if (!runner.hasUnreapedChildren()) throw new Error('missing worker fence');
+    try {
+      await runner.runTick({ mode: 'crash' });
+    } catch {}
+    await runner.runTick({ mode: 'empty' }); // replacement has no wait handle
+  }
 
-try {
   // Even a replacement SpawnDeps/worker with no owned callbacks must fence a
   // live inherited child. Once Z, request a real process exit, NEVER execve.
   if (!cli.upgradeHasAgents(deps)) throw new Error('inherited live child did not fence upgrade');
@@ -94,5 +96,6 @@ try {
   if (process.exitCode !== 75) throw new Error('production caller did not request process restart');
   console.log('live-fenced; zombie-dead; supervisor-restart=75');
 } finally {
+  fs.writeFileSync(path.join(dir, 'release'), 'exit');
   await runner?.close();
 }

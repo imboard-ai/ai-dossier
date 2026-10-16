@@ -2514,15 +2514,7 @@ function createUpgradeExec(): ExecFn {
  * The worker supplies its own unreaped-child fence at the completed tick boundary.
  */
 export function upgradeHasAgents(deps: Pick<EngineDeps, 'store' | 'spawnDeps'>): boolean {
-  return (
-    (deps.spawnDeps.hasUnreapedChildren?.() ?? false) ||
-    (procChildren()?.some((child) => child.state !== 'Z') ?? false) ||
-    deps.store
-      .load()
-      .slots.some(
-        (slot) => slot.pid !== null && deps.spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)
-      )
-  );
+  return engineChildBoundary(deps).kind === 'defer';
 }
 
 /** Unknown waitable children cannot be reaped by a replacement libuv image.
@@ -2533,29 +2525,31 @@ export function needsChildReaperRestart(
   deps: Pick<EngineDeps, 'store' | 'spawnDeps'>,
   workerHasChildren = false
 ): boolean {
-  return (
-    !workerHasChildren &&
-    !upgradeHasAgents(deps) &&
-    (procChildren()?.some((child) => child.state === 'Z') ?? false)
-  );
+  return engineChildBoundary(deps, workerHasChildren).kind === 'restart';
 }
 
-function upgradeDeferral(
+/** One snapshot decides all three outcomes. In particular a live inherited
+ * child turning Z between two scans must never fall through to execve.
+ */
+export function engineChildBoundary(
   deps: Pick<EngineDeps, 'store' | 'spawnDeps'>,
   worker = false
-): string | null {
-  if (!worker && !upgradeHasAgents(deps)) return null;
-  const slots =
-    deps.store
-      .load()
-      .slots.filter((slot) => slot.pid !== null)
-      .map((slot) => `${slot.unit}@${slot.pid}`)
-      .join(',') || 'none';
-  const children =
-    procChildren()
-      ?.map((child) => String(child.pid))
-      .join(',') || 'none';
-  return `recorded slots=${slots}; children=${children}; owned callbacks=${deps.spawnDeps.hasUnreapedChildren?.() ?? false}; worker callbacks=${worker} — retrying after drain`;
+): { kind: 'defer' | 'restart' | 'eligible'; detail: string | null } {
+  const slots = deps.store.load().slots.filter((slot) => slot.pid !== null);
+  const liveSlot = slots.some((slot) =>
+    deps.spawnDeps.isAlive(slot.pid as number, slot.pid_start ?? undefined)
+  );
+  const owned = deps.spawnDeps.hasUnreapedChildren?.() ?? false;
+  const children = procChildren() ?? [];
+  if (worker || owned || liveSlot || children.some((child) => child.state !== 'Z')) {
+    const recorded = slots.map((slot) => `${slot.unit}@${slot.pid}`).join(',') || 'none';
+    const childPids = children.map((child) => child.pid).join(',') || 'none';
+    return {
+      kind: 'defer',
+      detail: `recorded slots=${recorded}; children=${childPids}; owned callbacks=${owned}; worker callbacks=${worker} — retrying after drain`,
+    };
+  }
+  return { kind: children.length > 0 ? 'restart' : 'eligible', detail: null };
 }
 
 /** #537/#945/#1244: compare installed packages after a completed tick. Callers
@@ -3085,7 +3079,8 @@ function registerStartSubcommand(cmd: Command): void {
             handleKnownError(err);
             fail([`sched tick failed: ${(err as Error).name}: ${(err as Error).message}`]);
           }
-          if (needsChildReaperRestart(deps)) {
+          const boundary = engineChildBoundary(deps);
+          if (boundary.kind === 'restart') {
             exitLogger.logNormalExit('orphaned child reaper restart');
             process.exitCode = UPGRADE_RESTART_EXIT_CODE;
             return;
@@ -3094,7 +3089,7 @@ function registerStartSubcommand(cmd: Command): void {
             deps.journal,
             autoUpgradeEnabled && !stopping,
             upgradeExec,
-            upgradeDeferral(deps)
+            boundary.detail
           );
           if (upgradeHandoff) {
             exitLogger.logNormalExit('auto-upgrade handoff');
@@ -3143,7 +3138,11 @@ function registerStartSubcommand(cmd: Command): void {
           async (result) => {
             if (!opts.json) console.log(`✓ [${new Date().toISOString()}] ${describe(result)}`);
             else console.log(JSON.stringify({ ts: new Date().toISOString(), ...result }));
-            if (needsChildReaperRestart(deps, tickRunner?.hasUnreapedChildren?.() ?? false)) {
+            const boundary = engineChildBoundary(
+              deps,
+              tickRunner?.hasUnreapedChildren?.() ?? false
+            );
+            if (boundary.kind === 'restart') {
               reaperRestart = true;
               stopping = true;
               return;
@@ -3161,7 +3160,7 @@ function registerStartSubcommand(cmd: Command): void {
               deps.journal,
               true,
               upgradeExec,
-              upgradeDeferral(deps, tickRunner?.hasUnreapedChildren?.() ?? false)
+              boundary.detail
             );
             if (requested) {
               upgradeHandoff = true;

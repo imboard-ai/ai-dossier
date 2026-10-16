@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { RunLogEntry } from '@ai-dossier/core';
+import * as scheduler from '@ai-dossier/sched';
 import {
   assignToIdleSlot,
   CorruptStateError,
@@ -945,6 +946,48 @@ describe('ai-dossier sched start (#537: engine-stale detection)', () => {
         journalEvents().filter((event) => event.event === 'engine-auto-upgrade-drained')
       ).toHaveLength(1);
     } finally {
+      execve.restore();
+    }
+  });
+
+  it.each([
+    true,
+    false,
+  ])('#1244 a live-to-zombie boundary cannot authorize install or execve (once=%s)', async (once) => {
+    await runSched(['sched', 'pause', '--project', 'test-proj']);
+    let scans = 0;
+    vi.spyOn(scheduler, 'procChildren').mockImplementation(() => [
+      { pid: 41245, state: scans++ === 0 ? 'S' : 'Z' },
+    ]);
+    vi.mocked(checkEngineStaleness).mockResolvedValue({
+      installed: '0.12.1',
+      latest: '0.13.0',
+      stale: true,
+    });
+    const previousExitCode = process.exitCode;
+    const execve = stubProcessExecve();
+    vi.mocked(execFileSync).mockClear();
+    try {
+      await runSched([
+        'sched',
+        'start',
+        ...(once ? ['--once'] : ['--interval', '1']),
+        '--auto-upgrade',
+        '--project',
+        'test-proj',
+      ]);
+      if (once)
+        await runSched(['sched', 'start', '--once', '--auto-upgrade', '--project', 'test-proj']);
+      expect(scans).toBe(2);
+      expect(process.exitCode).toBe(75);
+      expect(execve.calls).toEqual([]);
+      expect(
+        vi
+          .mocked(execFileSync)
+          .mock.calls.filter(([file, args]) => file === 'npm' && (args as string[])[0] === 'i')
+      ).toEqual([]);
+    } finally {
+      process.exitCode = previousExitCode;
       execve.restore();
     }
   });
