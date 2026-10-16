@@ -24,7 +24,7 @@ import { createAlertNotifier, parseAlertIssue } from '../sched-alert';
 import { ensureRunning, setEnsureDisabled } from '../sched-ensure';
 import {
   defaultUnitDir,
-  installService,
+  installAndVerifyService,
   renderCronBlock,
   renderSystemdUnit,
   type ServiceIo,
@@ -80,8 +80,24 @@ export function readCrontabStrict(): string {
 
 /** Real process I/O for the supervisor helpers — also used by `sched start`'s unsupervised check (#1233). */
 export function serviceIo(opts: ServiceOptions = {}): ServiceIo {
+  let lastError: string | null = null;
   return {
-    run,
+    run: (file, args, timeoutMs = 30_000) => {
+      const res = spawnSync(file, args, { encoding: 'utf8', timeout: timeoutMs });
+      lastError =
+        res.status === 0
+          ? null
+          : [
+              res.stderr?.trim(),
+              res.stdout?.trim(),
+              res.error?.message,
+              `exit ${res.status}${res.signal ? ` (${res.signal})` : ''}`,
+            ]
+              .filter(Boolean)
+              .join('; ');
+      return res.status === 0 ? res.stdout.trim() : null;
+    },
+    lastError: () => lastError,
     unitDir: opts.unitDir ?? defaultUnitDir(),
     readCrontab: readCrontabStrict,
     writeCrontab: (text) => {
@@ -183,7 +199,7 @@ export function registerSchedServiceCommands(sched: Command): void {
       'Only write the unit / render the cron block — never call systemctl or crontab'
     )
     .option('--print', 'Print the unit / cron block instead of installing anything')
-    .action((opts: ServiceOptions) => {
+    .action(async (opts: ServiceOptions) => {
       const project = projectOf(opts);
       const spec = buildSpec(opts, project);
       const io = serviceIo(opts);
@@ -192,7 +208,9 @@ export function registerSchedServiceCommands(sched: Command): void {
         console.log(mode === 'systemd' ? renderSystemdUnit(spec) : renderCronBlock(spec));
         return;
       }
-      const result = installService(spec, mode, io);
+      const result = await installAndVerifyService(spec, mode, io, {
+        lease: () => new SchedStore(schedStateDir(project)).engineLeaseStatus(),
+      });
       if (result.ok) setEnsureDisabled(new SchedStore(schedStateDir(project)), false);
       if (!result.ok) {
         console.error(`✗ [${project}] ${mode} supervisor NOT installed`);
@@ -254,6 +272,10 @@ export function registerSchedServiceCommands(sched: Command): void {
       console.log(
         `systemd unit: ${status.systemd.installed ? `installed (${status.systemd.enabled ?? '?'}, ${status.systemd.active ?? '?'})` : 'not installed'}`
       );
+      if (status.systemd.loadState) console.log(`systemd load: ${status.systemd.loadState}`);
+      if (status.systemd.loadError || status.systemd.error) {
+        console.log(`systemd error: ${status.systemd.loadError ?? status.systemd.error}`);
+      }
       console.log(
         `cron watchdog: ${status.cron.error ? `unknown (${status.cron.error})` : status.cron.installed ? 'installed' : 'not installed'}`
       );

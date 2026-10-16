@@ -98,6 +98,14 @@ export const START_LIMIT_INTERVAL_SEC = 600;
 export const START_LIMIT_BURST = 10;
 
 export function renderSystemdUnit(spec: ServiceSpec): string {
+  // WorkingDirectory is a path directive, not a shell-style quoted word.
+  unitValue(spec.repoDir);
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: reject control characters in a systemd path directive
+  if (!spec.repoDir.startsWith('/') || /[\\"'\u0000-\u001f\u007f]|\s$/.test(spec.repoDir)) {
+    throw new Error(
+      'unsupported WorkingDirectory: use an absolute path without quotes, backslashes, controls or trailing whitespace'
+    );
+  }
   const exec = [spec.nodePath, spec.cliPath, ...startArgs(spec)].map(execArg).join(' ');
   return `${[
     '# Managed by `ai-dossier sched service install` (#945) — re-run it to update, `sched service uninstall` to remove.',
@@ -113,7 +121,7 @@ export function renderSystemdUnit(spec: ServiceSpec): string {
     '',
     '[Service]',
     'Type=simple',
-    `WorkingDirectory=${quotedUnitValue(spec.repoDir)}`,
+    `WorkingDirectory=${unitValue(spec.repoDir)}`,
     `Environment=${quotedUnitValue(`PATH=${spec.envPath}`)}`,
     `ExecStart=${exec}`,
     // Always: a clean exit (a graceful stop, an upgrade restart) must come back too.
@@ -226,10 +234,12 @@ export function validateServicePaths(
 // --- operations (injected I/O) ---
 
 /** Run a command; null on failure (the `ExecFn` contract). */
-export type RunFn = (file: string, args: string[]) => string | null;
+export type RunFn = (file: string, args: string[], timeoutMs?: number) => string | null;
 
 export interface ServiceIo {
   run: RunFn;
+  /** Diagnostic for the immediately preceding failed command. */
+  lastError?: () => string | null;
   /** Directory for the systemd user unit (default `~/.config/systemd/user`). */
   unitDir: string;
   /**
@@ -283,27 +293,25 @@ export function installService(spec: ServiceSpec, mode: ServiceMode, io: Service
     }
     if (!io.render) {
       const unit = unitName(spec.project);
-      if (changed && io.run('systemctl', ['--user', 'daemon-reload']) === null) {
-        ok = false;
-        notes.push('systemctl --user daemon-reload failed');
-      }
-      // enable --now is idempotent; it also (re)starts an inactive unit.
-      if (io.run('systemctl', ['--user', 'enable', '--now', unit]) === null) {
-        ok = false;
-        notes.push(`systemctl --user enable --now ${unit} failed`);
-      } else if (changed && previous !== null) {
-        if (io.run('systemctl', ['--user', 'restart', unit]) === null) {
+      // Always reload: an earlier render-only install may already have written identical bytes.
+      for (const args of [
+        ['--user', 'daemon-reload'],
+        ['--user', 'enable', unit],
+        ['--user', changed && previous !== null ? 'restart' : 'start', unit],
+      ]) {
+        if (io.run('systemctl', args) === null) {
           ok = false;
-          notes.push(`systemctl --user restart ${unit} failed`);
-        } else {
-          notes.push('unit changed: restarted (agents keep running — KillMode=process)');
+          notes.push(
+            `systemctl ${args.join(' ')} failed${io.lastError?.() ? `: ${io.lastError()}` : ''}`
+          );
+          break;
         }
       }
       notes.push(
         'Run `loginctl enable-linger $USER` once so the service starts at boot without a login session.'
       );
     }
-    return { mode, changed, ok, activated, unitPath, notes };
+    return { mode, changed, ok, activated: activated && ok, unitPath, notes };
   }
   // cron: render-only never reads or writes the crontab.
   if (io.render) {
@@ -364,9 +372,101 @@ export function uninstallService(
 
 export interface ServiceStatus {
   project: string;
-  systemd: { installed: boolean; enabled: string | null; active: string | null; unitPath: string };
+  systemd: {
+    installed: boolean;
+    enabled: string | null;
+    active: string | null;
+    unitPath: string;
+    loadState?: string | null;
+    loadError?: string | null;
+    error?: string | null;
+  };
   cron: { installed: boolean; error?: string };
   supervised: boolean;
+}
+
+function unitState(project: string, io: ServiceIo, timeoutMs = 1000) {
+  const output = io.run(
+    'systemctl',
+    [
+      '--user',
+      'show',
+      unitName(project),
+      '--property=LoadState,LoadError,ActiveState,SubState,Result,MainPID',
+    ],
+    timeoutMs
+  );
+  const values = new Map(
+    (output ?? '').split('\n').map((line) => {
+      const eq = line.indexOf('=');
+      return [line.slice(0, eq), line.slice(eq + 1)];
+    })
+  );
+  return {
+    loadState: values.get('LoadState') ?? null,
+    loadError: values.get('LoadError') || null,
+    active: values.get('ActiveState') ?? null,
+    subState: values.get('SubState') ?? null,
+    result: values.get('Result') ?? null,
+    pid: Number(values.get('MainPID')),
+    error: output === null ? (io.lastError?.() ?? 'systemctl show failed') : null,
+  };
+}
+
+/** The CLI's install boundary: no success until both supervisor and engine are live. */
+export async function installAndVerifyService(
+  spec: ServiceSpec,
+  mode: ServiceMode,
+  io: ServiceIo,
+  readiness: {
+    lease: () => { alive: boolean; pid: number } | null;
+    now?: () => number;
+    sleep?: (ms: number) => Promise<void>;
+    timeoutMs?: number;
+  }
+): Promise<InstallResult> {
+  const result = installService(spec, mode, io);
+  if (!result.ok || io.render || mode !== 'systemd') return result;
+  const now = readiness.now ?? (() => performance.now());
+  const sleep = readiness.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const timeout = readiness.timeoutMs ?? 10_000;
+  const deadline = now() + timeout;
+  let detail = 'no live engine lease';
+  do {
+    const state = unitState(
+      spec.project,
+      io,
+      Math.max(1, Math.floor(Math.min(1000, deadline - now())))
+    );
+    const lease = readiness.lease();
+    if (
+      state.loadState === 'loaded' &&
+      !state.loadError &&
+      !state.error &&
+      state.active === 'active' &&
+      lease?.alive &&
+      lease.pid === state.pid &&
+      now() <= deadline
+    )
+      return result;
+    detail = `load=${state.loadState ?? 'unknown'}, active=${state.active ?? 'unknown'}, sub=${state.subState ?? 'unknown'}, result=${state.result ?? 'unknown'}; ${state.loadError ?? state.error ?? (lease?.alive ? 'engine lease does not match service MainPID' : 'no live engine lease')}`;
+    if (
+      state.error ||
+      state.loadError ||
+      (state.loadState !== 'loaded' && state.loadState !== null) ||
+      state.active === 'failed'
+    )
+      break;
+    const remaining = deadline - now();
+    if (remaining <= 0) break;
+    await sleep(Math.min(250, remaining));
+  } while (now() <= deadline);
+  return {
+    ...result,
+    ok: false,
+    activated: false,
+    notes: [...result.notes, `systemd readiness failed (within ${timeout}ms): ${detail}`],
+  };
 }
 
 export function serviceStatus(project: string, io: ServiceIo): ServiceStatus {
@@ -380,6 +480,7 @@ export function serviceStatus(project: string, io: ServiceIo): ServiceStatus {
     installed && !io.render
       ? io.run('systemctl', ['--user', 'is-active', unitName(project)])
       : null;
+  const state = installed && !io.render ? unitState(project, io) : null;
   let cronInstalled = false;
   let cronError: string | undefined;
   if (!io.render) {
@@ -391,9 +492,23 @@ export function serviceStatus(project: string, io: ServiceIo): ServiceStatus {
   }
   return {
     project,
-    systemd: { installed, enabled, active, unitPath },
+    systemd: {
+      installed,
+      enabled,
+      active: state?.active ?? active,
+      unitPath,
+      loadState: state?.loadState ?? null,
+      loadError: state?.loadError ?? null,
+      error: state?.error ?? null,
+    },
     cron: { installed: cronInstalled, ...(cronError ? { error: cronError } : {}) },
-    supervised: (installed && (active === 'active' || io.render)) || cronInstalled,
+    supervised:
+      (installed &&
+        !state?.error &&
+        !state?.loadError &&
+        (state?.loadState == null || state.loadState === 'loaded') &&
+        ((state?.active ?? active) === 'active' || io.render)) ||
+      cronInstalled,
   };
 }
 
