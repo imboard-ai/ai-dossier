@@ -1,13 +1,21 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as schedApi from '@ai-dossier/sched';
 import { createEmptyState, enqueueEntries, Journal, SchedStore } from '@ai-dossier/sched';
+import { Command } from 'commander';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { readCrontabStrict } from '../commands/sched-service';
+import {
+  readCrontabStrict,
+  registerSchedServiceCommands,
+  serviceIo,
+} from '../commands/sched-service';
 import { createAlertNotifier } from '../sched-alert';
 import { ensureRunning, setEnsureDisabled } from '../sched-ensure';
+import * as serviceApi from '../sched-service';
 import {
   hasCronBlock,
+  installAndVerifyService,
   installService,
   renderCronBlock,
   renderSystemdUnit,
@@ -57,7 +65,7 @@ describe('systemd unit rendering (#945 AC1)', () => {
     expect(unit).toContain(
       'ExecStart=/home/u/.nvm/versions/node/v22.1.0/bin/node /home/u/.nvm/versions/node/v22.1.0/bin/ai-dossier sched start --project imboard-ai-ai-dossier --auto-upgrade --alert-issue 945'
     );
-    expect(unit).toContain('WorkingDirectory="/home/u/projects/ai-dossier/main"');
+    expect(unit).toContain('WorkingDirectory=/home/u/projects/ai-dossier/main\n');
     expect(unit).toContain(
       'Environment="PATH=/home/u/.nvm/versions/node/v22.1.0/bin:/usr/bin:/bin"'
     );
@@ -76,7 +84,7 @@ describe('systemd unit rendering (#945 AC1)', () => {
       envPath: '/opt/my "tools"/100%/bin:/usr/bin',
     });
     expect(odd).toContain('"/opt/my tools/100%%/$$bin/ai-dossier"');
-    expect(odd).toContain('WorkingDirectory="/home/u/My Projects/100%%/repo"');
+    expect(odd).toContain('WorkingDirectory=/home/u/My Projects/100%%/repo\n');
     expect(odd).toContain('Environment="PATH=/opt/my \\"tools\\"/100%%/bin:/usr/bin"');
     expect(() => renderSystemdUnit({ ...spec, repoDir: '/x\nExecStart=/bin/evil' })).toThrow(
       /newline/
@@ -85,6 +93,16 @@ describe('systemd unit rendering (#945 AC1)', () => {
 
   it('names the unit per project, safely', () => {
     expect(unitName('a/b c')).toBe('dossier-sched-a-b-c.service');
+  });
+
+  it.each([
+    '/repo\\path',
+    '/repo"path',
+    '/repo\tpath',
+    '/repo\0path',
+    '/repo ',
+  ])('refuses unsupported WorkingDirectory characters: %j', (repoDir) => {
+    expect(() => renderSystemdUnit({ ...spec, repoDir })).toThrow(/WorkingDirectory/);
   });
 });
 
@@ -171,18 +189,23 @@ describe('install / uninstall / status against temp dirs (never the real systemd
   });
   afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
 
-  it('systemd: writes the unit, reloads, enables --now; a second install changes nothing', () => {
+  it('systemd: writes the unit, reloads, enables and starts; identical installs still reload', () => {
     const first = installService(spec, 'systemd', io);
     expect(first.changed).toBe(true);
     expect(fs.readFileSync(first.unitPath as string, 'utf8')).toBe(renderSystemdUnit(spec));
     expect(calls).toEqual([
       'systemctl --user daemon-reload',
-      `systemctl --user enable --now ${unitName(spec.project)}`,
+      `systemctl --user enable ${unitName(spec.project)}`,
+      `systemctl --user start ${unitName(spec.project)}`,
     ]);
     calls.length = 0;
     const second = installService(spec, 'systemd', io);
     expect(second.changed).toBe(false);
-    expect(calls).toEqual([`systemctl --user enable --now ${unitName(spec.project)}`]);
+    expect(calls).toEqual([
+      'systemctl --user daemon-reload',
+      `systemctl --user enable ${unitName(spec.project)}`,
+      `systemctl --user start ${unitName(spec.project)}`,
+    ]);
   });
 
   it('systemd: a changed unit is restarted so it takes effect', () => {
@@ -230,7 +253,7 @@ describe('install / uninstall / status against temp dirs (never the real systemd
       run: (_file, args) => (args.includes('enable') ? null : ''),
     });
     expect(failing.ok).toBe(false);
-    expect(failing.notes.join(' ')).toMatch(/enable --now .* failed/);
+    expect(failing.notes.join(' ')).toMatch(/enable .* failed/);
     const cronFail = installService(spec, 'cron', { ...io, writeCrontab: () => false });
     expect(cronFail.ok).toBe(false);
   });
@@ -275,6 +298,138 @@ describe('install / uninstall / status against temp dirs (never the real systemd
       supervised: true,
       cron: { installed: true },
     });
+  });
+});
+
+describe('systemd readiness (#1243)', () => {
+  let dir: string;
+  let io: ServiceIo;
+  let clock: number;
+  let state: string;
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'service-ready-'));
+    clock = 0;
+    state = 'LoadState=loaded\nActiveState=active\nMainPID=42\nResult=success';
+    io = {
+      run: (_f, args) => (args.includes('show') ? state : ''),
+      unitDir: dir,
+      readCrontab: () => '',
+      writeCrontab: () => true,
+      render: false,
+    };
+  });
+  afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const readiness = (lease: () => { alive: boolean; pid: number } | null) => ({
+    lease,
+    now: () => clock,
+    sleep: async (ms: number) => {
+      clock += ms;
+    },
+    timeoutMs: 500,
+  });
+
+  it.each([
+    'daemon-reload',
+    'enable',
+    'start',
+    'restart',
+  ])('preserves %s failure and stops activation', async (operation) => {
+    if (operation === 'restart')
+      installService({ ...spec, autoUpgrade: false }, 'systemd', { ...io, render: true });
+    const calls: string[][] = [];
+    io.run = (_file, args) => {
+      calls.push(args);
+      return args.includes(operation) ? null : '';
+    };
+    io.lastError = () => 'systemd: permission denied';
+    const lease = vi.fn(() => null);
+    const result = await installAndVerifyService(spec, 'systemd', io, readiness(lease));
+    expect(result).toMatchObject({ ok: false, activated: false });
+    expect(result.notes.join(' ')).toContain('systemd: permission denied');
+    expect(calls.at(-1)).toContain(operation);
+    expect(lease).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'missing',
+    'stale',
+    'foreign',
+    'inactive',
+  ])('bounds readiness for a %s engine', async (kind) => {
+    if (kind === 'inactive') state = state.replace('ActiveState=active', 'ActiveState=inactive');
+    const result = await installAndVerifyService(
+      spec,
+      'systemd',
+      io,
+      readiness(() =>
+        kind === 'missing' ? null : { alive: kind !== 'stale', pid: kind === 'foreign' ? 99 : 42 }
+      )
+    );
+    expect(result).toMatchObject({ ok: false, activated: false });
+    expect(result.notes.join(' ')).toContain('readiness failed (within 500ms)');
+    expect(clock).toBe(500);
+  });
+
+  it('waits for active and a matching live lease', async () => {
+    const result = await installAndVerifyService(
+      spec,
+      'systemd',
+      io,
+      readiness(() => (clock < 250 ? null : { alive: true, pid: 42 }))
+    );
+    expect(result).toMatchObject({ ok: true, activated: true });
+    expect(clock).toBe(250);
+  });
+
+  it('render-only never probes readiness', async () => {
+    const lease = vi.fn(() => null);
+    const run = vi.fn(io.run);
+    expect(
+      await installAndVerifyService(spec, 'systemd', { ...io, run, render: true }, readiness(lease))
+    ).toMatchObject({ ok: true, activated: false });
+    expect(lease).not.toHaveBeenCalled();
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('reports load errors immediately even with a live lease', async () => {
+    state =
+      'LoadState=bad-setting\nLoadError=org.freedesktop.systemd1.BadUnitSetting WorkingDirectory is not absolute\nActiveState=inactive';
+    const result = await installAndVerifyService(
+      spec,
+      'systemd',
+      io,
+      readiness(() => ({ alive: true, pid: 42 }))
+    );
+    expect(result.ok).toBe(false);
+    expect(result.notes.join(' ')).toContain('WorkingDirectory is not absolute');
+    expect(clock).toBe(0);
+    expect(serviceStatus(spec.project, io)).toMatchObject({
+      supervised: false,
+      systemd: {
+        loadState: 'bad-setting',
+        loadError: expect.stringContaining('WorkingDirectory is not absolute'),
+      },
+    });
+  });
+
+  it.each(['failed', 'unavailable'])('retains %s manager diagnostics', async (kind) => {
+    if (kind === 'failed')
+      state = 'LoadState=loaded\nActiveState=failed\nResult=exit-code\nSubState=failed';
+    else {
+      io.run = (_f, args) => (args.includes('show') ? null : '');
+      io.lastError = () => 'Failed to connect to bus';
+    }
+    const result = await installAndVerifyService(
+      spec,
+      'systemd',
+      io,
+      readiness(() => null)
+    );
+    expect(result).toMatchObject({ ok: false, activated: false });
+    expect(result.notes.join(' ')).toContain(
+      kind === 'failed' ? 'result=exit-code' : 'Failed to connect to bus'
+    );
+    expect(clock).toBe(0);
   });
 });
 
@@ -438,6 +593,105 @@ describe('readCrontabStrict (fake crontab binary on PATH)', () => {
   it('returns the text on success', () => {
     fake('echo "0 3 * * * backup"');
     expect(readCrontabStrict()).toBe('0 3 * * * backup\n');
+  });
+
+  it('preserves real systemctl stderr and exit status on install failure', () => {
+    fake('exit 0');
+    fs.writeFileSync(
+      path.join(bin, 'systemctl'),
+      '#!/bin/sh\necho "Failed to start: bad unit setting" >&2\nexit 5\n',
+      { mode: 0o755 }
+    );
+    const result = installService(spec, 'systemd', serviceIo({ unitDir: path.join(bin, 'units') }));
+    expect(result).toMatchObject({ ok: false, activated: false });
+    expect(result.notes.join(' ')).toContain('Failed to start: bad unit setting');
+    expect(result.notes.join(' ')).toContain('exit 5');
+  });
+
+  it('CLI install exits nonzero with systemctl reason, without a success message', async () => {
+    fake('exit 0');
+    fs.writeFileSync(
+      path.join(bin, 'systemctl'),
+      '#!/bin/sh\necho "Unit has a bad unit file setting" >&2\nexit 1\n',
+      { mode: 0o755 }
+    );
+    const project = vi.spyOn(schedApi, 'resolveProjectSlug').mockReturnValue(spec.project);
+    const paths = vi
+      .spyOn(serviceApi, 'validateServicePaths')
+      .mockReturnValue({ errors: [], warnings: [] });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const exit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('test exit');
+    });
+    try {
+      const command = new Command();
+      registerSchedServiceCommands(command);
+      await expect(
+        command.parseAsync(
+          [
+            'service',
+            'install',
+            '--project',
+            spec.project,
+            '--repo-dir',
+            spec.repoDir,
+            '--mode',
+            'systemd',
+            '--unit-dir',
+            path.join(bin, 'units'),
+          ],
+          { from: 'user' }
+        )
+      ).rejects.toThrow('test exit');
+      expect(exit).toHaveBeenCalledWith(1);
+      expect(error.mock.calls.flat().join(' ')).toContain('Unit has a bad unit file setting');
+      expect(log).not.toHaveBeenCalled();
+    } finally {
+      project.mockRestore();
+      paths.mockRestore();
+      log.mockRestore();
+      error.mockRestore();
+      exit.mockRestore();
+    }
+  });
+
+  it.each([false, true])('status exposes load errors in CLI output (json=%s)', async (json) => {
+    fake('exit 0');
+    fs.writeFileSync(
+      path.join(bin, 'systemctl'),
+      '#!/bin/sh\ncase "$2" in\nshow) echo "LoadState=bad-setting"; echo "LoadError=WorkingDirectory is not absolute"; echo "ActiveState=inactive";;\n*) exit 1;;\nesac\n',
+      { mode: 0o755 }
+    );
+    const unitDir = path.join(bin, 'units');
+    installService(spec, 'systemd', { ...serviceIo({ unitDir }), render: true });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      const command = new Command();
+      registerSchedServiceCommands(command);
+      await command.parseAsync(
+        [
+          'service',
+          'status',
+          '--project',
+          spec.project,
+          '--unit-dir',
+          unitDir,
+          ...(json ? ['--json'] : []),
+        ],
+        { from: 'user' }
+      );
+      const output = log.mock.calls.map((args) => args.join(' ')).join('\n');
+      expect(output).toContain('WorkingDirectory is not absolute');
+      if (json)
+        expect(JSON.parse(output)).toMatchObject({
+          supervised: false,
+          systemd: { loadState: 'bad-setting', loadError: 'WorkingDirectory is not absolute' },
+        });
+      else expect(output).toContain('systemd load: bad-setting');
+    } finally {
+      log.mockRestore();
+    }
   });
   it('treats ONLY the exact "no crontab for <user>" as empty', () => {
     fake(`echo "no crontab for ${os.userInfo().username}" >&2; exit 1`);
