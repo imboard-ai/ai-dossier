@@ -64,6 +64,7 @@ import {
   parsePreambleLine,
   patchBatch,
   patchSlot,
+  procStatFields,
   readJsonl,
   requeueParkedMember,
   resolveDispatch,
@@ -6813,6 +6814,77 @@ describe('#844 item 1: crash recovery finishes what the eviction would have done
 });
 
 describe('#844 item 2: a member agent that ignores SIGTERM is SIGKILLed after the bound', () => {
+  it.skipIf(process.platform !== 'linux')(
+    '#1244 a real zombie past both kill bounds never blocks agent-unkillable and is reaped',
+    async () => {
+      const repo = scratchRepo();
+      const id = 'b-1244-zombie';
+      const h = batchHarness(
+        repo,
+        ['--mode=batch', '--commit-file=f-{issue}.txt', '--wrong-procedure-members=12441'],
+        { maxSlots: 1 }
+      );
+      h.enqueue([{ issue: 12441, mode: 'slot', batch: id, anchor: 12440, tier: 'mid' }]);
+      await tickUntil(h, id, (b) => b.status === 'executing' && batchSlotPid(h, id) !== undefined);
+      const slot = h.state().slots.find((s) => s.unit === `batch:${id}`);
+      if (!slot?.pid) throw new Error('missing member slot');
+      expect(await waitUntilDead(h.spawnDeps, slot.pid)).toBe(true);
+      const pid = h.spawnDeps.spawn(
+        [process.execPath, '-e', 'process.exit(0)'],
+        '',
+        path.join(h.store.runsDir, 'zombie.log')
+      );
+      const start = h.spawnDeps.processStart(pid);
+      const pastBound = Date.now() - KILL_ESCALATION_MS - 1_000;
+      h.store.withLock((state) => ({
+        state: patchSlot(state, slot.id, {
+          pid,
+          pid_start: start,
+          spawned_at: new Date(pastBound - 2_000).toISOString(),
+          kill_sent_at: new Date(pastBound - 1_000).toISOString(),
+          kill_escalated_at: new Date(pastBound).toISOString(),
+        }),
+        result: undefined,
+      }));
+      const signals: number[] = [];
+      h.deps.spawnDeps = {
+        ...h.spawnDeps,
+        kill: (...args) => {
+          signals.push(args[0]);
+          return h.spawnDeps.kill(...args);
+        },
+      };
+      try {
+        const deadline = Date.now() + 5_000;
+        while (procStatFields(pid)?.[0] !== 'Z' && Date.now() < deadline) {
+          Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+        }
+        expect(procStatFields(pid)?.[0]).toBe('Z');
+        expect(() => process.kill(pid, 0)).not.toThrow();
+        h.tick();
+        expect(findBatch(h.state(), id)?.blocked_reason).toBeNull();
+        expect(findBatch(h.state(), id)?.reprompted_members.map((m) => m.issue)).toEqual([12441]);
+        expect(signals).not.toContain(pid);
+        expect(
+          h.deps.journal
+            .read()
+            .filter(
+              (event) =>
+                event.event === 'kill-ineffective' ||
+                (event.event === 'batch-blocked' && event.detail === 'agent-unkillable')
+            )
+        ).toEqual([]);
+        for (let n = 0; n < 100 && procStatFields(pid) !== null; n++)
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        expect(procStatFields(pid)).toBeNull();
+        await tickUntil(h, id, (batch) => batch.status === 'awaiting-merge');
+      } finally {
+        h.spawnDeps.kill(pid, start ?? undefined, 'SIGKILL');
+      }
+    },
+    60_000
+  );
+
   it('#862: blocks once when a stubbed agent remains alive after SIGKILL', async () => {
     const repo = scratchRepo();
     const id = 'b-862-unkillable';
