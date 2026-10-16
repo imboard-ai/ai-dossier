@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import childProcess, { type ChildProcess, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -419,6 +419,30 @@ describe('ownership-proven store recovery', () => {
     expect(fs.readFileSync(lock, 'utf8')).toBe(text);
     expect(audit(dir)).toHaveLength(1);
   });
+  it('releases no racing process before every constructor is ready', async () => {
+    const dir = directory();
+    const releasedWithReadyCounts: number[] = [];
+    const spawnChild = childProcess.spawn;
+    vi.spyOn(childProcess, 'spawn').mockImplementation(((...args: Parameters<typeof spawn>) => {
+      const child = spawnChild(...args);
+      const send = child.send.bind(child);
+      vi.spyOn(child, 'send').mockImplementation((...message: Parameters<ChildProcess['send']>) => {
+        // Observe the actual parent release, outside any child error boundary.
+        releasedWithReadyCounts.push(fs.readdirSync(dir).length);
+        return send(...message);
+      });
+      return child;
+    }) as typeof spawn);
+    const outcomes = await raceReadyProcesses(
+      `const fs=require('node:fs');
+       fs.writeFileSync(${JSON.stringify(dir)}+'/'+process.pid, 'constructed');
+       process.once('message', () => process.disconnect());
+       process.send('ready');`,
+      8
+    );
+    expect(releasedWithReadyCounts).toEqual(Array(8).fill(8));
+    expect(outcomes).toEqual(Array(8).fill({ code: 0, signal: null, stderr: '' }));
+  }, 25_000);
   it('racing real budget reclaimers retain one audit and never overcommit', async () => {
     const dir = directory();
     const ledger = budget(dir);
@@ -430,17 +454,17 @@ describe('ownership-proven store recovery', () => {
     // correctly refuse nlink=0 as corrupt_ledger. Race reservations, not opens.
     const script = `
       const {BudgetLedger}=require(${JSON.stringify(module)});
-      function failed(e){console.error(e.code || e.message);process.exitCode=['ceiling_exceeded','persistence_uncertain'].includes(e.code)?2:3;}
+      function failed(phase,e){console.error(phase,e.code,e.stack || e.message);process.exitCode=['ceiling_exceeded','persistence_uncertain'].includes(e.code)?2:3;}
       try {
         const ledger=new BudgetLedger(${JSON.stringify(ledger.file)},'c',10000);
         process.once('message', message => {
           try {
             if(message!=='go')throw new Error('unexpected release');
             ledger.reserve('s',${JSON.stringify({ ...estimate, money: { currency: 'USD', minor: 60 } })});
-          } catch(e){failed(e);} finally {process.disconnect();}
+          } catch(e){failed('reserve',e);} finally {process.disconnect();}
         });
         process.send('ready');
-      } catch(e){failed(e);process.disconnect();}
+      } catch(e){failed('construct',e);process.disconnect();}
     `;
     const outcomes = await raceReadyProcesses(script, 8);
     const diagnostics = JSON.stringify(outcomes);

@@ -61,7 +61,7 @@ None requiring a product decision; distinguish observed child outcomes during im
 
 ## Implementation Evidence
 
-### Root cause: uncontrolled construction/mutation overlap
+### Demonstrated failure mechanism: uncontrolled construction/mutation overlap
 
 The reported six-element array counts code-2 child exits, not audits. The old
 test joined every exit but discarded stderr and signals. Its script constructed
@@ -71,8 +71,10 @@ while another constructor was still reading its initial snapshot.
 `BudgetLedger` construction calls `snapshot()` → `readEvidence()` → `readPrivate()`
 without the mutation guard. If a winner commits between the late constructor's
 `openSync` and `fstatSync`, its pinned old inode has `nlink=0`; `readPrivate` correctly
-rejects this with `corrupt_ledger`. That became unexpected code 3. This is a test
-scheduling error, not evidence of a lost reclaim audit or overcommit.
+rejects this with `corrupt_ledger`, which the old script maps to unexpected code 3.
+This demonstrates a test scheduling failure mode consistent with the original
+symptom, not a lost reclaim audit or overcommit. The original CI error remains
+unconfirmed because its diagnostics were discarded.
 
 A bounded external probe interposed only on the late constructor's ledger open:
 after the real open, synchronously wait for a separate real child to reserve 60,
@@ -117,3 +119,19 @@ Reproduction of the pressure configuration: pin the invoking process and one
 `node -e 'for(;;){}'` child to the same allowed CPU; loop the exact named-test
 command from Test Scope 50 times, stopping on any nonzero exit; terminate and join
 the owned pressure child in a guaranteed finalizer. Do not use Vitest `--repeat`.
+
+### Review evidence
+
+Full-tier report-only review found two actionable improvements: preserve error
+phase/code/stack, and distinguish the demonstrated failure mechanism from the
+unobserved historical CI error. Both were applied. Four other dimensions were
+clean. Blind conformance independently ran another 50 pressured iterations and
+requested a regression-discriminating barrier assertion.
+
+Added `releases no racing process before every constructor is ready`: eight real
+children publish constructor markers, and a recording spy observes the marker
+count at every actual parent `send('go')`. Removing only the readiness await
+deliberately injects the forbidden early release. The test failed with eight
+observed zeros instead of eight eights (18:14 UTC); restoring the await makes it
+pass. No mutation remains. This proves the synchronization assertion can fail,
+independently of whether the accounting race happens to pass under a schedule.

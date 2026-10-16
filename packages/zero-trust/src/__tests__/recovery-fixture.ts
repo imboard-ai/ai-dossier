@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import childProcess, { spawn } from 'node:child_process';
 import path from 'node:path';
 import { BudgetLedger } from '../budget';
 import type { BudgetRate } from '../budget-types';
@@ -8,7 +8,7 @@ import { Journal } from '../journal';
  * diagnostics are drained, and kill/join every owned child on failure/timeout. */
 export async function raceReadyProcesses(script: string, count: number) {
   const children = Array.from({ length: count }, () => {
-    const child = spawn(process.execPath, ['-e', script], {
+    const child = childProcess.spawn(process.execPath, ['-e', script], {
       stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
     });
     let stderr = '';
