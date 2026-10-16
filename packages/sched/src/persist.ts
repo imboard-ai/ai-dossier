@@ -93,11 +93,13 @@ export interface EngineLeaseStatus extends EngineLeaseHolder {
 export class LockTimeoutError extends Error {
   readonly lockPath: string;
 
-  constructor(lockPath: string, heldByPid: number | null) {
+  constructor(lockPath: string, heldByPid: number | null, permanent = false) {
     const holder = heldByPid !== null ? `; held by pid ${heldByPid}` : ' (no pid file found)';
     super(
-      `Timed out waiting for scheduler lock (${LOCK_TIMEOUT_MS}ms)${holder}. ` +
-        `If that process is not running, remove ${lockPath}`
+      permanent
+        ? `Timed out waiting for scheduler kernel guard (${LOCK_TIMEOUT_MS}ms): ${lockPath}. Retry or inspect the state-lock holder; never unlink or replace this permanent guard file.`
+        : `Timed out waiting for scheduler lock (${LOCK_TIMEOUT_MS}ms)${holder}. ` +
+            `If that process is not running, remove ${lockPath}`
     );
     this.name = 'LockTimeoutError';
     this.lockPath = lockPath;
@@ -193,7 +195,7 @@ function isolateTerminalBatches(
     }
     ids.add(batch.id);
     try {
-      validateBatchRecord(batch);
+      validateBatchRecord(batch, obj.entries);
       return batch;
     } catch (err) {
       const reason = `batches[${index}] (id ${JSON.stringify(batch.id)}): ${(err as Error).message}`;
@@ -336,7 +338,7 @@ function acquireStateGuard(dir: string): number | null {
       throw new Error(
         `Could not acquire scheduler kernel guard (${file}): ${result.error.message}`
       );
-    if (result.status !== 0) throw new LockTimeoutError(file, null);
+    if (result.status !== 0) throw new LockTimeoutError(file, null, true);
     const named = fs.lstatSync(file);
     if (named.dev !== stat.dev || named.ino !== stat.ino)
       throw new Error(`Scheduler lock guard changed: ${file}`);

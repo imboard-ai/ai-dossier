@@ -748,7 +748,7 @@ function validateStateHeader(data: unknown): Record<string, unknown> {
 }
 
 /** Pure strict record validator, shared with persistence's terminal isolation. */
-export function validateBatchRecord(data: unknown): void {
+export function validateBatchRecord(data: unknown, entries: readonly QueueEntry[] = []): void {
   if (data === null || typeof data !== 'object' || Array.isArray(data)) {
     throw new Error('Batch record must be an object');
   }
@@ -933,6 +933,13 @@ export function validateBatchRecord(data: unknown): void {
   if (!isIsoDateString(batch.created_at) || !isIsoDateString(batch.updated_at)) {
     throw new Error(`Batch ${batch.id}: created_at/updated_at must be ISO date strings`);
   }
+  for (const entry of entries) {
+    if (entry?.batch === batch.id && !batch.members.includes(entry.issue)) {
+      throw new Error(
+        `Batch ${batch.id}: members — Issue ${entry.issue}: not listed in batch ${batch.id} members`
+      );
+    }
+  }
 }
 
 /** Record location is retained without echoing executable paths or whole runs. */
@@ -954,7 +961,7 @@ export function validateState(data: unknown): SchedState {
   const seenBatches = new Set<string>();
   for (const [index, batch] of (obj.batches as BatchEntry[]).entries()) {
     try {
-      validateBatchRecord(batch);
+      validateBatchRecord(batch, obj.entries as QueueEntry[]);
       if (seenBatches.has(batch.id)) throw new Error(`Duplicate batch id ${batch.id}`);
       seenBatches.add(batch.id);
     } catch (err) {

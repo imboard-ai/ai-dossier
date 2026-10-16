@@ -13,7 +13,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerBatchCommand } from '../../commands/batch';
 import { errored, execHandles, logged, runCommandTree } from '../helpers/test-utils';
 
-vi.mock('node:child_process');
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    execFileSync: vi.fn(),
+    execFile: vi.fn(),
+    exec: vi.fn(),
+    execSync: vi.fn(),
+    fork: vi.fn(),
+    spawn: vi.fn(),
+    spawnSync: vi.fn((...args: Parameters<typeof actual.spawnSync>) =>
+      args[0] === '/usr/bin/flock' ? actual.spawnSync(...args) : undefined
+    ),
+  };
+});
 
 const PROJECT = 'batch-compose-test';
 
@@ -202,8 +216,14 @@ describe('batch compose', () => {
     expect(files.length).toBeGreaterThan(0);
     expect(new Set(files)).toEqual(new Set(['gh', 'git'])); // git: the local workspace-config read (#801)
     const { spawn, spawnSync, exec, execSync, execFile, fork } = childProcess;
-    for (const fn of [spawn, spawnSync, exec, execSync, execFile, fork]) {
+    for (const fn of [spawn, exec, execSync, execFile, fork]) {
       expect(vi.mocked(fn)).not.toHaveBeenCalled();
+    }
+    // Queue inspection now takes a real inherited-descriptor kernel lock.
+    // Permit only that exact infrastructure subprocess, never agent/model calls.
+    for (const [file, args] of vi.mocked(spawnSync).mock.calls) {
+      expect(file).toBe('/usr/bin/flock');
+      expect(args).toEqual(['-x', '-w', '10', '3']);
     }
     // Enough picks — the backlog is never queried.
     expect(ghCalls('list')).toEqual([]);

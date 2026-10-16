@@ -287,6 +287,14 @@ process-death/stale-contender tests exercise these boundaries. `types.ts` field
 comments and `cli/README.md` must reflect the new diagnostic/locking contracts.
 No new public state schema or executable quarantined payload is introduced.
 
+The next blind pass additionally reproduced terminal entry→members inconsistency
+outside the single-record shape checks; include reference membership in the shared
+record boundary so the same inert placeholder can preserve terminal references.
+Kernel-guard contention needs permanent-inode-specific guidance (never removal).
+The full gate exposed CLI tests auto-mocking the new flock subprocess: update only
+`cli/src/__tests__/commands/{sched,batch}.test.ts` to keep real kernel locking while
+retaining recorded/mocked automation subprocesses and the no-model-call assertion.
+
 None unresolved. The prior observable trigger mismatch is resolved by current-code
 tracing and the bounded fixture; it is not a new handoff. Quarantine mechanism and
 current-ownership handling above are technical decisions within the authorized

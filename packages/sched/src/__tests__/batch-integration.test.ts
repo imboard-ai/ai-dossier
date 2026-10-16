@@ -588,6 +588,7 @@ describe('#1245 terminal quarantine engine boundary', () => {
     'member_runs',
     'blocked_reason',
     'member_gates',
+    'members',
   ] as const)('advances unrelated work around malformed %s without executing any quarantined target or PID', (field) => {
     const h = batchHarness(scratchRepo(), []);
     h.enqueue([{ issue: 1000, mode: 'full' }]);
@@ -602,10 +603,19 @@ describe('#1245 terminal quarantine engine boundary', () => {
     });
     if (field !== 'member_runs') {
       state.batches[0].member_runs = [];
-      Object.assign(
-        state.batches[0],
-        field === 'blocked_reason' ? { blocked_reason: 7 } : { member_gates: { '674': null } }
-      );
+      if (field === 'members') {
+        const entries = enqueueEntries(
+          createEmptyState(),
+          [{ issue: 674, mode: 'slot', batch: 'damaged' }],
+          new Date()
+        ).entries;
+        entries[0].status = 'done';
+        state.entries.push(...entries);
+      } else
+        Object.assign(
+          state.batches[0],
+          field === 'blocked_reason' ? { blocked_reason: 7 } : { member_gates: { '674': null } }
+        );
     }
     h.store.save(state);
     const effects: unknown[][] = [];

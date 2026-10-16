@@ -182,6 +182,63 @@ describe('#1245 producer and current ownership', () => {
 
 describe('#1245 evidence-first terminal quarantine', () => {
   it.each([
+    'done',
+    'queued',
+  ] as const)('missing historical members with %s entry is assessed at the batch-record boundary', (status) => {
+    const state = enqueueEntries(
+      createEmptyState(),
+      [{ issue: 674, mode: 'slot', batch: 'old' }],
+      NOW
+    );
+    state.batches[0].status = 'done';
+    state.batches[0].members = [];
+    state.entries[0].status = status;
+    const { store, raw, evidence } = write(state);
+    expect(() => validateState(state)).toThrow(/batches\[0\].*old.*members.*674/);
+    if (status === 'done') {
+      expect(store.load().batches[0].members).toEqual([674]);
+      expect(fs.readFileSync(evidence, 'utf8')).toBe(raw);
+    } else {
+      expect(() => store.load()).toThrow(/active\/parked/);
+      expect(fs.readFileSync(store.statePath, 'utf8')).toBe(raw);
+    }
+  });
+
+  it('kernel-guard contention never advises removing the permanent inode', async () => {
+    const { store } = write(createEmptyState());
+    const ready = path.join(dir, 'holder-ready');
+    const holder = spawn(
+      process.execPath,
+      [
+        '-e',
+        `const fs=require('node:fs');new(require(${JSON.stringify(path.resolve('dist/index.js'))}).SchedStore)(${JSON.stringify(dir)}).withLock(s=>{fs.writeFileSync(${JSON.stringify(ready)},'yes');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,16000);return {state:s,result:null}});`,
+      ],
+      { stdio: 'ignore' }
+    );
+    const exited = new Promise((resolve) => holder.on('exit', resolve));
+    try {
+      const deadline = Date.now() + 5000;
+      while (!fs.existsSync(ready) && Date.now() < deadline)
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(fs.existsSync(ready)).toBe(true);
+      let caught: unknown;
+      try {
+        store.load();
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(Error);
+      expect((caught as Error).message).toContain('never unlink or replace');
+      expect((caught as Error).message).not.toContain('remove');
+      expect((caught as Error).message).not.toContain('no pid file found');
+    } finally {
+      holder.kill('SIGKILL');
+      await exited;
+    }
+    expect(store.load()).toEqual(createEmptyState());
+  }, 20000);
+
+  it.each([
     'blocked_reason',
     'member_gates',
   ] as const)('validates malformed %s inside the record boundary for active and terminal records', (field) => {
