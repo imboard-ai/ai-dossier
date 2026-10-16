@@ -1791,12 +1791,19 @@ per running parallel member) and stops unfinished members atomically. `abandon` 
 State is written atomically (tmp + fsync + rename), so a process killed between writes
 always leaves the previous complete state, and a scheduler restart resumes identically
 from `state.json` (pre-#464/#468/#472/#500/#505/#504 state files — schema
-1.0.0/1.1.0/1.2.0/1.3.0/1.4.0/1.5.0/1.6.0 — migrate to 1.7.0 on load). A corrupt state file is a loud
-error naming the file — never a silent queue reset — except a state file written by a
+1.0.0/1.1.0/1.2.0/1.3.0/1.4.0/1.5.0/1.6.0 — migrate on load). Corrupt state fails closed
+with record-local repair guidance. Eligible malformed terminal batches are instead
+isolated after durable preservation in `quarantine/<sha256>.json` and a companion
+manifest; commands warn and continue with inert placeholders. Original cleanup
+obligations require operator reconciliation. See the scheduler package README's
+“Corrupt state is loud” contract for the recovery/refusal and locking boundaries.
+A state file written by a
 newer schema than the installed engine, which is not corruption: `load()` throws the more
 specific `EngineTooOldError` (#537), pointing at an engine upgrade
 (`npm i -g @ai-dossier/cli@latest`) rather than at deleting real queue data. Concurrency is
-serialized by a `.sched-lock` directory mutex (stolen from dead holders). `config.json`
+serialized by the state mutex, including reads (directory write access required).
+Linux holds a permanent `.sched-lock.guard` kernel lock; never remove that file.
+Non-Linux stale-directory takeover requires verified manual reconciliation. `config.json`
 holds `max_slots` (default 3, bounds concurrently-live units), `stall_timeout_ms` (default
 1 800 000 — but the `implement` phase defaults to 5 400 000, overridable per phase via
 `dispatch.phase_stall_timeout_ms: {"<phase>": <ms>}`, #495), `reconcile_interval_ms`

@@ -268,6 +268,25 @@ and alert with explicitly unknown counts rather than silencing the independent
 dead-engine watcher or bypassing the new lock. Its existing regression is the
 verification boundary; this is required by the load contract change.
 
+### Review-driven mechanical strengthening
+
+Independent reviews reproduced malformed `blocked_reason` and nested `member_gates`
+escaping the record validator, FIFO/dangling-symlink evidence hazards, and a stale
+directory-lock race that can erase a concurrent enqueue. Add nullable diagnostic and
+gate-map validation before migration, nonblocking/no-follow evidence reads with
+ENOENT-only absence handling, and reuse the directory-fsync primitive.
+
+The recovery serialization guarantee requires strengthening the scheduler mutex:
+publish a populated pending owner directory atomically; on Linux hold a permanent
+`.sched-lock.guard` inode with util-linux flock across the whole transaction (the
+inherited-descriptor primitive already used by the private zero-trust package).
+The published scheduler cannot depend on that private package. Non-Linux directory
+locking remains available but refuses automatic stale reclamation without a kernel
+guard, requiring verified manual reconciliation instead of a racy takeover. New
+process-death/stale-contender tests exercise these boundaries. `types.ts` field
+comments and `cli/README.md` must reflect the new diagnostic/locking contracts.
+No new public state schema or executable quarantined payload is introduced.
+
 None unresolved. The prior observable trigger mismatch is resolved by current-code
 tracing and the bounded fixture; it is not a new handoff. Quarantine mechanism and
 current-ownership handling above are technical decisions within the authorized

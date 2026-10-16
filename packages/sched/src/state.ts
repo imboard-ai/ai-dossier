@@ -768,6 +768,35 @@ export function validateBatchRecord(data: unknown): void {
   if (typeof batch.base_branch !== 'string' || batch.base_branch.length === 0) {
     throw new Error(`Batch ${batch.id}: base_branch must be a non-empty string`);
   }
+  if (batch.blocked_reason != null && typeof batch.blocked_reason !== 'string') {
+    throw new Error(`Batch ${batch.id}: blocked_reason must be a string or null`);
+  }
+  // Validate every value normalization consumes inside this record boundary,
+  // so malformed terminal history is isolatable rather than an unlocated TypeError.
+  if (batch.member_gates != null) {
+    if (typeof batch.member_gates !== 'object' || Array.isArray(batch.member_gates)) {
+      throw new Error(`Batch ${batch.id}: member_gates must be an object or null`);
+    }
+    for (const [issue, gate] of Object.entries(batch.member_gates)) {
+      if (
+        !gate ||
+        typeof gate !== 'object' ||
+        Array.isArray(gate) ||
+        typeof gate.capability !== 'string' ||
+        !['ok', 'task-failed', 'automation-broken', 'capability-unavailable'].includes(
+          gate.outcome
+        ) ||
+        (gate.output_tail !== null && typeof gate.output_tail !== 'string') ||
+        (gate.duration_ms != null &&
+          (!Number.isFinite(gate.duration_ms) || gate.duration_ms < 0)) ||
+        !isIsoDateString(gate.at)
+      ) {
+        throw new Error(
+          `Batch ${batch.id}: member_gates[${JSON.stringify(issue)}] must be a valid gate record (capability/outcome/output_tail/duration_ms/at)`
+        );
+      }
+    }
+  }
   // #707: null (or absent, backfilled below) is the default profile; a
   // present value must match the same grammar the config validator and the
   // enqueue path enforce, so a state file can never carry a profile name

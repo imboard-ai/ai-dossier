@@ -1689,6 +1689,16 @@ after-the-fact recovery, not a missing-data bug.
   globally corrupt state still fails closed. Valid historical runs retain membership
   after re-enqueue so ordinary verified cleanup can finish; dependencies use the
   current queue entry's batch association instead of historical membership.
+  Every `load()` synchronously acquires the state mutex, requires directory write
+  access and can time out (`LockTimeoutError`); recovery may write evidence and
+  replace state. It is non-reentrant: inside `withLock`, use the supplied state.
+  On Linux the permanent `.sched-lock.guard` inode is held with util-linux
+  `/usr/bin/flock` until release (and automatically released on process death);
+  never delete/replace that file. Atomic ownership-directory publication prevents
+  a killed reader from leaving a PID-less lock. Non-Linux platforms retain the
+  directory mutex but refuse automatic stale takeover: verify the old owner is
+  dead and reconcile `.sched-lock` manually before restarting. This avoids
+  stealing a live replacement owner from a stale PID observation.
   A `state.json` written by a newer
   schema than the installed engine is not corruption — `load()` throws the more specific
   `EngineTooOldError` (#537), pointing at an engine upgrade rather than at deleting real

@@ -584,7 +584,11 @@ function batchSlotPid(h: BatchHarness, batchId: string): number | undefined {
 }
 
 describe('#1245 terminal quarantine engine boundary', () => {
-  it('advances unrelated work without executing any quarantined target or PID', () => {
+  it.each([
+    'member_runs',
+    'blocked_reason',
+    'member_gates',
+  ] as const)('advances unrelated work around malformed %s without executing any quarantined target or PID', (field) => {
     const h = batchHarness(scratchRepo(), []);
     h.enqueue([{ issue: 1000, mode: 'full' }]);
     const state = h.state();
@@ -596,6 +600,13 @@ describe('#1245 terminal quarantine engine boundary', () => {
       member_worktree: '/untrusted/member-target',
       anchor: 999,
     });
+    if (field !== 'member_runs') {
+      state.batches[0].member_runs = [];
+      Object.assign(
+        state.batches[0],
+        field === 'blocked_reason' ? { blocked_reason: 7 } : { member_gates: { '674': null } }
+      );
+    }
     h.store.save(state);
     const effects: unknown[][] = [];
     h.deps.spawnDeps = {
@@ -632,7 +643,7 @@ describe('#1245 terminal quarantine engine boundary', () => {
       .find((file) => !file.includes('manifest'));
     if (!evidence) throw new Error('missing quarantine fixture evidence');
     expect(fs.readFileSync(path.join(h.store.dir, 'quarantine', evidence), 'utf8')).toContain(
-      '/untrusted/quarantine-target'
+      '/untrusted/batch-target'
     );
   });
 });

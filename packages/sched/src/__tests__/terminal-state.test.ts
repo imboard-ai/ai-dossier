@@ -182,6 +182,115 @@ describe('#1245 producer and current ownership', () => {
 
 describe('#1245 evidence-first terminal quarantine', () => {
   it.each([
+    'blocked_reason',
+    'member_gates',
+  ] as const)('validates malformed %s inside the record boundary for active and terminal records', (field) => {
+    for (const status of ['dissolved', 'executing'] as const) {
+      const state = malformed(status);
+      state.batches[0].member_runs = [];
+      Object.assign(
+        state.batches[0],
+        field === 'blocked_reason' ? { blocked_reason: 7 } : { member_gates: { '674': null } }
+      );
+      expect(() => validateState(state)).toThrow(new RegExp(`batches\\[0\\].*${field}`));
+      const { store, raw } = write(state);
+      if (status === 'dissolved') expect(store.load().batches[0].blocked_reason).toContain(field);
+      else {
+        expect(() => store.load()).toThrow(new RegExp(`batches\\[0\\].*${field}`));
+        expect(fs.readFileSync(store.statePath, 'utf8')).toBe(raw);
+      }
+    }
+  });
+
+  it.each([
+    'fifo',
+    'dangling-symlink',
+  ] as const)('refuses existing %s evidence promptly, preserving original state and evidence object', (kind) => {
+    const { store, raw, evidence } = write(malformed());
+    fs.mkdirSync(path.dirname(evidence));
+    if (kind === 'fifo') {
+      expect(spawnSync('mkfifo', [evidence]).status).toBe(0);
+    } else fs.symlinkSync(path.join(dir, 'absent'), evidence);
+    const child = spawnSync(
+      process.execPath,
+      [
+        '-e',
+        `try {new (require(${JSON.stringify(path.resolve('dist/index.js'))}).SchedStore)(${JSON.stringify(dir)}).load();process.exitCode=2;} catch(e){console.error(e.message);}`,
+      ],
+      { encoding: 'utf8', timeout: 5000 }
+    );
+    expect(child.error).toBeUndefined();
+    expect(child.status).toBe(0);
+    expect(child.stderr).toContain('terminal quarantine refused');
+    expect(fs.readFileSync(store.statePath, 'utf8')).toBe(raw);
+    expect(fs.lstatSync(evidence)[kind === 'fifo' ? 'isFIFO' : 'isSymbolicLink']()).toBe(true);
+    expect(fs.existsSync(path.join(dir, '.sched-lock'))).toBe(false);
+  });
+
+  it('a real SIGKILL before lock PID publication leaves no public ownerless mutex', () => {
+    const { store } = write(createEmptyState());
+    const child = spawnSync(process.execPath, [
+      '-e',
+      `const fs=require('node:fs');const w=fs.writeFileSync;fs.writeFileSync=(p,...a)=>{if(typeof p==='string'&&p.endsWith('/pid'))process.kill(process.pid,'SIGKILL');return w(p,...a)};new(require(${JSON.stringify(path.resolve('dist/index.js'))}).SchedStore)(${JSON.stringify(dir)}).load();`,
+    ]);
+    expect(child.signal).toBe('SIGKILL');
+    expect(fs.existsSync(path.join(dir, '.sched-lock'))).toBe(false);
+    expect(store.load()).toEqual(createEmptyState());
+    store.withLock((state) => ({
+      state: enqueueEntries(state, [{ issue: 1000 }], NOW),
+      result: null,
+    }));
+    expect(store.load().entries[0].issue).toBe(1000);
+  });
+
+  it('a delayed stale-lock observer cannot steal a live replacement lock or erase its enqueue', async () => {
+    const { store } = write(malformed());
+    const lock = path.join(dir, '.sched-lock');
+    fs.mkdirSync(lock);
+    fs.writeFileSync(path.join(lock, 'pid'), '999999999');
+    const observed = path.join(dir, 'observed');
+    const release = path.join(dir, 'release');
+    const doneB = path.join(dir, 'done-b');
+    const module = JSON.stringify(path.resolve('dist/index.js'));
+    const proc = (script: string) => {
+      const child = spawn(process.execPath, ['-e', script], { stdio: 'pipe' });
+      let stderr = '';
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk;
+      });
+      const done = new Promise<void>((resolve, reject) => {
+        child.on('error', reject);
+        child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(stderr))));
+      });
+      return { child, done };
+    };
+    const a = proc(
+      `const fs=require('node:fs');const rename=fs.renameSync;fs.renameSync=(a,b)=>{if(a===${JSON.stringify(lock)}&&b.includes('.stale-')){fs.writeFileSync(${JSON.stringify(observed)},'yes');while(!fs.existsSync(${JSON.stringify(release)}))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,20);}return rename(a,b)};const {SchedStore,enqueueEntries}=require(${module});new SchedStore(${JSON.stringify(dir)}).withLock(s=>({state:enqueueEntries(s,[{issue:1000}],new Date()),result:null}));`
+    );
+    let b: ReturnType<typeof proc> | undefined;
+    try {
+      const deadline = Date.now() + 5000;
+      while (!fs.existsSync(observed) && Date.now() < deadline)
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(fs.existsSync(observed)).toBe(true);
+      b = proc(
+        `const fs=require('node:fs');const {SchedStore,enqueueEntries}=require(${module});new SchedStore(${JSON.stringify(dir)}).withLock(s=>({state:enqueueEntries(s,[{issue:1001}],new Date()),result:null}));fs.writeFileSync(${JSON.stringify(doneB)},'yes');`
+      );
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(fs.existsSync(doneB)).toBe(false);
+    } finally {
+      fs.writeFileSync(release, 'yes');
+      await Promise.all([a.done, ...(b ? [b.done] : [])]);
+    }
+    expect(
+      store
+        .load()
+        .entries.map((entry) => entry.issue)
+        .sort()
+    ).toEqual([1000, 1001]);
+  }, 20000);
+
+  it.each([
     'done',
     'dissolved',
     'stopped',
@@ -220,11 +329,11 @@ describe('#1245 evidence-first terminal quarantine', () => {
   });
 
   it.each([
-    null,
-    1,
-    [],
-    { worktree: null },
-  ])('null-safe malformed run %j is strict, yet terminal-isolatable', (run) => {
+    { run: null },
+    { run: 1 },
+    { run: [] },
+    { run: { worktree: null } },
+  ])('null-safe malformed run $run is strict, yet terminal-isolatable', ({ run }) => {
     const state = malformed();
     (state.batches[0] as unknown as Record<string, unknown>).member_runs = [run];
     expect(() => validateState(state)).toThrow(/batches\[0\].*member_runs\[0\]/);

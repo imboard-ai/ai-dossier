@@ -8,11 +8,12 @@
  * file (AC2). A stray `.tmp` is ignored by `load()` and overwritten by the
  * next write.
  *
- * Cross-process mutations are serialized by a directory mutex (`.sched-lock`),
- * the same acquire/release protocol as `packages/worktree-pool/src/pool-actions.ts`
- * (acquireLock/releaseLock there) — the two copies must be kept in lockstep.
+ * Reads/recovery and mutations share `.sched-lock`. Linux additionally pins a
+ * permanent kernel guard, so stale-owner observation and reclamation cannot race
+ * a new owner. Other platforms fail closed on stale locks (manual reconciliation).
  */
 
+import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import * as path from 'node:path';
@@ -155,12 +156,7 @@ export function writeAtomic(filePath: string, contents: string): void {
   // Best-effort directory fsync so the rename itself is durable. Not available
   // on every platform/fs — a failure here never blocks the write.
   try {
-    const dfd = fs.openSync(dir, 'r');
-    try {
-      fs.fsyncSync(dfd);
-    } finally {
-      fs.closeSync(dfd);
-    }
+    fsyncDirectory(dir);
   } catch {
     // ignore
   }
@@ -265,7 +261,14 @@ function preserveQuarantine(
     [`${digest}.manifest.json`, manifest],
   ] as const) {
     const target = path.join(evidenceDir, name);
-    if (!fs.existsSync(target)) {
+    let present = true;
+    try {
+      fs.lstatSync(target);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      present = false;
+    }
+    if (!present) {
       const tmp = path.join(evidenceDir, `.pending-${randomUUID()}`);
       const fd = fs.openSync(
         tmp,
@@ -287,7 +290,10 @@ function preserveQuarantine(
         fs.rmSync(tmp, { force: true });
       }
     }
-    const fd = fs.openSync(target, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const fd = fs.openSync(
+      target,
+      fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK
+    );
     try {
       if (!fs.fstatSync(fd).isFile() || !fs.readFileSync(fd).equals(bytes)) {
         throw new Error(`quarantine evidence verification failed: ${target}`);
@@ -301,70 +307,130 @@ function preserveQuarantine(
   fsyncDirectory(dir); // makes the new quarantine directory durable too
 }
 
-// --- Lock (directory mutex, worktree-pool protocol) ---
+// --- State mutex ---
+
+const stateGuards = new Map<string, number>();
+
+/** Same inherited-open-description flock primitive as zero-trust/lock.ts.
+ * That private workspace cannot be a dependency of the published scheduler.
+ * The guard inode is permanent: never unlink/replace it, including after a crash.
+ */
+function acquireStateGuard(dir: string): number | null {
+  if (process.platform !== 'linux') return null;
+  const file = path.join(dir, `${LOCK_DIR}.guard`);
+  const fd = fs.openSync(
+    file,
+    fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
+    0o600
+  );
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid?.()) {
+      throw new Error(`Scheduler lock guard must be a private regular file: ${file}`);
+    }
+    const result = spawnSync('/usr/bin/flock', ['-x', '-w', String(LOCK_TIMEOUT_MS / 1000), '3'], {
+      stdio: ['ignore', 'ignore', 'ignore', fd],
+      timeout: LOCK_TIMEOUT_MS + 1000,
+    });
+    if (result.error)
+      throw new Error(
+        `Could not acquire scheduler kernel guard (${file}): ${result.error.message}`
+      );
+    if (result.status !== 0) throw new LockTimeoutError(file, null);
+    const named = fs.lstatSync(file);
+    if (named.dev !== stat.dev || named.ino !== stat.ino)
+      throw new Error(`Scheduler lock guard changed: ${file}`);
+    return fd;
+  } catch (err) {
+    fs.closeSync(fd);
+    throw err;
+  }
+}
 
 function acquireLock(dir: string): void {
+  dir = path.resolve(dir);
   const lockPath = path.join(dir, LOCK_DIR);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const guard = acquireStateGuard(dir);
 
-  const start = Date.now();
-  let heldByPid: number | null = null;
-  while (true) {
-    try {
-      fs.mkdirSync(lockPath);
+  try {
+    const start = Date.now();
+    let heldByPid: number | null = null;
+    while (true) {
       try {
-        fs.writeFileSync(path.join(lockPath, 'pid'), String(process.pid), { mode: 0o600 });
-      } catch (err) {
-        fs.rmSync(lockPath, { recursive: true, force: true });
-        throw err;
-      }
-      return;
-    } catch (err) {
-      // Permission/disk failures are not contention; retrying them hides the
-      // real I/O diagnosis and unnecessarily stalls read-only watchers (#1245).
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
-      heldByPid = null;
-      try {
-        const pidFile = path.join(lockPath, 'pid');
-        if (fs.existsSync(pidFile)) {
-          const lockPid = Number.parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
-          heldByPid = Number.isNaN(lockPid) ? null : lockPid;
-          try {
-            process.kill(lockPid, 0);
-          } catch {
-            // Recorded holder is dead. Take the stale lock over by RENAMING it
-            // first: with two contenders both seeing the dead pid, only one
-            // rename succeeds — the loser's rmSync cannot delete the winner's
-            // freshly-acquired lock (the plain rmSync-race the pool protocol
-            // inherits from its original mkdir-mutex).
-            const stale = `${lockPath}.stale-${process.pid}-${Date.now()}`;
-            try {
-              fs.renameSync(lockPath, stale);
-            } catch {
-              // another contender already took it over — fall through to retry
-            }
-            try {
-              fs.rmSync(stale, { recursive: true, force: true });
-            } catch {
-              // best effort cleanup
-            }
-            continue;
-          }
+        // Publish ownership atomically; a killed pending writer cannot leave a
+        // public PID-less mutex. Pending names are inert and never reclaimed.
+        const pending = path.join(dir, `${LOCK_DIR}.pending-${randomUUID()}`);
+        fs.mkdirSync(pending, { mode: 0o700 });
+        try {
+          fs.writeFileSync(path.join(pending, 'pid'), String(process.pid), { mode: 0o600 });
+          fs.renameSync(pending, lockPath);
+        } catch (err) {
+          fs.rmSync(pending, { recursive: true, force: true });
+          throw err;
         }
-      } catch {
-        // retry
-      }
+        if (guard !== null) stateGuards.set(dir, guard);
+        return;
+      } catch (err) {
+        // Permission/disk failures are not contention; retrying them hides the
+        // real I/O diagnosis and unnecessarily stalls read-only watchers (#1245).
+        if (!['EEXIST', 'ENOTEMPTY'].includes((err as NodeJS.ErrnoException).code ?? '')) throw err;
+        heldByPid = null;
+        try {
+          const pidFile = path.join(lockPath, 'pid');
+          if (fs.existsSync(pidFile)) {
+            const lockPid = Number.parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
+            heldByPid = Number.isNaN(lockPid) ? null : lockPid;
+            try {
+              process.kill(lockPid, 0);
+            } catch {
+              // Without the kernel guard there is no atomic compare-and-remove
+              // for a directory owner. Refuse rather than steal a replacement.
+              if (guard === null) throw new LockTimeoutError(lockPath, heldByPid);
+              // Recorded holder is dead. Take the stale lock over by RENAMING it
+              // first: with two contenders both seeing the dead pid, only one
+              // rename succeeds — the loser's rmSync cannot delete the winner's
+              // freshly-acquired lock (the plain rmSync-race the pool protocol
+              // inherits from its original mkdir-mutex).
+              const stale = `${lockPath}.stale-${process.pid}-${Date.now()}`;
+              try {
+                fs.renameSync(lockPath, stale);
+              } catch {
+                // another contender already took it over — fall through to retry
+              }
+              try {
+                fs.rmSync(stale, { recursive: true, force: true });
+              } catch {
+                // best effort cleanup
+              }
+              continue;
+            }
+          }
+        } catch {
+          // retry
+        }
 
-      if (Date.now() - start > LOCK_TIMEOUT_MS) {
-        throw new LockTimeoutError(lockPath, heldByPid);
+        if (Date.now() - start > LOCK_TIMEOUT_MS) {
+          throw new LockTimeoutError(lockPath, heldByPid);
+        }
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_RETRY_MS);
       }
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_RETRY_MS);
     }
+  } catch (err) {
+    if (guard !== null) fs.closeSync(guard);
+    throw err;
   }
 }
 
 function releaseLock(dir: string): void {
-  fs.rmSync(path.join(dir, LOCK_DIR), { recursive: true, force: true });
+  dir = path.resolve(dir);
+  const guard = stateGuards.get(dir);
+  try {
+    fs.rmSync(path.join(dir, LOCK_DIR), { recursive: true, force: true });
+  } finally {
+    stateGuards.delete(dir);
+    if (guard !== undefined) fs.closeSync(guard);
+  }
 }
 
 function readEngineLeaseHolder(leasePath: string): EngineLease | null {
@@ -551,6 +617,9 @@ export class SchedStore {
     if (this.heldLease?.id === lease.id) this.heldLease = null;
   }
 
+  /** Synchronous, non-reentrant locked read. Requires directory write access even
+   * for healthy state, may throw LockTimeoutError, and may publish quarantine
+   * evidence/state recovery. Inside withLock use its supplied state, not load(). */
   load(): SchedState {
     acquireLock(this.dir);
     try {

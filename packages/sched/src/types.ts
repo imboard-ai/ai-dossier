@@ -727,7 +727,10 @@ export interface BatchEntry {
    * previously journaled/posted its reason but never persisted it on the
    * entry itself, so `sched status` had nothing to read back for the #562
    * suite-unreadable case either). Cleared back to `null` on any transition
-   * out of `blocked`. `null` when the batch has never been blocked.
+   * out of `blocked`. Normally null when never blocked. Exception (#1245):
+   * an inert terminal quarantine placeholder retains a `terminal-quarantine:`
+   * evidence/reconciliation locator here across reopening. Non-null does not
+   * imply status=blocked; the marker never authorizes executable cleanup.
    */
   blocked_reason: string | null;
   /**
