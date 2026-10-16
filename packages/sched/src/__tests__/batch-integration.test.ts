@@ -583,6 +583,81 @@ function batchSlotPid(h: BatchHarness, batchId: string): number | undefined {
   return slot?.pid ?? undefined;
 }
 
+describe('#1245 terminal quarantine engine boundary', () => {
+  it.each([
+    'member_runs',
+    'blocked_reason',
+    'member_gates',
+    'members',
+  ] as const)('advances unrelated work around malformed %s without executing any quarantined target or PID', (field) => {
+    const h = batchHarness(scratchRepo(), []);
+    h.enqueue([{ issue: 1000, mode: 'full' }]);
+    const state = h.state();
+    state.batches.push({
+      ...createBatch('damaged', [], new Date()),
+      status: 'dissolved',
+      member_runs: [memberRun({ issue: 901, worktree: '/untrusted/quarantine-target' })],
+      worktree: '/untrusted/batch-target',
+      member_worktree: '/untrusted/member-target',
+      anchor: 999,
+    });
+    if (field !== 'member_runs') {
+      state.batches[0].member_runs = [];
+      if (field === 'members') {
+        const entries = enqueueEntries(
+          createEmptyState(),
+          [{ issue: 674, mode: 'slot', batch: 'damaged' }],
+          new Date()
+        ).entries;
+        entries[0].status = 'done';
+        state.entries.push(...entries);
+      } else
+        Object.assign(
+          state.batches[0],
+          field === 'blocked_reason' ? { blocked_reason: 7 } : { member_gates: { '674': null } }
+        );
+    }
+    h.store.save(state);
+    const effects: unknown[][] = [];
+    h.deps.spawnDeps = {
+      spawn: (...args) => {
+        effects.push(['spawn', ...args]);
+        return 99999999;
+      },
+      kill: (...args) => {
+        effects.push(['kill', ...args]);
+        return true;
+      },
+      isAlive: () => true,
+      processStart: () => null,
+    };
+    h.deps.batchExec = (file, args, cwd) => {
+      effects.push(['batch-exec', file, args, cwd]);
+      return null;
+    };
+    h.deps.teardownExec = (file, args, cwd) => {
+      effects.push(['teardown-exec', file, args, cwd]);
+      return null;
+    };
+    h.tick();
+    expect(h.state().entries.find((entry) => entry.issue === 1000)?.status).toBe('dispatched');
+    expect(effects.filter(([kind]) => kind === 'spawn')).toHaveLength(1);
+    expect(effects.filter(([kind]) => kind === 'kill')).toEqual([]);
+    expect(JSON.stringify(effects)).not.toContain('/untrusted/');
+    expect(JSON.stringify(effects)).not.toMatch(
+      /worktree.*remove|worktree-pool.*return|issue.*close/
+    );
+    expect(h.state().batches[0].member_runs).toEqual([]);
+    const evidence = fs
+      .readdirSync(path.join(h.store.dir, 'quarantine'))
+      .find((file) => !file.includes('manifest'));
+    if (!evidence) throw new Error('missing quarantine fixture evidence');
+    expect(fs.readFileSync(path.join(h.store.dir, 'quarantine', evidence), 'utf8')).toContain(
+      '/untrusted/batch-target'
+    );
+  });
+});
+
 /** `BatchDispatchDeps` sliced from a `batchHarness`'s `EngineDeps` (#583 `sched resume --batch` tests) — mirrors `engine.ts`'s own `EngineDeps → BatchDispatchDeps` mapping. */
 function batchDispatchDepsFrom(
   h: BatchHarness,
@@ -5151,6 +5226,7 @@ function keptWorktreeReconcileHarness() {
 
   let execImpl: ExecFn = () => null;
   const execCalls: Array<{ file: string; args: string[] }> = [];
+  const killCalls: Array<Parameters<SpawnDeps['kill']>> = [];
   let fsExistsImpl: (p: string) => boolean = () => true;
 
   const config: SchedConfig = { max_slots: 1 };
@@ -5163,7 +5239,10 @@ function keptWorktreeReconcileHarness() {
       spawn: () => {
         throw new Error('must not spawn in this test');
       },
-      kill: () => true,
+      kill: (...args) => {
+        killCalls.push(args);
+        return true;
+      },
       isAlive: () => true,
       processStart: () => null,
     },
@@ -5182,6 +5261,7 @@ function keptWorktreeReconcileHarness() {
   return {
     store,
     execCalls,
+    killCalls,
     setExec: (fn: ExecFn) => {
       execImpl = fn;
     },
@@ -5595,6 +5675,71 @@ describe("#834: reconcileKeptWorktrees clears a done batch's live member_runs[] 
  * re-injected into `teardownParallelRuns`, then to PASS once restored.
  */
 describe("#855: the terminal-batch safety net keeps a kept batch's member_runs[] and never marks a failed teardown torn down", () => {
+  it.each([
+    'success',
+    'failed',
+    'kept',
+  ] as const)('#1245 historical cleanup %s never retargets a fresh entry or its slot', (outcome) => {
+    const h = keptWorktreeReconcileHarness();
+    const tree = realMemberTree(h, 901);
+    h.patch({
+      status: 'dissolved',
+      worktree_kept: outcome === 'kept',
+      member_runs: [memberRun({ issue: 901, worktree: tree, status: 'running' })],
+    });
+    h.store.withLock((state) => {
+      const assigned = assignToIdleSlot(
+        enqueueEntries(
+          state,
+          [{ issue: 901, mode: 'slot', batch: 'fresh', more_members_expected: true }],
+          new Date()
+        ),
+        'batch:fresh#901',
+        'implement',
+        new Date()
+      );
+      return {
+        state: transitionSlot(
+          assigned.state,
+          assigned.slotId,
+          'running',
+          { pid: 99999999 },
+          new Date()
+        ),
+        result: null,
+      };
+    });
+    const before = h.store.load();
+    let removed = false;
+    h.setExec((file, args) => {
+      if (file === 'git' && args[0] === 'worktree' && args[1] === 'remove') {
+        if (outcome === 'failed') return null;
+        removed = true;
+      }
+      return cooperativeGit(h)(file, args, h.store.dir);
+    });
+    h.setFsExists(() => !removed);
+    h.tick();
+    const after = h.store.load();
+    expect(after.entries).toEqual(before.entries);
+    expect(after.slots).toEqual(before.slots);
+    expect(h.killCalls).toEqual([]);
+    expect(after.batches[0].member_runs[0].torn_down).toBe(outcome === 'success');
+    if (outcome === 'failed')
+      expect(after.batches[0].member_runs[0].teardown_failed_at).not.toBeNull();
+    if (outcome === 'kept')
+      expect(
+        h.execCalls.some((call) => DESTRUCTIVE_ARGV.test(`${call.file} ${call.args.join(' ')}`))
+      ).toBe(false);
+    else
+      expect(
+        h.execCalls.some(
+          (call) =>
+            call.args[0] === 'worktree' && call.args[1] === 'remove' && call.args.includes(tree)
+        )
+      ).toBe(true);
+  });
+
   it('AC1: a kept (members-closed) done batch — no destructive command runs on any tick and torn_down stays false', () => {
     const h = keptWorktreeReconcileHarness();
     h.patch({

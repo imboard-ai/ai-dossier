@@ -1,25 +1,34 @@
 /**
  * Crash-safe persistence for the scheduler core.
  *
- * `state.json` is written atomically: contents land in `state.json.tmp` in the
+ * `state.json` is written atomically: contents land in an exclusive temporary file in the
  * SAME directory (rename is atomic only within a filesystem), get fsynced, and
  * are renamed over `state.json`. A process killed between writes therefore
  * leaves either the previous complete state or the new one — never a partial
- * file (AC2). A stray `.tmp` is ignored by `load()` and overwritten by the
- * next write.
+ * file (AC2). Stray temporary files are ignored; publication never opens an
+ * existing temporary pathname that could alias evidence or block on a FIFO.
  *
- * Cross-process mutations are serialized by a directory mutex (`.sched-lock`),
- * the same acquire/release protocol as `packages/worktree-pool/src/pool-actions.ts`
- * (acquireLock/releaseLock there) — the two copies must be kept in lockstep.
+ * Reads/recovery and mutations share `.sched-lock`. Linux additionally pins a
+ * permanent kernel guard, so stale-owner observation and reclamation cannot race
+ * a new owner. Other platforms fail closed on stale locks (manual reconciliation).
  */
 
-import * as fs from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { createHash, randomUUID } from 'node:crypto';
+import fs from 'node:fs';
 import * as path from 'node:path';
 import { DISPATCH_PROFILE_RE, procStartTime } from './dispatch';
 import { JOURNAL_FILE } from './journal';
-import { createEmptyState, validateState } from './state';
+import {
+  batchUnit,
+  createBatch,
+  createEmptyState,
+  validateBatchRecord,
+  validateState,
+} from './state';
 import {
   BATCH_PHASES,
+  type BatchEntry,
   CONFIG_SCHEMA_VERSION,
   DEFAULT_MAX_SLOTS,
   type DispatchConfig,
@@ -35,6 +44,8 @@ import {
   type SchedConfig,
   type SchedConfigFile,
   type SchedState,
+  TERMINAL_BATCH_STATUSES,
+  TERMINAL_ISSUE_STATUSES,
   type TierDispatchSpec,
 } from './types';
 
@@ -82,11 +93,13 @@ export interface EngineLeaseStatus extends EngineLeaseHolder {
 export class LockTimeoutError extends Error {
   readonly lockPath: string;
 
-  constructor(lockPath: string, heldByPid: number | null) {
+  constructor(lockPath: string, heldByPid: number | null, permanent = false) {
     const holder = heldByPid !== null ? `; held by pid ${heldByPid}` : ' (no pid file found)';
     super(
-      `Timed out waiting for scheduler lock (${LOCK_TIMEOUT_MS}ms)${holder}. ` +
-        `If that process is not running, remove ${lockPath}`
+      permanent
+        ? `Timed out waiting for scheduler kernel guard (${LOCK_TIMEOUT_MS}ms): ${lockPath}. Retry or inspect the state-lock holder; never unlink or replace this permanent guard file.`
+        : `Timed out waiting for scheduler lock (${LOCK_TIMEOUT_MS}ms)${holder}. ` +
+            `If that process is not running, remove ${lockPath}`
     );
     this.name = 'LockTimeoutError';
     this.lockPath = lockPath;
@@ -100,7 +113,8 @@ export class CorruptStateError extends Error {
     const reason = cause instanceof Error ? cause.message : String(cause);
     super(
       `Scheduler state file is corrupt: ${filePath} (${reason}). ` +
-        'Rename or remove it to reset the queue — GitHub remains the system of record.'
+        'Preserve the original file as evidence; repair only the named record/field, then retry. ' +
+        'For invalid JSON repair the JSON syntax; for unsupported schemas use a compatible engine; for I/O failures restore file access. Do not reset the queue.'
     );
     this.name = 'CorruptStateError';
     this.filePath = filePath;
@@ -132,85 +146,301 @@ export function releaseOwnStateLock(dir: string): boolean {
 export function writeAtomic(filePath: string, contents: string): void {
   const dir = path.dirname(filePath);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const tmp = `${filePath}.tmp`;
-  const fd = fs.openSync(tmp, 'w', 0o600);
+  const tmp = path.join(dir, `.state-write-${randomUUID()}`);
+  const fd = fs.openSync(
+    tmp,
+    fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
+    0o600
+  );
   try {
-    fs.writeFileSync(fd, contents, 'utf8');
-    fs.fsyncSync(fd);
+    try {
+      fs.writeFileSync(fd, contents, 'utf8');
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.renameSync(tmp, filePath);
   } finally {
-    fs.closeSync(fd);
+    fs.rmSync(tmp, { force: true });
   }
-  fs.renameSync(tmp, filePath);
   // Best-effort directory fsync so the rename itself is durable. Not available
   // on every platform/fs — a failure here never blocks the write.
   try {
-    const dfd = fs.openSync(dir, 'r');
-    try {
-      fs.fsyncSync(dfd);
-    } finally {
-      fs.closeSync(dfd);
-    }
+    fsyncDirectory(dir);
   } catch {
     // ignore
   }
 }
 
-// --- Lock (directory mutex, worktree-pool protocol) ---
+const QUARANTINE_DIR = 'quarantine';
+const QUARANTINE_MARKER = 'terminal-quarantine:';
+
+interface QuarantinedBatch {
+  index: number;
+  id: string;
+  reason: string;
+}
+
+/** Build an entirely validated inert candidate BEFORE touching any evidence/state files. */
+function isolateTerminalBatches(
+  data: unknown,
+  evidence: string
+): {
+  state: SchedState;
+  records: QuarantinedBatch[];
+} {
+  if (!data || typeof data !== 'object') throw new Error('Scheduler state must be an object');
+  const obj = data as SchedState;
+  if (!Array.isArray(obj.batches) || !Array.isArray(obj.entries) || !Array.isArray(obj.slots)) {
+    throw new Error('Scheduler state must have batches, entries and slots arrays');
+  }
+  const ids = new Set<string>();
+  const records: QuarantinedBatch[] = [];
+  const batches = obj.batches.map((batch, index) => {
+    // Even a bad record must have one unambiguous identity. Never recover duplicates.
+    if (!batch || typeof batch.id !== 'string' || !batch.id || ids.has(batch.id)) {
+      throw new Error(`batches[${index}]: missing or duplicate batch id`);
+    }
+    ids.add(batch.id);
+    try {
+      validateBatchRecord(batch, obj.entries);
+      return batch;
+    } catch (err) {
+      const reason = `batches[${index}] (id ${JSON.stringify(batch.id)}): ${(err as Error).message}`;
+      if (!TERMINAL_BATCH_STATUSES.has(batch.status)) throw new Error(reason);
+      const references = obj.entries.filter((entry) => entry?.batch === batch.id);
+      if (references.some((entry) => !TERMINAL_ISSUE_STATUSES.has(entry.status))) {
+        throw new Error(
+          `${reason}; active/parked entry references this batch — repair only this record`
+        );
+      }
+      const unit = batchUnit(batch.id);
+      if (
+        obj.slots.some(
+          (slot) =>
+            slot?.status !== 'idle' &&
+            (slot?.unit === unit ||
+              (typeof slot?.unit === 'string' && slot.unit.startsWith(`${unit}#`)))
+        )
+      ) {
+        throw new Error(`${reason}; held batch/member slot — repair only this record`);
+      }
+      records.push({ index, id: batch.id, reason });
+      return {
+        ...createBatch(
+          batch.id,
+          references.map((entry) => entry.issue),
+          new Date(0)
+        ),
+        status: batch.status,
+        blocked_reason: `${QUARANTINE_MARKER}${evidence}; ${reason}; original cleanup obligations require record-local reconciliation`,
+      } satisfies BatchEntry;
+    }
+  });
+  // Also checks schema, entries, slots, referential integrity and all global fields.
+  // A terminal exception must never hide independently corrupt active/global state.
+  return { state: validateState({ ...obj, batches }), records };
+}
+
+function fsyncDirectory(dir: string): void {
+  const fd = fs.openSync(dir, 'r');
+  try {
+    fs.fsyncSync(fd);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/** Mandatory durable evidence; existing digest files are verified, never overwritten. */
+function preserveQuarantine(
+  dir: string,
+  digest: string,
+  raw: Buffer,
+  records: QuarantinedBatch[]
+): void {
+  const evidenceDir = path.join(dir, QUARANTINE_DIR);
+  fs.mkdirSync(evidenceDir, { recursive: true, mode: 0o700 });
+  if (!fs.lstatSync(evidenceDir).isDirectory() || fs.lstatSync(evidenceDir).isSymbolicLink()) {
+    throw new Error(`quarantine directory is not a store-owned directory: ${evidenceDir}`);
+  }
+  const manifest = Buffer.from(
+    `${JSON.stringify({ digest, state_file: STATE_FILE, records }, null, 2)}\n`
+  );
+  for (const [name, bytes] of [
+    [`${digest}.json`, raw],
+    [`${digest}.manifest.json`, manifest],
+  ] as const) {
+    const target = path.join(evidenceDir, name);
+    let present = true;
+    try {
+      fs.lstatSync(target);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      present = false;
+    }
+    if (!present) {
+      const tmp = path.join(evidenceDir, `.pending-${randomUUID()}`);
+      const fd = fs.openSync(
+        tmp,
+        fs.constants.O_WRONLY |
+          fs.constants.O_CREAT |
+          fs.constants.O_EXCL |
+          fs.constants.O_NOFOLLOW,
+        0o600
+      );
+      try {
+        try {
+          fs.writeFileSync(fd, bytes);
+          fs.fsyncSync(fd);
+        } finally {
+          fs.closeSync(fd);
+        }
+        fs.renameSync(tmp, target);
+      } finally {
+        fs.rmSync(tmp, { force: true });
+      }
+    }
+    const fd = fs.openSync(
+      target,
+      fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK
+    );
+    try {
+      if (!fs.fstatSync(fd).isFile() || !fs.readFileSync(fd).equals(bytes)) {
+        throw new Error(`quarantine evidence verification failed: ${target}`);
+      }
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
+  fsyncDirectory(evidenceDir);
+  fsyncDirectory(dir); // makes the new quarantine directory durable too
+}
+
+// --- State mutex ---
+
+const stateGuards = new Map<string, number>();
+
+/** Same inherited-open-description flock primitive as zero-trust/lock.ts.
+ * That private workspace cannot be a dependency of the published scheduler.
+ * The guard inode is permanent: never unlink/replace it, including after a crash.
+ */
+function acquireStateGuard(dir: string): number | null {
+  if (process.platform !== 'linux') return null;
+  const file = path.join(dir, `${LOCK_DIR}.guard`);
+  const fd = fs.openSync(
+    file,
+    fs.constants.O_RDWR | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
+    0o600
+  );
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid?.()) {
+      throw new Error(`Scheduler lock guard must be a private regular file: ${file}`);
+    }
+    const result = spawnSync('/usr/bin/flock', ['-x', '-w', String(LOCK_TIMEOUT_MS / 1000), '3'], {
+      stdio: ['ignore', 'ignore', 'ignore', fd],
+      timeout: LOCK_TIMEOUT_MS + 1000,
+    });
+    if (result.error)
+      throw new Error(
+        `Could not acquire scheduler kernel guard (${file}): ${result.error.message}`
+      );
+    if (result.status !== 0) throw new LockTimeoutError(file, null, true);
+    const named = fs.lstatSync(file);
+    if (named.dev !== stat.dev || named.ino !== stat.ino)
+      throw new Error(`Scheduler lock guard changed: ${file}`);
+    return fd;
+  } catch (err) {
+    fs.closeSync(fd);
+    throw err;
+  }
+}
 
 function acquireLock(dir: string): void {
+  dir = path.resolve(dir);
   const lockPath = path.join(dir, LOCK_DIR);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const guard = acquireStateGuard(dir);
 
-  const start = Date.now();
-  let heldByPid: number | null = null;
-  while (true) {
-    try {
-      fs.mkdirSync(lockPath);
-      fs.writeFileSync(path.join(lockPath, 'pid'), String(process.pid), { mode: 0o600 });
-      return;
-    } catch {
-      heldByPid = null;
+  try {
+    const start = Date.now();
+    let heldByPid: number | null = null;
+    while (true) {
       try {
-        const pidFile = path.join(lockPath, 'pid');
-        if (fs.existsSync(pidFile)) {
-          const lockPid = Number.parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
-          heldByPid = Number.isNaN(lockPid) ? null : lockPid;
-          try {
-            process.kill(lockPid, 0);
-          } catch {
-            // Recorded holder is dead. Take the stale lock over by RENAMING it
-            // first: with two contenders both seeing the dead pid, only one
-            // rename succeeds — the loser's rmSync cannot delete the winner's
-            // freshly-acquired lock (the plain rmSync-race the pool protocol
-            // inherits from its original mkdir-mutex).
-            const stale = `${lockPath}.stale-${process.pid}-${Date.now()}`;
-            try {
-              fs.renameSync(lockPath, stale);
-            } catch {
-              // another contender already took it over — fall through to retry
-            }
-            try {
-              fs.rmSync(stale, { recursive: true, force: true });
-            } catch {
-              // best effort cleanup
-            }
-            continue;
-          }
+        // Publish ownership atomically; a killed pending writer cannot leave a
+        // public PID-less mutex. Pending names are inert and never reclaimed.
+        const pending = path.join(dir, `${LOCK_DIR}.pending-${randomUUID()}`);
+        fs.mkdirSync(pending, { mode: 0o700 });
+        try {
+          fs.writeFileSync(path.join(pending, 'pid'), String(process.pid), { mode: 0o600 });
+          fs.renameSync(pending, lockPath);
+        } catch (err) {
+          fs.rmSync(pending, { recursive: true, force: true });
+          throw err;
         }
-      } catch {
-        // retry
-      }
+        if (guard !== null) stateGuards.set(dir, guard);
+        return;
+      } catch (err) {
+        // Permission/disk failures are not contention; retrying them hides the
+        // real I/O diagnosis and unnecessarily stalls read-only watchers (#1245).
+        if (!['EEXIST', 'ENOTEMPTY'].includes((err as NodeJS.ErrnoException).code ?? '')) throw err;
+        heldByPid = null;
+        try {
+          const pidFile = path.join(lockPath, 'pid');
+          if (fs.existsSync(pidFile)) {
+            const lockPid = Number.parseInt(fs.readFileSync(pidFile, 'utf-8').trim(), 10);
+            heldByPid = Number.isNaN(lockPid) ? null : lockPid;
+            try {
+              process.kill(lockPid, 0);
+            } catch {
+              // Without the kernel guard there is no atomic compare-and-remove
+              // for a directory owner. Refuse rather than steal a replacement.
+              if (guard === null) throw new LockTimeoutError(lockPath, heldByPid);
+              // Recorded holder is dead. Take the stale lock over by RENAMING it
+              // first: with two contenders both seeing the dead pid, only one
+              // rename succeeds — the loser's rmSync cannot delete the winner's
+              // freshly-acquired lock (the plain rmSync-race the pool protocol
+              // inherits from its original mkdir-mutex).
+              const stale = `${lockPath}.stale-${process.pid}-${Date.now()}`;
+              try {
+                fs.renameSync(lockPath, stale);
+              } catch {
+                // another contender already took it over — fall through to retry
+              }
+              try {
+                fs.rmSync(stale, { recursive: true, force: true });
+              } catch {
+                // best effort cleanup
+              }
+              continue;
+            }
+          }
+        } catch {
+          // retry
+        }
 
-      if (Date.now() - start > LOCK_TIMEOUT_MS) {
-        throw new LockTimeoutError(lockPath, heldByPid);
+        if (Date.now() - start > LOCK_TIMEOUT_MS) {
+          throw new LockTimeoutError(lockPath, heldByPid);
+        }
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_RETRY_MS);
       }
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_RETRY_MS);
     }
+  } catch (err) {
+    if (guard !== null) fs.closeSync(guard);
+    throw err;
   }
 }
 
 function releaseLock(dir: string): void {
-  fs.rmSync(path.join(dir, LOCK_DIR), { recursive: true, force: true });
+  dir = path.resolve(dir);
+  const guard = stateGuards.get(dir);
+  try {
+    fs.rmSync(path.join(dir, LOCK_DIR), { recursive: true, force: true });
+  } finally {
+    stateGuards.delete(dir);
+    if (guard !== undefined) fs.closeSync(guard);
+  }
 }
 
 function readEngineLeaseHolder(leasePath: string): EngineLease | null {
@@ -263,6 +493,7 @@ export class SchedStore {
   readonly dir: string;
   /** The lease this store instance acquired (heartbeat target). */
   private heldLease: EngineLease | null = null;
+  private readonly warnedQuarantines = new Set<string>();
 
   constructor(
     dir: string,
@@ -396,15 +627,47 @@ export class SchedStore {
     if (this.heldLease?.id === lease.id) this.heldLease = null;
   }
 
+  /** Synchronous, non-reentrant locked read. Requires directory write access even
+   * for healthy state, may throw LockTimeoutError, and may publish quarantine
+   * evidence/state recovery. Inside withLock use its supplied state, not load(). */
   load(): SchedState {
-    const statePath = this.statePath;
-    if (!fs.existsSync(statePath)) {
-      return createEmptyState();
-    }
-    let raw: string;
+    acquireLock(this.dir);
     try {
-      raw = fs.readFileSync(statePath, 'utf-8');
+      return this.loadLocked();
+    } finally {
+      releaseLock(this.dir);
+    }
+  }
+
+  private warnQuarantined(state: SchedState): void {
+    for (const batch of state.batches) {
+      if (
+        batch.blocked_reason?.startsWith(QUARANTINE_MARKER) &&
+        !this.warnedQuarantines.has(batch.blocked_reason)
+      ) {
+        console.error(`⚠ Scheduler ${this.statePath}: ${batch.blocked_reason}`);
+        this.warnedQuarantines.add(batch.blocked_reason);
+      }
+    }
+  }
+
+  private loadLocked(): SchedState {
+    const statePath = this.statePath;
+    let raw: Buffer;
+    try {
+      const fd = fs.openSync(
+        statePath,
+        fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK
+      );
+      try {
+        if (!fs.fstatSync(fd).isFile())
+          throw new Error('state must be a regular file, not a special filesystem object');
+        raw = fs.readFileSync(fd);
+      } finally {
+        fs.closeSync(fd);
+      }
     } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return createEmptyState();
       // An I/O failure (permissions, disk, read-only mount) is NOT corruption —
       // the destructive "rename to reset" advice must not attach to it.
       throw new CorruptStateError(
@@ -414,14 +677,36 @@ export class SchedStore {
         )
       );
     }
+    let parsed: unknown;
     try {
-      return validateState(JSON.parse(raw));
+      parsed = JSON.parse(raw.toString('utf8'));
+      const state = validateState(parsed);
+      this.warnQuarantined(state);
+      return state;
     } catch (err) {
       // A newer-than-installed schema is not corruption (#537) — rethrow as
       // itself so callers (`handleKnownError`) can give the specific
       // upgrade-the-engine message instead of "rename or remove it".
       if (err instanceof EngineTooOldError) throw err;
-      throw new CorruptStateError(statePath, err);
+      if (parsed === undefined) throw new CorruptStateError(statePath, err);
+      const digest = createHash('sha256').update(raw).digest('hex');
+      const evidence = path.join(this.dir, QUARANTINE_DIR, `${digest}.json`);
+      try {
+        const isolated = isolateTerminalBatches(parsed, evidence);
+        if (isolated.records.length === 0) throw err;
+        preserveQuarantine(this.dir, digest, raw, isolated.records);
+        this.save(isolated.state);
+        this.warnQuarantined(isolated.state);
+        return isolated.state;
+      } catch (recoveryError) {
+        if (recoveryError instanceof EngineTooOldError) throw recoveryError;
+        throw new CorruptStateError(
+          statePath,
+          new Error(
+            `${(err as Error).message}; terminal quarantine refused (${(recoveryError as Error).message}); evidence location ${evidence}`
+          )
+        );
+      }
     }
   }
 
@@ -436,7 +721,7 @@ export class SchedStore {
   withLock<T>(fn: (state: SchedState) => { state: SchedState; result: T }): T {
     acquireLock(this.dir);
     try {
-      const current = this.load();
+      const current = this.loadLocked();
       const { state, result } = fn(current);
       this.save(state);
       return result;

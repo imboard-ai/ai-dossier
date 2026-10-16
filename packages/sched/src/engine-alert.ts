@@ -112,8 +112,15 @@ export function checkStaleLeaseAlert(
     clearMarkers(store.dir);
     return 'alive';
   }
-  const { unfinished, liveSlots } = countUnfinishedWork(store.load());
-  if (unfinished === 0 && liveSlots === 0) return 'no-work';
+  let work: ReturnType<typeof countUnfinishedWork> | null = null;
+  try {
+    work = countUnfinishedWork(store.load());
+  } catch (err) {
+    // Loading now takes the state lock (#1245). An unwritable/locked/corrupt
+    // store must not silence the independent dead-engine watcher.
+    process.stderr.write(`⚠ sched alert: could not read queue: ${(err as Error).message}\n`);
+  }
+  if (work?.unfinished === 0 && work.liveSlots === 0) return 'no-work';
 
   const hung = lease.alive;
   const baseEpisode = lease.id ?? `pid-${lease.pid}`;
@@ -127,7 +134,10 @@ export function checkStaleLeaseAlert(
     );
   }
 
-  const queue = `${unfinished} queue entr${unfinished === 1 ? 'y is' : 'ies are'} unfinished and ${liveSlots} slot(s) live`;
+  const queue =
+    work === null
+      ? 'queue state is unavailable (work counts unknown)'
+      : `${work.unfinished} queue entr${work.unfinished === 1 ? 'y is' : 'ies are'} unfinished and ${work.liveSlots} slot(s) live`;
   const message = hung
     ? `sched engine looks HUNG: pid ${lease.pid} is alive but its last heartbeat was ${lease.updated_at} (${Math.round((hungFor ?? 0) / 60_000)} min ago) while ${queue} — a tick is probably wedged. Stop it (SIGTERM; SIGKILL if it ignores that) and run \`ai-dossier sched start\`.${inFlightSuffix(store.dir)}`
     : `sched engine is DOWN: lease holder pid ${lease.pid} is not running${lease.updated_at ? ` (last heartbeat ${lease.updated_at})` : ''} while ${queue} — nothing is ticking. Restart with \`ai-dossier sched start\`. ${SIGKILL_SUSPECTS_HINT}${inFlightSuffix(store.dir)}`;

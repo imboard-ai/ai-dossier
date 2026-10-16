@@ -12,7 +12,20 @@ import { checkCliStaleness, checkEngineStaleness } from '../../engine-version';
 import { readRunLog } from '../../run-log';
 import { createTestProgram, type ExecStub, execHandles, execReturns } from '../helpers/test-utils';
 
-vi.mock('node:child_process');
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    execFileSync: vi.fn(),
+    execFile: vi.fn(),
+    spawn: vi.fn(),
+    // Persistence's inherited-descriptor kernel lock must stay real in CLI
+    // tests; automation subprocesses remain mocked (#1245).
+    spawnSync: vi.fn((...args: Parameters<typeof actual.spawnSync>) =>
+      args[0] === '/usr/bin/flock' ? actual.spawnSync(...args) : undefined
+    ),
+  };
+});
 // `cli/src/run-log.ts`'s LOG_FILE is computed once at import time from
 // `os.homedir()` — this file's `vi.stubEnv('HOME', home)` (below) does not
 // retroactively change it, so `sched stats` tests mock `readRunLog` directly

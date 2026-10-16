@@ -1670,9 +1670,36 @@ after-the-fact recovery, not a missing-data bug.
   running slots with dead pids are re-detected and verified, slots left `assigned` by a
   crash between assign and spawn are spawned, and a dispatched entry no slot holds is
   requeued.
-- **Corrupt state is loud**: `load()` throws `CorruptStateError` naming the file —
-  never a silent queue reset. `state.json` is deletable and rebuildable from GitHub,
-  which remains the system of record. Exception: a `state.json` written by a newer
+- **Corrupt state is loud**: `load()` throws `CorruptStateError` naming the file and
+  offending record/field. Preserve the original and repair only that record; resetting
+  the queue loses local cleanup obligations that GitHub cannot reconstruct.
+  Malformed uniquely identified **terminal** batches (`done`, `dissolved`, `stopped`)
+  can be isolated automatically under the state lock, only when no active/parked
+  entry or held batch/member slot references them and the entire remaining state
+  validates. Before replacing the record with an inert terminal placeholder, the
+  loader durably preserves the exact original snapshot in
+  `quarantine/<sha256>.json`, with record indexes/IDs/reasons in the companion
+  `<sha256>.manifest.json`. The placeholder retains terminal queue references but
+  no executable paths, runs, PR or anchor; it warns with the evidence location on
+  reopening. Original cleanup obligations remain **pending operator reconciliation**
+  in that evidence, never marked successfully torn down. Reconcile only the named
+  record's obligations using verified process/worktree identities; do not execute
+  paths/PIDs copied from malformed evidence. Evidence write/verification/fsync failure
+  leaves the original state unchanged and refuses recovery. Active, ambiguous or
+  globally corrupt state still fails closed. Valid historical runs retain membership
+  after re-enqueue so ordinary verified cleanup can finish; dependencies use the
+  current queue entry's batch association instead of historical membership.
+  Every `load()` synchronously acquires the state mutex, requires directory write
+  access and can time out (`LockTimeoutError`); recovery may write evidence and
+  replace state. It is non-reentrant: inside `withLock`, use the supplied state.
+  On Linux the permanent `.sched-lock.guard` inode is held with util-linux
+  `/usr/bin/flock` until release (and automatically released on process death);
+  never delete/replace that file. Atomic ownership-directory publication prevents
+  a killed reader from leaving a PID-less lock. Non-Linux platforms retain the
+  directory mutex but refuse automatic stale takeover: verify the old owner is
+  dead and reconcile `.sched-lock` manually before restarting. This avoids
+  stealing a live replacement owner from a stale PID observation.
+  A `state.json` written by a newer
   schema than the installed engine is not corruption — `load()` throws the more specific
   `EngineTooOldError` (#537), pointing at an engine upgrade rather than at deleting real
   queue data.
