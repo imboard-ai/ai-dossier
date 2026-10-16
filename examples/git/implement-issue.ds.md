@@ -4,10 +4,10 @@ description: 'Implement the solution described in the planning document, run tes
 metadata:
   dossier.dossier_schema_version: '1.0.0'
   dossier.title: 'Implement Issue — Code and Test'
-  dossier.version: '1.8.4'
+  dossier.version: '1.9.0'
   dossier.protocol_version: '"1.0"'
   dossier.status: 'Stable'
-  dossier.last_updated: '2026-10-15'
+  dossier.last_updated: '2026-10-16'
   dossier.objective: 'Implement the solution described in the planning document, run tests, and auto-fix lint issues'
   dossier.category: '["development"]'
   dossier.tags: '["issue","workflow","git","github","implement","test"]'
@@ -16,8 +16,8 @@ metadata:
   dossier.requires_approval: 'false'
   dossier.inputs: '{"optional":[{"default":"main","description":"Base branch for comparing pre-existing test failures","name":"base_branch","type":"string"},{"description":"Runstate run id minted by gate-issue; pass through unchanged","name":"run_id","type":"string"}],"required":[{"description":"Path to the PLANNING-{number}-{slug}.md file","name":"planning_file","type":"string"}]}'
   dossier.authors: '[{"name":"Yuval Dimnik"}]'
-  dossier.checksum: '{"algorithm":"sha256","hash":"27b8db6a5668ee6d7bde4484b228c9d34e5fb036683c50302f4c3fd9159b7edf"}'
-  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"adQEtj1Bw1IbrvrOYkSQe9DF4gEHM819d54hotjgvumlHnISJtCQQb7ZBUlv1Q4exV+UejcI/G2EtwTBukB9Cg==","signed_at":"2026-10-15T15:09:49.807Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
+  dossier.checksum: '{"algorithm":"sha256","hash":"56494ff0ff199a60c464db05114efbfb8e9d0d918569b2fce01e470eaf0f6268"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"6QOlE9jM+iP+z91eJ68xeN07Qx3WScw1AC0QYd+WNgSoN/2jl2HtWn9SmW75Q/ZPTP7B8uQI1bIv+/F0GGVZBA==","signed_at":"2026-10-16T17:43:03.174Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Implement Issue — Code and Test
@@ -49,9 +49,9 @@ Read `planning_file`. Extract: the approach, predicted files, reusable code to l
 
 **Before building**, run the project's auto-fixer to avoid lint iteration loops.
 
-**If `scripts/ci-parity.sh` exists, run `bash scripts/ci-parity.sh` instead of detecting the toolchain** — it is the project's own definition of what CI enforces. Record `ci_parity=pass` (passed first time), `fail-then-fixed` (you fixed and re-ran), `blocked-external` (the script aborts on a pre-existing shared-resource condition — e.g. the test-cluster collection cap — and you ran its gates individually instead; name the condition in the milestone as `ci_parity_note=`), or `skipped` (no script — use the fallback below), and carry it to the runstate milestone.
+**Do NOT run `scripts/ci-parity.sh` here, even when it exists** (ai-dossier#1259). This step is the fast lint/format pass; ci-parity is the whole gate including the test matrix (~30 min on a large monorepo) and runs once per tree, in Step 5.2. Use the fast gates below instead.
 
-**If no ci-parity script, prefer the project's combined script.** Grep `package.json` / `Makefile` for one script bundling everything CI runs — `hygiene`, `hygiene:ci`, `check`, `lint:fix`, `format`, `precommit`. Run it (or its `:fix` / `:write` variant): single source of truth, matching what CI checks.
+**Prefer the project's combined lint/format script.** Grep `package.json` / `Makefile` for one script bundling the lint/format checks CI runs — `hygiene`, `hygiene:ci`, `check`, `lint:fix`, `format`, `precommit`. Run it (or its `:fix` / `:write` variant): single source of truth, matching what CI checks. Never a script that also runs the test suite — that is Step 4's and Step 5.2's job.
 
 **If no combined script, detect the toolchain and run ALL configured fixers** — running only the linter when the project also uses a separate formatter is the #1 reason CI hygiene fails after local checks pass:
 
@@ -114,12 +114,103 @@ Record the outcome (used in Step 7's `repro=` key):
 1. Run lint auto-fixer one more time after tests (test creation may introduce lint issues) — same commands as Step 3.
 
 2. **Verify in CI-check mode before reporting complete.** Run the same checks CI runs, read-only; fix anything the auto-fixer didn't resolve before continuing. CI WILL fail otherwise.
-   - If `scripts/ci-parity.sh` exists, run `bash scripts/ci-parity.sh` — it is the authority; update `ci_parity` accordingly.
+   - If `scripts/ci-parity.sh` exists, run it through the **once-per-tree gate** below (not bare) — it is the authority; record `ci_parity` from it. This is the implement phase's ONE full ci-parity run.
    - Otherwise prefer the project's CI script if one exists (e.g., `npm run hygiene:ci`, `npm run check`).
    - Otherwise run check-mode equivalents of every tool in Step 3 — Biome: `npx biome check .`; ESLint + Prettier: `npx eslint . && npx prettier --check .`; Ruff: `ruff check . && ruff format --check .`
    - Also run typecheck if the project has one (`npx tsc --noEmit`, `mypy .`, etc.) — auto-fix doesn't catch type errors.
 
 3. **If this change added a NEW package / workspace / module**, confirm its typecheck and tests are wired into the PR CI pipeline, not just runnable locally — a package CI never checks is a silent blind spot. Add the wiring in this change if you can; otherwise record it in the output as an explicit follow-up.
+
+#### The once-per-tree ci-parity gate (ai-dossier#1259)
+
+The same full gate used to run up to three times per issue on near-identical trees (implement's lint pass, Step 5.2, ship Step 1). Now a passing run is stamped by tree hash and later phases skip it when the tree is unchanged. Install the helper — byte-identical in implement-issue and ship-issue — into this worktree's private git dir (never tracked, never dirties the tree; each Bash call is a fresh shell, so re-derive `GATE` in every call that uses it):
+
+```bash
+GATE=$(git rev-parse --path-format=absolute --git-path ci-parity-gate.sh)
+cat > "$GATE" <<'GATE_EOF'
+#!/usr/bin/env bash
+# ci-parity once-per-tree gate (ai-dossier#1259). Safe default: a missing,
+# unreadable, mismatched or dirty-tree stamp ALWAYS runs the gate.
+#   run [<gate_tree>|-] [ci-parity args...]
+#       SKIP only if the worktree is clean AND HEAD^{tree} equals the local
+#       stamp or <gate_tree> (from runstate); otherwise run scripts/ci-parity.sh.
+#   confirm
+#       after committing: print gate_tree=<tree> iff the clean HEAD^{tree} is
+#       the tree that passed (and stamp it); otherwise gate_tree=none.
+set -u
+STAMP=$(git rev-parse --path-format=absolute --git-path ci-parity-gate-tree) || exit 2
+clean_tree() {
+  local s
+  s=$(git status --porcelain) || return 1
+  [ -z "$s" ] || return 1
+  git rev-parse --verify -q 'HEAD^{tree}'
+}
+worktree_tree() { # the working tree as it stands, hashed via a throwaway index
+  local idx rc
+  idx=$(mktemp) || return 1
+  cp "$(git rev-parse --path-format=absolute --git-path index)" "$idx" 2>/dev/null ||
+    { rm -f "$idx"; GIT_INDEX_FILE="$idx" git read-tree HEAD; } || { rm -f "$idx"; return 1; }
+  GIT_INDEX_FILE="$idx" git add -A >/dev/null 2>&1 && GIT_INDEX_FILE="$idx" git write-tree
+  rc=$?
+  rm -f "$idx"
+  return $rc
+}
+case "${1:-}" in
+run)
+  WANT="${2:-}"
+  shift
+  [ $# -gt 0 ] && shift
+  if T=$(clean_tree) && [ -n "$T" ]; then
+    for S in "$(cat "$STAMP" 2>/dev/null)" "$WANT"; do
+      if [ -n "$S" ] && [ "$S" = "$T" ]; then
+        printf '%s\n' "$T" >"$STAMP"
+        echo "ci_parity=cached tree=$T"
+        exit 0
+      fi
+    done
+  fi
+  rm -f "$STAMP" "$STAMP.pending"
+  PRE=$(worktree_tree) || PRE=
+  bash scripts/ci-parity.sh "$@"
+  RC=$?
+  if [ "$RC" -ne 0 ]; then
+    echo "ci_parity=fail rc=$RC"
+    exit "$RC"
+  fi
+  POST=$(worktree_tree) || POST=
+  [ -n "$PRE" ] && [ "$PRE" = "$POST" ] && printf '%s\n' "$POST" >"$STAMP.pending"
+  echo "ci_parity=ran tree=${POST:-unknown}"
+  ;;
+confirm)
+  C=$(cat "$STAMP.pending" 2>/dev/null) || C=$(cat "$STAMP" 2>/dev/null) || C=
+  rm -f "$STAMP.pending"
+  if T=$(clean_tree) && [ -n "$C" ] && [ "$C" = "$T" ]; then
+    printf '%s\n' "$T" >"$STAMP"
+    echo "gate_tree=$T"
+  else
+    echo "gate_tree=none"
+  fi
+  ;;
+*)
+  echo 'usage: bash "$GATE" run [<gate_tree>|-] [ci-parity args...] | confirm' >&2
+  exit 2
+  ;;
+esac
+GATE_EOF
+```
+
+Then run the gate (pass ci-parity's own flags after the `-`, e.g. `bash "$GATE" run - --isolated-db`):
+
+```bash
+GATE=$(git rev-parse --path-format=absolute --git-path ci-parity-gate.sh)
+bash "$GATE" run -
+```
+
+- `ci_parity=ran tree=<hash>` — the full gate passed on that tree; the pass is pending until Step 6b's `confirm` proves the committed tree is the one that passed. Record `ci_parity=pass` when it passed on the first run.
+- `ci_parity=cached tree=<hash>` — skipped: the worktree is clean and `HEAD^{tree}` equals a recorded passing tree (a resumed implement). Record `ci_parity=cached`.
+- `ci_parity=fail rc=<n>` — it failed. **Fix, then re-run only what the fix touched** — the failing gate step's own command (the script names it) plus the tests covering the fix; if the script keeps its own resume checkpoint (re-running only the gates that failed), a plain re-run already does this. Never loop the whole matrix per fix. Once those pass, ONE final `bash "$GATE" run -` — that full pass is what gets stamped. Record `ci_parity=fail-then-fixed`.
+
+A dirty worktree never skips, and a stamp from any other tree never skips — the helper runs the gate in every case it cannot prove is the same passing tree. `blocked-external` (the script aborts on a pre-existing shared-resource condition — e.g. the test-cluster collection cap — and you ran its gates individually instead; name the condition in the milestone as `ci_parity_note=`) and `skipped` (no script — use the fallbacks in item 2) keep their meanings; neither produces a stamp.
 
 ### Step 6: Output
 
@@ -139,7 +230,11 @@ Before posting the milestone, commit everything and push so origin has the durab
 ```bash
 git add -A && git commit -m "wip(implement): #<issue_number> <slug> [skip ci]" && git push
 git rev-parse --short HEAD   # note the pushed sha for the milestone
+GATE=$(git rev-parse --path-format=absolute --git-path ci-parity-gate.sh)
+[ -f "$GATE" ] && bash "$GATE" confirm || echo "gate_tree=none"   # note gate_tree= for the milestone
 ```
+
+`confirm` prints `gate_tree=<tree>` only when the clean, just-committed `HEAD^{tree}` is exactly the tree Step 5.2's gate passed on (anything edited after that run — item 3's CI wiring, a late fix — yields `gate_tree=none`, and ship re-runs the gate). It is what lets review and ship reuse this pass instead of re-running the full matrix.
 
 `git add -A` respects `.gitignore` — never force-add ignored files (`.env` etc). Commit only if there are changes. If the phase is ending `blocked` or tests-failing-partial rather than clean `done`, STILL commit and push whatever exists as `wip(implement): partial — <reason> [skip ci]`, before posting the `status=blocked` milestone.
 
@@ -153,12 +248,13 @@ ai-dossier runstate post --issue <issue_number> --phase implement --status done 
   --kv files=<n> \
   --kv tests_added=<n> \
   --kv tests_run=<n> \
-  --kv ci_parity=pass|fail-then-fixed|blocked-external|skipped \
+  --kv ci_parity=pass|fail-then-fixed|cached|blocked-external|skipped \
+  --kv gate_tree=<tree hash printed by Step 6b's confirm|none> \
   --kv repro=n/a|red-then-green|green-on-base|no-repro|no-repro-timeout \
   --kv repro_note=<short-reason-slug, required when repro=green-on-base or repro=no-repro>
 ```
 
-Let the CLI stamp `at=` and compute `next=review` — do not pass either; never hand-write the comment. `head=` is the pushed sha from Step 6b (`git rev-parse --short HEAD` after the push) — never a `-dirty` suffix; by protocol there is no uncommitted work left when this milestone posts. `repro=` is set from item 3b's outcome on every run — `n/a` for a non-bug issue, never omitted. `repro_note=` is REQUIRED alongside `repro=green-on-base` or `repro=no-repro` (see Validation) and omitted otherwise (including `no-repro-timeout`, which is self-explanatory).
+Let the CLI stamp `at=` and compute `next=review` — do not pass either; never hand-write the comment. `gate_tree=` is copied verbatim from Step 6b's `confirm` output (`none` when there is no ci-parity script or the committed tree is not the one that passed) — ship reads it back from the runstate to skip an unchanged tree, including on a resumed run. `head=` is the pushed sha from Step 6b (`git rev-parse --short HEAD` after the push) — never a `-dirty` suffix; by protocol there is no uncommitted work left when this milestone posts. `repro=` is set from item 3b's outcome on every run — `n/a` for a non-bug issue, never omitted. `repro_note=` is REQUIRED alongside `repro=green-on-base` or `repro=no-repro` (see Validation) and omitted otherwise (including `no-repro-timeout`, which is self-explanatory).
 
 ## Output
 
@@ -166,7 +262,8 @@ Let the CLI stamp `at=` and compute `next=review` — do not pass either; never 
 - `tests_created`: number of new test files created
 - `tests_run`: number of test files executed
 - `pre_existing_failures`: count of ignored pre-existing test failures
-- `ci_parity`: pass | fail-then-fixed | skipped
+- `ci_parity`: pass | fail-then-fixed | cached | blocked-external | skipped
+- `gate_tree`: the tree hash the full ci-parity gate passed on and that was committed unchanged, or `none`
 - `repro`: n/a | red-then-green | green-on-base | no-repro | no-repro-timeout — item 3b's bug-issue base-branch repro outcome
 - Posts runstate milestone to the issue (`phase=implement`)
 
@@ -174,7 +271,7 @@ Let the CLI stamp `at=` and compute `next=review` — do not pass either; never 
 
 - [ ] Planning file was read and its approach followed; implementation addresses the issue requirements
 - [ ] Existing code patterns were followed; reusable code from the plan was leveraged (not re-implemented)
-- [ ] Lint auto-fixer was run before AND after testing
+- [ ] Lint auto-fixer was run before AND after testing (the fast lint/format gates — never the full ci-parity gate in Step 3)
 - [ ] Tests exist and pass for changed code (created if missing)
 - [ ] On a bug issue (item 3b's rule), the targeted test was run against an isolated, detached base-branch worktree before item 4, and `repro=` was recorded — never omitted. `repro=green-on-base` or `repro=no-repro` without an accompanying `repro_note=` is a milestone contract violation: the phase must NOT post `status=done` until the test is strengthened, or `repro_note=` is added
 - [ ] Any new/changed backend registry route ships with an integration test in the same PR (route-coverage ratchet stays green)
@@ -182,7 +279,7 @@ Let the CLI stamp `at=` and compute `next=review` — do not pass either; never 
 - [ ] Pre-existing failures were verified against base branch (not blindly fixed)
 - [ ] CI-mode verification (check-only) passes — including any separate formatter (e.g. Prettier) and typecheck
 - [ ] Any newly added package/workspace/module is wired into PR CI (typecheck + tests), or the gap is recorded as a follow-up
-- [ ] `scripts/ci-parity.sh` was used when present, and `ci_parity` was recorded
+- [ ] `scripts/ci-parity.sh` was used when present — NOT in Step 3's lint pass, exactly once (to a passing run) in Step 5.2 via the once-per-tree gate — and `ci_parity` + `gate_tree` were recorded; `gate_tree` is a real hash only when `confirm` printed it
 - [ ] Everything was committed (`git add -A`) and pushed to origin before the milestone — including on a `blocked`/partial ending — and milestone `head=` is the pushed sha, never a `-dirty` suffix
 - [ ] Runstate milestone comment was posted to the issue
 

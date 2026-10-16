@@ -4,10 +4,10 @@ description: 'Commit changes, push, create a PR, then either drive it to a confi
 metadata:
   dossier.dossier_schema_version: '1.0.0'
   dossier.title: 'Ship Issue — Commit, PR, Merge, Deploy, Teardown'
-  dossier.version: '1.19.1'
+  dossier.version: '1.20.0'
   dossier.protocol_version: '"1.0"'
   dossier.status: 'Stable'
-  dossier.last_updated: '2026-10-15'
+  dossier.last_updated: '2026-10-16'
   dossier.objective: 'Commit changes, push, create a PR, then either drive it to a confirmed merge and deploy (attached) or park it on auto-merge and stop (detached); in batch mode (batch_id set): ship the batch PR from the batch branch — per-member PR sections, Closes #N per member, rebase-merged so one commit per member issue lands on the base branch'
   dossier.category: '["development"]'
   dossier.tags: '["issue","workflow","git","github","ship","pr","merge"]'
@@ -17,8 +17,8 @@ metadata:
   dossier.destructive_operations: '["Pushes branch to remote","Creates and merges pull request (squash for per-issue PRs; rebase for batch PRs — one commit per member issue lands on the base branch)","Deletes branch after merge","Rewrites the PR body''s Acceptance Criteria section when a stale verdict is refreshed (Step 3a.5)"]'
   dossier.inputs: '{"optional":[{"default":"main","description":"Target branch for the PR","name":"base_branch","type":"string"},{"default":"","description":"Path of the worktree to clean up after merge","name":"worktree_path","type":"string"},{"default":"","description":"Directory to return to after teardown","name":"original_dir","type":"string"},{"default":false,"description":"Whether the worktree was claimed from the pool (affects cleanup)","name":"pool_claimed","type":"boolean"},{"description":"Runstate run id minted by gate-issue; pass through unchanged. In batch mode this is the batch''s run id (minted against the anchor issue).","name":"run_id","type":"string"},{"default":"attached","description":"attached (default) = open the PR, wait for CI, merge, confirm the deploy, and tear down in this run. detached = open the PR, park it on auto-merge, post the awaiting-merge milestone, and STOP — a later run (gate resumes at ship-teardown) finishes it. Detached needs a merge mechanism (an auto-merge watcher workflow, or native auto-merge requested on the PR); without one Step 3c runs attached instead. Every mode merges only after the full review round.","name":"ship_mode","type":"string"},{"description":"Per-acceptance-criterion checklist from review-issue''s Agent 7 (Conformance) — criterion, verdict, file:line or reason. Used to populate the PR body''s Acceptance Criteria section. Per-issue mode only.","name":"ac_results","type":"string"},{"description":"Per-touched-UI-flow verdict list from review-issue''s Agent 8 (Visual Conformance) — flow, the AC it bears on, verdict, and either the evidence path plus the observed state that proved it or the reason it was not met / could not be driven. Arrives with live (pass|fail|unverifiable|n/a), live_flows and, when one was recorded, live_note. Populates the PR body''s Visual verification section; omitted entirely when live=n/a. Per-issue mode only.","name":"live_results","type":"string"},{"description":"Batch id slug (e.g. b-2026-08-29-01). When set, run BATCH MODE: ship the batch PR from the batch branch against the batch ANCHOR issue (issue_number is the anchor number) — per-member PR sections, Closes #N per member, rebase-merge. Unset = ordinary per-issue ship.","name":"batch_id","type":"string"},{"description":"Batch mode only: comma-separated member issue numbers (e.g. 101,102,104). Drives the PR body''s per-member sections and the Closes #N list. Default: derived from the batch branch''s per-issue commits.","name":"members","type":"string"},{"description":"Batch mode only: per-member per-AC conformance verdicts from slot-cycles, passed through by review-issue''s aggregate mode (Agent 7''s format: ''ACn <criterion> — met <file:line> | not-met <why> | unverifiable <what test would prove it>''). Populates the PR body''s per-member Acceptance Criteria checkboxes. Fallback when absent: the per-member verdict comment a prior aggregate review posted on the anchor.","name":"member_verdicts","type":"string"}],"required":[{"description":"GitHub issue number","name":"issue_number","type":"number"}]}'
   dossier.authors: '[{"name":"Yuval Dimnik"}]'
-  dossier.checksum: '{"algorithm":"sha256","hash":"46153a2f958c2e98c0ffa9f166ebb03c80ef5540d7f1377622e7eae0d52a71c6"}'
-  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"O3Q2+Cw/pCGNXJ+cn/fWKwZm6DRoHFFoYZ/ewOCoIQigBv4NLumXlh6kjObE4a6Vpep7JESHl+XI6MPBx4uhDA==","signed_at":"2026-10-15T15:10:32.982Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
+  dossier.checksum: '{"algorithm":"sha256","hash":"0b84e5a8a3909b8fc5b6fa56f1d8d4c24f0e0ac224bb0fae9f31334413da2615"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"FFL5U6IuHmxNZQHDqsAc4h25gvBH3nOet04U7hUJjLuXVhF/Bt0fdLJv1t3OFBGP4o38wbHY09CByknpyMbAAw==","signed_at":"2026-10-16T17:43:05.827Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Ship Issue — Commit, PR, Merge, Teardown
@@ -244,9 +244,98 @@ ai-dossier runstate post --issue <anchor_number> --phase batch-ship --status don
 
 **PR-head skip-marker guard.** By protocol the tree may already be clean (all work landed as `wip … [skip ci]` commits). GitHub evaluates CI skip markers **per commit, against the head commit only** — if the branch head carries one, the whole `pull_request` event is suppressed and the PR opens with ZERO `pull_request`-triggered runs. It fails silently: no red check, no failed run, nothing for an auto-merge watcher that only looks for failures to catch, so the PR merges untested. This has shipped CI-less merges more than once. So: if the tree is clean, or the commit you are about to make would carry a skip marker, make the final commit empty instead — `git commit --allow-empty -m "<type>: <summary>"` — and never put a skip marker in ship's own commit message. Step 2.5 re-checks this as a blocking gate; do not rely on remembering it here.
 
+**0. The ci-parity gate — once per tree (ai-dossier#1259). Runs FIRST, on the clean committed tree, before the planning-doc removal below** (a staged removal would make the tree dirty, and a dirty tree never matches a stamp). If `scripts/ci-parity.sh` does not exist, skip this item and record `ci_parity=skipped`, `gate_tree=none`. Otherwise it is the project's own definition of what CI enforces, and it must pass on this tree before committing — but when implement (or an earlier ship attempt) already passed it on exactly this tree and review applied no fixes, re-running the ~30-minute matrix buys nothing. Install the helper — byte-identical to implement-issue's — into this worktree's private git dir (re-derive `GATE` in every Bash call; it does not survive between calls):
+
+```bash
+GATE=$(git rev-parse --path-format=absolute --git-path ci-parity-gate.sh)
+cat > "$GATE" <<'GATE_EOF'
+#!/usr/bin/env bash
+# ci-parity once-per-tree gate (ai-dossier#1259). Safe default: a missing,
+# unreadable, mismatched or dirty-tree stamp ALWAYS runs the gate.
+#   run [<gate_tree>|-] [ci-parity args...]
+#       SKIP only if the worktree is clean AND HEAD^{tree} equals the local
+#       stamp or <gate_tree> (from runstate); otherwise run scripts/ci-parity.sh.
+#   confirm
+#       after committing: print gate_tree=<tree> iff the clean HEAD^{tree} is
+#       the tree that passed (and stamp it); otherwise gate_tree=none.
+set -u
+STAMP=$(git rev-parse --path-format=absolute --git-path ci-parity-gate-tree) || exit 2
+clean_tree() {
+  local s
+  s=$(git status --porcelain) || return 1
+  [ -z "$s" ] || return 1
+  git rev-parse --verify -q 'HEAD^{tree}'
+}
+worktree_tree() { # the working tree as it stands, hashed via a throwaway index
+  local idx rc
+  idx=$(mktemp) || return 1
+  cp "$(git rev-parse --path-format=absolute --git-path index)" "$idx" 2>/dev/null ||
+    { rm -f "$idx"; GIT_INDEX_FILE="$idx" git read-tree HEAD; } || { rm -f "$idx"; return 1; }
+  GIT_INDEX_FILE="$idx" git add -A >/dev/null 2>&1 && GIT_INDEX_FILE="$idx" git write-tree
+  rc=$?
+  rm -f "$idx"
+  return $rc
+}
+case "${1:-}" in
+run)
+  WANT="${2:-}"
+  shift
+  [ $# -gt 0 ] && shift
+  if T=$(clean_tree) && [ -n "$T" ]; then
+    for S in "$(cat "$STAMP" 2>/dev/null)" "$WANT"; do
+      if [ -n "$S" ] && [ "$S" = "$T" ]; then
+        printf '%s\n' "$T" >"$STAMP"
+        echo "ci_parity=cached tree=$T"
+        exit 0
+      fi
+    done
+  fi
+  rm -f "$STAMP" "$STAMP.pending"
+  PRE=$(worktree_tree) || PRE=
+  bash scripts/ci-parity.sh "$@"
+  RC=$?
+  if [ "$RC" -ne 0 ]; then
+    echo "ci_parity=fail rc=$RC"
+    exit "$RC"
+  fi
+  POST=$(worktree_tree) || POST=
+  [ -n "$PRE" ] && [ "$PRE" = "$POST" ] && printf '%s\n' "$POST" >"$STAMP.pending"
+  echo "ci_parity=ran tree=${POST:-unknown}"
+  ;;
+confirm)
+  C=$(cat "$STAMP.pending" 2>/dev/null) || C=$(cat "$STAMP" 2>/dev/null) || C=
+  rm -f "$STAMP.pending"
+  if T=$(clean_tree) && [ -n "$C" ] && [ "$C" = "$T" ]; then
+    printf '%s\n' "$T" >"$STAMP"
+    echo "gate_tree=$T"
+  else
+    echo "gate_tree=none"
+  fi
+  ;;
+*)
+  echo 'usage: bash "$GATE" run [<gate_tree>|-] [ci-parity args...] | confirm' >&2
+  exit 2
+  ;;
+esac
+GATE_EOF
+```
+
+Read the recorded passing tree from the runstate — the newest trusted milestone carrying `gate_tree=` (implement's, or this phase's own `awaiting-merge` on a resumed run; `runstate list` reads repo-member milestones only, so a forged comment cannot plant one) and run the gate (pass ci-parity's own flags after it, e.g. `bash "$GATE" run "$GT" --isolated-db`):
+
+```bash
+GATE=$(git rev-parse --path-format=absolute --git-path ci-parity-gate.sh)
+GT=$(ai-dossier runstate list --issue <issue_number> --json 2>/dev/null | jq -r '[.[] | .gate_tree // empty] | last // "-"' 2>/dev/null)
+bash "$GATE" run "${GT:--}" && bash "$GATE" confirm
+```
+
+- `ci_parity=cached tree=<hash>` — **skipped**: the worktree is clean and `HEAD^{tree}` equals a recorded PASSING gate tree (the local stamp, or `gate_tree=` from the runstate). Log that line verbatim in the run output; record `ci_parity=cached`.
+- `ci_parity=ran tree=<hash>` — the tree changed since the recorded pass (review applied fixes), or nothing usable was recorded, so the full gate ran and passed. Record `ci_parity=pass`.
+- `ci_parity=fail rc=<n>` — fix, then re-run only what the fix touched (the failing gate step's own command plus the tests covering the fix — a plain re-run already does this when the script keeps its own resume checkpoint; never loop the whole matrix per fix), then ONE final `bash "$GATE" run -` until it passes. Record `ci_parity=fail-then-fixed`.
+
+The skip is safe by construction: it needs a clean worktree AND tree equality with a tree that passed — a missing, unreadable (no `jq`, CLI error → `GT=-`), mismatched or dirty-tree stamp always runs the gate, and a run whose runstate has no `gate_tree` (an older implement-issue) simply runs it as before. `confirm` prints the `gate_tree=` to carry onto the `awaiting-merge` milestone (Step 3b) — the tree that passed here, before the planning doc's removal; `none` when the fix loop left edits uncommitted. The only change Step 1 makes after the gate is that removal, a documentation-only delete.
+
 **Remove the planning doc before committing**: `git rm -f PLANNING-<issue_number>-*.md` — planning files never land on the base branch (they are already preserved in the branch history and the issue trail).
 
-0. **If `scripts/ci-parity.sh` exists in the repo, run `bash scripts/ci-parity.sh` before committing.** It is the project's own definition of what CI enforces. Fix and re-run until it passes. If the script does not exist, skip this and commit as usual.
 1. Stage relevant files (never `.env`, credentials, secrets)
 2. Commit with conventional commits format:
    ```
@@ -436,10 +525,12 @@ ai-dossier runstate post --issue <issue_number> --phase ship --status awaiting-m
   --kv verdict_refreshed=<true|false> \
   --kv verdict_check=<tree|patch-id|inconclusive|sha-fallback> \
   --kv ship_mode=<the requested ship_mode: attached|detached> \
+  --kv ci_parity=<pass|fail-then-fixed|cached|skipped> \
+  --kv gate_tree=<tree hash printed by Step 1's confirm|none> \
   --next ship
 ```
 
-The CLI stamps `at=` itself; never hand-write the comment. `ship_mode=` is the mode this run was asked for; `attached` here keeps a scheduler from reading this pre-CI milestone as a parked PR if the run dies mid-wait (Step 3c item 3b (ship-mode record) restates the mode actually chosen). `--next ship` is the one place a dossier overrides the computed `next=` — this milestone is mid-phase, so the next phase is still ship.
+The CLI stamps `at=` itself; never hand-write the comment. `ci_parity=`/`gate_tree=` carry Step 1 item 0's result (`ci_parity=cached` when the gate was skipped on an unchanged tree) so a resumed ship can reuse the pass and the trail shows how many times the full gate actually ran. `ship_mode=` is the mode this run was asked for; `attached` here keeps a scheduler from reading this pre-CI milestone as a parked PR if the run dies mid-wait (Step 3c item 3b (ship-mode record) restates the mode actually chosen). `--next ship` is the one place a dossier overrides the computed `next=` — this milestone is mid-phase, so the next phase is still ship.
 
 `verdict_head=`/`verdict_refreshed=`/`verdict_check=` carry Step 3a.5's result, which is why that gate runs before this milestone on every path: this is the detached run's LAST milestone and comments are append-only, so a result produced after it could never be recorded. On the attached self-merge path Step 8 posts whatever Step 6's re-check produced, which is these same values unless Step 5 moved the head.
 
@@ -838,7 +929,7 @@ Let the CLI stamp `at=` and compute `next=report` — do not pass either; never 
 - [ ] in-progress label removed
 - [ ] Worktree returned to pool or removed; returned to original directory
 - [ ] Cold teardown path (no pool return): every process rooted in the worktree was SIGTERM'd, survivors SIGKILL'd, none remained before `git worktree remove` — `procs_killed` recorded on the final milestone (`0` is a valid, expected value)
-- [ ] `scripts/ci-parity.sh` was run before committing when present
+- [ ] `scripts/ci-parity.sh` gated the commit when present — via the once-per-tree helper, BEFORE the planning-doc removal: skipped (`ci_parity=cached tree=<hash>` logged) ONLY on a clean worktree whose `HEAD^{tree}` equals a recorded passing `gate_tree`, otherwise run to a pass; `ci_parity` and `gate_tree` carried onto the `awaiting-merge` milestone
 - [ ] Runstate milestones were posted via `ai-dossier runstate post` (`awaiting-merge` before the CI wait — with `--next ship` — and, on the attached/tail path, the final one after teardown)
 - Batch mode: rebase prerequisites asserted BEFORE the PR (repo `allow_rebase_merge`, watcher batch-epic rebase support when a watcher exists, watcher presence for detached) — each failure posted `phase=batch-ship status=blocked reason=rebase-not-allowed|watcher-no-rebase|no-watcher` and stopped; PR body has one section per member with its AC checkboxes (from `member_verdicts`) and `Closes #N` per member (never the anchor); `batch-epic` applied and confirmed at PR creation (`auto-merge` applied and confirmed only when parking on or handing the merge to the watcher — never on the attached-no-watcher self-merge path); merged with `--rebase` (never `--squash`); `MERGE_COMMIT` = the merge head, deploy confirmed via the unchanged containment check; teardown returned/removed the BATCH worktree and deleted the batch branch, killing any worktree-rooted processes first on the cold path (`procs_killed`); both milestones posted on the ANCHOR (`batch-ship` awaiting-merge with `--next batch-ship`, then done with `batch=` `pr=` `merge_commit=` `deploy=` `cleanup=` `test_env=` `procs_killed=` `members=` `strategy=rebase` `verdict_head=` `verdict_refreshed=` `verdict_check=`); Batch Step 3a.5's gate cleared before each batch merge authorization (the `auto-merge` park and the Batch Step 6 merge)
 

@@ -4,10 +4,10 @@ description: 'Take a GitHub issue from start to merged PR autonomously — compo
 metadata:
   dossier.dossier_schema_version: '1.0.0'
   dossier.title: 'Full Cycle Issue Workflow'
-  dossier.version: '3.19.2'
+  dossier.version: '3.20.0'
   dossier.protocol_version: '"1.0"'
   dossier.status: 'Draft'
-  dossier.last_updated: '2026-10-15'
+  dossier.last_updated: '2026-10-16'
   dossier.objective: 'Take a GitHub issue from start to merged PR autonomously — composed from shared sub-dossiers: gate, setup, plan, implement, review, ship, and report'
   dossier.category: '["development"]'
   dossier.tags: '["github","issues","workflow","autonomous","full-cycle","pr","merge"]'
@@ -19,8 +19,8 @@ metadata:
   dossier.external_references: '[{"description":"GitHub CLI documentation","required":false,"trust_level":"trusted","type":"documentation","url":"https://cli.github.com/"}]'
   dossier.inputs: '{"optional":[{"default":"imboard-ai/git/warm-worktree","description":"Which warm-worktree dossier to use for worktree warmup. Passed through to setup-issue-workflow. Override for project-specific warmup (e.g., imboard-ai/imboard/warm-worktree-pnpm-ssm for pnpm+SSM).","name":"warmup_dossier","type":"string"},{"default":"auto","description":"Target branch to branch from and merge into. Overrides issue body parsing. Use for epic sub-issues.","name":"base_branch","type":"string"},{"description":"How to query this project''s production data for plan-issue''s reachability check — a read-only method such as a database MCP server, read replica, or analytics warehouse. No default: passed through to plan-issue only when set; when unset it is omitted and plan-issue applies its own generic default. Use exactly `none` for a project that deliberately grants no production access — plan-issue then skips the production query instead of escalating as unverifiable. Bind it in the project''s own invocation, never in this generic workflow.","name":"prod_data_access","type":"string"},{"default":"attached","description":"attached (default) = Phase 5 drives the PR to a confirmed merge and deploy, then Phase 6 reports. detached = a REQUEST to park: Phase 5 parks the PR on auto-merge, posts the awaiting-merge milestone, and the run STOPS (a later run resumes at ship-teardown) ONLY when ship-issue Step 3c confirms a merge mechanism (watcher workflow, or a non-null autoMergeRequest read back after requesting native auto-merge) — otherwise the run falls back to attached and merges the PR itself. Fleet-cycle and sched pass the detected mechanism and dispatch detached only where it is confirmed.","name":"ship_mode","type":"string"}]}'
   dossier.authors: '[{"name":"Yuval Dimnik"}]'
-  dossier.checksum: '{"algorithm":"sha256","hash":"da4b3e00a667721057bcdc3acb9d28e9502db70d843e09329e4045c75f254d4e"}'
-  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"egaV99pk+0DyB539LgakNTWtFdxIiTq1o+KtnYNVzRTVyIMJ6OJ6T8NUnhu67s5viIPSG8WDsTmhNi6oNJWsCw==","signed_at":"2026-10-15T07:05:48.527Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
+  dossier.checksum: '{"algorithm":"sha256","hash":"c40da2ced976316707270947532d6a367a0186b3610f84fdd7b766c8396c68b3"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"HjwsYubCMEGylFrebIkdTlG9aKvXk+OOqZBiWJp/aKxKTbPIFfQZNfAb1rnbXWNT591tQr9kegk+WLTsIPyNBA==","signed_at":"2026-10-16T17:43:08.570Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Full Cycle Issue Workflow
@@ -90,9 +90,9 @@ Per-phase `--kv` keys:
 | gate | done / blocked | `base_branch=` `warnings=<n>` `model=<model id of the executing agent>` (blocked: `reason=closed\|decomposed\|needs-clarification\|epic\|open-dependency-<N>`) |
 | setup | done / blocked | `branch=` `worktree=<worktree path>` `pool_claimed=true\|false` `base_branch=` `remote=pushed` |
 | plan | done / blocked | `planning=<planning file path>` `head=<short sha of base at plan time>` `open_questions=<n>` `visual_review=true\|false` |
-| implement | done / blocked | `head=<short sha>` `files=<n>` `tests_added=<n>` `tests_run=<n>` `ci_parity=pass\|fail-then-fixed\|blocked-external\|skipped` |
+| implement | done / blocked | `head=<short sha>` `files=<n>` `tests_added=<n>` `tests_run=<n>` `ci_parity=pass\|fail-then-fixed\|cached\|blocked-external\|skipped` `gate_tree=<tree hash\|none>` |
 | review | done / partial / blocked | `head=` `fixed=<n>` `escalated=<n>` `tier=micro\|docs\|small\|full` `agents_done=<comma list>` `agents_pending=<comma list or none>` (lists cover only the tier's agents) `live=pass\|fail\|unverifiable\|n/a` `live_flows=<n>` (always present; `n/a`/`0` when Agent 8 did not run) `live_note=<slug>` (only when one applied) |
-| ship (1st, BEFORE the CI/merge wait) | awaiting-merge | `pr=<n>` `head=<pushed sha>` `ci_fix_attempts=0` |
+| ship (1st, BEFORE the CI/merge wait) | awaiting-merge | `pr=<n>` `head=<pushed sha>` `ci_fix_attempts=0` `ci_parity=pass\|fail-then-fixed\|cached\|skipped` `gate_tree=<tree hash\|none>` |
 | ship (2nd, after merge + teardown) | done / blocked | `pr=` `merge_commit=` `ci_fix_attempts=<n>` `cleanup=pool_returned\|worktree_removed\|skipped` `procs_killed=<n>` |
 | report | done | `pr=` `traps_added=<n>` |
 
@@ -112,7 +112,7 @@ Every phase that changes the working tree syncs to origin BEFORE posting its mil
 
 Phase order: gate → setup → plan → implement → review → ship → report. Skip every phase preceding `resume_from`.
 
-**Skipping setup**: take `branch`, `pool_claimed`, `base_branch` from `resume_context`, then `git fetch origin <branch>`. If `resolved_paths.worktree` from `ai-dossier runstate verify --json` exists on THIS machine and its HEAD matches origin, `cd` in. Otherwise create one from the synced branch — `git worktree add <repo>/worktrees/<branch-slug> <branch>` (after `git branch --track <branch> origin/<branch>` if needed) — run the repo's warmup (pool claim does not apply to an existing branch; use the warmup_dossier or `pnpm install`+build equivalent), and `cd` in (hard gate `pwd | grep -q worktree` still applies). Uncommitted work does not exist by protocol; if an inherited worktree has local changes, commit and push them as `wip(recovered): [skip ci]` first. **Skipping plan**: take the planning file from `resolved_paths.planning` (not the posted `planning=` string) (the planning-file check happens here, after the worktree is materialized — gate-issue Step 1.5). **Review with `agents_pending`** → run only those agents. **`ship-wait`** → ship Step 5 (CI wait) with `pr` from context; **`ship-teardown`** → ship Step 7 post-merge cleanup.
+**Skipping setup**: take `branch`, `pool_claimed`, `base_branch` from `resume_context`, then `git fetch origin <branch>`. If `resolved_paths.worktree` from `ai-dossier runstate verify --json` exists on THIS machine and its HEAD matches origin, `cd` in. Otherwise create one from the synced branch — `git worktree add <repo>/worktrees/<branch-slug> <branch>` (after `git branch --track <branch> origin/<branch>` if needed) — run the repo's warmup (pool claim does not apply to an existing branch; use the warmup_dossier or `pnpm install`+build equivalent), and `cd` in (hard gate `pwd | grep -q worktree` still applies). Uncommitted work does not exist by protocol; if an inherited worktree has local changes, commit and push them as `wip(recovered): [skip ci]` first. **Skipping plan**: take the planning file from `resolved_paths.planning` (not the posted `planning=` string) (the planning-file check happens here, after the worktree is materialized — gate-issue Step 1.5). **Review with `agents_pending`** → run only those agents. **Resuming at `ship`** → ship Step 1 reads the newest `gate_tree=` from the trusted runstate and skips `scripts/ci-parity.sh` (`ci_parity=cached tree=<hash>`) only when the worktree is clean and `HEAD^{tree}` equals it — a re-materialized worktree of the same pushed head has the same tree, so the pass survives a session change; any other case re-runs the gate (ai-dossier#1259). **`ship-wait`** → ship Step 5 (CI wait) with `pr` from context; **`ship-teardown`** → ship Step 7 post-merge cleanup.
 
 ## Prerequisites
 
