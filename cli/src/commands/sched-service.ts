@@ -175,7 +175,9 @@ export function registerSchedServiceCommands(sched: Command): void {
 
   service
     .command('install')
-    .description('Write and enable the supervisor for this project (idempotent; re-run to update)')
+    .description(
+      'Write, enable and start the supervisor; verify the systemd engine is live (re-run to update)'
+    )
     .option('--project <slug>', 'Project slug (default: owner-repo of the current directory)')
     .option(
       '--mode <mode>',
@@ -204,16 +206,30 @@ export function registerSchedServiceCommands(sched: Command): void {
       const spec = buildSpec(opts, project);
       const io = serviceIo(opts);
       const mode = chooseMode(opts.mode, io);
+      if (mode === 'systemd') {
+        try {
+          renderSystemdUnit(spec);
+        } catch (err) {
+          fail([(err as Error).message]);
+        }
+      }
       if (opts.print) {
         console.log(mode === 'systemd' ? renderSystemdUnit(spec) : renderCronBlock(spec));
         return;
       }
+      const store = new SchedStore(schedStateDir(project));
       const result = await installAndVerifyService(spec, mode, io, {
-        lease: () => new SchedStore(schedStateDir(project)).engineLeaseStatus(),
+        lease: () => store.engineLeaseStatus(),
       });
-      if (result.ok) setEnsureDisabled(new SchedStore(schedStateDir(project)), false);
+      if (result.ok) setEnsureDisabled(store, false);
       if (!result.ok) {
-        console.error(`✗ [${project}] ${mode} supervisor NOT installed`);
+        console.error(
+          `✗ [${project}] ${mode} supervisor ${mode === 'systemd' ? 'installation/verification FAILED; the unit may already be enabled or running' : 'installation FAILED'}`
+        );
+        if (mode === 'systemd')
+          console.error(
+            'Inspect with systemctl --user status and journalctl --user; use sched service uninstall to remove the supervisor. The watchdog disabled marker is unchanged.'
+          );
         for (const n of result.notes) console.error(`  ${n}`);
         process.exit(1);
       }
@@ -270,7 +286,7 @@ export function registerSchedServiceCommands(sched: Command): void {
       }
       console.log(`Project: ${project}`);
       console.log(
-        `systemd unit: ${status.systemd.installed ? `installed (${status.systemd.enabled ?? '?'}, ${status.systemd.active ?? '?'})` : 'not installed'}`
+        `systemd unit: ${status.systemd.installed ? `installed (${status.systemd.enabled ?? 'unknown'}, ${status.systemd.active ?? 'unknown'})` : 'not installed'}`
       );
       if (status.systemd.loadState) console.log(`systemd load: ${status.systemd.loadState}`);
       if (status.systemd.loadError || status.systemd.error) {

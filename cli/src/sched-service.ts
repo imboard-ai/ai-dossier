@@ -100,10 +100,14 @@ export const START_LIMIT_BURST = 10;
 export function renderSystemdUnit(spec: ServiceSpec): string {
   // WorkingDirectory is a path directive, not a shell-style quoted word.
   unitValue(spec.repoDir);
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: reject control characters in a systemd path directive
-  if (!spec.repoDir.startsWith('/') || /[\\"'\u0000-\u001f\u007f]|\s$/.test(spec.repoDir)) {
+  if (
+    !spec.repoDir.startsWith('/') ||
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: reject control characters in a systemd path directive
+    /[\\"'\u0000-\u001f\u007f]|\s$/.test(spec.repoDir) ||
+    spec.repoDir.split('/').some((part) => part === '.' || part === '..')
+  ) {
     throw new Error(
-      'unsupported WorkingDirectory: use an absolute path without quotes, backslashes, controls or trailing whitespace'
+      `unsupported WorkingDirectory ${JSON.stringify(spec.repoDir)}: use --repo-dir with an absolute normalized path without quotes, backslashes, control characters or trailing whitespace`
     );
   }
   const exec = [spec.nodePath, spec.cliPath, ...startArgs(spec)].map(execArg).join(' ');
@@ -233,7 +237,7 @@ export function validateServicePaths(
 
 // --- operations (injected I/O) ---
 
-/** Run a command; null on failure (the `ExecFn` contract). */
+/** Run a command; null on failure. Unlike scheduler ExecFn, argument three is a timeout, not cwd. */
 export type RunFn = (file: string, args: string[], timeoutMs?: number) => string | null;
 
 export interface ServiceIo {
@@ -297,16 +301,17 @@ export function installService(spec: ServiceSpec, mode: ServiceMode, io: Service
       for (const args of [
         ['--user', 'daemon-reload'],
         ['--user', 'enable', unit],
-        ['--user', changed && previous !== null ? 'restart' : 'start', unit],
+        ['--user', previous !== null ? 'restart' : 'start', unit],
       ]) {
-        if (io.run('systemctl', args) === null) {
+        if (io.run('systemctl', args, 90_000) === null) {
           ok = false;
-          notes.push(
-            `systemctl ${args.join(' ')} failed${io.lastError?.() ? `: ${io.lastError()}` : ''}`
-          );
+          const error = io.lastError?.();
+          notes.push(`systemctl ${args.join(' ')} failed${error ? `: ${error}` : ''}`);
           break;
         }
       }
+      if (ok && previous !== null)
+        notes.push('unit restarted (agents keep running — KillMode=process)');
       notes.push(
         'Run `loginctl enable-linger $USER` once so the service starts at boot without a login session.'
       );
@@ -385,7 +390,7 @@ export interface ServiceStatus {
   supervised: boolean;
 }
 
-function unitState(project: string, io: ServiceIo, timeoutMs = 1000) {
+function unitState(project: string, io: ServiceIo, timeoutMs = 5000) {
   const output = io.run(
     'systemctl',
     [
@@ -397,10 +402,13 @@ function unitState(project: string, io: ServiceIo, timeoutMs = 1000) {
     timeoutMs
   );
   const values = new Map(
-    (output ?? '').split('\n').map((line) => {
-      const eq = line.indexOf('=');
-      return [line.slice(0, eq), line.slice(eq + 1)];
-    })
+    (output ?? '')
+      .split('\n')
+      .filter((line) => line.indexOf('=') > 0)
+      .map((line) => {
+        const eq = line.indexOf('=');
+        return [line.slice(0, eq), line.slice(eq + 1)];
+      })
   );
   return {
     loadState: values.get('LoadState') ?? null,
@@ -413,7 +421,9 @@ function unitState(project: string, io: ServiceIo, timeoutMs = 1000) {
   };
 }
 
-/** The CLI's install boundary: no success until both supervisor and engine are live. */
+/** Activating systemd installs require an active unit and matching live lease within 10s.
+ * Cron and render-only installs retain their non-readiness behavior.
+ */
 export async function installAndVerifyService(
   spec: ServiceSpec,
   mode: ServiceMode,
@@ -432,7 +442,9 @@ export async function installAndVerifyService(
   const timeout = readiness.timeoutMs ?? 10_000;
   const deadline = now() + timeout;
   let detail = 'no live engine lease';
+  let observed = false;
   do {
+    if (deadline - now() < 1) break;
     const state = unitState(
       spec.project,
       io,
@@ -449,9 +461,10 @@ export async function installAndVerifyService(
       now() <= deadline
     )
       return result;
-    detail = `load=${state.loadState ?? 'unknown'}, active=${state.active ?? 'unknown'}, sub=${state.subState ?? 'unknown'}, result=${state.result ?? 'unknown'}; ${state.loadError ?? state.error ?? (lease?.alive ? 'engine lease does not match service MainPID' : 'no live engine lease')}`;
+    if (!state.error || !observed)
+      detail = `load=${state.loadState ?? 'unknown'}, active=${state.active ?? 'unknown'}, sub=${state.subState ?? 'unknown'}, result=${state.result ?? 'unknown'}; ${state.loadError ?? state.error ?? (lease?.alive ? `engine lease PID ${lease.pid} does not match service MainPID ${state.pid}; stop the competing engine and reinstall` : 'no live engine lease')}`;
+    if (!state.error) observed = true;
     if (
-      state.error ||
       state.loadError ||
       (state.loadState !== 'loaded' && state.loadState !== null) ||
       state.active === 'failed'
@@ -533,6 +546,7 @@ export function unsupervisedWarning(
   } catch {
     return null;
   }
+  if (status.systemd.error && !status.cron.installed) return null;
   if (status.supervised) return null;
   return (
     `⚠ sched: the engine for ${project} is NOT supervised (systemd unit: ${status.systemd.installed ? `installed, ${status.systemd.active ?? 'unknown'}` : 'not installed'}; cron watchdog: ${status.cron.installed ? 'installed' : 'not installed'}). ` +
