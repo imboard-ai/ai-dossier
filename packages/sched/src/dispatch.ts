@@ -1429,6 +1429,34 @@ export function procStartTime(pid: number): number | null {
   return Number.isInteger(start) && start >= 0 ? start : null;
 }
 
+/** Direct children across ALL threads. A terminated worker's children become
+ * children of the main thread, but its libuv wait handles are gone. Linux's
+ * task children files let the engine find those inherited identities without
+ * scanning unrelated host processes. Null means the platform has no /proc.
+ */
+export function procChildren(): Array<{ pid: number; state: string }> | null {
+  try {
+    const pids = new Set<number>();
+    for (const tid of fs.readdirSync('/proc/self/task')) {
+      let children: string;
+      try {
+        children = fs.readFileSync(`/proc/self/task/${tid}/children`, 'utf8');
+      } catch {
+        continue; // a worker can finish between readdir and read
+      }
+      for (const pid of children.trim().split(/\s+/).map(Number)) {
+        if (Number.isInteger(pid) && pid > 1) pids.add(pid);
+      }
+    }
+    return [...pids].flatMap((pid) => {
+      const fields = procStatFields(pid);
+      return fields?.[1] === String(process.pid) ? [{ pid, state: fields[0] }] : [];
+    });
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Real process I/O: detached spawn with output to a log file, unref'd.
  *

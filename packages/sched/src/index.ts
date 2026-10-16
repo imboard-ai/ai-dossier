@@ -118,6 +118,7 @@ export {
   OPENCODE_DISPATCH_COMMAND,
   priorWorkBranch,
   priorWorkInstruction,
+  procChildren,
   procStartTime,
   procStatFields,
   type ResolvedDispatch,

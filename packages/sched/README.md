@@ -211,6 +211,13 @@ where every mechanical supervision decision is code, not remembered prose:
    On Linux a `/proc/<pid>/stat` state of `Z` is dead for reconciliation, not an
    unkillable agent. Owned children are reaped by libuv when their event loop runs;
    detecting `Z` alone does not reap a child adopted from an older engine image.
+   If Linux reports inherited zombies after all live agents and known child
+   callbacks drain (including after a tick-worker crash), the engine exits with
+   code 75 instead of re-executing: the OS reaper collects the children and the
+   service/watchdog starts a fresh process on retained state. An unsupervised
+   engine must be started again by its operator. A deliberate upgrade deferral
+   is journaled as `engine-auto-upgrade-deferred` with recorded slot/PID and child
+   information; unchanged deferrals are deduplicated, and drain is recorded once.
 
    To recover an existing `agent-unkillable` batch without abandoning its work:
    `ai-dossier sched resume --batch <id> --project <slug>`. It rechecks every
@@ -421,8 +428,8 @@ ai-dossier sched service uninstall
   node / entry-point / repo paths that are missing, relative, or under a temp or `worktrees/`
   directory, and warns that an nvm node path must be re-pinned (re-run `install`) after a node
   upgrade. It runs `sched start --auto-upgrade` (opt out with `--no-auto-upgrade`); after a
-  completed tick, a stale engine installs the latest CLI and re-execs the same command before
-  another state write. Detached agents keep running and the new engine reattaches by pid. The
+   completed tick and after all recorded agents and owned children drain, a stale engine
+   installs the latest CLI and re-execs the same command before another state write. The
   new version migrates state on load; older engines reject newer schemas. If the Node runtime
   cannot replace the process directly, exit code 75 asks systemd/the watchdog to restart the
   updated entry point.

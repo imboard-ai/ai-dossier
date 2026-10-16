@@ -6847,6 +6847,17 @@ describe('#844 item 2: a member agent that ignores SIGTERM is SIGKILLed after th
       [8621, slot.pid, slot.id],
     ]);
     expect(findBatch(h.state(), id)?.blocked_reason).toBe('agent-unkillable');
+    // Crash-prefix recovery: a previous image saved the ineffective stamp
+    // but died before persisting the batch block. The next tick completes it.
+    h.store.withLock((state) => ({
+      state: transitionBatch(state, id, 'executing', { blocked_reason: null }),
+      result: undefined,
+    }));
+    h.tick();
+    expect(findBatch(h.state(), id)?.blocked_reason).toBe('agent-unkillable');
+    expect(
+      h.deps.journal.read().filter((event) => event.event === 'kill-ineffective')
+    ).toHaveLength(1);
     const blocked = h.state();
     expect(() => resumeUnkillableBatch(h.store, h.deps.spawnDeps, id)).toThrow('still has live');
     expect(h.state()).toEqual(blocked);

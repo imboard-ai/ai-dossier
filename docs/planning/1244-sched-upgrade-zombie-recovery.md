@@ -69,6 +69,12 @@ Implementation also touches the tick worker/runner and their existing tests to c
 
 Verification: all workspace suites and root script tests passed. Initial make test hit the outer 20-minute timeout in the large unchanged zero-trust suite; the retry with two workers and a 60-second per-test timeout passed (5,039 tests). Scheduler 1,433 tests and CLI 2,245 tests passed. No CI-parity shell script exists; make check, make lint and make build-all are the local gates.
 
+### Review refinements
+
+The blind review reproduced zombies inherited across old-image execve and tick-worker death. Node cannot wait for a child whose libuv wait handle no longer exists. At completed tick boundaries, Linux task-child enumeration now fences inherited live children too; when every agent and known callback drains but unknown zombies remain, both once/continuous callers exit 75 (not execve). OS reparenting reaps them and the supervisor starts fresh on retained state. New real-process fixtures prove /proc disappearance for both ownership-loss paths and exercise the production CLI caller, including its compiled continuous tick worker. This runs independently of the auto-upgrade setting to recover old-image incidents.
+
+The ineffective-kill stamp no longer suppresses an interrupted batch-block transition. Upgrade deferrals carry deduplicated slot/PID/child diagnostics and a drained event. CLI README, autonomous-pipeline guide and help now describe post-tick drain instead of live-agent handoff. Existing runstate fence liveness remains outside this issue's changed agentAlive/upgrade/member-recovery surface; the DRY review's independent boundPidAlive drift was dismissed as out-of-diff rather than broadening fence semantics here.
+
 ## Visual Review
 
 - [x] Not required (backend/CLI only)

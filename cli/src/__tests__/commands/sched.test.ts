@@ -933,11 +933,17 @@ describe('ai-dossier sched start (#537: engine-stale detection)', () => {
           .mock.calls.filter(([file, args]) => file === 'npm' && (args as string[])[0] === 'i');
       expect(installs()).toHaveLength(once ? 0 : 1);
       expect(execve.calls).toHaveLength(once ? 0 : 1);
+      expect(
+        journalEvents().filter((event) => event.event === 'engine-auto-upgrade-deferred')
+      ).toHaveLength(1);
       if (once) {
         await runSched(['sched', 'start', '--once', '--auto-upgrade', '--project', 'test-proj']);
         expect(installs()).toHaveLength(1);
         expect(execve.calls).toHaveLength(1);
       }
+      expect(
+        journalEvents().filter((event) => event.event === 'engine-auto-upgrade-drained')
+      ).toHaveLength(1);
     } finally {
       execve.restore();
     }

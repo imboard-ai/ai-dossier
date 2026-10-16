@@ -3793,8 +3793,8 @@ function currentDispatchStamp(
 
 /**
  * Stop the slot's agent before a decision that must not run alongside it
- * (#844). Returns `true` while it is still alive — the caller waits and
- * decides on a later tick — and `false` once it is gone (or never had a pid).
+ * (#844). Returns waiting while alive, gone once dead (or without a pid),
+ * and unkillable once SIGKILL's bound expires and the batch blocks.
  *
  * The first sight sends SIGTERM, stamps `kill_sent_at` and journals
  * `member-stop-requested` once; each later tick
@@ -3839,8 +3839,10 @@ function stopAgentBeforeDeciding(
         slot: slot.id,
         detail: `agent remained alive ${KILL_ESCALATION_MS / 1000}s after SIGKILL — blocking for operator`,
       });
-      blockBatchForOperator(deps, config, batchId, { reason: 'agent-unkillable' }, now, result);
     }
+    // A crash after the stamp but before the block must finish the block on
+    // the next tick; the stamp deduplicates telemetry, not the transition.
+    blockBatchForOperator(deps, config, batchId, { reason: 'agent-unkillable' }, now, result);
     return 'unkillable';
   }
   const firstEscalation =
