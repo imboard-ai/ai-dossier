@@ -58,3 +58,62 @@ None requiring a product decision; distinguish observed child outcomes during im
 ## Base Branch
 
 `main`
+
+## Implementation Evidence
+
+### Root cause: uncontrolled construction/mutation overlap
+
+The reported six-element array counts code-2 child exits, not audits. The old
+test joined every exit but discarded stderr and signals. Its script constructed
+each handle immediately before reserving, allowing a winner to replace the ledger
+while another constructor was still reading its initial snapshot.
+
+`BudgetLedger` construction calls `snapshot()` → `readEvidence()` → `readPrivate()`
+without the mutation guard. If a winner commits between the late constructor's
+`openSync` and `fstatSync`, its pinned old inode has `nlink=0`; `readPrivate` correctly
+rejects this with `corrupt_ledger`. That became unexpected code 3. This is a test
+scheduling error, not evidence of a lost reclaim audit or overcommit.
+
+A bounded external probe interposed only on the late constructor's ledger open:
+after the real open, synchronously wait for a separate real child to reserve 60,
+then return the original fd so the constructor continues. Observed on unchanged
+production code:
+
+```text
+winner exit: 0 opened inode nlink after commit: 0
+late constructor error: corrupt_ledger Unreadable budget ledger; reconciliation required
+durable reservations: 1
+```
+
+The probe used a disposable external ledger and removed it afterward. The original
+uninstrumented CI run cannot reveal its exact error because it ignored stderr;
+this forced interleaving demonstrates a concrete scheduling defect independently
+of that historical diagnostic gap. Thirty instrumented unsynchronized runs on this
+host passed, so random reruns alone were not used as the diagnosis.
+
+The fix opens all eight handles before releasing an IPC barrier. Mutations still
+race through real kernel guards; assertions now bind the sole audit to the exact
+dead owner and the sole reservation to 60 minor units. Only expected budget refusals
+count as losers; signals, timeouts and unexpected errors still fail with bounded
+diagnostics. The helper kills and joins its own children on every exit path.
+
+### Verification
+
+- Original named test passed in an isolated detached `0a0e256` worktree:
+  `repro=green-on-base`, because the defect is the test's uncontrolled interleaving;
+  there is no production change that a copied fixed test could distinguish.
+- Focused recovery, budget and repair-regression suites: **102/102 passed**.
+- `make check`, `make lint`, `make build-all` (baseline) and `make build-zero-trust`
+  (updated test fixture): passed. No ci-parity script exists.
+- **50 consecutive named-test runs passed** on 2026-10-16. The npm/Vitest process
+  and its descendants inherited CPU affinity `{0}`, shared with one Node infinite
+  busy-loop sibling pinned to the same CPU. Each iteration invoked the workspace
+  test script freshly; all 50 exited 0 (11.55–14.21 seconds wall time each), with
+  400 total reservation contenders. Pressure child was terminated and joined
+  (`exit=-15`) in `finally`. An earlier verification call timed out after 46 passing
+  iterations; the complete 50-iteration run restarted from zero with a longer cap.
+
+Reproduction of the pressure configuration: pin the invoking process and one
+`node -e 'for(;;){}'` child to the same allowed CPU; loop the exact named-test
+command from Test Scope 50 times, stopping on any nonzero exit; terminate and join
+the owned pressure child in a guaranteed finalizer. Do not use Vitest `--repeat`.

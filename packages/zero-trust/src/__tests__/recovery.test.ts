@@ -9,7 +9,12 @@ import type { BudgetEstimate, BudgetRate } from '../budget-types';
 import { Journal, JournalError } from '../journal';
 import { ReceiptNonceStore } from '../receipt/nonces';
 import { compiledFixture } from './compiled-fixture';
-import { readJournal as audit, budgetFixture, crashProcess as killed } from './recovery-fixture';
+import {
+  readJournal as audit,
+  budgetFixture,
+  crashProcess as killed,
+  raceReadyProcesses,
+} from './recovery-fixture';
 
 const dirs: string[] = [];
 function directory(): string {
@@ -417,23 +422,45 @@ describe('ownership-proven store recovery', () => {
   it('racing real budget reclaimers retain one audit and never overcommit', async () => {
     const dir = directory();
     const ledger = budget(dir);
-    fs.writeFileSync(`${ledger.file}.lock`, JSON.stringify(owner()), { mode: 0o600 });
+    const dead = owner();
+    fs.writeFileSync(`${ledger.file}.lock`, JSON.stringify(dead), { mode: 0o600 });
     const module = compiledFixture(dir, 'budget');
-    const script = `const {BudgetLedger}=require(${JSON.stringify(module)});try {new BudgetLedger(${JSON.stringify(ledger.file)},'c',5000).reserve('s',${JSON.stringify({ ...estimate, money: { currency: 'USD', minor: 60 } })});process.exitCode=0;}catch(e){process.exitCode=['ceiling_exceeded','persistence_uncertain'].includes(e.code)?2:3;}`;
-    const codes = await Promise.all(
-      Array.from(
-        { length: 8 },
-        () =>
-          new Promise<number | null>((resolve, reject) => {
-            const child = spawn(process.execPath, ['-e', script], { stdio: 'ignore' });
-            child.once('error', reject);
-            child.once('exit', resolve);
-          })
-      )
-    );
-    expect(codes.filter((code) => code === 0)).toHaveLength(1);
-    expect(codes.filter((code) => code === 2)).toHaveLength(7);
-    expect(ledger.snapshot().reservations).toHaveLength(1);
-    expect(audit(`${ledger.file}.recovery-journal`)).toHaveLength(1);
-  });
+    // Construction reads a private snapshot outside the mutation guard. A late
+    // constructor can pin the old inode just before the winner replaces it and
+    // correctly refuse nlink=0 as corrupt_ledger. Race reservations, not opens.
+    const script = `
+      const {BudgetLedger}=require(${JSON.stringify(module)});
+      function failed(e){console.error(e.code || e.message);process.exitCode=['ceiling_exceeded','persistence_uncertain'].includes(e.code)?2:3;}
+      try {
+        const ledger=new BudgetLedger(${JSON.stringify(ledger.file)},'c',10000);
+        process.once('message', message => {
+          try {
+            if(message!=='go')throw new Error('unexpected release');
+            ledger.reserve('s',${JSON.stringify({ ...estimate, money: { currency: 'USD', minor: 60 } })});
+          } catch(e){failed(e);} finally {process.disconnect();}
+        });
+        process.send('ready');
+      } catch(e){failed(e);process.disconnect();}
+    `;
+    const outcomes = await raceReadyProcesses(script, 8);
+    const diagnostics = JSON.stringify(outcomes);
+    expect(
+      outcomes.every(({ signal }) => signal === null),
+      diagnostics
+    ).toBe(true);
+    expect(
+      outcomes.filter(({ code }) => code === 0),
+      diagnostics
+    ).toHaveLength(1);
+    expect(
+      outcomes.filter(({ code }) => code === 2),
+      diagnostics
+    ).toHaveLength(7);
+    expect(ledger.snapshot().reservations).toEqual([
+      expect.objectContaining({ estimate: { ...estimate, money: { currency: 'USD', minor: 60 } } }),
+    ]);
+    expect(audit(`${ledger.file}.recovery-journal`)).toEqual([
+      expect.objectContaining({ type: 'lock_reclaimed', owner: dead, pendingReservations: [] }),
+    ]);
+  }, 25_000);
 });
