@@ -31,7 +31,7 @@ describe('worker tick runner (#1233)', () => {
         '    return;',
         '  }',
         // biome-ignore lint/suspicious/noTemplateCurlyInString: source text of the stand-in worker script
-        '  parentPort.postMessage({ id, ok: true, result: { spawned: [`thread-${threadId}`] } });',
+        '  parentPort.postMessage({ id, ok: true, unreapedChildren: config.mode === "children", result: { spawned: [`thread-${threadId}`] } });',
         '});',
         '',
       ].join('\n')
@@ -58,6 +58,18 @@ describe('worker tick runner (#1233)', () => {
         name: 'LockTimeoutError',
         message: 'state locked',
       });
+    } finally {
+      await runner.close();
+    }
+  });
+
+  it('#1244 carries the worker-owned child fence across tick boundaries until drain', async () => {
+    const runner = createWorkerTickRunner(file, { stateDir: dir, repoDir: dir });
+    try {
+      await runner.runTick(config('children'));
+      expect(runner.hasUnreapedChildren?.()).toBe(true);
+      await runner.runTick(config('ok'));
+      expect(runner.hasUnreapedChildren?.()).toBe(false);
     } finally {
       await runner.close();
     }

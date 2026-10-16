@@ -62,6 +62,7 @@ export {
   MAX_BATCH_AGENT_RESPAWNS,
   memberBranchFor,
   resumeBlockedGate,
+  resumeUnkillableBatch,
   runBatchTick,
 } from './batch-dispatch';
 export {

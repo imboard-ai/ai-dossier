@@ -96,6 +96,7 @@ import {
   resolveProjectSlug,
   resumeBlockedGate,
   resumeLandedBatch,
+  resumeUnkillableBatch,
   runLoop,
   SAFE_REF_RE,
   SchedNotFoundError,
@@ -1651,6 +1652,26 @@ function resumeBatchGate(opts: PauseResumeOptions): void {
   // blocks) resumes by re-running the gate + tail over its landed members —
   // routed before the config load, which only the gate recheck needs.
   const blockedOn = findBatch(store.load(), opts.batch as string)?.blocked_reason ?? null;
+  if (blockedOn === 'agent-unkillable') {
+    try {
+      const result = resumeUnkillableBatch(
+        store,
+        createSpawnDeps(process.cwd()),
+        opts.batch as string
+      );
+      new Journal(store.dir).append(
+        unitEvent('batch-resumed', `batch:${opts.batch}`, { reason: 'agent-unkillable' })
+      );
+      console.log(
+        opts.json
+          ? JSON.stringify(result)
+          : `▶ Batch ${opts.batch} resumed — recorded agents are gone; the next tick reconciles the retained members.`
+      );
+    } catch (err) {
+      handleKnownError(err);
+    }
+    return;
+  }
   if (isLandedResumableBlock(blockedOn)) {
     resumeLandedBatchCommand(store, opts);
     return;
@@ -1769,14 +1790,14 @@ function registerPauseResumeSubcommand(cmd: Command, pause: boolean): void {
     .description(
       pause
         ? 'Prevent every new agent process, including recovery takeovers; live agents keep running'
-        : 'Resume making new slot assignments; with --batch <id>, re-run the incremental gate for a batch blocked on gate-inconclusive (#583), or re-run the gate + tail over the landed members of a batch blocked over landed work — dissolve-refused / tail-blocked / members-mismatch / respawn-cap:tail (#822)'
+        : 'Resume making new slot assignments; with --batch <id>, recover agent-unkillable after agent exit, recheck an inconclusive gate, or re-run the gate + tail over landed work'
     )
     .option('--project <slug>', 'Project slug (default: owner-repo of the current directory)')
     .option('--json', 'Output the result as JSON');
   if (!pause) {
     sub.option(
       '--batch <id>',
-      'Batch id blocked on gate-inconclusive:<cap> (re-run that gate) or over landed work (dissolve-refused / tail-blocked / members-mismatch / respawn-cap:tail — ship the landed members)'
+      'Batch id blocked on agent-unkillable (resume once agents are dead), gate-inconclusive:<cap>, or over landed work'
     );
   }
   sub.action((opts: PauseResumeOptions) => {
@@ -2496,6 +2517,20 @@ function createUpgradeExec(): ExecFn {
  * caller awaits this AFTER a completed tick and stops the old loop on success;
  * live agents are detached and the restarted engine reattaches to their pids.
  */
+/** Include every slot role, plus children whose slots were already released.
+ * The worker supplies its own unreaped-child fence at the completed tick boundary.
+ */
+export function upgradeHasAgents(deps: Pick<EngineDeps, 'store' | 'spawnDeps'>): boolean {
+  return (
+    (deps.spawnDeps.hasUnreapedChildren?.() ?? false) ||
+    deps.store
+      .load()
+      .slots.some(
+        (slot) => slot.pid !== null && deps.spawnDeps.isAlive(slot.pid, slot.pid_start ?? undefined)
+      )
+  );
+}
+
 async function checkAndHandleEngineStaleness(
   journal: Journal,
   autoUpgradeEnabled: boolean,
@@ -2998,7 +3033,7 @@ function registerStartSubcommand(cmd: Command): void {
           }
           const upgradeHandoff = await checkAndHandleEngineStaleness(
             deps.journal,
-            autoUpgradeEnabled && !stopping,
+            autoUpgradeEnabled && !stopping && !upgradeHasAgents(deps),
             upgradeExec
           );
           if (upgradeHandoff) {
@@ -3056,7 +3091,11 @@ function registerStartSubcommand(cmd: Command): void {
             // #945: await the complete upgrade after this tick. On success,
             // `shouldStop` becomes true before `runLoop` can start another tick,
             // so the old package cannot write state after the install lands.
-            const requested = await checkAndHandleEngineStaleness(deps.journal, true, upgradeExec);
+            const requested = await checkAndHandleEngineStaleness(
+              deps.journal,
+              !upgradeHasAgents(deps) && !(tickRunner?.hasUnreapedChildren?.() ?? false),
+              upgradeExec
+            );
             if (requested) {
               upgradeHandoff = true;
               stopping = true;

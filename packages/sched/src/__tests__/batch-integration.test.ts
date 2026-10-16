@@ -69,6 +69,7 @@ import {
   resolveDispatch,
   resumeBlockedGate,
   resumeLandedBatch,
+  resumeUnkillableBatch,
   runBatchTick,
   runnableUnits,
   type SchedConfig,
@@ -6846,6 +6847,24 @@ describe('#844 item 2: a member agent that ignores SIGTERM is SIGKILLed after th
       [8621, slot.pid, slot.id],
     ]);
     expect(findBatch(h.state(), id)?.blocked_reason).toBe('agent-unkillable');
+    const blocked = h.state();
+    expect(() => resumeUnkillableBatch(h.store, h.deps.spawnDeps, id)).toThrow('still has live');
+    expect(h.state()).toEqual(blocked);
+    // The real agent already exited; remove the artificial unkillable stub.
+    expect(await waitUntilDead(h.spawnDeps, slot.pid as number)).toBe(true);
+    expect(resumeUnkillableBatch(h.store, h.spawnDeps, id).outcome).toBe('resumed');
+    const resumed = findBatch(h.state(), id);
+    expect(resumed).toEqual({
+      ...findBatch(blocked, id),
+      status: 'executing',
+      blocked_reason: null,
+      updated_at: resumed?.updated_at,
+    });
+    expect(h.state().entries).toEqual(blocked.entries);
+    expect(h.state().slots).toEqual(blocked.slots);
+    h.deps.spawnDeps = h.spawnDeps;
+    await tickUntil(h, id, (b) => b.status === 'awaiting-merge');
+    expect(memberDispatchCount(h, id, 1, 8621)).toBe(2); // one permitted wrong-procedure re-prompt
   }, 60_000);
 
   it('the wrong-procedure wait escalates to SIGKILL once past KILL_ESCALATION_MS, journals it once, then re-prompts', async () => {
@@ -6883,6 +6902,7 @@ describe('#844 item 2: a member agent that ignores SIGTERM is SIGKILLed after th
     expect(slot.kill_escalated_at).toBeNull();
     const stopRequests = h.deps.journal.read().filter((e) => e.event === 'member-stop-requested');
     expect(stopRequests.map((e) => [e.issue, e.pid])).toEqual([[885, pid]]);
+    expect(stopRequests[0].reason).toBe('wrong-procedure');
 
     // A FUTURE stamp (clock step, hand edit) must not switch the escalation
     // off: it is replaced by a fresh one on the next tick.
@@ -6953,6 +6973,11 @@ describe('#844 item 2: a member agent that ignores SIGTERM is SIGKILLed after th
     // and its worktree intact while the agent ignores it.
     h.tick();
     expect(h.spawnDeps.isAlive(pid)).toBe(true);
+    expect(
+      h.deps.journal
+        .read()
+        .find((event) => event.event === 'member-stop-requested' && event.issue === 8611)?.reason
+    ).toBe('member-complete');
     expect(findBatch(h.state(), id)?.member_runs.find((run) => run.issue === 8611)?.status).toBe(
       'running'
     );

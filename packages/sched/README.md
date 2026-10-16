@@ -202,6 +202,24 @@ where every mechanical supervision decision is code, not remembered prose:
    tick; a runnable unit never waits while a slot is idle (pinned by a regression test).
    Refill was always synchronous; what previously had no journal trace was the release
    itself — see `slot-released` below (#525).
+   **Auto-upgrade and child supervision (#1244):** `sched start --auto-upgrade`
+   (including `--once`) defers installation and process replacement while any
+   recorded slot agent is alive, or this engine/its tick worker still owns a child
+   awaiting its exit callback. This includes parallel members, tail, fix and report
+   agents, even after their slot is released. Upgrades retry at later tick boundaries
+   once those agents drain; the old engine never writes after installing the update.
+   On Linux a `/proc/<pid>/stat` state of `Z` is dead for reconciliation, not an
+   unkillable agent. Owned children are reaped by libuv when their event loop runs;
+   detecting `Z` alone does not reap a child adopted from an older engine image.
+
+   To recover an existing `agent-unkillable` batch without abandoning its work:
+   `ai-dossier sched resume --batch <id> --project <slug>`. It rechecks every
+   recorded batch/member agent's PID and start identity under the state lock and
+   refuses while any is genuinely alive. Once all are dead (including zombies),
+   it resumes the retained executing position. Members, landed commits, worktrees,
+   branches and dispatch profile stay intact; the next tick finishes the original
+   member decision. This does not toggle the global pause state. Avoid `abandon`
+   when the goal is to keep the batch.
 6. **Journal (AC6)** — every event (assigned, spawned, exit-detected, external-advance,
    progress, stalled, redispatched, fence-written, fence-failed, unit-failed,
    dependents-blocked, slot-released, suspect-dispatch, dispatch-unhealthy, dispatch-failure,

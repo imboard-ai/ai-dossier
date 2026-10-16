@@ -61,6 +61,14 @@ Keep PID-reuse/platform fallbacks, owned child event-loop reaping and worker own
 
 None blocking. The historical stop trigger cannot be attributed from issue timestamps alone; offline tests will distinguish terminal/wrong-procedure input from mere restart.
 
+### Investigation result
+
+Offline existing real-agent regressions reproduce both stop inputs: a full-cycle-shaped milestone triggers `wrong-procedure`; a parallel member's valid review-done milestone triggers `member-complete` before landing. There is no output/stall check on either path. The incident's timestamps alone cannot distinguish these two; new `reason` fields on member-stop-requested record the exact input. Zombie liveness was reproduced red on isolated base b96c77a (signal 0 succeeds, old isAlive returns true), green on this branch with actual /proc disappearance after yielding to libuv.
+
+Implementation also touches the tick worker/runner and their existing tests to carry owned-child drain evidence across thread boundaries, exports the recovery helper through index.ts, and adds a dedicated real-process liveness test file. These are lifecycle coverage refinements to the predicted files.
+
+Verification: all workspace suites and root script tests passed. Initial make test hit the outer 20-minute timeout in the large unchanged zero-trust suite; the retry with two workers and a 60-second per-test timeout passed (5,039 tests). Scheduler 1,433 tests and CLI 2,245 tests passed. No CI-parity shell script exists; make check, make lint and make build-all are the local gates.
+
 ## Visual Review
 
 - [x] Not required (backend/CLI only)
