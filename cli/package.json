@@ -1,6 +1,6 @@
 {
   "name": "@ai-dossier/cli",
-  "version": "0.93.3",
+  "version": "0.93.4",
   "description": "CLI for signed, versioned agent skills and model-driven orchestration: create, verify, sign, publish, and install skills for Claude Code, Codex, OpenCode, and LLM tools.",
   "main": "dist/cli.js",
   "bin": {
@@ -49,7 +49,7 @@
     "url": "https://github.com/imboard-ai/ai-dossier/issues"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=22.23.4"
   },
   "publishConfig": {
     "access": "public",

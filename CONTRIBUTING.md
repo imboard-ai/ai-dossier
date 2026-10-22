@@ -44,7 +44,7 @@ Use GitHub Discussions for:
 ## Local Development
 
 ### Prerequisites
-- Node.js 20+ required (vitest v4 + vite v7 dropped Node 18)
+- Node.js >=22.23.4 required (Node 20 is EOL and lacks the emSign CA-store fix)
 - Git
 
 ### Setup

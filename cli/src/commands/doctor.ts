@@ -2,7 +2,7 @@
  * `ai-dossier doctor` — diagnostic command that checks the user's setup.
  *
  * Reports pass/fail/warning for:
- *   - Node.js version (>=20 required)
+ *   - Node.js version (>=22 required)
  *   - Package installation (@ai-dossier/cli, core, mcp-server)
  *   - MCP configuration (~/.claude/mcp.json has dossier entry)
  *   - Dossier files in the current project (*.ds.md)
@@ -26,17 +26,17 @@ export interface CheckResult {
 
 export function checkNodeVersion(): CheckResult {
   const [major] = process.versions.node.split('.').map(Number);
-  if (major >= 20) {
+  if (major >= 22) {
     return {
       name: 'Node.js version',
       status: 'pass',
-      message: `v${process.versions.node} (>=20 required)`,
+      message: `v${process.versions.node} (>=22 required)`,
     };
   }
   return {
     name: 'Node.js version',
     status: 'fail',
-    message: `v${process.versions.node} — Node.js >=20 is required`,
+    message: `v${process.versions.node} — Node.js >=22 is required`,
     detail: 'Upgrade Node.js: https://nodejs.org/',
   };
 }

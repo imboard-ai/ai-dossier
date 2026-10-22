@@ -33,7 +33,7 @@ field and state in more depth.
 | Linux x86_64 host with KVM | `test -r /dev/kvm && test -w /dev/kvm` |
 | `qemu-system-x86_64`, `qemu-img`, and `genisoimage` (or `mkisofs` or `xorrisofs`) on `PATH` | `command -v qemu-system-x86_64 qemu-img genisoimage` |
 | `/usr/bin/git`, `/usr/bin/prlimit`, `/usr/bin/flock` | `ls /usr/bin/git /usr/bin/prlimit /usr/bin/flock` |
-| Node.js 20 or later | `node --version` |
+| Node.js 22.23.4 or later | `node --version` |
 | Docker, for the package proxy only | `docker info` |
 | A browser on the same host as `zt-run`, or a forwarded loopback port | The OAuth callback goes to `127.0.0.1` |
 | A model endpoint with an OpenAI-compatible Chat Completions API, and its key | |

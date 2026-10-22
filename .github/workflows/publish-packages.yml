@@ -35,7 +35,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '22.23.4'
           cache: 'npm'
 
       - name: Install dependencies
@@ -61,7 +61,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '22.23.4'
           cache: 'npm'
 
       - name: Install dependencies
@@ -169,7 +169,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '22.23.4'
           registry-url: 'https://registry.npmjs.org'
 
       # Trusted-publishing AUTH (OIDC token used as the npm publish
@@ -277,7 +277,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '22.23.4'
           registry-url: 'https://registry.npmjs.org'
 
       - name: Verify packages are available under the selected channel

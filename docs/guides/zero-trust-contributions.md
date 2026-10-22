@@ -72,7 +72,7 @@ Described generically; any machine that matches works.
 | KVM (`/dev/kvm` readable and writable by your user) | Speed | Without KVM the same image runs under TCG emulation. It works but is much slower. Set `accelerator` accordingly. |
 | `qemu-system-x86_64`, `qemu-img`, and `genisoimage` (or `mkisofs` or `xorrisofs`) on `PATH` | Run and bake the VM | Checked at start; missing tools refuse the run. |
 | Git at `/usr/bin/git`, and `prlimit` and `flock` in `/usr/bin` (util-linux) | Trusted Git operations and local locks | The controller calls these by absolute path. |
-| Node.js 20 or later | Runs the controller scripts | |
+| Node.js 22.23.4 or later | Runs the controller scripts | |
 | Docker | Runs the package proxy on the controller machine | Only the proxy uses Docker. Repository code never runs in Docker on your machine. |
 | `/proc` | Local store and budget locks | Standard on Linux. Don't share one state directory between separate container PID namespaces. |
 | A baked VM profile | The disposable VM image the work runs in | Built once with `zt-vm.mjs bake` (below). |

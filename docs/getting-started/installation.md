@@ -16,7 +16,7 @@ npm install -g @ai-dossier/cli
 npx @ai-dossier/cli verify <dossier-file-or-url>
 ```
 
-Requires Node.js 20+.
+Requires Node.js 22.23.4+.
 
 ### Standalone binary (no Node.js)
 

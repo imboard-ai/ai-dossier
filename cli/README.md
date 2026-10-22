@@ -2600,7 +2600,7 @@ Exit 0 (safe) or 1 (unsafe)
 
 ### v0.7.0
 - ✅ Security hardening (execFileSync, Zod validation)
-- ✅ Node 20+ requirement
+- ✅ Node 22.23.4+ requirement
 - ✅ Coverage thresholds enforcement
 - ✅ Documentation consistency fixes
 

@@ -205,7 +205,7 @@ Edit the `actions/github-script` step to change labels, assignees, or the issue 
 |----------|-------------|---------|
 | `DOSSIER_REGISTRY_URL` | Repository variable or `env` | Custom registry URL for `ai-dossier` commands |
 | `DOSSIER_REGISTRY_TOKEN` | Repository secret | Authentication token for private registries |
-| `NODE_VERSION` | Workflow `env` | Node.js version (default: `22`) |
+| `NODE_VERSION` | Workflow `env` | Node.js version (default: `22.23.4`) |
 
 ### Setting secrets in GitHub
 

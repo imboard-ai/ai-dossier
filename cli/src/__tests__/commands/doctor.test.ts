@@ -26,12 +26,12 @@ describe('doctor command', () => {
   });
 
   describe('checkNodeVersion', () => {
-    it('should pass when Node.js version is >=20', () => {
+    it('should pass when Node.js version is >=22', () => {
       const result = checkNodeVersion();
-      // We are running tests on Node >=20 (per engines field)
+      // We are running tests on Node >=22 (per engines field)
       expect(result.status).toBe('pass');
       expect(result.name).toBe('Node.js version');
-      expect(result.message).toContain('>=20 required');
+      expect(result.message).toContain('>=22 required');
     });
   });
 

@@ -42,7 +42,7 @@ env:
   DOSSIER: 'dossiers/weekly-readme-check.ds.md'
 
   # Node.js version to use
-  NODE_VERSION: '22'
+  NODE_VERSION: '22.23.4'
 
 jobs:
   run:

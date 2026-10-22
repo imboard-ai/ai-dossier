@@ -24,8 +24,18 @@ const outDir = path.resolve(
 const work = path.join(outDir, '.work');
 mkdirSync(work, { recursive: true });
 
-if (Number(process.versions.node.split('.')[0]) < 22) {
-  throw new Error(`SEA build needs Node >= 22 (running ${process.versions.node})`);
+// The binary embeds the builder's own node, including its bundled CA store. Releases
+// before 22.23.4 / 24.22.1 / 26.12.1 still trust the compromised emSign ECC Root CA - G3
+// (nodejs/node#66871), so refuse to build on them (#1265).
+const MIN_PATCHED = { 22: [22, 23, 4], 24: [24, 22, 1], 26: [26, 12, 1] };
+const running = process.versions.node.split('.').map(Number);
+const floor = MIN_PATCHED[running[0]];
+const cmp = (x, y) => x.reduce((d, n, i) => d || n - y[i], 0);
+const patched = floor ? cmp(running, floor) >= 0 : running[0] > 26;
+if (!patched) {
+  throw new Error(
+    `SEA build needs a patched Node (>=22.23.4, >=24.22.1 or >=26.12.1); running ${process.versions.node}`
+  );
 }
 
 const entry = path.join(root, 'cli/dist/cli.js');
