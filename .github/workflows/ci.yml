@@ -31,7 +31,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: '22.23.4'
           cache: 'npm'
 
       - name: Install dependencies
@@ -108,7 +108,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: '22.23.4'
 
       # Never splice `${{ }}` into a `run:` body: the value is substituted
       # into the script *before* the shell sees it, so PR-controlled data
@@ -160,7 +160,7 @@ jobs:
         if: steps.changes.outputs.run == 'true'
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: '22.23.4'
           cache: 'npm'
           cache-dependency-path: website/package-lock.json
 
