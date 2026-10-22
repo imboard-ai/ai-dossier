@@ -4,7 +4,7 @@ Create, verify, and execute your first dossier in under 10 minutes.
 
 ## Prerequisites
 
-- Node.js 20+ installed
+- Node.js 22.23.4+ installed
 - An AI assistant (Claude Code, Cursor, ChatGPT, or any LLM)
 - A project directory to work in
 

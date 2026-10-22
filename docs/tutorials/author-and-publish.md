@@ -4,7 +4,7 @@ Create a dossier, validate it, add a checksum, and publish it to the registry.
 
 ## Prerequisites
 
-- Node.js 20+ installed
+- Node.js 22.23.4+ installed
 - The CLI installed: `npm install -g @ai-dossier/cli`
 - A project directory to work in
 

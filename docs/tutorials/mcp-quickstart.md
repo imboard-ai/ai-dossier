@@ -7,7 +7,7 @@ Add dossier support to Claude Code and start using dossiers immediately.
 ## Prerequisites
 
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and working
-- Node.js 20+ installed
+- Node.js 22.23.4+ installed
 
 ## Step 1: Add the MCP Server
 

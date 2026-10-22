@@ -25,7 +25,7 @@ capabilities:
     timeout_ms: 2400000  # full suite measured at ~21 min locally (b-20261015-02); 600000 blocked the batch gate
     assumptions:
       - file-exists: scripts/test-report.mjs
-      - tool-version: node>=20
+      - tool-version: node>=22
 
   # --- The batch incremental member gate (#594 dogfood) ------------------
   #
@@ -61,7 +61,7 @@ capabilities:
     timeout_ms: 600000
     assumptions:
       - file-exists: Makefile
-      - tool-version: node>=20
+      - tool-version: node>=22
 
   test.focused:
     command: node scripts/test-report.mjs --changed
@@ -88,7 +88,7 @@ capabilities:
     timeout_ms: 1800000  # per-member gate timed out at 600000 on every member of b-20261015-02, docs-only included
     assumptions:
       - file-exists: scripts/test-report.mjs
-      - tool-version: node>=20
+      - tool-version: node>=22
 
   # --- Lint, exactly as CI runs it (#859) ---------------------------------
   #
@@ -105,4 +105,4 @@ capabilities:
       been warning-free since #859, so a failure belongs to the change under test.
     assumptions:
       - file-exists: biome.json
-      - tool-version: node>=20
+      - tool-version: node>=22

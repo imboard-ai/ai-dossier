@@ -1,6 +1,6 @@
 /**
  * HTTP client for the Dossier Registry API.
- * Uses Node.js built-in fetch (Node 20+).
+ * Uses Node.js built-in fetch (Node 22+).
  */
 
 class RegistryError extends Error {

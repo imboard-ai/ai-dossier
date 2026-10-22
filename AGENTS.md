@@ -48,7 +48,7 @@ make check        # biome format + lint with auto-fix; fails if a warning remain
 make lint         # exactly CI's lint gate, read-only: errors AND warnings fail
 ```
 
-- Node 20+ required (vitest v4 + vite v7 dropped Node 18)
+- Node >=22.23.4 required (Node 20 is EOL and lacks the emSign CA-store fix; see #1265)
 - Linter/formatter: **Biome** (not ESLint/Prettier) — fix with `make check`, verify with `make lint`.
   CI fails on Biome warnings, not just errors (#859); where a rule is wrong for a site, suppress
   it with `// biome-ignore lint/<group>/<rule>: <why>`

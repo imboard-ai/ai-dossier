@@ -289,7 +289,7 @@ INVALID          → Failed verification → BLOCK EXECUTION
 - **Tools**: `list_dossiers`, `read_dossier`, `verify_dossier`
 - **Resources**: `dossier://concept`, `dossier://protocol`, `dossier://security`
 
-**Technology Stack**: TypeScript, Node.js 20+, @modelcontextprotocol/sdk
+**Technology Stack**: TypeScript, Node.js 22.23.4+, @modelcontextprotocol/sdk
 
 **Current State**: The server is functional and implements core features for discovering, reading, and verifying dossiers. See `mcp-server/SPECIFICATION.md` for the complete API design and `mcp-server/src` for the implementation.
 
@@ -1290,7 +1290,7 @@ The MCP (Model Context Protocol) server will provide frictionless integration be
 ### Technology Stack
 
 **Language**: TypeScript
-**Runtime**: Node.js 20+
+**Runtime**: Node.js 22.23.4+
 **Dependencies**: `@modelcontextprotocol/sdk`
 **Protocol**: MCP 1.0
 
