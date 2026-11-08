@@ -153,16 +153,6 @@ export async function assessPolicy(
       return 'ledger';
     }
   };
-  // A project with no AI topic is silent, not a paid permission inference.
-  if (floor.ai === 'silent') {
-    const reason = budgetFailure();
-    if (reason) return Object.freeze({ ...floor, reason });
-    return Object.freeze({
-      ...floor,
-      assignment: analysis.contradictions.assignment ? 'unclear' : floor.assignment,
-      directPr: analysis.contradictions.directPr ? 'unclear' : floor.directPr,
-    });
-  }
   const admitted = new Map<string, Map<number, string>>();
   let ambiguous = false;
   const inputs: DecisionInput[] = snapshot.map((file) => {
@@ -182,8 +172,13 @@ export async function assessPolicy(
   const result = { ...floor };
   const evidence: Record<string, PolicyDecisionEvidence> = {};
   let refusal: 'budget' | 'ledger' | undefined;
-  // One reserved controlling citation per dimension, independent of floor cap.
-  const dimensions = Object.keys(POLICY_QUESTIONS) as Dimension[];
+  // A project with no AI topic stays silent, never a paid permission inference;
+  // its other dimensions keep their floors. Ownership is ordinary contribution
+  // flow, so assignment and direct-PR prose is still decided (#1268).
+  const dimensions = (
+    floor.ai === 'silent' ? ['assignment', 'directPr'] : Object.keys(POLICY_QUESTIONS)
+  ) as Dimension[];
+  // One reserved controlling citation per decided dimension, independent of floor cap.
   const citations = floor.citations.slice(0, POLICY_CITATION_LIMIT - dimensions.length);
   for (const dimension of dimensions) {
     const question = POLICY_QUESTIONS[dimension];
@@ -215,7 +210,20 @@ export async function assessPolicy(
         admitted.get(sourceId)?.get(line)?.includes(quote)
       ) ?? false;
     const accepted = verdict?.status === 'accepted' && literal && verdict.citations.length > 0;
-    const value = accepted && verdict ? verdict.value : question.escalateValue;
+    // For AI-silent policy, an escalated ownership answer keeps a restrictive
+    // floor: `unclear` would let an accepted answer on the other dimension pass
+    // the gate (#1268). The floor cannot tell "not required" from "required", so
+    // such a project is asked first rather than guessed.
+    const keepsFloor =
+      floor.ai === 'silent' &&
+      ((dimension === 'assignment' && floor.assignment === 'required') ||
+        (dimension === 'directPr' && floor.directPr === 'discussion_first'));
+    const value =
+      accepted && verdict
+        ? verdict.value
+        : keepsFloor
+          ? floor[dimension as 'assignment' | 'directPr']
+          : question.escalateValue;
     const fullCitations = canonicalPolicyDecisionCitations(
       accepted && verdict ? verdict.citations : []
     );
