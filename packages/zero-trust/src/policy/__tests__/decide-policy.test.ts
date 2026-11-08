@@ -469,16 +469,64 @@ describe('typed policy assessment', () => {
       model: deps.provider.model,
     });
   });
-  it('records zero model effects for silence with a positive topical control', async () => {
+  it('decides only ownership for silence, never AI permission (#1268)', async () => {
     const deps = fake(permissive);
     const before = deps.budget.ledger.snapshot();
-    expect((await assessPolicy([file('Please add tests.')], deps)).ai).toBe('silent');
-    expect(deps.request.mock.calls).toEqual([]);
-    expect(deps.complete.mock.calls).toEqual([]);
-    expect(deps.budget.ledger.snapshot()).toEqual(before);
-    expect((await assessPolicy([file('AI is welcome.')], deps)).ai).toBe('welcomed');
-    expect(deps.complete.mock.calls.length).toBeGreaterThan(0);
+    const silent = await assessPolicy([file('Please add tests.')], deps);
+    expect(silent.ai).toBe('silent');
+    const asked = new Set(deps.request.mock.calls.map(([q]) => q.id));
+    expect([...asked].sort()).toEqual(['policy-assignment', 'policy-direct-pr']);
+    expect(Object.keys(silent.decisions ?? {}).sort()).toEqual(['assignment', 'directPr']);
+    expect(silent).toMatchObject({
+      draftRequired: false,
+      receiptBlockAllowed: true,
+      baselineFailuresPermitted: false,
+    });
     expect(deps.budget.ledger.snapshot()).not.toEqual(before);
+    expect((await assessPolicy([file('AI is welcome.')], deps)).ai).toBe('welcomed');
+    expect(deps.request.mock.calls.some(([q]) => q.id === 'policy-ai')).toBe(true);
+  });
+  it('resolves direct-PR permission for AI-silent fork-and-PR prose (#1268)', async () => {
+    const prose = [
+      '# Contributing',
+      'The first step is to fork the repository on GitHub.',
+      'Then open a pull request into main.',
+    ].join('\n');
+    const a = await assessPolicy(
+      [file(prose)],
+      fake((q, inputs) =>
+        q.id === 'policy-direct-pr'
+          ? {
+              value: 'welcomed',
+              citations: [
+                { sourceId: 'CONTRIBUTING.md', line: 3, quote: inputs[0].text.split('\n')[2] },
+              ],
+            }
+          : { value: 'unclear', citations: [] }
+      )
+    );
+    expect(a).toMatchObject({ ai: 'silent', assignment: 'unclear', directPr: 'welcomed' });
+    expect(a.decisions?.directPr?.status).toBe('accepted');
+  });
+  it('keeps a discussion-first floor for AI-silent policy against a permissive model', async () => {
+    const a = await assessPolicy(
+      [file('Please open an issue and discuss it before opening a pull request.')],
+      fake(permissive)
+    );
+    expect(a.ai).toBe('silent');
+    expect(a.directPr).not.toBe('welcomed');
+  });
+  it('returns the floor with reason budget for AI-silent policy on an exhausted session', async () => {
+    const deps = fake(permissive);
+    exhaust(deps, 'money');
+    const a = await assessPolicy([file('Then open a pull request into main.')], deps);
+    expect(a).toMatchObject({
+      ai: 'silent',
+      assignment: 'unclear',
+      directPr: 'unclear',
+      reason: 'budget',
+    });
+    expect(deps.complete.mock.calls).toEqual([]);
   });
   it.each([
     'AI is banned.\nAI is welcome.',

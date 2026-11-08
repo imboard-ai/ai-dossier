@@ -1962,7 +1962,8 @@ recognize restrictions. Only-restrictive AI units yield the strictest kind:
 are fine. Any other topical unit makes its dimension `unclear` (even a welcome).
 Assignment/direct-PR dimensions use the analogous restrictive/unclear rule. No AI
 topic yields `silent`; assignment silence remains unclear because the legacy
-exception requires `directPr=welcomed`, which the floor cannot produce. Booleans
+exception requires `directPr=welcomed`, which the floor cannot produce (`assessPolicy`
+decides it from the prose, even for an AI-silent policy). Booleans
 need no prose interpretation: draft topic ⇒ true, template topic ⇒ receipt false,
 baseline permission ⇒ always false. With no draft/template topics their defaults
 are false/true. `unknown` is blocked; `unclear` needs a decision, not necessarily a
@@ -2005,7 +2006,11 @@ assessment API for gate/freshness consumers. `classifyPolicy` remains offline an
 floor-only. Files are validated and detached before any await; admitted Markdown
 regions are passed as data under their original path `sourceId`, with excluded
 lines blank to retain original line coordinates. Inputs are sorted by path.
-AI silence returns the floor without provider calls or budget effects.
+AI silence is never a paid permission inference: `ai` stays `silent` and the draft,
+receipt and baseline dimensions keep their floors without provider calls. Only the
+assignment and direct-PR questions are decided for a silent policy, since ownership is
+ordinary contribution-flow prose ("fork, then open a pull request into main") that the
+floor cannot resolve on its own; their floors and contradictions still bind (#1268).
 
 `POLICY_QUESTIONS` contains frozen version-1 questions for all six dimensions.
 AI strictness is `banned > requires_approval > disclosure_required > welcomed`;
@@ -2043,7 +2048,7 @@ deterministic floor values and display citations for every dimension, with
 `reason: 'ledger'`. Retained decision records are marked escalated with that reason
 and the floor value, while validated earlier citations remain audit evidence.
 The reason and refused verdict metadata are bound in `policyDigest`, distinguishing
-this fallback from a decided assessment. Silent inputs still make no model calls.
+this fallback from a decided assessment. Silent inputs make model calls only for assignment and direct PR.
 
 Accepted answers require at least one citation and literal source spans in admitted
 lines, enforced by the shared decision's `citationMode: 'verbatim'` on both fresh

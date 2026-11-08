@@ -433,6 +433,10 @@ strict confidence thresholds) classify the prose, and a deterministic floor can 
 answer stricter. Any disagreement, failure or uncertainty becomes a hand-off, never a pass.
 
 - An explicit ban on LLM contributions ends the run as `blocked`, citing the rule.
+- A project that does not mention AI at all is treated as silent: silence is never read as
+  permission and costs no model call, but the assignment and direct pull request questions are
+  still decided from the prose, so a guide that simply says "fork, then open a pull request" can
+  let the run continue.
 - If the project welcomes direct pull requests on unassigned issues, the run continues without
   any comment.
 - If the project wants assignment or discussion first, the run prepares **one** short engagement
