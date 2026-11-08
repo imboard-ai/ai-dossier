@@ -210,7 +210,20 @@ export async function assessPolicy(
         admitted.get(sourceId)?.get(line)?.includes(quote)
       ) ?? false;
     const accepted = verdict?.status === 'accepted' && literal && verdict.citations.length > 0;
-    const value = accepted && verdict ? verdict.value : question.escalateValue;
+    // For AI-silent policy, an escalated ownership answer keeps a restrictive
+    // floor: `unclear` would let an accepted answer on the other dimension pass
+    // the gate (#1268). The floor cannot tell "not required" from "required", so
+    // such a project is asked first rather than guessed.
+    const keepsFloor =
+      floor.ai === 'silent' &&
+      ((dimension === 'assignment' && floor.assignment === 'required') ||
+        (dimension === 'directPr' && floor.directPr === 'discussion_first'));
+    const value =
+      accepted && verdict
+        ? verdict.value
+        : keepsFloor
+          ? floor[dimension as 'assignment' | 'directPr']
+          : question.escalateValue;
     const fullCitations = canonicalPolicyDecisionCitations(
       accepted && verdict ? verdict.citations : []
     );

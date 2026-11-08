@@ -2010,7 +2010,10 @@ AI silence is never a paid permission inference: `ai` stays `silent` and the dra
 receipt and baseline dimensions keep their floors without provider calls. Only the
 assignment and direct-PR questions are decided for a silent policy, since ownership is
 ordinary contribution-flow prose ("fork, then open a pull request into main") that the
-floor cannot resolve on its own; their floors and contradictions still bind (#1268).
+floor cannot resolve on its own; their floors and contradictions still bind (#1268). For a
+silent policy an escalated ownership answer keeps a restrictive floor (`required`,
+`discussion_first`) instead of `unclear`, because the floor reads "not required" and "required"
+alike and `unclear` beside an accepted answer on the other dimension would pass the gate.
 
 `POLICY_QUESTIONS` contains frozen version-1 questions for all six dimensions.
 AI strictness is `banned > requires_approval > disclosure_required > welcomed`;

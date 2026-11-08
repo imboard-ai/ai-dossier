@@ -17,6 +17,7 @@ import {
 } from '../classify';
 import { assessPolicy, POLICY_QUESTIONS } from '../decide-policy';
 import type { PolicyFile } from '../discover';
+import { policyGate } from '../gate';
 
 const directories: string[] = [];
 afterEach(() => {
@@ -103,8 +104,12 @@ function noWeaker(a: PolicyAssessment, floor: PolicyAssessment, files: readonly 
   };
   if (floor.ai === 'silent') expect(a.ai).toBe('silent');
   else if (floor.ai !== 'unclear') expect(rank[a.ai]).toBeGreaterThanOrEqual(rank[floor.ai]);
-  if (floor.assignment === 'required') expect(a.assignment).not.toBe('not_required');
-  if (floor.directPr === 'discussion_first') expect(a.directPr).not.toBe('welcomed');
+  // AI-silent restrictive ownership floors bind exactly (#1268); otherwise an
+  // escalation may still become unclear, as before.
+  const bound = (value: string) => (floor.ai === 'silent' ? [value] : [value, 'unclear']);
+  if (floor.assignment === 'required') expect(bound('required')).toContain(a.assignment);
+  if (floor.directPr === 'discussion_first')
+    expect(bound('discussion_first')).toContain(a.directPr);
   if (floor.draftRequired) expect(a.draftRequired).toBe(true);
   if (!floor.receiptBlockAllowed) expect(a.receiptBlockAllowed).toBe(false);
   if (!floor.baselineFailuresPermitted) expect(a.baselineFailuresPermitted).toBe(false);
@@ -340,7 +345,12 @@ describe('typed policy assessment', () => {
     expect(a).toMatchObject({ assignment: 'unclear', directPr: 'unclear' });
     const deps = fake(permissive);
     const silent = await assessPolicy([file(text.replace('AI is welcome.\n', ''))], deps);
-    expect(silent).toMatchObject({ ai: 'silent', assignment: 'unclear', directPr: 'unclear' });
+    expect(silent).toMatchObject({
+      ai: 'silent',
+      assignment: 'required',
+      directPr: 'discussion_first',
+    });
+    expect(policyGate(silent, false).kind).not.toBe('proceed');
     expect(deps.request.mock.calls).toEqual([]);
     expect(deps.complete.mock.calls).toEqual([]);
   });
@@ -482,6 +492,15 @@ describe('typed policy assessment', () => {
       receiptBlockAllowed: true,
       baselineFailuresPermitted: false,
     });
+    const topical = await assessPolicy(
+      [file('Open pull requests as drafts.\nFollow the pull request template exactly.')],
+      fake(permissive)
+    );
+    expect(topical).toMatchObject({
+      ai: 'silent',
+      draftRequired: true,
+      receiptBlockAllowed: false,
+    });
     expect(deps.budget.ledger.snapshot()).not.toEqual(before);
     expect((await assessPolicy([file('AI is welcome.')], deps)).ai).toBe('welcomed');
     expect(deps.request.mock.calls.some(([q]) => q.id === 'policy-ai')).toBe(true);
@@ -507,6 +526,35 @@ describe('typed policy assessment', () => {
     );
     expect(a).toMatchObject({ ai: 'silent', assignment: 'unclear', directPr: 'welcomed' });
     expect(a.decisions?.directPr?.status).toBe('accepted');
+  });
+  it.each([
+    [
+      'assignment',
+      'You must be assigned to an issue before working on it.\nPull requests are welcome.',
+      { assignment: 'required' },
+    ],
+    [
+      'discussion',
+      'Please discuss changes in an issue before opening a pull request.\nNo assignment is needed.',
+      { directPr: 'discussion_first' },
+    ],
+  ] as const)('keeps an escalated %s restriction binding at the gate (#1268)', async (_n, prose, kept) => {
+    {
+      const text = `# Contributing\n${prose}`;
+      const a = await assessPolicy(
+        [file(text)],
+        fake((q, inputs) => {
+          const lines = inputs[0].text.split('\n');
+          const index = lines.findIndex((l) => /welcome|needed/u.test(l));
+          return {
+            value: q.kind === 'boolean' ? true : q.options[0],
+            citations: [{ sourceId: 'CONTRIBUTING.md', line: index + 1, quote: lines[index] }],
+          };
+        })
+      );
+      expect(a).toMatchObject(kept);
+      expect(policyGate(a, false).kind).not.toBe('proceed');
+    }
   });
   it('keeps a discussion-first floor for AI-silent policy against a permissive model', async () => {
     const a = await assessPolicy(
