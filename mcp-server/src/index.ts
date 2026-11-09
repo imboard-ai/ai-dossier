@@ -54,7 +54,7 @@ const VerifyGraphSchema = z.object({
 const StartJourneySchema = z.object({ graph_id: z.string(), dry_run: z.boolean().optional() });
 const StepCompleteSchema = z.object({
   journey_id: z.string(),
-  outputs: z.record(z.unknown()).optional(),
+  outputs: z.record(z.string(), z.unknown()).optional(),
   status: z.enum(['completed', 'failed']),
 });
 const GetJourneyStatusSchema = z.object({ journey_id: z.string() });
