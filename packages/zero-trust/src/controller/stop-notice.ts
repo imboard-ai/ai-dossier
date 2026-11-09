@@ -37,6 +37,28 @@ export function provisioningNotice(
   };
 }
 
+/** The proxy endpoints file does not declare the selected ecosystem's mirror (#1276). */
+export function proxyEcosystemNotice(
+  selected: 'node' | 'python'
+): Omit<StopNotice, 'historyLength'> {
+  const mirror = selected === 'node' ? 'npm' : 'pypi';
+  return {
+    state: 'paused_user',
+    reason: 'proxy_ecosystem_mismatch',
+    nextPermittedAction: `proxy_ecosystem_mismatch: this run installs the ${selected} side, but the run's proxy endpoints file does not declare that mirror. Set "target" to the ${mirror} mirror zt-proxy up printed and "targetEcosystem": "${selected}" in the endpoints file, then resume explicitly. No VM started and nothing was published.`,
+  };
+}
+
+/** A mixed npm + Python root with no reliable choice of side (#1276). */
+export function ecosystemAmbiguousNotice(): Omit<StopNotice, 'historyLength'> {
+  return {
+    state: 'paused_user',
+    reason: 'ecosystem_ambiguous',
+    nextPermittedAction:
+      'ecosystem_ambiguous: the repository root holds both an npm and a Python project, and the issue does not name source paths on only one side, so no ecosystem was chosen. No VM started and nothing was published. Choose the side the fix belongs to with resume --ecosystem python|node (only that side is installed and tested locally; the pull request says so), or contribute manually.',
+  };
+}
+
 const REVISION_REFRESH_ACTIONS = Object.freeze({
   unavailable:
     'Revision feedback was not admitted, and GitHub could not be read while checking for newer maintainer feedback; nothing was recorded. Run resume --revise again later, or cancel the run.',

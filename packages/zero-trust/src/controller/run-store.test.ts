@@ -439,3 +439,47 @@ describe('RunStore', () => {
     if (fault === 'upstream-fsync') expect(recovered.upstreamRepositoryId).toBe(123);
   });
 });
+
+describe('ecosystem user change (#1276)', () => {
+  const choice = { ecosystem: 'python', operator: 'contributor', sourceDigest: 'a'.repeat(64) };
+  function pausedFrom(state: 'planning' | 'implementing') {
+    const h = rig();
+    let run = transitionRun(h.store.run, ReasonCode.GatePassed, LATER);
+    if (state === 'implementing') run = transitionRun(run, ReasonCode.PlanApproved, LATER);
+    h.store.persistRun(run);
+    h.store.persistRun(transitionRun(h.store.run, ReasonCode.UserPaused, LATER));
+    return h;
+  }
+
+  it('journals a normalized choice while paused from planning and replays it', () => {
+    const h = pausedFrom('planning');
+    h.store.recordUserChange('ecosystem', choice, LATER);
+    const id = h.store.runId;
+    h.store.close();
+    handles.splice(handles.indexOf(h.store), 1);
+    const reopened = open(h.root, id);
+    expect(reopened.userChanges).toEqual([
+      expect.objectContaining({ kind: 'ecosystem', value: choice }),
+    ]);
+  });
+
+  it.each([
+    ['another operator', { ...choice, operator: 'someone-else' }],
+    ['an unknown ecosystem', { ...choice, ecosystem: 'ruby' }],
+    ['a malformed digest', { ...choice, sourceDigest: 'xyz' }],
+    ['an extra field', { ...choice, note: 'why' }],
+    [
+      'non-normalized key order',
+      { sourceDigest: choice.sourceDigest, operator: 'contributor', ecosystem: 'python' },
+    ],
+  ])('refuses %s', (_label, value) => {
+    const h = pausedFrom('planning');
+    expect(() => h.store.recordUserChange('ecosystem', value, LATER)).toThrow(RunStoreError);
+    expect(h.store.userChanges).toEqual([]);
+  });
+
+  it('refuses a choice outside a pause from planning', () => {
+    const h = pausedFrom('implementing');
+    expect(() => h.store.recordUserChange('ecosystem', choice, LATER)).toThrow(RunStoreError);
+  });
+});

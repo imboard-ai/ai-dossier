@@ -12,6 +12,8 @@ import {
 import { createCandidate, reconstructCandidate } from '../canonical/reconstruct';
 import { loadHeldSource, sourcePackStore } from '../canonical/source-store';
 import { TrustedGit } from '../canonical/trusted-git';
+import { isEcosystem } from '../ecosystem/detect';
+import { type OperatorEcosystem, validateOperatorEcosystem } from '../ecosystem/operator';
 import { Journal } from '../journal';
 import { assertModelKeyEnv, readModelKey } from '../model/transport';
 import type { PolicyAssessment } from '../policy/classify';
@@ -32,6 +34,7 @@ import type { RunStore } from './run-store';
 import {
   type Candidate,
   candidateMessage,
+  type EcosystemHandoff,
   implementationPhaseKey,
   reviewDiff,
   StepArtifacts,
@@ -50,6 +53,8 @@ export class UserEditError extends Error {
       | 'invalid_user_edit'
       | 'policy_not_at_gate'
       | 'invalid_policy_decision'
+      | 'ecosystem_not_at_handoff'
+      | 'invalid_ecosystem'
   ) {
     super(`User change refused (${code})`);
   }
@@ -387,6 +392,48 @@ export function changePolicy(
   }
   store.recordUserChange('policy', policy, now.toISOString());
   return policy;
+}
+/** Journal the contributor's choice of side after an `ecosystem_ambiguous` hand-off
+ * (#1276). It binds to the source manifest digest that hand-off retained, so it never
+ * applies to different source; acquisition applies it on the next resume. */
+export function changeEcosystem(
+  store: RunStore,
+  run: RunRecord,
+  request: { readonly ecosystem: string },
+  now = new Date()
+): OperatorEcosystem {
+  if (!isEcosystem(request.ecosystem)) throw new UserEditError('invalid_ecosystem');
+  paused(store, run);
+  if (run.history.at(-1)?.from !== 'planning') throw new UserEditError('ecosystem_not_at_handoff');
+  const journal = new Journal(path.join(store.storeDirectory('control'), 'steps'));
+  let held: Partial<EcosystemHandoff> | null;
+  try {
+    held =
+      new StepArtifacts(journal, run.runId, sourcePackStore(store)).get<EcosystemHandoff>(
+        'ecosystem_handoff'
+      ) ?? null;
+  } finally {
+    journal.close();
+  }
+  if (
+    held?.reason !== 'ecosystem_ambiguous' ||
+    typeof held.sourceDigest !== 'string' ||
+    !Array.isArray(held.ecosystems)
+  )
+    throw new UserEditError('ecosystem_not_at_handoff');
+  if (!held.ecosystems.includes(request.ecosystem)) throw new UserEditError('invalid_ecosystem');
+  let choice: OperatorEcosystem;
+  try {
+    choice = validateOperatorEcosystem({
+      ecosystem: request.ecosystem,
+      operator: run.contributor,
+      sourceDigest: held.sourceDigest,
+    });
+  } catch {
+    throw new UserEditError('invalid_ecosystem');
+  }
+  store.recordUserChange('ecosystem', choice, now.toISOString());
+  return choice;
 }
 export function changeIdentity(_store: RunStore, _run: RunRecord, _identity: unknown): never {
   throw new UserEditError('identity_change_requires_new_run');
