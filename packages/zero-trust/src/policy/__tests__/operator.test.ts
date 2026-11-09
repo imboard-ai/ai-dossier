@@ -3,6 +3,7 @@ import type { PolicyAssessment } from '../classify';
 import {
   applyOperatorPolicy,
   assessmentInputDigest,
+  mergeOperatorPolicies,
   type OperatorPolicy,
   parseOperatorPolicy,
   validateOperatorPolicy,
@@ -62,6 +63,8 @@ describe('validateOperatorPolicy', () => {
     ['bad login', { ...policy({ ai: 'welcomed' }), operator: '-bad' }],
     ['extra key', { ...policy({ ai: 'welcomed' }), applied: [] }],
     ['non-string value', { ...policy({}), decisions: { ai: true } }],
+    ['smuggled pair', { ...policy({}), decisions: { ai: 'welcomed,directPr=welcomed' } }],
+    ['unknown dimension', { ...policy({}), decisions: { draftRequired: 'welcomed' } }],
   ])('refuses %s', (_name, value) => {
     expect(() => validateOperatorPolicy(value)).toThrow();
   });
@@ -111,5 +114,28 @@ describe('assessmentInputDigest', () => {
         base({ decisions: { ai: decision(DIGEST), directPr: decision('b'.repeat(64)) } })
       )
     ).toBeUndefined();
+  });
+});
+
+describe('mergeOperatorPolicies', () => {
+  const other = 'b'.repeat(64);
+  it('merges answers for the same input, later answers winning per dimension', () => {
+    const merged = mergeOperatorPolicies(
+      [
+        policy({ ai: 'welcomed', assignment: 'required' }),
+        { ...policy({ assignment: 'not_required' }), note: 'second', operator: 'other' },
+        { ...policy({ directPr: 'welcomed' }), inputDigest: other },
+      ],
+      DIGEST
+    );
+    expect(merged).toEqual({
+      decisions: { ai: 'welcomed', assignment: 'not_required' },
+      note: 'CONTRIBUTING.md:58 invites coding agents | second',
+      operator: 'other',
+      inputDigest: DIGEST,
+    });
+  });
+  it('is undefined when nothing was recorded for this input', () => {
+    expect(mergeOperatorPolicies([policy({ ai: 'welcomed' })], 'c'.repeat(64))).toBeUndefined();
   });
 });

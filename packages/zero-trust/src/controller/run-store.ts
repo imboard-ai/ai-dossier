@@ -121,11 +121,18 @@ function restoreUserChange(
     // An operator policy decision answers a gate hand-off, so it is only valid while
     // the pause interrupted gating.
     if (run.history.at(-1)?.from !== 'gating') fail('invalid_store');
+    let policy: ReturnType<typeof validateOperatorPolicy> | undefined;
     try {
-      validateOperatorPolicy(raw.value);
+      policy = validateOperatorPolicy(raw.value);
     } catch {
       fail('invalid_store');
     }
+    // Replay keeps raw bytes, so they must already be the normalized record.
+    if (
+      JSON.stringify(policy) !== JSON.stringify(raw.value) ||
+      policy?.operator !== run.contributor
+    )
+      fail('invalid_store');
   } else if (!['implementing', 'verifying'].includes(run.history.at(-1)?.from ?? ''))
     fail('invalid_store');
   if (raw.kind === 'source') {

@@ -471,10 +471,14 @@ node scripts/zt-run.mjs resume --root <state-dir>/runs --run <id> \
 `--policy` takes comma-separated `dimension=value` pairs: `ai=welcomed|disclosure_required|requires_approval`,
 `assignment=required|not_required`, `directPr=welcomed|discussion_first`. `--policy-note` is
 required; cite the file and line you relied on. The decision is journaled with your login and
-bound to the policy text that was assessed. It only replaces dimensions the gate left `unclear`:
-it never overrides a ban, and never changes a reading the gate already settled. If the policy
-files change before the gate runs again, the decision no longer applies and the run hands off
-with `operator_policy_stale`. Status shows the decision under `policyGate.operatorPolicy`,
+bound to the policy text that was assessed. It only replaces dimensions the gate left `unclear`,
+and an answer to a dimension the gate already settled is refused. That includes AI readings the
+gate marked unclear because a line mentioned AI next to a negation (a possible ban): you decide
+whether that line is really a ban. A definite `banned` reading can never be overridden. Answers
+recorded against the same policy text add up, so you can answer AI first and ownership later. If
+the policy files change before the gate runs again, earlier answers no longer apply: the gate
+decides without them and, if it still hands off, adds `operator_policy_stale` so you can answer
+again. Status shows the decision under `policyGate.operatorPolicy`,
 including which dimensions it changed. The rest of the gate still applies: for example
 `assignment=required` still waits for a maintainer to assign you.
 

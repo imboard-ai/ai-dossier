@@ -352,6 +352,14 @@ export function changePolicy(
     throw new UserEditError('policy_not_at_gate');
   const inputDigest = assessmentInputDigest(assessed.assessment);
   if (!inputDigest) throw new UserEditError('policy_not_at_gate');
+  // Each answer must resolve something the gate actually left unclear.
+  const unclear = assessed.assessment;
+  if (
+    Object.keys(request.decisions).some(
+      (dimension) => unclear[dimension as keyof OperatorPolicyDecisions] !== 'unclear'
+    )
+  )
+    throw new UserEditError('invalid_policy_decision');
   let policy: OperatorPolicy;
   try {
     policy = validateOperatorPolicy({

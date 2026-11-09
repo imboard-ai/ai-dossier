@@ -150,6 +150,10 @@ async function answeredHandoff() {
   expect(() => changePolicy(store, store.run, { decisions: answer.decisions, note: ' ' })).toThrow(
     'invalid_policy_decision'
   );
+  // AI was settled by the gate: an answer must only touch what it left unclear.
+  expect(() =>
+    changePolicy(store, store.run, { decisions: { ai: 'welcomed' }, note: answer.note })
+  ).toThrow('invalid_policy_decision');
   const policy = changePolicy(store, store.run, answer);
   expect(policy).toMatchObject({ operator: h.config.contributor, decisions: answer.decisions });
   expect(store.userChanges.at(-1)).toMatchObject({ kind: 'policy', value: policy });
@@ -198,12 +202,40 @@ it('retires an operator answer when the policy text changed before the gate re-r
   const resumed = (await h.authorize(reopened.resume(run.runId), reopened)) as RunRecord;
   expect(resumed.state).toBe('gating');
   const a = h.artifacts(run.runId);
-  expect(a.get('gate_assessment')).toMatchObject({
+  const stale = a.get<{ reasons: string[]; operatorPolicy: unknown }>('gate_assessment');
+  expect(stale).toMatchObject({
     outcome: 'hand_off',
-    reasons: ['operator_policy_stale'],
     operatorPolicy: { ...policy, applied: [], stale: true },
   });
-  expect(a.get('stop_notice')).toMatchObject({ reason: 'operator_policy_stale' });
+  expect(stale.reasons).toContain('ownership_unclear');
+  expect(stale.reasons.at(-1)).toBe('operator_policy_stale');
+  expect(a.get<{ reason: string }>('stop_notice').reason).toContain('operator_policy_stale');
   a.close();
-  noShipping();
-}, 60000);
+
+  // Not a dead end: a fresh answer against the new text is accepted and proceeds.
+  const runs = path.join(h.config.executionProfile.stateDir, 'runs');
+  const observer = RunStore.open(runs, run.runId, { readOnly: true, observe: true });
+  requestControl(observer, { kind: 'pause', reason: 'Record policy reading' }, new Date());
+  observer.close();
+  const again = h.reopen();
+  expect(((await h.authorize(again.resume(run.runId), again)) as RunRecord).state).toBe(
+    'paused_user'
+  );
+  const store = RunStore.open(runs, run.runId);
+  const fresh = changePolicy(store, store.run, {
+    decisions: { directPr: 'welcomed' },
+    note: 'CONTRIBUTING.md:1 says fork and open a pull request',
+  });
+  expect(fresh.inputDigest).not.toBe(policy.inputDigest);
+  store.close();
+  const last = h.reopen();
+  expect(((await h.authorize(last.resume(run.runId), last)) as RunRecord).state).toBe(
+    'awaiting_contributor'
+  );
+  const b = h.artifacts(run.runId);
+  expect(b.get('gate_assessment')).toMatchObject({
+    outcome: 'proceed',
+    operatorPolicy: { decisions: { directPr: 'welcomed' }, applied: ['directPr'], stale: false },
+  });
+  b.close();
+}, 90000);

@@ -42,6 +42,7 @@ import { checkInvitation, type InvitationEvidence } from '../policy/invitation';
 import {
   applyOperatorPolicy,
   assessmentInputDigest,
+  mergeOperatorPolicies,
   type OperatorPolicy,
 } from '../policy/operator';
 import { policyRegions } from '../policy/regions';
@@ -605,19 +606,22 @@ export function createSteps(
               },
               signal: c.signal,
             });
-      // A journaled operator answer replaces only `unclear` dimensions, and only for the
-      // policy input it was recorded against; a changed policy retires it (#1268).
-      const operator = c.store.userChanges.filter((change) => change.kind === 'policy').at(-1)
-        ?.value as OperatorPolicy | undefined;
-      const stale =
-        operator !== undefined &&
-        p.ai !== 'banned' &&
-        assessmentInputDigest(p) !== operator.inputDigest;
-      const answered = operator && !stale ? applyOperatorPolicy(p, operator) : undefined;
+      // Journaled operator answers replace only `unclear` dimensions, and only for the
+      // policy input they were recorded against (#1268). A changed policy retires them:
+      // the gate decides without them and, if it still hands off, asks again.
+      const recorded = c.store.userChanges
+        .filter((change) => change.kind === 'policy')
+        .map((change) => change.value as OperatorPolicy);
+      const inputDigest = p.ai === 'banned' ? undefined : assessmentInputDigest(p);
+      const operator = inputDigest ? mergeOperatorPolicies(recorded, inputDigest) : undefined;
+      const stale = recorded.length > 0 && p.ai !== 'banned' && !operator;
+      const answered = operator ? applyOperatorPolicy(p, operator) : undefined;
       const assessment = answered?.assessment ?? p;
-      const decision = stale
-        ? ({ kind: 'hand_off', reasons: ['operator_policy_stale'] } as const)
-        : decideGate(assessment, e, c.run.contributor);
+      const gated = decideGate(assessment, e, c.run.contributor);
+      const decision =
+        stale && gated.kind === 'hand_off'
+          ? ({ kind: 'hand_off', reasons: [...gated.reasons, 'operator_policy_stale'] } as const)
+          : gated;
       assessed = {
         historyLength: c.run.history.length,
         sessionId: c.sessionId,
@@ -626,8 +630,10 @@ export function createSteps(
         outcome: decision.kind,
         reasons: 'reasons' in decision ? decision.reasons : [],
         ...(operator
-          ? { operatorPolicy: { ...operator, applied: answered?.applied ?? [], stale } }
-          : {}),
+          ? { operatorPolicy: { ...operator, applied: answered?.applied ?? [], stale: false } }
+          : stale
+            ? { operatorPolicy: { ...(recorded.at(-1) as OperatorPolicy), applied: [], stale } }
+            : {}),
       };
       artifacts(c).put('gate_assessment', assessed);
       if (
