@@ -748,7 +748,9 @@ telemetry service. Credentials and raw environments are never stored.
   node scripts/zt-run.mjs sweep --root <state-dir>/runs --apply   # deletes expired artifacts
   ```
 
-  Stop running controllers first. A swept run keeps its summary (pull request URL, verified and
+  Sweeping also deletes the run's retained copy of the repository source (git packs under
+  `artifacts/source-packs/`; storing source as packs is what lets large trees with big binary
+  assets run without hitting an artifact size limit). Stop running controllers first. A swept run keeps its summary (pull request URL, verified and
   observed commit SHAs, receipt digests, outcome and costs), but its snapshot is marked expired and
   can never be resumed; continuing that work means a new run. Runs in `blocked_cleanup` are never
   swept.

@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { localGit } from '../__tests__/local-git';
 import { BudgetLedger } from '../budget';
 import { acquireSource } from '../canonical/acquire';
+import { sourcePackDirectory, sourcePackStore } from '../canonical/source-store';
 import { Journal } from '../journal';
 import { ReasonCode as R, transitionRun } from '../state';
 import { validateRunConfig } from './config';
@@ -118,7 +119,7 @@ function rig(origin: 'implementing' | 'verifying' | 'shipping' | 'planning' = 'i
     { remoteUrlForTest: pathToFileURL(remote).href }
   );
   const j = new Journal(path.join(store.storeDirectory('control'), 'steps'));
-  const artifacts = new StepArtifacts(j, store.runId);
+  const artifacts = new StepArtifacts(j, store.runId, sourcePackStore(store));
   artifacts.put('source', { manifest: source.manifest, pack: source.pack.toString('base64') });
   artifacts.put('gate', { baseSha, policyDigest: 'a'.repeat(64) });
   j.close();
@@ -176,7 +177,7 @@ describe('trusted paused user mutations', () => {
     const h = rig();
     const previous = applyUserPatch(h.store, h.store.run, patch(), now);
     const j = new Journal(path.join(h.store.storeDirectory('control'), 'steps'));
-    const artifacts = new StepArtifacts(j, h.store.runId);
+    const artifacts = new StepArtifacts(j, h.store.runId, sourcePackStore(h.store));
     artifacts.put('candidate', previous);
     artifacts.put('applied_user_edit', 1);
     artifacts.put('implementation_attempt', { phaseKey: implementationPhaseKey(h.store.run) });
@@ -237,6 +238,40 @@ describe('trusted paused user mutations', () => {
     expect(reopened.validateEvidence().state).toBe('paused_user');
     const next = applyUserPatch(reopened, reopened.run, patch('file', 'fixed', 'second'), now);
     expect(next.record.candidateSha).not.toBe(candidate.record.candidateSha);
+  });
+  it('keeps the edited candidate source in verified git packs, refusing a tampered pack at its consumer (#1275)', () => {
+    const h = rig();
+    const before = fs.readdirSync(sourcePackDirectory(h.store));
+    const candidate = applyUserPatch(h.store, h.store.run, patch(), now);
+    const artifacts = h.store.storeDirectory('artifacts');
+    const record = fs.readdirSync(artifacts).find((name) => name.startsWith('user-change-'));
+    const stored = JSON.parse(fs.readFileSync(path.join(artifacts, String(record)), 'utf8'));
+    expect(stored.candidate.manifest.storage).toBe('git-packs-v1');
+    expect(JSON.stringify(stored)).not.toContain(candidate.manifest.entries[0].bytes);
+    // The edit's new blob went into one new pack beside the acquired source pack.
+    const added = fs
+      .readdirSync(sourcePackDirectory(h.store))
+      .filter((name) => !before.includes(name));
+    expect(added).toHaveLength(1);
+    expect(stored.candidate.manifest.packs.map((p: { sha256: string }) => p.sha256)).toEqual([
+      ...before,
+      ...added,
+    ]);
+    const file = path.join(sourcePackDirectory(h.store), added[0]);
+    const original = fs.readFileSync(file);
+    const id = h.store.runId;
+    h.store.close();
+    const tampered = Buffer.from(original);
+    tampered[tampered.length - 25] ^= 1;
+    fs.writeFileSync(file, tampered);
+    // Replay checks references only; the edit's consumer verifies the bytes and refuses.
+    const opened = RunStore.open(h.root, id);
+    expect(() => latestSourceEdit(opened)).toThrow('invalid_user_edit');
+    opened.close();
+    fs.writeFileSync(file, original);
+    const reopened = RunStore.open(h.root, id);
+    stores.push(reopened);
+    expect(latestSourceEdit(reopened)?.candidate).toEqual(candidate);
   });
   it.each([
     '../escape',

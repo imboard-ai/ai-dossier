@@ -2231,6 +2231,8 @@ permit fallback. Completed disk/permission failures and unknown diagnostics rema
 unavailable; raw diagnostic text is never returned.
 No path or byte normalization occurs. The manifest
 has the existing immutable `SourceManifest` shape. Both APIs are package exports.
+The controller persists both as git packs, never inline (see
+[Git-backed held source](#git-backed-held-source-1275)).
 Tests alone can pass `options.remoteUrlForTest`, a local `file:` URL accepted only
 when `process.env.VITEST` is set; only then is file transport permitted. Tests use no
 live network, and production must never set that option.
@@ -2262,7 +2264,9 @@ hide corrupt or divergent selected files.
   retained; only strictly older contributions qualify. `blocked_cleanup` never
   qualifies. `SweepPlan.contributions[].files` lists exclusively regular,
   single-link files below `artifacts/`, with relative paths, inode identities,
-  sizes, modification times and SHA-256 digests. Directories are kept.
+  sizes, modification times and SHA-256 digests. Directories are kept. These
+  include the run's held source packs (`artifacts/source-packs/<sha256>`), so
+  expiry deletes the retained copy of the repository source.
 - `applySweep(plan, fault?)` is the explicit destructive operation. It requires
   the unchanged original plan object issued in this process (serialized, cloned,
   forged or edited plans are refused). Replan after a process restart with the
@@ -2439,8 +2443,9 @@ verification metadata, PR/outcome, disclosure and policy citations. The exported
 summary omits the local sweep manifest and file identities. Missing verification
 is null, with `verifiedSha: null`; no absence can earn a verification claim. An
 independently observed outcome and its SHA remain available without verification.
-Config, environment, token journals, nonce stores, budget locks, raw logs and
-prepared body file paths are excluded. All output strings are scanned again.
+Config, environment, token journals, nonce stores, budget locks, raw logs,
+held source (manifests and `artifacts/source-packs`) and prepared body file
+paths are excluded. All output strings are scanned again.
 `EXPORT_SCHEMA` is the versioned public JSON Schema and the runtime validator's
 source of truth. `validateContributionExport(input)` rejects unknown fields,
 non-JSON values/accessors and bundles beyond the 1-MiB strict snapshot bound,
@@ -3265,7 +3270,7 @@ without following symlinks, directory enumeration is streamed in bounded batches
 reads are byte-bounded and identity/metadata changes
 around reads are rejected. The worker supervisor should freeze source before export.
 The snapshot contains copied, immutable base64 bytes, executable modes, directory
-entries and SHA-256 hashes. No shipping operation re-reads the mutable filesystem.
+entries and SHA-256 hashes (persisted as verified git packs; see Git-backed held source below). No shipping operation re-reads the mutable filesystem.
 Hard links are accepted as regular file bytes, never preserved as links.
 
 Default limits: 10 MiB/file, 100 MiB total, 10,000 entries, 64 path components.
@@ -3338,6 +3343,54 @@ Adversarial tests use real symlink/FIFO/socket/files, malformed raw baseline tre
 gitlinks, no-follow race injection, and executable malicious filter/hook sentinels
 with positive execution controls. Device rejection uses an actual `/dev/null` stat
 injected at the source lstat boundary so the test requires no mknod privileges.
+
+### Git-backed held source (#1275)
+
+The in-memory `SourceManifest` keeps inline base64 bytes, but the controller never persists
+them inline: a repository with a large tree would push one step artifact past its 96 MiB cap.
+Git already holds those bytes, so `canonical/source-store` persists source as git packs.
+`StepArtifacts` (`control/steps`) applies it to the `source` record (manifest and acquired
+pack), every `candidate` record and the `shipping` record (manifest and `basePack`);
+contributor edits (`artifacts/user-change-<digest>.json`) store their candidate the same way.
+A persisted manifest is `{ version, storage: 'git-packs-v1', packs, entries, totalBytes,
+digest }`: `packs` are `{ sha256, size }` references and each entry keeps `path`, `mode`,
+`gitOid` (`null` for directories), `sha256` and `size`, never bytes. A pack field becomes a
+`{ sha256, size }` reference. Record size therefore scales with the entry count, not with
+content size.
+
+- **Store.** Packs live in `artifacts/source-packs/<sha256>`, a private (0700) per-run
+  directory of 0600 single-link files. Names are digest-shaped only; no path comes from input.
+  The strictly verified acquired pack is written once and every base blob is referenced in
+  it. A candidate, shipping record or contributor edit resolves its blobs against the held
+  source's packs; only blobs absent there (agent writes, patch results) go into one new pack,
+  built by `hash-object` and `pack-objects` in a fresh `TrustedGit`. Each pack file is
+  fsynced and renamed into place (never replacing a name; interrupted temporary files are
+  removed on the next write), and the directory is fsynced, all **before** the record that
+  references it is published. An existing pack is reused only when it verifies exactly; a
+  mismatching one refuses the write.
+- **Verifying accessor.** Decoding is the only way bytes come back. Each referenced pack is
+  read through `SourcePackStore.read`: the directory and leaf are opened without following
+  symlinks, the leaf must be a private single-link regular file of exactly the recorded size,
+  and its SHA-256 is recomputed on **every** read. The packs are indexed in a fresh
+  `TrustedGit` repository (never a persisted repository or its config), blobs are read with
+  `cat-file --batch`, and each entry's size, git object id and SHA-256 are re-checked as
+  defense in depth over Git's SHA-1. Any mismatch throws `CanonicalError('invalid_manifest')`
+  (`invalid_step_artifact` / `invalid_store` at the record boundary). Decoding rebuilds
+  exactly the previous inline record, so every consumer (overlay, review diff, candidate
+  creation/reconstruction, evidence runner, agent loop, ecosystem detection, user patches,
+  drift, shipping) receives verified bytes, and `validateManifest` still recomputes the
+  manifest digest over them.
+- **Identity.** `manifestDigest` and candidate SHAs are unchanged for identical content: the
+  digest keeps its definition and is recomputed over the decoded bytes, never trusted from
+  the stored record.
+- **Compatibility.** Records written before #1275 (inline base64 manifest and pack) are read
+  unchanged. Replaying the step journal validates pack references structurally without
+  reading packs, so a store whose packs were swept still opens; only a consumer of the swept
+  source refuses.
+- **Retention and export.** Packs are ordinary `artifacts/` leaves: sweep inventories,
+  digests, lists and deletes them with the other artifacts, under the same quarantine,
+  crash-replay and inventory bounds. The portable export (`ztfc-export-v1`, at most 1 MiB)
+  never contained source and carries no packs.
 
 ## Controller-signed receipts
 

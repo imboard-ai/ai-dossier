@@ -14,6 +14,7 @@ import {
   removeTemps,
   VerifierFakeVm,
 } from '../../__tests__/verifier-fixture';
+import { sourcePackStore } from '../../canonical/source-store';
 import {
   CLIENT_ID,
   CLIENT_SECRET,
@@ -762,7 +763,7 @@ export function rig(options: RigOptions = {}) {
     const store = RunStore.open(path.join(root, 'runs'), runId);
     const dir = store.storeDirectory('artifacts');
     const j = new Journal(path.join(store.storeDirectory('control'), 'steps'));
-    const held = new StepArtifacts(j, runId);
+    const held = new StepArtifacts(j, runId, sourcePackStore(store));
     return {
       store,
       dir,

@@ -7,6 +7,7 @@ import { Ed25519Signer, type Signer } from '@ai-dossier/core';
 import { BudgetLedger, conservativeHoldObservation } from '../budget';
 import type { BudgetEstimate, BudgetObservation } from '../budget-types';
 import { resolveBase } from '../canonical/acquire';
+import { sourcePackStore } from '../canonical/source-store';
 import { assertDirectoryAncestors, readPrivate, replacePrivate } from '../durable-fs';
 import { AppCredentials, fetchGitHubHttp, fetchOAuthHttp } from '../github/app-auth';
 import { ForkCredentialBroker } from '../github/broker';
@@ -408,9 +409,11 @@ export async function stopStoredRun(
         tokenJournal.settleExpired(now().toISOString());
         const ledger = tokenJournal.state;
         if (![...ledger.tokens.values()].some((t) => UNRESOLVED.includes(t.status))) return;
-        const fork = new StepArtifacts(journal('control', 'steps'), runId).require<ForkReady>(
-          'fork'
-        );
+        const fork = new StepArtifacts(
+          journal('control', 'steps'),
+          runId,
+          sourcePackStore(store)
+        ).require<ForkReady>('fork');
         broker = new ForkCredentialBroker({
           store: tokens,
           fork,
@@ -674,7 +677,7 @@ export function createController(
   };
   const artifacts = (c: PhaseContext) => {
     activeContext = c;
-    heldArtifacts ??= new StepArtifacts(journal(c, 'steps'), c.run.runId);
+    heldArtifacts ??= new StepArtifacts(journal(c, 'steps'), c.run.runId, sourcePackStore(c.store));
     return heldArtifacts;
   };
   const localVm = (c?: PhaseContext): VmAdapter => {
@@ -1872,7 +1875,7 @@ export function createController(
       store.validateEvidence();
       const j = new Journal(path.join(store.storeDirectory('control'), 'steps'));
       try {
-        const held = new StepArtifacts(j, runId);
+        const held = new StepArtifacts(j, runId, sourcePackStore(store));
         held.put('authorization_required', null);
         authorizationRequired = false;
       } finally {

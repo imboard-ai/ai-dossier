@@ -1,4 +1,5 @@
 /** Trusted contributor commands. Repository/model input has no route to these APIs. */
+
 import fs from 'node:fs';
 import path from 'node:path';
 import {
@@ -9,6 +10,7 @@ import {
   validateSourcePath,
 } from '../canonical/export';
 import { createCandidate, reconstructCandidate } from '../canonical/reconstruct';
+import { loadHeldSource, sourcePackStore } from '../canonical/source-store';
 import { TrustedGit } from '../canonical/trusted-git';
 import { Journal } from '../journal';
 import { assertModelKeyEnv, readModelKey } from '../model/transport';
@@ -145,9 +147,17 @@ export function latestSourceEdit(store: RunStore): SourceEdit | undefined {
     if (typeof file !== 'string') throw new UserEditError('invalid_user_edit');
     validateSourcePath(file);
   }
-  const candidate = value.candidate as unknown as Candidate;
+  // Its candidate source is git-backed (#1275): every read re-verifies the held packs.
+  let candidate: Candidate;
+  try {
+    candidate = loadHeldSource(value.candidate, sourcePackStore(store), {
+      pack: null,
+    }) as unknown as Candidate;
+  } catch {
+    throw new UserEditError('invalid_user_edit');
+  }
   validateManifest(candidate.manifest);
-  return value as unknown as SourceEdit;
+  return { ...value, candidate } as unknown as SourceEdit;
 }
 export function sourceEditCount(store: RunStore): number {
   return store.userChanges.filter((c) => c.kind === 'source').length;
@@ -169,7 +179,7 @@ export function applyUserPatch(
   const files = validateUserPatch(bytes);
   const journal = new Journal(path.join(store.storeDirectory('control'), 'steps'));
   try {
-    const artifacts = new StepArtifacts(journal, run.runId);
+    const artifacts = new StepArtifacts(journal, run.runId, sourcePackStore(store));
     const source = artifacts.require<{ manifest: SourceManifest; pack: string }>('source');
     const base = validateManifest(source.manifest);
     const pack = Buffer.from(source.pack, 'base64');
@@ -276,7 +286,8 @@ export function applyUserPatch(
       {
         patchDigest: digest,
         files,
-        candidate,
+        // Its new blobs become a digest-named git pack beside the source's (#1275).
+        candidate: artifacts.storeCandidate(candidate),
         superseded,
         policyDigest: artifacts.require<{ policyDigest: string }>('gate').policyDigest,
         reviewDigest: sha256(diff),
@@ -338,7 +349,10 @@ export function changePolicy(
   type Assessed = { outcome?: unknown; reasons?: unknown; assessment?: PolicyAssessment };
   let assessed: Assessed | null;
   try {
-    assessed = new StepArtifacts(journal, run.runId).get<Assessed>('gate_assessment') ?? null;
+    assessed =
+      new StepArtifacts(journal, run.runId, sourcePackStore(store)).get<Assessed>(
+        'gate_assessment'
+      ) ?? null;
   } finally {
     journal.close();
   }
