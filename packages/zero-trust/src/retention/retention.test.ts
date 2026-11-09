@@ -6,8 +6,11 @@ import Ajv from 'ajv';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createFixtures, producerEvidence as evidence } from '../../fixtures/retention';
 import { BudgetLedger } from '../budget';
+import { createManifest, sha256 } from '../canonical/export';
+import { sourcePackDirectory, sourcePackStore } from '../canonical/source-store';
 import { logArtifact } from '../controller/evidence-runner';
 import { RunStore } from '../controller/run-store';
+import { StepArtifacts } from '../controller/steps';
 import { replacePrivate } from '../durable-fs';
 import { engagementBody } from '../github/handoff';
 import { HandoffDriver } from '../github/handoff-driver';
@@ -172,6 +175,47 @@ describe('retention acceptance criteria', () => {
     expect(plan.contributions).toEqual([]);
     applySweep(plan);
     expect(fs.existsSync(file)).toBe(true);
+  });
+  it('counts, digests and deletes held source packs; the expired store still opens and exports (#1275)', () => {
+    const r = rig();
+    const manifest = createManifest([
+      {
+        path: 'a.bin',
+        mode: '100644',
+        bytes: 'AAEC',
+        sha256: sha256(Buffer.from('AAEC', 'base64')),
+      },
+      { path: 'b.txt', mode: '100644', bytes: 'aGk=', sha256: sha256('hi') },
+    ]);
+    const steps = new Journal(path.join(r.store.storeDirectory('control'), 'steps'));
+    const held = new StepArtifacts(steps, r.runId, sourcePackStore(r.store));
+    held.put('candidate', { touched: [], manifest });
+    held.put('fork', { ready: true });
+    steps.close();
+    const blobs = sourcePackDirectory(r.store);
+    const names = fs.readdirSync(blobs).sort();
+    expect(names).toHaveLength(1);
+    r.close();
+    const plan = planSweep(r.root, NOW);
+    const planned = plan.contributions[0].files;
+    expect(planned.map((f) => f.path)).toEqual(names.map((n) => `artifacts/source-packs/${n}`));
+    for (const f of planned) expect(f.sha256).toBe(path.basename(f.path));
+    applySweep(plan);
+    expect(fs.readdirSync(blobs)).toEqual([]);
+    const store = r.open();
+    expect(readContributionSummary(store)?.sweep.files).toEqual(planned);
+    // Replay still validates the step journal; only consumers of the swept source refuse.
+    const j = new Journal(path.join(store.storeDirectory('control'), 'steps'));
+    try {
+      const reopened = new StepArtifacts(j, r.runId, sourcePackStore(store));
+      expect(reopened.get('fork')).toEqual({ ready: true });
+      expect(() => reopened.get('candidate')).toThrow('invalid_step_artifact');
+    } finally {
+      j.close();
+    }
+    const bundle = exportContribution(store, path.join(r.temp, 'export.json'));
+    expect(bundle.status.snapshotExpired).toBe(true);
+    expect(JSON.stringify(bundle)).not.toContain('source-packs');
   });
   it('empty expired artifacts still get a durable nonresumable summary', () => {
     const r = rig();

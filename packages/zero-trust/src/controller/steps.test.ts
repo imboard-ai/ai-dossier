@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { SourcePackStore } from '../canonical/source-store';
 import { Journal } from '../journal';
 import { StepArtifacts } from './steps';
 
@@ -12,7 +13,8 @@ function rig() {
   roots.push(root);
   const j = new Journal(root);
   journals.push(j);
-  return { root, j, artifacts: new StepArtifacts(j, 'run-fixture') };
+  const packs = new SourcePackStore(path.join(root, 'blobs'));
+  return { root, j, packs, artifacts: new StepArtifacts(j, 'run-fixture', packs) };
 }
 afterEach(() => {
   for (const j of journals.splice(0)) j.close();
@@ -25,13 +27,13 @@ describe('durable step artifacts', () => {
     h.artifacts.put('fixture', value);
     value.nested.value = 'changed';
     expect(h.artifacts.require('fixture')).toEqual({ nested: { value: 'original' } });
-    expect(new StepArtifacts(h.j, 'run-fixture').require('fixture')).toEqual({
+    expect(new StepArtifacts(h.j, 'run-fixture', h.packs).require('fixture')).toEqual({
       nested: { value: 'original' },
     });
     const row = h.j.read()[0] as { digest: string };
     fs.writeFileSync(path.join(h.root, `${row.digest}.json`), '{}');
     expect(() => h.artifacts.get('fixture')).toThrow('invalid_step_artifact');
-    expect(() => new StepArtifacts(h.j, 'run-fixture')).toThrow('invalid_step_artifact');
+    expect(() => new StepArtifacts(h.j, 'run-fixture', h.packs)).toThrow('invalid_step_artifact');
   });
   it('stores source artifacts larger than receipt JSON limits without embedding them in journal rows', () => {
     const h = rig();
@@ -51,7 +53,7 @@ describe('durable step artifacts', () => {
       version: 1,
       digest: 'a'.repeat(64),
     });
-    expect(() => new StepArtifacts(h.j, 'run-fixture')).toThrow('invalid_step_artifact');
+    expect(() => new StepArtifacts(h.j, 'run-fixture', h.packs)).toThrow('invalid_step_artifact');
   });
   it.each([
     [],
@@ -67,7 +69,7 @@ describe('durable step artifacts', () => {
   ])('refuses corrupt rows %j', (row) => {
     const h = rig();
     h.j.append(row);
-    expect(() => new StepArtifacts(h.j, 'run-fixture')).toThrow();
+    expect(() => new StepArtifacts(h.j, 'run-fixture', h.packs)).toThrow();
   });
   it('refuses symlinked or missing artifact bytes without falling back to a cache', () => {
     const h = rig();

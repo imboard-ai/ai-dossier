@@ -12,6 +12,14 @@ import {
   createCandidate,
   reconstructCandidate,
 } from '../canonical/reconstruct';
+import {
+  assertHeldSource,
+  type HeldSourceOptions,
+  heldPacks,
+  loadHeldSource,
+  type SourcePackStore,
+  storeHeldSource,
+} from '../canonical/source-store';
 import { dataDescriptors } from '../data-descriptors';
 import { createLlmDecisionProvider } from '../decision/providers/llm';
 import { publishPrivate, readPrivate } from '../durable-fs';
@@ -277,13 +285,24 @@ export interface StepServices {
   ) => Promise<RevisionRefresh>;
 }
 
+/** Records whose source bytes persist as git packs (`canonical/source-store`); `pack` names
+ * a base64 object pack field. Reads return the exact inline record. */
+const HELD_SOURCE: ReadonlyMap<string, HeldSourceOptions> = new Map<string, HeldSourceOptions>([
+  ['source', Object.freeze({ pack: 'pack' as const })],
+  ['candidate', Object.freeze({ pack: null })],
+  ['shipping', Object.freeze({ pack: 'basePack' as const })],
+  ['implementation_basis', Object.freeze({ pack: null, nested: 'candidate' as const })],
+]);
+
 /** Every completed artifact is write-ahead journaled with its exact bytes digest.
  * Replaying validates the complete log and each producer at its consumption boundary. */
 export class StepArtifacts {
   private readonly values = new Map<string, string>();
+  /** `packs` holds the digest-named git packs of held source records (#1275). */
   constructor(
     private readonly journal: Journal,
-    readonly runId: string
+    readonly runId: string,
+    private readonly packs: SourcePackStore
   ) {
     for (const raw of journal.read()) {
       if (!raw || typeof raw !== 'object' || Array.isArray(raw))
@@ -302,10 +321,30 @@ export class StepArtifacts {
       )
         throw new Error('invalid_step_artifact');
       this.values.set(row.key, row.digest);
-      this.get(row.key);
+      // Replay validates each record without reading its packs: an expired snapshot has
+      // swept them, and only a consumer of the held source needs its bytes.
+      const value = this.stored(row.key);
+      const held = HELD_SOURCE.get(row.key);
+      if (held) {
+        try {
+          assertHeldSource(value, held);
+        } catch {
+          throw new Error('invalid_step_artifact');
+        }
+      }
     }
   }
   get<T>(key: string): T | undefined {
+    const value = this.stored(key);
+    const held = HELD_SOURCE.get(key);
+    if (value === undefined || !held) return value as T | undefined;
+    try {
+      return loadHeldSource(value, this.packs, held) as T;
+    } catch {
+      throw new Error('invalid_step_artifact');
+    }
+  }
+  private stored(key: string): unknown {
     const digest = this.values.get(key);
     if (!digest) return undefined;
     const bytes = readPrivate(
@@ -317,7 +356,31 @@ export class StepArtifacts {
     if (sha256(bytes) !== digest) throw new Error('invalid_step_artifact');
     const value: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
     assertSecretFree(value);
-    return value as T;
+    return value;
+  }
+  /** Pack files of the held source and latest candidate, so later records reference their
+   * blobs instead of packing them again. */
+  private sourcePacks() {
+    return [
+      ...heldPacks(this.stored('source'), HELD_SOURCE.get('source') as HeldSourceOptions),
+      ...heldPacks(this.stored('candidate'), HELD_SOURCE.get('candidate') as HeldSourceOptions),
+    ];
+  }
+  /** The persisted form of a candidate held outside this journal (a contributor edit),
+   * resolving its blobs against the held source's packs. Its new blobs are durable first. */
+  storeCandidate(candidate: unknown): unknown {
+    assertSecretFree(candidate);
+    try {
+      return storeHeldSource(
+        structuredClone(candidate),
+        this.packs,
+        HELD_SOURCE.get('candidate') as HeldSourceOptions,
+        this.sourcePacks()
+      );
+    } catch (error) {
+      if (error instanceof CanonicalError) throw new Error('invalid_step_artifact');
+      throw error;
+    }
   }
   require<T>(key: string): T {
     const value = this.get<T>(key);
@@ -350,7 +413,18 @@ export class StepArtifacts {
           .map((k) => [k, copy(descriptors[k].value, depth + 1)])
       );
     };
-    const bytes = Buffer.from(JSON.stringify(copy(value, 0)));
+    let detached = copy(value, 0);
+    const held = HELD_SOURCE.get(key);
+    // Packs are durable before the record that references them is published.
+    if (held) {
+      try {
+        detached = storeHeldSource(detached, this.packs, held, this.sourcePacks());
+      } catch (error) {
+        if (error instanceof CanonicalError) throw new Error('invalid_step_artifact');
+        throw error;
+      }
+    }
+    const bytes = Buffer.from(JSON.stringify(detached));
     if (bytes.length > 96 * 1024 * 1024) throw new Error('invalid_step_artifact');
     const digest = sha256(bytes);
     publishPrivate(path.join(path.dirname(this.journal.filePath), `${digest}.json`), bytes);
@@ -706,7 +780,7 @@ export function createSteps(
       await approval(c);
       if (!(await fresh(c).policyFresh())) return { kind: 'blocked' };
       let acquired: AcquiredSource;
-      if (artifacts(c).get('source')) acquired = source(c);
+      if (artifacts(c).digest('source')) acquired = source(c);
       else {
         acquired = acquireSource(
           { ...c.store.config.upstream, baseSha: gate(c).baseSha },

@@ -2,6 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { types } from 'node:util';
+import { assertHeldSource } from '../canonical/source-store';
 import {
   assertDirectoryAncestors,
   privateDir,
@@ -149,8 +150,18 @@ function restoreUserChange(
       if (stat.size > 96 * 1024 * 1024) fail('invalid_store');
     });
     if (hash(bytes) !== ref.digest) fail('invalid_store');
-    const value: unknown = JSON.parse(strictUtf8(bytes));
-    assertSecretFree(value);
+    const stored: unknown = JSON.parse(strictUtf8(bytes));
+    assertSecretFree(stored);
+    // The edit's candidate source is git-backed (#1275). Replay checks its pack references
+    // structurally; the edit's consumer (`latestSourceEdit`) decodes and verifies the bytes.
+    if (isRecord(stored) && 'candidate' in stored) {
+      try {
+        assertHeldSource(stored.candidate, { pack: null });
+      } catch {
+        fail('invalid_store');
+      }
+    }
+    const value = stored;
     return { ...raw, value } as unknown as UserChange;
   }
   return raw as unknown as UserChange;

@@ -1,4 +1,5 @@
 /** Offline vertical slice: real controller/producers, only transport/VM/model edges fake. */
+
 import { createHash, generateKeyPairSync } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -14,6 +15,7 @@ import {
   VerifierFakeVm,
 } from '../../__tests__/verifier-fixture';
 import { BudgetLedger } from '../../budget';
+import { sourcePackStore } from '../../canonical/source-store';
 import { TrustedGit } from '../../canonical/trusted-git';
 import {
   CLIENT_ID,
@@ -662,7 +664,7 @@ function rig(
     const store = RunStore.open(path.join(root, 'runs'), runId);
     const dir = store.storeDirectory('artifacts');
     const j = new Journal(path.join(store.storeDirectory('control'), 'steps'));
-    const held = new StepArtifacts(j, runId);
+    const held = new StepArtifacts(j, runId, sourcePackStore(store));
     const get = <T>(key: string) => held.get<T>(key) as T;
     return {
       store,

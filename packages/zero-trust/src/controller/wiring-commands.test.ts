@@ -5,6 +5,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FakeVmAdapter } from '../__tests__/fake-vm';
 import { BudgetLedger } from '../budget';
+import { sourcePackStore } from '../canonical/source-store';
 import { AppCredentials } from '../github/app-auth';
 import { ForkCredentialBroker } from '../github/broker';
 import { Journal } from '../journal';
@@ -384,7 +385,7 @@ describe('production command credential/resource edges', () => {
       broker.close();
       tokens.close();
       const steps = new Journal(path.join(store.storeDirectory('control'), 'steps'));
-      new StepArtifacts(steps, runId).put('fork', fork);
+      new StepArtifacts(steps, runId, sourcePackStore(store)).put('fork', fork);
       steps.close();
       if (terminal)
         store.persistRun(

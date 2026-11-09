@@ -8,6 +8,7 @@ import { candidateInput, harness, removeTemps, TIME } from '../__tests__/verifie
 import { BudgetLedger } from '../budget';
 import type { BudgetEstimate, BudgetObservation } from '../budget-types';
 import { sha256 } from '../canonical/export';
+import { sourcePackStore } from '../canonical/source-store';
 import { isAdmitted } from '../intents';
 import { Journal } from '../journal';
 import { ReasonCode, transitionRun } from '../state';
@@ -361,7 +362,7 @@ function rig(checkpoints: ('plan' | 'patch' | 'verification')[] = []) {
     ): void | Promise<void> => {
       const journal = new Journal(path.join(c.store.storeDirectory('control'), 'steps'));
       try {
-        const artifacts = new StepArtifacts(journal, c.run.runId);
+        const artifacts = new StepArtifacts(journal, c.run.runId, sourcePackStore(c.store));
         if (reason)
           recordStopNotice(
             artifacts,
@@ -408,7 +409,7 @@ function notice(h: ReturnType<typeof rig>, runId: string) {
   const store = open(h, runId);
   const journal = new Journal(path.join(store.storeDirectory('control'), 'steps'));
   try {
-    const retained = new StepArtifacts(journal, runId).get(STOP_NOTICE_KEY);
+    const retained = new StepArtifacts(journal, runId, sourcePackStore(store)).get(STOP_NOTICE_KEY);
     return { retained, action: stopNoticeAction(retained, store.run) };
   } finally {
     journal.close();
