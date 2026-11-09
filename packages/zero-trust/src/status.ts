@@ -34,6 +34,11 @@ export interface StatusRecord {
       readonly stale: boolean;
     };
   };
+  /** The side of a mixed npm + Python root this run installs and tests (#1276). */
+  readonly ecosystemSelection?: {
+    readonly ecosystem: 'node' | 'python';
+    readonly basis: 'operator' | 'issue_paths';
+  };
   readonly runId: string;
   readonly phase: string;
   readonly state: RunState;
@@ -264,6 +269,7 @@ function safeStatus(input: StatusRecord): StatusRecord {
     nextPermittedAction: input.nextPermittedAction,
     authorApproval: input.authorApproval,
     policyGate: input.policyGate,
+    ecosystemSelection: input.ecosystemSelection,
   };
   // Inspect actual strings (JSON escapes whitespace), never invoke input toJSON.
   // Unknown properties are stripped rather than visited or serialized.
@@ -315,6 +321,17 @@ function safeStatus(input: StatusRecord): StatusRecord {
     if (!validatePolicyGate(held)) throw new InvalidStatusError();
     policyGate = held as StatusRecord['policyGate'];
   }
+  let ecosystemSelection: StatusRecord['ecosystemSelection'];
+  if (value.ecosystemSelection !== undefined) {
+    const e = value.ecosystemSelection;
+    if (
+      !isRecord(e) ||
+      (e.ecosystem !== 'node' && e.ecosystem !== 'python') ||
+      (e.basis !== 'operator' && e.basis !== 'issue_paths')
+    )
+      throw new InvalidStatusError();
+    ecosystemSelection = { ecosystem: e.ecosystem, basis: e.basis };
+  }
   return {
     runId: value.runId,
     phase: value.phase,
@@ -329,6 +346,7 @@ function safeStatus(input: StatusRecord): StatusRecord {
     nextPermittedAction: value.nextPermittedAction,
     ...(authorApproval === undefined ? {} : { authorApproval }),
     ...(policyGate === undefined ? {} : { policyGate }),
+    ...(ecosystemSelection === undefined ? {} : { ecosystemSelection }),
   };
 }
 

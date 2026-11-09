@@ -213,3 +213,29 @@ describe('status contract', () => {
     }
   });
 });
+
+describe('mixed-root ecosystem selection (#1276)', () => {
+  it('renders the closed selection and refuses anything else', () => {
+    const selection = { ecosystem: 'python' as const, basis: 'issue_paths' as const };
+    expect(JSON.parse(renderJson({ ...status, ecosystemSelection: selection }))).toMatchObject({
+      ecosystemSelection: selection,
+    });
+    expect(JSON.parse(renderJson(status)).ecosystemSelection).toBeUndefined();
+    for (const bad of [
+      { ecosystem: 'ruby', basis: 'operator' },
+      { ecosystem: 'node', basis: 'guess' },
+      'node',
+    ])
+      expect(() =>
+        renderJson({ ...status, ecosystemSelection: bad } as unknown as StatusRecord)
+      ).toThrow(InvalidStatusError);
+    // Extra fields are dropped, never rendered.
+    const extra = {
+      ...selection,
+      sourceDigest: 'a'.repeat(64),
+    } as unknown as StatusRecord['ecosystemSelection'];
+    expect(
+      JSON.parse(renderJson({ ...status, ecosystemSelection: extra })).ecosystemSelection
+    ).toEqual(selection);
+  });
+});

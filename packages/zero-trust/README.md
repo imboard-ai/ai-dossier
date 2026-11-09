@@ -76,6 +76,15 @@ contributor. The answered assessment becomes the admitted `gate.policy` (so fres
 and publication checks keep it), and `gate_assessment.operatorPolicy` records the decision with
 `applied` dimensions and `stale`, shown in status as `policyGate.operatorPolicy`.
 
+`--ecosystem python|node` answers an `ecosystem_ambiguous` hand-off through
+`changeEcosystem(store, run, { ecosystem }, now?)` (#1276). It requires `paused_user`
+interrupted from `planning` and a retained `ecosystem_handoff` step artifact from the latest
+acquisition (`ecosystem_not_at_handoff` otherwise); a value outside that hand-off's
+`ecosystems` is `invalid_ecosystem`. The journaled `ecosystem` user change
+(`ecosystem/operator`) holds the side, the contributor login as operator and the source
+manifest digest the hand-off retained; acquisition applies it only to that exact source.
+Replay rejects a non-normalized record, another operator, or a pause from another phase.
+
 All mutations hold the controller's exclusive run-store guard. Corrupt or partial
 mutation evidence refuses reopening. A crash after supersession but before a source
 edit is committed conservatively keeps old verification fenced for inspection;
@@ -3467,6 +3476,24 @@ Design, evidence and verdict:
   `uv.lock` (virtual projects only; a project that installs itself is
   `project_build_required`). Everything else returns `unsupported_environment` with a
   specific reason.
+- A root holding both Node and Python files is a mixed root (`rootEcosystems(files)` lists
+  the sides). `detectEcosystem(files)` still refuses it as `mixed_ecosystems`;
+  `detectEcosystem(files, only)` narrows it to one side, setting aside the other side's
+  manifests, lockfiles and tool configuration (none of its tools is planned), and checks the
+  selected side in full. Acquisition (#1276) selects the side from, in order: the run's
+  pinned `ecosystem_selection` step artifact, a journaled `resume --ecosystem` answer bound
+  to the current source manifest digest (basis `operator`), and `issueEcosystem(title, body)`
+  in `ecosystem/issue-paths`, which scans the untrusted issue text for path-shaped tokens
+  only and returns a side when every named source path (`.py`/`.pyi`, `pyproject.toml`,
+  `uv.lock`, `requirements.txt`; `.js`/`.ts` family, `package.json`, `package-lock.json`)
+  falls on it (basis `issue_paths`). Otherwise it pauses from `planning` with
+  `ecosystem_ambiguous`, retaining `ecosystem_handoff` (`sourceDigest`, `ecosystems`), before
+  any VM. Status shows the selection as `ecosystemSelection`, and the PR limitations disclose
+  that only the selected side was installed and tested locally (`mixedRootLimitation`).
+- The endpoints file may declare `targetEcosystem` (`node` or `python`): which mirror its one
+  `target` is. `preflightProxyEcosystem` refuses before any VM, as a `proxy_ecosystem_mismatch`
+  pause with a diagnostic, when it names the other ecosystem, or when a mixed root was
+  narrowed and it is absent. Single-ecosystem runs without it are unchanged.
 - `selectProfile(detection)` picks a runtime from the versioned `profiles.json` that
   satisfies every project declaration and never substitutes a version.
   `recordProfileSelection` / `loadProfileRecord` store the choice once per run and

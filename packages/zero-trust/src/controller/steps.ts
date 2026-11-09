@@ -24,7 +24,14 @@ import { dataDescriptors } from '../data-descriptors';
 import { createLlmDecisionProvider } from '../decision/providers/llm';
 import { publishPrivate, readPrivate } from '../durable-fs';
 import { buildCommandPlan, type CommandPlan, type ProxyEndpoints } from '../ecosystem/commands';
-import { detectEcosystem, sourceFilesFromManifest } from '../ecosystem/detect';
+import {
+  detectEcosystem,
+  type Ecosystem,
+  rootEcosystems,
+  sourceFilesFromManifest,
+} from '../ecosystem/detect';
+import { issueEcosystem } from '../ecosystem/issue-paths';
+import type { OperatorEcosystem } from '../ecosystem/operator';
 import {
   loadProfileRecord,
   type ProfileRecord,
@@ -88,11 +95,13 @@ import {
 import { retainVerification } from './export-evidence';
 import { assessRevisionFeedback, type FeedbackDecision, feedbackIdentity } from './feedback';
 import { OutputCollector } from './output-collector';
+import { preflightProxyEcosystem } from './proxy-preflight';
 import type { ShippingAuthorizeDeps } from './shipping';
 import {
   alteredEvidenceNotice,
   clearStopNotice,
   driftHandoffNotice,
+  ecosystemAmbiguousNotice,
   freshnessNotice,
   gateHandoffNotice,
   isAlteredEvidence,
@@ -115,6 +124,18 @@ export interface GateRecord {
   readonly title: string;
   readonly body: string;
   readonly invitation?: InvitationEvidence;
+}
+/** Retained while an `ecosystem_ambiguous` hand-off waits for `resume --ecosystem`. */
+export interface EcosystemHandoff {
+  readonly reason: 'ecosystem_ambiguous';
+  readonly sourceDigest: string;
+  readonly ecosystems: readonly Ecosystem[];
+}
+/** The side of a mixed npm + Python root this run installs and tests (#1276). */
+export interface EcosystemSelection {
+  readonly ecosystem: Ecosystem;
+  readonly basis: 'operator' | 'issue_paths';
+  readonly sourceDigest: string;
 }
 export function implementationPhaseKey(run: RunRecord): number {
   return run.history.filter(
@@ -258,6 +279,8 @@ export interface StepServices {
   ) => ModelAdapter;
   readonly endpoints: ProxyEndpoints;
   readonly proxyTarget: ProxyTarget;
+  /** The endpoints file's declared `targetEcosystem`, if any (#1276). */
+  readonly proxyEcosystem?: Ecosystem;
   readonly sourceRemote?: string;
   readonly adapter: (context: PhaseContext) => VmAdapter;
   readonly vmJournal: (context: PhaseContext) => Journal;
@@ -450,6 +473,26 @@ export function createSteps(
     return { manifest: validateManifest(held.manifest), pack: Buffer.from(held.pack, 'base64') };
   };
   const gate = (c: PhaseContext) => artifacts(c).require<GateRecord>('gate');
+  /** The side a mixed root installs (#1276). A selection already made for this run is
+   * kept, like its profile record. Otherwise: the contributor's journaled
+   * `resume --ecosystem` answer for exactly this source, then the side every source path
+   * named in the issue belongs to. Undefined hands off as `ecosystem_ambiguous`. */
+  const selectMixedEcosystem = (
+    c: PhaseContext,
+    sourceDigest: string
+  ): EcosystemSelection | undefined => {
+    const held = artifacts(c).get<EcosystemSelection>('ecosystem_selection');
+    if (held) return held;
+    const answer = c.store.userChanges
+      .filter((change) => change.kind === 'ecosystem')
+      .map((change) => change.value as OperatorEcosystem)
+      .filter((value) => value.sourceDigest === sourceDigest)
+      .at(-1);
+    if (answer) return { ecosystem: answer.ecosystem, basis: 'operator', sourceDigest };
+    const g = gate(c);
+    const inferred = issueEcosystem(g.title, g.body);
+    return inferred ? { ecosystem: inferred, basis: 'issue_paths', sourceDigest } : undefined;
+  };
   /** Rebases already spent in the current budget session. `rebase_session` is the record;
    * the session-less `rebases` count is kept and read only for first-session runs that
    * predate it. */
@@ -791,8 +834,32 @@ export function createSteps(
           pack: acquired.pack.toString('base64'),
         });
       }
-      const detection = detectEcosystem(sourceFilesFromManifest(acquired.manifest));
+      // Retire the previous attempt's ambiguity evidence: only this attempt's hand-off may
+      // be answered with `resume --ecosystem` (#1276).
+      if (artifacts(c).get('ecosystem_handoff') != null)
+        artifacts(c).put('ecosystem_handoff', null);
+      const files = sourceFilesFromManifest(acquired.manifest);
+      const sides = rootEcosystems(files);
+      let only: Ecosystem | undefined;
+      if (sides.length > 1) {
+        const chosen = selectMixedEcosystem(c, acquired.manifest.digest);
+        if (!chosen) {
+          artifacts(c).put('ecosystem_handoff', {
+            reason: 'ecosystem_ambiguous',
+            sourceDigest: acquired.manifest.digest,
+            ecosystems: sides,
+          } satisfies EcosystemHandoff);
+          recordStopNotice(artifacts(c), c.run, ecosystemAmbiguousNotice(), true);
+          return { kind: 'hand_off' };
+        }
+        only = chosen.ecosystem;
+        if (!artifacts(c).get('ecosystem_selection'))
+          artifacts(c).put('ecosystem_selection', chosen);
+      }
+      const detection = detectEcosystem(files, only);
       if (!detection.supported) return { kind: 'unsupported' };
+      // The one proxy forward must reach this ecosystem's mirror; refuse before any VM.
+      preflightProxyEcosystem(services.proxyEcosystem, detection.ecosystem, only !== undefined);
       const selection = selectProfile(detection);
       if (!selection.ok) return { kind: 'unsupported' };
       recordProfileSelection(c.store.storeDirectory('profile'), c.run.runId, selection);

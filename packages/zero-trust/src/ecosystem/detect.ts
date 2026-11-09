@@ -102,7 +102,18 @@ const UNSUPPORTED_MANAGER_FILES: Readonly<Record<string, string>> = {
 };
 /** Repository-local tool configuration that can redirect registries, indexes or
  * interpreter downloads. Commands are planned without it, so its presence is unsupported. */
-const CONFIG_FILES = ['.npmrc', '.yarnrc', 'pip.conf', 'pip.ini', 'uv.toml'];
+const NODE_CONFIG_FILES = ['.npmrc', '.yarnrc'];
+const PYTHON_CONFIG_FILES = ['pip.conf', 'pip.ini', 'uv.toml'];
+const CONFIG_FILES = [...NODE_CONFIG_FILES, ...PYTHON_CONFIG_FILES];
+/** The root files that belong to one side of a mixed root (#1276). */
+const SIDE_FILES: Readonly<Record<Ecosystem, readonly string[]>> = Object.freeze({
+  node: Object.freeze([...NODE_FILES, ...NODE_CONFIG_FILES]),
+  python: Object.freeze([...PYTHON_FILES, ...PYTHON_CONFIG_FILES]),
+});
+export const ECOSYSTEMS: readonly Ecosystem[] = Object.freeze(['node', 'python']);
+export function isEcosystem(value: unknown): value is Ecosystem {
+  return value === 'node' || value === 'python';
+}
 /** `[tool.uv]` keys that cannot change where or how packages are fetched. */
 const UV_TOOL_KEYS = new Set(['package', 'default-groups']);
 const NPM_PACKAGE_MANAGER = /^npm@\d+\.\d+\.\d+(\+sha(256|512)\.[a-f0-9]+)?$/;
@@ -189,9 +200,26 @@ function versionFile(
   return [{ source: name, value }];
 }
 
+/** The ecosystems whose manifest or lock files sit at the root, in `ECOSYSTEMS` order.
+ * Two entries is a mixed root: a run then selects one side (`detectEcosystem(files, only)`). */
+export function rootEcosystems(files: SourceFiles): Ecosystem[] {
+  const present: Ecosystem[] = [];
+  if (NODE_FILES.some((name) => files.has(name))) present.push('node');
+  if (PYTHON_FILES.some((name) => files.has(name))) present.push('python');
+  return present;
+}
+
 /** Classifies the snapshot's root-level files as exactly one supported manager and
- * lockfile, or `unsupported_environment` with a specific reason. Reads text only. */
-export function detectEcosystem(files: SourceFiles): Detection {
+ * lockfile, or `unsupported_environment` with a specific reason. Reads text only.
+ * `only` narrows a mixed root to one side: the other side's manifests, locks and tool
+ * configuration are set aside, because none of that side's tools is ever planned or run.
+ * Without `only`, a mixed root is `mixed_ecosystems`. */
+export function detectEcosystem(files: SourceFiles, only?: Ecosystem): Detection {
+  if (only !== undefined) {
+    if (!isEcosystem(only)) return unsupported('no_supported_ecosystem');
+    const other = SIDE_FILES[only === 'node' ? 'python' : 'node'];
+    files = new Map([...files].filter(([name]) => !other.includes(name)));
+  }
   const node = NODE_FILES.some((name) => files.has(name));
   const python = PYTHON_FILES.some((name) => files.has(name));
   if (node && python) return unsupported('mixed_ecosystems');

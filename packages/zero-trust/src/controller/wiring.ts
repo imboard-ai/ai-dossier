@@ -9,6 +9,7 @@ import type { BudgetEstimate, BudgetObservation } from '../budget-types';
 import { resolveBase } from '../canonical/acquire';
 import { sourcePackStore } from '../canonical/source-store';
 import { assertDirectoryAncestors, readPrivate, replacePrivate } from '../durable-fs';
+import { type Ecosystem, isEcosystem } from '../ecosystem/detect';
 import { AppCredentials, fetchGitHubHttp, fetchOAuthHttp } from '../github/app-auth';
 import { ForkCredentialBroker } from '../github/broker';
 import {
@@ -72,7 +73,7 @@ import { ProvisioningFailedError } from './evidence-runner';
 import { retainPortfolio, retainReceipt } from './export-evidence';
 import { type FeedbackDecision, feedbackIdentity } from './feedback';
 import { readOutcomeBudget } from './outcome-records';
-import { ProxyCaError, preflightProxyCa } from './proxy-preflight';
+import { ProxyCaError, ProxyEcosystemError, preflightProxyCa } from './proxy-preflight';
 import { RunStore } from './run-store';
 import {
   makeAuthorize,
@@ -81,12 +82,20 @@ import {
   type ShippingAuthorizeDeps,
   shippingIntent,
 } from './shipping';
-import { createSteps, type GateRecord, gateFreshness, policyReader, StepArtifacts } from './steps';
+import {
+  createSteps,
+  type EcosystemSelection,
+  type GateRecord,
+  gateFreshness,
+  policyReader,
+  StepArtifacts,
+} from './steps';
 import {
   clearControllerRefusalNotice,
   clearStopNotice,
   controllerRefusalNotice,
   provisioningNotice,
+  proxyEcosystemNotice,
   rebindControllerRefusalNotice,
   recordStopNotice,
   writeBlockedNotice,
@@ -485,6 +494,15 @@ class PrerequisiteError extends Error {
   }
 }
 
+/** PR disclosure for a mixed npm + Python root narrowed to one side (#1276). */
+export function mixedRootLimitation(selection: EcosystemSelection | null | undefined): string[] {
+  if (!selection) return [];
+  const side = selection.ecosystem === 'python' ? 'Python' : 'npm';
+  return [
+    `Mixed npm + Python repository: only the ${side} side was installed and tested locally; upstream CI covers the rest.`,
+  ];
+}
+
 function readProxyFile(file: string): unknown {
   try {
     const bytes = readPrivate(file, (stat) => {
@@ -575,12 +593,17 @@ export function createController(
     throw new Error('invalid_proxy_file');
   const p = proxy as Record<string, unknown>;
   if (
-    Object.keys(p).some((key) => !['endpoints', 'target', 'caCertificateFile'].includes(key)) ||
+    Object.keys(p).some(
+      (key) => !['endpoints', 'target', 'caCertificateFile', 'targetEcosystem'].includes(key)
+    ) ||
     ('caCertificateFile' in p &&
-      (typeof p.caCertificateFile !== 'string' || !path.isAbsolute(p.caCertificateFile)))
+      (typeof p.caCertificateFile !== 'string' || !path.isAbsolute(p.caCertificateFile))) ||
+    ('targetEcosystem' in p && !isEcosystem(p.targetEcosystem))
   )
     throw new Error('invalid_proxy_file');
   const caCertificateFile = p.caCertificateFile as string | undefined;
+  // Which mirror `target` is (#1276). Optional: single-ecosystem runs work as before.
+  const proxyEcosystem = p.targetEcosystem as Ecosystem | undefined;
   const endpoints = p.endpoints as { npmRegistry: string; pypiIndex: string };
   const proxyTarget = p.target as { host: string; port: number };
   if (
@@ -1209,6 +1232,7 @@ export function createController(
       model,
       endpoints,
       proxyTarget,
+      ...(proxyEcosystem ? { proxyEcosystem } : {}),
       sourceRemote: overrides.gitRemoteUrl?.upstream,
       adapter,
       vmJournal: (c) => journal(c, 'vm'),
@@ -1347,6 +1371,7 @@ export function createController(
                     'Includes contributor edits; every edited candidate was independently re-verified.',
                   ]
                 : []),
+              ...mixedRootLimitation(artifacts(c).get<EcosystemSelection>('ecosystem_selection')),
               ...(policy.draftRequired
                 ? ['Upstream requires a draft PR; select Create draft PR when submitting.']
                 : []),
@@ -1511,6 +1536,18 @@ export function createController(
         if (error instanceof PrerequisiteError)
           return { kind: phase === 'gate' ? error.kind : 'hand_off' };
         if (error instanceof UnsupportedEnvironmentError) return { kind: 'unsupported' };
+        if (error instanceof ProxyEcosystemError) {
+          const notice = proxyEcosystemNotice(error.selected);
+          artifacts(c).put('diagnostic', {
+            runId: c.run.runId,
+            phase,
+            operation: 'proxy_ecosystem',
+            code: error.code,
+            next: notice.nextPermittedAction,
+          });
+          recordStopNotice(artifacts(c), c.store.run, notice, c.store.run.state !== 'paused_user');
+          return { kind: 'hand_off' };
+        }
         if (error instanceof ProxyCaError || error instanceof ProvisioningFailedError) {
           const reason = error instanceof ProxyCaError ? error.code : 'provisioning_failed';
           const notice = provisioningNotice(reason);

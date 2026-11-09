@@ -14,6 +14,7 @@ import { readControlRequests, requestControl } from '../dist/controller/control.
 import {
   applyUserPatch,
   changeCheckpoints,
+  changeEcosystem,
   changeModelProfile,
   changePolicy,
   latestSourceEdit,
@@ -322,6 +323,7 @@ export async function createCommands({ root, createController, onAuthorizationUr
             authorizationRequired: artifacts.get('authorization_required'),
             feedbackDecision: artifacts.get('feedback_decision'),
             stopNotice: artifacts.get(STOP_NOTICE_KEY),
+            ecosystemSelection: artifacts.get('ecosystem_selection'),
           };
         });
         let handoff;
@@ -422,6 +424,12 @@ export async function createCommands({ root, createController, onAuthorizationUr
             assessment: assessed.assessment,
             ...(assessed.operatorPolicy ? { operatorPolicy: assessed.operatorPolicy } : {}),
           };
+        // The side a mixed npm + Python root was narrowed to (#1276).
+        if (retained.ecosystemSelection)
+          result.ecosystemSelection = {
+            ecosystem: retained.ecosystemSelection.ecosystem,
+            basis: retained.ecosystemSelection.basis,
+          };
         // A producer's reason for exactly this stop; any later transition retires it.
         const noticed = stopNoticeAction(retained.stopNotice, run);
         if (noticed) result.nextPermittedAction = noticed;
@@ -513,7 +521,10 @@ export async function createCommands({ root, createController, onAuthorizationUr
       });
       return status(runId);
     },
-    async resume(runId, { revise, reviewers, modelProfile, checkpoints, policy, policyNote } = {}) {
+    async resume(
+      runId,
+      { revise, reviewers, modelProfile, checkpoints, policy, policyNote, ecosystem } = {}
+    ) {
       if (incidentRequested(root)) {
         const held = RunStore.open(root, runId, { cleanup: true });
         held.close();
@@ -532,13 +543,21 @@ export async function createCommands({ root, createController, onAuthorizationUr
           refuse('invalid_policy_decision');
         }
       }
-      if (modelProfile !== undefined || checkpoints !== undefined || decisions !== undefined)
+      if (ecosystem !== undefined && !['node', 'python'].includes(ecosystem))
+        refuse('invalid_ecosystem');
+      if (
+        modelProfile !== undefined ||
+        checkpoints !== undefined ||
+        decisions !== undefined ||
+        ecosystem !== undefined
+      )
         withStore(runId, false, (store) => {
           checkRoot(store.config);
           if (modelProfile !== undefined) changeModelProfile(store, store.run, modelProfile);
           if (checkpoints !== undefined) changeCheckpoints(store, store.run, checkpoints);
           if (decisions !== undefined)
             changePolicy(store, store.run, { decisions, note: policyNote });
+          if (ecosystem !== undefined) changeEcosystem(store, store.run, { ecosystem });
         });
       const config = configFor(runId, true);
       if (!config.authorApproval) refuse('author_approval_missing');

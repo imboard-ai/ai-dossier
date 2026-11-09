@@ -109,7 +109,19 @@ export interface RigOptions {
   root?: string;
   persistent?: boolean;
   activeMinutes?: number;
+  /** Upstream root also holds a uv project next to the npm one (#1276). */
+  mixedRoot?: boolean;
+  /** Replaces the fixture issue body. */
+  issueBody?: string;
+  /** The endpoints file's `targetEcosystem`. */
+  proxyEcosystem?: 'node' | 'python';
 }
+
+/** A minimal supported uv project (virtual, pytest wheel from PyPI, hashed). */
+export const UV_PROJECT: Readonly<Record<string, string>> = Object.freeze({
+  'pyproject.toml': '[project]\nname = "app"\nrequires-python = ">=3.11"\n',
+  'uv.lock': `version = 1\nrequires-python = ">=3.11"\n\n[[package]]\nname = "app"\nversion = "1.0"\nsource = { virtual = "." }\n\n[[package]]\nname = "pytest"\nversion = "1.0"\nsource = { registry = "https://pypi.org/simple" }\nwheels = [{ url = "https://files.pythonhosted.org/packages/aa/bb/${'e'.repeat(60)}/pytest-1.0-py3-none-any.whl", hash = "sha256:${'d'.repeat(64)}" }]\n`,
+});
 
 export function rig(options: RigOptions = {}) {
   const root = options.root ?? fs.mkdtempSync(path.join(os.tmpdir(), 'zt-composition-'));
@@ -117,6 +129,23 @@ export function rig(options: RigOptions = {}) {
   const upstream = new Fork(path.join(root, 'upstream.git'));
   upstream.git(['index-pack', '--stdin'], BASE_COMMIT.pack);
   upstream.git(['update-ref', 'refs/heads/main', BASE_COMMIT.baseSha]);
+  /** Upstream default-branch head; `advanceUpstream` moves it. */
+  let head = BASE_COMMIT.baseSha;
+  if (options.mixedRoot) {
+    const env = { GIT_INDEX_FILE: path.join(root, 'mixed.index') };
+    upstream.git(['read-tree', head], undefined, env);
+    for (const [file, text] of Object.entries(UV_PROJECT)) {
+      const blob = upstream.git(['hash-object', '-w', '--stdin'], text);
+      upstream.git(
+        ['update-index', '--add', '--cacheinfo', `100644,${blob},${file}`],
+        undefined,
+        env
+      );
+    }
+    const tree = upstream.git(['write-tree'], undefined, env);
+    head = upstream.git(['commit-tree', tree, '-p', head], 'mixed root\n', UPSTREAM_IDENTITY);
+    upstream.git(['update-ref', 'refs/heads/main', head]);
+  }
   const fork = new Fork(path.join(root, 'fork.git'));
   const signerKeyFile = path.join(root, 'signer.pem');
   fs.writeFileSync(signerKeyFile, SIGNER, { mode: 0o600 });
@@ -125,7 +154,11 @@ export function rig(options: RigOptions = {}) {
   const proxyEndpointsFile = path.join(root, 'proxy.json');
   fs.writeFileSync(
     proxyEndpointsFile,
-    JSON.stringify({ endpoints: ENDPOINTS, target: { host: '10.0.0.2', port: 4873 } }),
+    JSON.stringify({
+      endpoints: ENDPOINTS,
+      target: { host: '10.0.0.2', port: 4873 },
+      ...(options.proxyEcosystem ? { targetEcosystem: options.proxyEcosystem } : {}),
+    }),
     { mode: 0o600 }
   );
   const phase = {
@@ -270,8 +303,6 @@ export function rig(options: RigOptions = {}) {
   let feedback: Record<string, unknown>[] = [];
   let revisionMode = false;
   let issueState: 'open' | 'closed' = 'open';
-  /** Upstream default-branch head; `advanceUpstream` moves it. */
-  let head = BASE_COMMIT.baseSha;
   let advances = 0;
   /** Fork commits a scenario wrote out of band; the audit requires them untouched. */
   const foreign = new Set<string>();
@@ -322,7 +353,7 @@ export function rig(options: RigOptions = {}) {
           assignees: [],
           created_at: TIME.replace('.000', ''),
           title: 'Duration uses wrong units',
-          body: 'Convert milliseconds into seconds.',
+          body: options.issueBody ?? 'Convert milliseconds into seconds.',
         },
       };
     if (p.includes('/timeline?')) return { status: 200, body: [] };
@@ -911,6 +942,7 @@ export function rig(options: RigOptions = {}) {
       loadServer();
     },
     modelCalls: () => modelRequests,
+    linkBody,
     interruptedVm: () => interruptedVm,
     identityUnavailable() {
       options.userUnavailable = true;
