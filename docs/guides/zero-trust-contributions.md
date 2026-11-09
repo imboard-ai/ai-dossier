@@ -457,6 +457,31 @@ work started. The full assessment is retained as the `gate_assessment` step arti
 older runs and stops before assessment omit `policyGate`. `displayTruncated: true`
 means status shows bounded citation excerpts; the complete quotes remain in the artifact.
 
+When the hand-off reason is `ai_unclear` or `ownership_unclear`, you can record your own
+reading of the rules instead of contributing manually. For example, a project that tells
+contributors to fork and open a pull request but never mentions assignment:
+
+```bash
+node scripts/zt-run.mjs pause --root <state-dir>/runs --run <id> --reason "Record policy reading"
+node scripts/zt-run.mjs resume --root <state-dir>/runs --run <id>    # moves to paused_user
+node scripts/zt-run.mjs resume --root <state-dir>/runs --run <id> \
+  --policy directPr=welcomed --policy-note "CONTRIBUTING.md:12 says fork and open a PR"
+```
+
+`--policy` takes comma-separated `dimension=value` pairs: `ai=welcomed|disclosure_required|requires_approval`,
+`assignment=required|not_required`, `directPr=welcomed|discussion_first`. `--policy-note` is
+required; cite the file and line you relied on. The decision is journaled with your login and
+bound to the policy text that was assessed. It only replaces dimensions the gate left `unclear`,
+and an answer to a dimension the gate already settled is refused. That includes AI readings the
+gate marked unclear because a line mentioned AI next to a negation (a possible ban): you decide
+whether that line is really a ban. A definite `banned` reading can never be overridden. Answers
+recorded against the same policy text add up, so you can answer AI first and ownership later. If
+the policy files change before the gate runs again, earlier answers no longer apply: the gate
+decides without them and, if it still hands off, adds `operator_policy_stale` so you can answer
+again. Status shows the decision under `policyGate.operatorPolicy`,
+including which dimensions it changed. The rest of the gate still applies: for example
+`assignment=required` still waits for a maintainer to assign you.
+
 ### Step 3: reproduce, plan and implement
 
 Inside a fresh VM (no credentials, no network except the package proxy during dependency
@@ -836,7 +861,7 @@ Every command needs `--root <stateDir>/runs`. This table summarizes `node script
 | Command | Arguments |
 |---|---|
 | `start` | `--config <file.json>` [`--confirm-author`] [`--author-name <name>`] [`--author-email <email>`] |
-| `resume` | `--run <id>` [`--revise`] [`--reviewers <login,...>`] [`--model-profile <file.json>`] [`--checkpoints plan,patch,verification\|none`] |
+| `resume` | `--run <id>` [`--revise`] [`--reviewers <login,...>`] [`--model-profile <file.json>`] [`--checkpoints plan,patch,verification\|none`] [`--policy <dimension=value,...>` `--policy-note <why>`] |
 | `edit` | `--run <id>` `--patch <file.diff>` |
 | `pr-edit` | `--run <id>` `--title <text>` `--body-file <file>` |
 | `withdraw` | `--run <id>` `--reason <maintainer_request\|user_instruction>` `--explanation <text>` |

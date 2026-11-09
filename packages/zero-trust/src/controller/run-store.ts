@@ -11,6 +11,7 @@ import {
 } from '../durable-fs';
 import { Journal } from '../journal';
 import { acquirePrivateGuard, StoreLockedError } from '../lock';
+import { validateOperatorPolicy } from '../policy/operator';
 import { isRecoveryEvent, isTailRecovery } from '../recovery';
 import { assertSecretFree, SecretRedactionError } from '../redaction';
 import {
@@ -89,7 +90,7 @@ export class RunStoreError extends Error {
   }
 }
 export interface UserChange {
-  readonly kind: 'model' | 'checkpoints' | 'source';
+  readonly kind: 'model' | 'checkpoints' | 'source' | 'policy';
   readonly at: string;
   readonly value: unknown;
   readonly digest: string;
@@ -106,7 +107,7 @@ function restoreUserChange(
     run.state !== 'paused_user' ||
     !isTimestamp(raw.at) ||
     Date.parse(raw.at) < Date.parse(run.updatedAt) ||
-    !['model', 'checkpoints', 'source'].includes(String(raw.kind)) ||
+    !['model', 'checkpoints', 'source', 'policy'].includes(String(raw.kind)) ||
     raw.digest !==
       hash(Buffer.from(JSON.stringify({ kind: raw.kind, at: raw.at, value: raw.value })))
   )
@@ -116,6 +117,22 @@ function restoreUserChange(
       ...runConfigInput(config),
       [raw.kind === 'model' ? 'modelProfile' : 'checkpoints']: raw.value,
     });
+  } else if (raw.kind === 'policy') {
+    // An operator policy decision answers a gate hand-off, so it is only valid while
+    // the pause interrupted gating.
+    if (run.history.at(-1)?.from !== 'gating') fail('invalid_store');
+    let policy: ReturnType<typeof validateOperatorPolicy> | undefined;
+    try {
+      policy = validateOperatorPolicy(raw.value);
+    } catch {
+      fail('invalid_store');
+    }
+    // Replay keeps raw bytes, so they must already be the normalized record.
+    if (
+      JSON.stringify(policy) !== JSON.stringify(raw.value) ||
+      policy?.operator !== run.contributor
+    )
+      fail('invalid_store');
   } else if (!['implementing', 'verifying'].includes(run.history.at(-1)?.from ?? ''))
     fail('invalid_store');
   if (raw.kind === 'source') {

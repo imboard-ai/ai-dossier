@@ -15,6 +15,7 @@ import {
   applyUserPatch,
   changeCheckpoints,
   changeModelProfile,
+  changePolicy,
   latestSourceEdit,
   sourceEditCount,
 } from '../dist/controller/edits.js';
@@ -47,6 +48,7 @@ import { isGitHubLogin } from '../dist/github-login.js';
 import { parseJournalEvents } from '../dist/journal.js';
 import { lockDescriptor, StoreLockedError } from '../dist/lock.js';
 import { aggregate, contributionOutcome, recordAdoption } from '../dist/metrics/outcomes.js';
+import { parseOperatorPolicy } from '../dist/policy/operator.js';
 import { canonicalJson } from '../dist/receipt/schema.js';
 import { assertSecretFree } from '../dist/redaction.js';
 import { exportContribution } from '../dist/retention/export.js';
@@ -418,6 +420,7 @@ export async function createCommands({ root, createController, onAuthorizationUr
             baseSha: assessed.baseSha,
             reasons: assessed.reasons,
             assessment: assessed.assessment,
+            ...(assessed.operatorPolicy ? { operatorPolicy: assessed.operatorPolicy } : {}),
           };
         // A producer's reason for exactly this stop; any later transition retires it.
         const noticed = stopNoticeAction(retained.stopNotice, run);
@@ -510,7 +513,7 @@ export async function createCommands({ root, createController, onAuthorizationUr
       });
       return status(runId);
     },
-    async resume(runId, { revise, reviewers, modelProfile, checkpoints } = {}) {
+    async resume(runId, { revise, reviewers, modelProfile, checkpoints, policy, policyNote } = {}) {
       if (incidentRequested(root)) {
         const held = RunStore.open(root, runId, { cleanup: true });
         held.close();
@@ -519,11 +522,23 @@ export async function createCommands({ root, createController, onAuthorizationUr
       }
       // Refuse a malformed login before any profile or checkpoint change is saved.
       if (reviewers?.some((login) => !isGitHubLogin(login))) refuse('invalid_reviewer');
-      if (modelProfile !== undefined || checkpoints !== undefined)
+      // A policy answer needs its reason; parse both before anything is saved.
+      if ((policy === undefined) !== (policyNote === undefined)) refuse('invalid_policy_decision');
+      let decisions;
+      if (policy !== undefined) {
+        try {
+          decisions = parseOperatorPolicy(policy);
+        } catch {
+          refuse('invalid_policy_decision');
+        }
+      }
+      if (modelProfile !== undefined || checkpoints !== undefined || decisions !== undefined)
         withStore(runId, false, (store) => {
           checkRoot(store.config);
           if (modelProfile !== undefined) changeModelProfile(store, store.run, modelProfile);
           if (checkpoints !== undefined) changeCheckpoints(store, store.run, checkpoints);
+          if (decisions !== undefined)
+            changePolicy(store, store.run, { decisions, note: policyNote });
         });
       const config = configFor(runId, true);
       if (!config.authorApproval) refuse('author_approval_missing');

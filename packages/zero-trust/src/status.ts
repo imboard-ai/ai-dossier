@@ -2,6 +2,7 @@ import Ajv from 'ajv';
 import { validateAuthorApproval } from './controller/config';
 import { dataDescriptors } from './data-descriptors';
 import type { PolicyAssessment } from './policy/classify';
+import type { OperatorPolicy } from './policy/operator';
 import { canonicalJson } from './receipt/schema';
 import { assertNoSecrets, assertSecretFree } from './redaction';
 import { object as strictObject } from './schema-object';
@@ -27,6 +28,11 @@ export interface StatusRecord {
     readonly reasons: readonly string[];
     readonly assessment: PolicyAssessment;
     readonly displayTruncated?: boolean;
+    /** The journaled human answer this gate attempt applied, if any (#1268). */
+    readonly operatorPolicy?: OperatorPolicy & {
+      readonly applied: readonly string[];
+      readonly stale: boolean;
+    };
   };
   readonly runId: string;
   readonly phase: string;
@@ -98,6 +104,21 @@ const validatePolicyGate = new Ajv({ strict: false }).compile(
       baseSha: { type: 'string', pattern: '^[a-f0-9]{40}$' },
       reasons: { type: 'array', items: { type: 'string', pattern: '^[a-z_]{1,64}$' } },
       displayTruncated: { type: 'boolean' },
+      operatorPolicy: object({
+        decisions: object(
+          {
+            ai: { enum: ['welcomed', 'disclosure_required', 'requires_approval'] },
+            assignment: { enum: ['required', 'not_required'] },
+            directPr: { enum: ['welcomed', 'discussion_first'] },
+          },
+          []
+        ),
+        note: text,
+        operator: text,
+        inputDigest: text,
+        applied: { type: 'array', items: { enum: ['ai', 'assignment', 'directPr'] } },
+        stale: { type: 'boolean' },
+      }),
       assessment: object(
         {
           ai: {
