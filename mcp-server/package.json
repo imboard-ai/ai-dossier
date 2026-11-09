@@ -1,6 +1,6 @@
 {
   "name": "@ai-dossier/mcp-server",
-  "version": "1.6.5",
+  "version": "1.6.6",
   "description": "MCP server for signed, versioned agent skills: discover, verify, and run skills for model-driven orchestration through the Model Context Protocol.",
   "main": "dist/index.js",
   "bin": {
@@ -59,7 +59,7 @@
   "dependencies": {
     "@ai-dossier/core": "^1.12.0",
     "@modelcontextprotocol/sdk": "^1.21.0",
-    "zod": "^3.25.76"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^24.10.0",
