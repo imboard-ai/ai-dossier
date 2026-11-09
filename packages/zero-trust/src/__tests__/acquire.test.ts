@@ -9,6 +9,7 @@ import { acquireSource, resolveBase, sourceUrl } from '../canonical/acquire';
 import { CanonicalError, exportSource } from '../canonical/export';
 import { baseManifest, createCandidate, MAX_PACK_BYTES } from '../canonical/reconstruct';
 import { TrustedGit } from '../canonical/trusted-git';
+import { pushOutcome } from '../github/push';
 import { localGit as git } from './local-git';
 
 const temps: string[] = [];
@@ -80,9 +81,10 @@ describe('credential-free source acquisition', () => {
     );
     expect(candidate.record.baseSha).toBe(f.baseSha);
     const fetches = fetch.mock.calls.filter(([args]) => args[0] === 'fetch');
-    // The gated base is the shallow boundary: one depth-1 fetch even with a parent (#1273).
-    expect(fetches).toHaveLength(1);
+    // Complete history is preferred whenever it fits: a parent means a second, full fetch.
+    expect(fetches).toHaveLength(parent ? 2 : 1);
     expect(fetches[0]?.[0]).toContain('--depth=1');
+    if (parent) expect(fetches[1]?.[0]).not.toContain('--depth=1');
   });
   it.each([
     '120000',
@@ -429,9 +431,8 @@ describe('credential-free source acquisition', () => {
     });
     expect(() => baseManifest(result.pack, f.baseSha)).toThrow(new CanonicalError('unavailable'));
   });
-  // Three repositories: shallow fetch, strict probe, base inspection (no full-history retry).
   it.each([
-    1, 2, 3,
+    1, 2, 3, 4,
   ])('source repository initialization failure at step %s stops without publication', (failureAt) => {
     const f = fixture();
     const original = TrustedGit.prototype.run;
@@ -453,7 +454,7 @@ describe('credential-free source acquisition', () => {
     expect(() => acquire(f)).toThrow(new CanonicalError('unavailable'));
     expect(initializations).toBe(failureAt);
     expect(exec.mock.calls.filter(([args]) => args[0] === 'fetch')).toHaveLength(
-      failureAt === 1 ? 0 : 1
+      failureAt === 1 ? 0 : failureAt === 4 ? 2 : 1
     );
     for (const directory of directories) expect(fs.existsSync(directory)).toBe(false);
   });
@@ -570,8 +571,40 @@ describe('shallow base boundary (#1273)', () => {
     message: 'approved contribution\n',
   });
 
+  // Full history above the pack bound: the receive limit refuses the full fetch.
+  const tooLarge = () => {
+    const exec = TrustedGit.prototype.exec;
+    vi.spyOn(TrustedGit.prototype, 'exec').mockImplementation(function (
+      this: TrustedGit,
+      args,
+      options
+    ) {
+      if (args[0] === 'fetch' && !args.includes('--depth=1'))
+        return {
+          status: 1,
+          stdout: Buffer.alloc(0),
+          outputLimitExceeded: false,
+          fileLimitExceeded: true,
+        };
+      return exec.call(this, args, options);
+    });
+  };
+
+  it('keeps the history-bounded pack when the full history exceeds the bound', () => {
+    const f = fixture(true);
+    tooLarge();
+    const result = acquire(f);
+    expect(result.manifest).toEqual(
+      acquireSource({ ...upstream, baseSha: f.baseSha }, { remoteUrlForTest: f.url }).manifest
+    );
+    expect(createCandidate(result.manifest, approved(f.baseSha), result.pack).record.baseSha).toBe(
+      f.baseSha
+    );
+  });
+
   it('a depth-1 pack of a non-root base omits its history yet imports strictly', () => {
     const f = fixture(true);
+    tooLarge();
     const result = acquire(f);
     // Only the base commit, its tree and blob: the ancestor commit is not in the pack.
     const probe = new TrustedGit();
@@ -597,6 +630,7 @@ describe('shallow base boundary (#1273)', () => {
 
   it('keeps the boundary only while parents are missing; complete history is not shallow', () => {
     const f = fixture(true);
+    tooLarge();
     const full = git(f.root, ['pack-objects', '--stdout', '--revs'], `${f.baseSha}\n`);
     const shallowFile = (g: TrustedGit) => fs.existsSync(join(g.directory, 'repo', 'shallow'));
     for (const [pack, expected] of [
@@ -626,6 +660,7 @@ describe('shallow base boundary (#1273)', () => {
 
   it('a shallow candidate pushes to a remote that already holds the base history', () => {
     const f = fixture(true);
+    tooLarge();
     const result = acquire(f);
     const candidate = createCandidate(result.manifest, approved(f.baseSha), result.pack);
     const g = new TrustedGit();
@@ -666,5 +701,30 @@ describe('shallow base boundary (#1273)', () => {
       g.close();
     }
     expect(() => baseManifest(acquire(other).pack, f.baseSha)).toThrow(CanonicalError);
+  });
+
+  it('a fork without the base refuses the shallow push, classified apart from other rejections', () => {
+    const f = fixture(true);
+    tooLarge();
+    const result = acquire(f);
+    const candidate = createCandidate(result.manifest, approved(f.baseSha), result.pack);
+    const empty = temp();
+    git(empty, ['init', '--bare', '--template=', '.']);
+    const g = new TrustedGit();
+    const ref = 'refs/heads/fix';
+    try {
+      g.markShallow(f.baseSha);
+      g.run(['index-pack', '--stdin', '--strict'], candidate.pack);
+      g.settleShallow(f.baseSha);
+      const pushed = g.exec(
+        ['push', '--porcelain', `file://${empty}`, `${candidate.record.candidateSha}:${ref}`],
+        { config: ['protocol.file.allow=always'] } as never
+      );
+      expect(pushed.status).not.toBe(0);
+      expect(pushOutcome(pushed, ref)).toBe('shallow_refused');
+    } finally {
+      g.close();
+    }
+    expect(() => git(empty, ['rev-parse', '--verify', ref])).toThrow();
   });
 });

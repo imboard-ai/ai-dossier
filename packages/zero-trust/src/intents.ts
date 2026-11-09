@@ -97,6 +97,7 @@ export const WRITE_BLOCK_REASONS = Object.freeze([
   'remote_diverged',
   'authorization_refused',
   'fork_unverified',
+  'fork_base_missing',
 ] as const);
 export type WriteBlockReason = (typeof WRITE_BLOCK_REASONS)[number];
 export class IntentError extends Error {
@@ -123,7 +124,7 @@ export class WriteRefusedError extends Error {
   constructor(
     readonly reason: Extract<
       WriteBlockReason,
-      'remote_diverged' | 'authorization_refused' | 'fork_unverified'
+      'remote_diverged' | 'authorization_refused' | 'fork_unverified' | 'fork_base_missing'
     >,
     readonly detail?: string
   ) {
