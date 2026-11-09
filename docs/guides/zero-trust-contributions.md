@@ -503,7 +503,8 @@ at the root. A run installs and tests **one** of them:
 2. Otherwise, the side every source path in the issue title and body belongs to. For example, an
    issue that names only `app/models.py` and `tests/test_api.py` selects Python; one that names
    only `web/src/index.ts` or `package.json` selects npm. The issue text is only scanned for
-   path-shaped tokens; nothing in it is fetched or run.
+   path-shaped tokens (URLs and library names such as `next.js` do not count); nothing in it
+   is fetched or run.
 3. If the issue names no source paths, or paths on both sides, the run pauses before any VM
    with `ecosystem_ambiguous`. Choose the side yourself:
 
@@ -511,9 +512,12 @@ at the root. A run installs and tests **one** of them:
    node scripts/zt-run.mjs resume --root <state-dir>/runs --run <id> --ecosystem python
    ```
 
-The other side's manifests, lockfiles and tool configuration are set aside: none of its tools
-runs. The selected side must still be a supported setup on its own, and the run keeps that side
-for its whole life. The pull request's limitations say that only the selected side was installed
+The other side's manifests, lockfiles and tool configuration (for example `.npmrc` when Python
+is selected) are set aside: none of its tools is planned or run. A test script that shells out to
+the other side's tools could still read that configuration, but provisioning reaches only the one
+mirror and tests run with no network. The selected side must still be a supported setup on its
+own, and the run keeps that side for its whole life. A side chosen from the issue paths cannot be
+changed with `--ecosystem`; if it is wrong, cancel the run and start a new one. The pull request's limitations say that only the selected side was installed
 and tested locally, and that upstream CI covers the rest.
 
 The run's one proxy forward must reach the selected side's mirror. Add `"targetEcosystem":

@@ -82,7 +82,9 @@ interrupted from `planning` and a retained `ecosystem_handoff` step artifact fro
 acquisition (`ecosystem_not_at_handoff` otherwise); a value outside that hand-off's
 `ecosystems` is `invalid_ecosystem`. The journaled `ecosystem` user change
 (`ecosystem/operator`) holds the side, the contributor login as operator and the source
-manifest digest the hand-off retained; acquisition applies it only to that exact source.
+manifest digest the hand-off retained; acquisition only selects from it for that exact
+source. Once selected, the side is held for the run's life (like the profile record), and a
+drift onto a root that is no longer mixed retires the selection.
 Replay rejects a non-normalized record, another operator, or a pause from another phase.
 
 All mutations hold the controller's exclusive run-store guard. Corrupt or partial
@@ -3481,10 +3483,11 @@ Design, evidence and verdict:
   `detectEcosystem(files, only)` narrows it to one side, setting aside the other side's
   manifests, lockfiles and tool configuration (none of its tools is planned), and checks the
   selected side in full. Acquisition (#1276) selects the side from, in order: the run's
-  pinned `ecosystem_selection` step artifact, a journaled `resume --ecosystem` answer bound
+  held `ecosystem_selection` step artifact, the ecosystem of an already recorded profile
+  (a run rebased onto a mixed root keeps its side and records no selection), a journaled `resume --ecosystem` answer bound
   to the current source manifest digest (basis `operator`), and `issueEcosystem(title, body)`
   in `ecosystem/issue-paths`, which scans the untrusted issue text for path-shaped tokens
-  only and returns a side when every named source path (`.py`/`.pyi`, `pyproject.toml`,
+  only (URLs and library names such as `next.js` are not paths) and returns a side when every named source path (`.py`/`.pyi`, `pyproject.toml`,
   `uv.lock`, `requirements.txt`; `.js`/`.ts` family, `package.json`, `package-lock.json`)
   falls on it (basis `issue_paths`). Otherwise it pauses from `planning` with
   `ecosystem_ambiguous`, retaining `ecosystem_handoff` (`sourceDigest`, `ecosystems`), before

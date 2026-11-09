@@ -34,6 +34,7 @@ import { issueEcosystem } from '../ecosystem/issue-paths';
 import type { OperatorEcosystem } from '../ecosystem/operator';
 import {
   loadProfileRecord,
+  ProfileError,
   type ProfileRecord,
   recordProfileSelection,
   selectProfile,
@@ -473,16 +474,24 @@ export function createSteps(
     return { manifest: validateManifest(held.manifest), pack: Buffer.from(held.pack, 'base64') };
   };
   const gate = (c: PhaseContext) => artifacts(c).require<GateRecord>('gate');
-  /** The side a mixed root installs (#1276). A selection already made for this run is
-   * kept, like its profile record. Otherwise: the contributor's journaled
+  /** The ecosystem of the run's recorded profile, if acquisition already recorded one. */
+  const recordedEcosystem = (c: PhaseContext): Ecosystem | undefined => {
+    let record: ProfileRecord;
+    try {
+      record = profile(c);
+    } catch (error) {
+      if (error instanceof ProfileError && error.code === 'record_missing') return undefined;
+      throw error;
+    }
+    return record.manager === 'npm' ? 'node' : 'python';
+  };
+  /** The side a mixed root installs (#1276): the contributor's journaled
    * `resume --ecosystem` answer for exactly this source, then the side every source path
    * named in the issue belongs to. Undefined hands off as `ecosystem_ambiguous`. */
   const selectMixedEcosystem = (
     c: PhaseContext,
     sourceDigest: string
   ): EcosystemSelection | undefined => {
-    const held = artifacts(c).get<EcosystemSelection>('ecosystem_selection');
-    if (held) return held;
     const answer = c.store.userChanges
       .filter((change) => change.kind === 'ecosystem')
       .map((change) => change.value as OperatorEcosystem)
@@ -841,8 +850,16 @@ export function createSteps(
       const files = sourceFilesFromManifest(acquired.manifest);
       const sides = rootEcosystems(files);
       let only: Ecosystem | undefined;
-      if (sides.length > 1) {
-        const chosen = selectMixedEcosystem(c, acquired.manifest.digest);
+      const held = artifacts(c).get<EcosystemSelection | null>('ecosystem_selection');
+      // A selection describes a mixed root; drift onto a single-ecosystem root retires it,
+      // so the PR never discloses a narrowing that no longer happened.
+      if (sides.length < 2 && held) artifacts(c).put('ecosystem_selection', null);
+      // A run whose profile is already recorded keeps that ecosystem for its whole life:
+      // drift onto a mixed root narrows to it, never hands off or re-selects.
+      const pinned = sides.length > 1 && !held ? recordedEcosystem(c) : undefined;
+      if (pinned) only = pinned;
+      else if (sides.length > 1) {
+        const chosen = held ?? selectMixedEcosystem(c, acquired.manifest.digest);
         if (!chosen) {
           artifacts(c).put('ecosystem_handoff', {
             reason: 'ecosystem_ambiguous',
@@ -853,13 +870,16 @@ export function createSteps(
           return { kind: 'hand_off' };
         }
         only = chosen.ecosystem;
-        if (!artifacts(c).get('ecosystem_selection'))
-          artifacts(c).put('ecosystem_selection', chosen);
+        if (!held) artifacts(c).put('ecosystem_selection', chosen);
       }
       const detection = detectEcosystem(files, only);
       if (!detection.supported) return { kind: 'unsupported' };
       // The one proxy forward must reach this ecosystem's mirror; refuse before any VM.
-      preflightProxyEcosystem(services.proxyEcosystem, detection.ecosystem, only !== undefined);
+      preflightProxyEcosystem(
+        services.proxyEcosystem,
+        detection.ecosystem,
+        only !== undefined && !pinned
+      );
       const selection = selectProfile(detection);
       if (!selection.ok) return { kind: 'unsupported' };
       recordProfileSelection(c.store.storeDirectory('profile'), c.run.runId, selection);

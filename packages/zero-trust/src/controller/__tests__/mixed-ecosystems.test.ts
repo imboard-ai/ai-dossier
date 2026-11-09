@@ -5,10 +5,11 @@ import { expect, it } from 'vitest';
 import { ENDPOINTS } from '../../__tests__/verifier-fixture';
 import { loadProfileRecord } from '../../ecosystem/profiles';
 import type { RunRecord } from '../../state';
+import { approveCheckpoint } from '../checkpoints';
 import { changeEcosystem } from '../edits';
 import { RunStore } from '../run-store';
 import { stopNoticeAction } from '../stop-notice';
-import { rig } from './composition-fixture';
+import { rig, TIME } from './composition-fixture';
 import { compositionHooks, noShipping } from './composition-hooks';
 
 compositionHooks();
@@ -171,4 +172,43 @@ it('refuses --ecosystem outside an ecosystem hand-off', async () => {
   );
   expect(store.userChanges).toEqual([]);
   store.close();
+}, 90000);
+
+it('a recorded profile pins the ecosystem: re-acquisition never hands off or re-selects', async () => {
+  // Paused at the plan checkpoint with the npm profile recorded. Retiring the selection
+  // stands in for a run that recorded its profile on a single-ecosystem root and was then
+  // rebased onto a mixed one: re-acquisition must narrow to the profile, not ask again.
+  const h = rig({
+    mixedRoot: true,
+    proxyEcosystem: 'node',
+    checkpoint: 'plan',
+    issueBody: 'Fix web/app.ts',
+  });
+  const run = (await h.authorize(h.controller.start(h.config))) as RunRecord;
+  expect(run.state).toBe('paused_user');
+  const a = h.artifacts(run.runId);
+  expect(a.get('ecosystem_selection')).toMatchObject({ ecosystem: 'node', basis: 'issue_paths' });
+  a.put('ecosystem_selection', null);
+  const checkpoint = a.store.checkpoint('plan');
+  approveCheckpoint(
+    a.store,
+    a.store.run,
+    { point: 'plan', digest: checkpoint?.digest as string },
+    new Date(Date.parse(TIME) + 60000)
+  );
+  h.advanceClock(120000);
+  a.close();
+  // Undeclared proxy: a pinned run is not a newly narrowed one, so it is not refused.
+  fs.writeFileSync(
+    h.config.executionProfile.proxyEndpointsFile,
+    JSON.stringify({ endpoints: ENDPOINTS, target: { host: '10.0.0.2', port: 4873 } })
+  );
+  const reopened = h.reopen();
+  const resumed = (await h.authorize(reopened.resume(run.runId), reopened)) as RunRecord;
+  expect(resumed.state).toBe('awaiting_contributor');
+  const b = h.artifacts(run.runId);
+  expect(b.get('ecosystem_handoff') ?? null).toBeNull();
+  expect(b.get('ecosystem_selection')).toBeNull();
+  b.close();
+  expect(h.linkBody(run.runId, 'pr_create')).not.toContain('Mixed npm + Python');
 }, 90000);

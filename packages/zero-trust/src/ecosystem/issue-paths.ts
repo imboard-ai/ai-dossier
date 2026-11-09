@@ -17,12 +17,21 @@ const NODE_EXTENSIONS = /\.(?:[cm]?js|jsx|[cm]?ts|tsx)$/u;
 /** A bare file name must look like one: `index.ts`, `test_api.py`. A capitalized word
  * with a suffix (`Node.js`, `Vue.js`) is prose, so it only counts inside a path. */
 const BARE_NAME = /^[a-z0-9_][a-z0-9_.-]*$/u;
+/** Library and runtime names written like files (`next.js`, `node.js`): prose, not paths. */
+const LIBRARY_NAME =
+  /^(?:node|next|nuxt|vue|react|angular|ember|backbone|express|nest|chart|three|d3|p5|alpine|solid|svelte|preact|deno|bun|electron|socket|moment|day|anime|pixi|babylon|tensorflow|brain|ml5|video|highlight|marked|pdf|leaflet|mapbox-gl|handlebars|mustache|knockout|meteor|riot|mithril|htmx|lit)\.js$/u;
 
 function side(token: string): Ecosystem | undefined {
+  // `scheme://host/...` splits at `:`, leaving `//host/...`: a URL, never a repository path.
+  if (token.startsWith('//')) return undefined;
   const trimmed = token.replace(/^[./]+(?=[A-Za-z0-9_])/u, '').replace(/[./-]+$/u, '');
   if (!trimmed || trimmed.length > MAX_TOKEN) return undefined;
   const name = trimmed.slice(trimmed.lastIndexOf('/') + 1);
-  if (!name || (!trimmed.includes('/') && !BARE_NAME.test(name))) return undefined;
+  if (
+    !name ||
+    (!trimmed.includes('/') && (!BARE_NAME.test(name) || LIBRARY_NAME.test(name.toLowerCase())))
+  )
+    return undefined;
   if (PYTHON_NAMES.has(name) || PYTHON_EXTENSIONS.test(name)) return 'python';
   if (NODE_NAMES.has(name) || NODE_EXTENSIONS.test(name)) return 'node';
   return undefined;
