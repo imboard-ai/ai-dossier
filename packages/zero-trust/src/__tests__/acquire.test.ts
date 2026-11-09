@@ -80,9 +80,9 @@ describe('credential-free source acquisition', () => {
     );
     expect(candidate.record.baseSha).toBe(f.baseSha);
     const fetches = fetch.mock.calls.filter(([args]) => args[0] === 'fetch');
-    expect(fetches).toHaveLength(parent ? 2 : 1);
+    // The gated base is the shallow boundary: one depth-1 fetch even with a parent (#1273).
+    expect(fetches).toHaveLength(1);
     expect(fetches[0]?.[0]).toContain('--depth=1');
-    if (parent) expect(fetches[1]?.[0]).not.toContain('--depth=1');
   });
   it.each([
     '120000',
@@ -429,8 +429,9 @@ describe('credential-free source acquisition', () => {
     });
     expect(() => baseManifest(result.pack, f.baseSha)).toThrow(new CanonicalError('unavailable'));
   });
+  // Three repositories: shallow fetch, strict probe, base inspection (no full-history retry).
   it.each([
-    1, 2, 3, 4,
+    1, 2, 3,
   ])('source repository initialization failure at step %s stops without publication', (failureAt) => {
     const f = fixture();
     const original = TrustedGit.prototype.run;
@@ -452,7 +453,7 @@ describe('credential-free source acquisition', () => {
     expect(() => acquire(f)).toThrow(new CanonicalError('unavailable'));
     expect(initializations).toBe(failureAt);
     expect(exec.mock.calls.filter(([args]) => args[0] === 'fetch')).toHaveLength(
-      failureAt === 1 ? 0 : failureAt === 4 ? 2 : 1
+      failureAt === 1 ? 0 : 1
     );
     for (const directory of directories) expect(fs.existsSync(directory)).toBe(false);
   });
@@ -552,5 +553,118 @@ describe('credential-free source acquisition', () => {
     } finally {
       trusted.close();
     }
+  });
+});
+
+describe('shallow base boundary (#1273)', () => {
+  const author = {
+    login: 'contributor',
+    name: 'Contributor',
+    email: 'contributor@example.org',
+    timestamp: '2026-10-05T00:00:00Z',
+  };
+  const approved = (baseSha: string) => ({
+    baseSha,
+    author,
+    committerTimestamp: '2026-10-05T00:01:00Z',
+    message: 'approved contribution\n',
+  });
+
+  it('a depth-1 pack of a non-root base omits its history yet imports strictly', () => {
+    const f = fixture(true);
+    const result = acquire(f);
+    // Only the base commit, its tree and blob: the ancestor commit is not in the pack.
+    const probe = new TrustedGit();
+    try {
+      expect(() => probe.run(['index-pack', '--strict', '--stdin'], result.pack)).toThrow();
+    } finally {
+      probe.close();
+    }
+    const candidate = createCandidate(result.manifest, approved(f.baseSha), result.pack);
+    // The candidate pack stays bounded by the same boundary, and reconstructs from it.
+    const check = new TrustedGit();
+    try {
+      check.markShallow(f.baseSha);
+      check.run(['index-pack', '--strict', '--stdin'], candidate.pack);
+      const parent = /^parent ([a-f0-9]{40})$/mu.exec(
+        check.run(['cat-file', 'commit', f.baseSha]).toString()
+      )?.[1] as string;
+      expect(check.exec(['cat-file', '-e', parent]).status).not.toBe(0);
+    } finally {
+      check.close();
+    }
+  });
+
+  it('keeps the boundary only while parents are missing; complete history is not shallow', () => {
+    const f = fixture(true);
+    const full = git(f.root, ['pack-objects', '--stdout', '--revs'], `${f.baseSha}\n`);
+    const shallowFile = (g: TrustedGit) => fs.existsSync(join(g.directory, 'repo', 'shallow'));
+    for (const [pack, expected] of [
+      [acquire(f).pack, true],
+      [full, false],
+    ] as const) {
+      const g = new TrustedGit();
+      try {
+        g.markShallow(f.baseSha);
+        g.run(['index-pack', '--strict', '--stdin'], pack);
+        g.settleShallow(f.baseSha);
+        expect(shallowFile(g)).toBe(expected);
+      } finally {
+        g.close();
+      }
+    }
+    const root = fixture(false);
+    const g = new TrustedGit();
+    try {
+      g.run(['index-pack', '--strict', '--stdin'], acquire(root).pack);
+      g.settleShallow(root.baseSha);
+      expect(shallowFile(g)).toBe(false);
+    } finally {
+      g.close();
+    }
+  });
+
+  it('a shallow candidate pushes to a remote that already holds the base history', () => {
+    const f = fixture(true);
+    const result = acquire(f);
+    const candidate = createCandidate(result.manifest, approved(f.baseSha), result.pack);
+    const g = new TrustedGit();
+    try {
+      g.markShallow(f.baseSha);
+      g.run(['index-pack', '--stdin', '--strict'], candidate.pack);
+      g.settleShallow(f.baseSha);
+      const pushed = g.exec(
+        [
+          'push',
+          '--porcelain',
+          `file://${f.root}`,
+          `${candidate.record.candidateSha}:refs/heads/fix`,
+        ],
+        { config: ['protocol.file.allow=always'] } as never
+      );
+      expect(pushed.status).toBe(0);
+    } finally {
+      g.close();
+    }
+    expect(git(f.root, ['rev-parse', 'refs/heads/fix']).toString().trim()).toBe(
+      candidate.record.candidateSha
+    );
+    git(f.root, ['fsck', '--strict', '--no-dangling']);
+  });
+
+  it('strict import still rejects a pack whose objects are not the base', () => {
+    const f = fixture(true);
+    // A different commit (no parent) with the same content: never the gated base.
+    const other = fixture(false);
+    expect(other.baseSha).not.toBe(f.baseSha);
+    const g = new TrustedGit();
+    try {
+      g.markShallow(f.baseSha);
+      g.run(['index-pack', '--strict', '--stdin'], acquire(other).pack);
+      expect(() => g.settleShallow(f.baseSha)).toThrow(new CanonicalError('git_failed'));
+    } finally {
+      g.close();
+    }
+    expect(() => baseManifest(acquire(other).pack, f.baseSha)).toThrow(CanonicalError);
   });
 });

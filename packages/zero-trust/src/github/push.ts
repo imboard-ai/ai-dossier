@@ -402,7 +402,10 @@ export class ForkPusher implements WriteAdapter {
     const git = new TrustedGit();
     const started = !signal.aborted;
     try {
+      // Candidate packs stop at the gated base (#1273); the fork network holds its history.
+      git.markShallow(candidate.record.baseSha);
       git.run(['index-pack', '--stdin', '--strict'], candidate.pack);
+      git.settleShallow(candidate.record.baseSha);
       if (git.run(['cat-file', '-t', sha]).toString().trim() !== 'commit')
         throw new ForkPushError('invalid_candidate');
       const { url, config } = this.remote(at);

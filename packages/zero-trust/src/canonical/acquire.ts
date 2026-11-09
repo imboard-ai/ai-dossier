@@ -98,10 +98,11 @@ export function acquireSource(
   };
   let pack = fetchPack(true);
   // Only a strict import rejection permits the explicitly authorized full-history retry.
+  // With the base declared shallow, a depth-1 pack normally imports and no retry happens.
   const probe = createSourceGit();
   try {
     try {
-      importPack(probe, pack);
+      importPack(probe, pack, base);
     } catch (error) {
       if (!(error instanceof CanonicalError) || error.reason !== 'unsupported') throw error;
       pack = fetchPack(false);
