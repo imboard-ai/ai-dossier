@@ -39,6 +39,11 @@ import { engagementBody } from '../policy/engagement';
 import { createFreshnessProbe, type FreshnessReport } from '../policy/freshness';
 import { decideGate } from '../policy/gate';
 import { checkInvitation, type InvitationEvidence } from '../policy/invitation';
+import {
+  applyOperatorPolicy,
+  assessmentInputDigest,
+  type OperatorPolicy,
+} from '../policy/operator';
 import { policyRegions } from '../policy/regions';
 import { canonicalJson, ReceiptError } from '../receipt/schema';
 import { assertSecretFree } from '../redaction';
@@ -554,6 +559,10 @@ export function createSteps(
             assessment: PolicyAssessment;
             outcome: string;
             reasons: readonly string[];
+            operatorPolicy?: OperatorPolicy & {
+              readonly applied: readonly string[];
+              readonly stale: boolean;
+            };
           }
         | undefined;
       const handOff = (...reasons: string[]) => {
@@ -596,14 +605,29 @@ export function createSteps(
               },
               signal: c.signal,
             });
-      const decision = decideGate(p, e, c.run.contributor);
+      // A journaled operator answer replaces only `unclear` dimensions, and only for the
+      // policy input it was recorded against; a changed policy retires it (#1268).
+      const operator = c.store.userChanges.filter((change) => change.kind === 'policy').at(-1)
+        ?.value as OperatorPolicy | undefined;
+      const stale =
+        operator !== undefined &&
+        p.ai !== 'banned' &&
+        assessmentInputDigest(p) !== operator.inputDigest;
+      const answered = operator && !stale ? applyOperatorPolicy(p, operator) : undefined;
+      const assessment = answered?.assessment ?? p;
+      const decision = stale
+        ? ({ kind: 'hand_off', reasons: ['operator_policy_stale'] } as const)
+        : decideGate(assessment, e, c.run.contributor);
       assessed = {
         historyLength: c.run.history.length,
         sessionId: c.sessionId,
         baseSha,
-        assessment: p,
+        assessment,
         outcome: decision.kind,
         reasons: 'reasons' in decision ? decision.reasons : [],
+        ...(operator
+          ? { operatorPolicy: { ...operator, applied: answered?.applied ?? [], stale } }
+          : {}),
       };
       artifacts(c).put('gate_assessment', assessed);
       if (
@@ -641,11 +665,13 @@ export function createSteps(
       )
         return handOff('issue_unreadable');
       const prior = artifacts(c).get<GateRecord>('gate');
-      const currentDigest = policyDigest(p, files.files);
+      // Later freshness and publication checks read the answered assessment, so an
+      // operator decision keeps binding past the gate.
+      const currentDigest = policyDigest(assessment, files.files);
       artifacts(c).put('gate', {
         signoffRequired,
         ...(templates[0] ? { template: templates[0].content } : {}),
-        policy: p,
+        policy: assessment,
         policyDigest: currentDigest,
         ...(prior?.invitation && prior.policyDigest === currentDigest
           ? { invitation: prior.invitation }

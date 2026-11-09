@@ -12,6 +12,14 @@ import { createCandidate, reconstructCandidate } from '../canonical/reconstruct'
 import { TrustedGit } from '../canonical/trusted-git';
 import { Journal } from '../journal';
 import { assertModelKeyEnv, readModelKey } from '../model/transport';
+import type { PolicyAssessment } from '../policy/classify';
+import {
+  assessmentInputDigest,
+  OPERATOR_POLICY_REASONS,
+  type OperatorPolicy,
+  type OperatorPolicyDecisions,
+  validateOperatorPolicy,
+} from '../policy/operator';
 import { assertSecretFree } from '../redaction';
 import { isRecord, type RunRecord, sameRunRecord } from '../state';
 import { strictUtf8 } from '../strict-utf8';
@@ -38,6 +46,8 @@ export class UserEditError extends Error {
       | 'model_key_missing'
       | 'model_unavailable'
       | 'invalid_user_edit'
+      | 'policy_not_at_gate'
+      | 'invalid_policy_decision'
   ) {
     super(`User change refused (${code})`);
   }
@@ -313,6 +323,48 @@ export function changeCheckpoints(
     checkpoints: structuredClone(checkpoints),
   });
   store.recordUserChange('checkpoints', config.checkpoints, now.toISOString());
+}
+/** Journal a human answer to a policy hand-off. It binds to the assessed policy
+ * input, so a policy edit upstream retires it rather than silently carrying over. */
+export function changePolicy(
+  store: RunStore,
+  run: RunRecord,
+  request: { readonly decisions: OperatorPolicyDecisions; readonly note: string },
+  now = new Date()
+): OperatorPolicy {
+  paused(store, run);
+  if (run.history.at(-1)?.from !== 'gating') throw new UserEditError('policy_not_at_gate');
+  const journal = new Journal(path.join(store.storeDirectory('control'), 'steps'));
+  type Assessed = { outcome?: unknown; reasons?: unknown; assessment?: PolicyAssessment };
+  let assessed: Assessed | null;
+  try {
+    assessed = new StepArtifacts(journal, run.runId).get<Assessed>('gate_assessment') ?? null;
+  } finally {
+    journal.close();
+  }
+  const reasons = Array.isArray(assessed?.reasons) ? (assessed.reasons as string[]) : [];
+  if (
+    assessed?.outcome !== 'hand_off' ||
+    !assessed.assessment ||
+    !reasons.length ||
+    !reasons.every((reason) => (OPERATOR_POLICY_REASONS as readonly string[]).includes(reason))
+  )
+    throw new UserEditError('policy_not_at_gate');
+  const inputDigest = assessmentInputDigest(assessed.assessment);
+  if (!inputDigest) throw new UserEditError('policy_not_at_gate');
+  let policy: OperatorPolicy;
+  try {
+    policy = validateOperatorPolicy({
+      decisions: request.decisions,
+      note: request.note,
+      operator: run.contributor,
+      inputDigest,
+    });
+  } catch {
+    throw new UserEditError('invalid_policy_decision');
+  }
+  store.recordUserChange('policy', policy, now.toISOString());
+  return policy;
 }
 export function changeIdentity(_store: RunStore, _run: RunRecord, _identity: unknown): never {
   throw new UserEditError('identity_change_requires_new_run');

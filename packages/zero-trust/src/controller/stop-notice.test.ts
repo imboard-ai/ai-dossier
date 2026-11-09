@@ -127,6 +127,12 @@ describe('stop notices', () => {
     const notice = gateHandoffNotice(['ai_unclear', 'ownership_unclear', 'ai_unclear']);
     expect(notice).toMatchObject({ state: 'gating', reason: 'ai_unclear,ownership_unclear' });
     expect(notice.nextPermittedAction).toContain('(ai_unclear,ownership_unclear)');
+    // Only a policy reading the operator can answer points at --policy (#1268).
+    expect(notice.nextPermittedAction).toContain('--policy <dimension=value,...>');
+    expect(gateHandoffNotice(['real_name_required']).nextPermittedAction).not.toContain('--policy');
+    expect(gateHandoffNotice(['ai_unclear', 'policy_unknown']).nextPermittedAction).not.toContain(
+      '--policy'
+    );
     expect(gateHandoffNotice(['<script>ghp_x']).reason).toBe('unknown_input');
     expect(gateHandoffNotice([]).reason).toBe('unknown_input');
     const store = new Map<string, unknown>();

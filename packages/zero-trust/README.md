@@ -58,6 +58,19 @@ records; repository/model output never selects checkpoints. Original identity,
 contributor, issue, upstream and fork cannot change in place; `changeIdentity`
 refuses with `identity_change_requires_new_run`. Create a new run for new targets.
 
+`--policy <dimension=value,...> --policy-note <why>` answers a gate hand-off through
+`changePolicy(store, run, { decisions, note }, now?)` (#1268). It requires `paused_user`
+interrupted from `gating`, and a retained `gate_assessment` whose hand-off reasons are only
+`ai_unclear` and/or `ownership_unclear` (`policy_not_at_gate` otherwise). Values come from
+`OPERATOR_POLICY_VALUES` in `policy/operator`; `banned` and `unclear` cannot be recorded, and a
+missing or blank note is `invalid_policy_decision`. The journaled `policy` user change holds the
+decisions, the note, the contributor login as operator, and the shared `inputDigest` of the
+assessment it answers. On the next gate, `applyOperatorPolicy` replaces only dimensions that are
+still `unclear`; a banned assessment is never touched. A different input digest hands off with
+`operator_policy_stale`. The answered assessment becomes the admitted `gate.policy` (so freshness
+and publication checks keep it), and `gate_assessment.operatorPolicy` records the decision with
+`applied` dimensions and `stale`, shown in status as `policyGate.operatorPolicy`.
+
 All mutations hold the controller's exclusive run-store guard. Corrupt or partial
 mutation evidence refuses reopening. A crash after supersession but before a source
 edit is committed conservatively keeps old verification fenced for inspection;

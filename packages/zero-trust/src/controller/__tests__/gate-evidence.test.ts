@@ -1,8 +1,12 @@
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { expect, it } from 'vitest';
 import type { PolicyAssessment } from '../../policy/classify';
 import type { RunRecord } from '../../state';
+import { requestControl } from '../control';
+import { changePolicy } from '../edits';
+import { RunStore } from '../run-store';
 import { stopNoticeAction } from '../stop-notice';
 import { rig } from './composition-fixture';
 import { compositionHooks, noShipping } from './composition-hooks';
@@ -105,6 +109,101 @@ it('finalizes retained policy evidence for a post-assessment real-name hand-off'
     )
   ).toHaveLength(6);
   expect(a.get('stop_notice')).toMatchObject({ reason: 'real_name_required' });
+  a.close();
+  noShipping();
+}, 60000);
+
+async function answeredHandoff() {
+  const h = rig({ modelPrice: 1, ceilingMinor: 1000000 });
+  const model = h.edges.models.planning;
+  const complete = model.complete.bind(model);
+  // Ownership stays unreadable on every attempt: only the human answer can clear it.
+  model.complete = async (request) => {
+    const result = await complete(request);
+    if (
+      request.tools[0]?.function.name === 'report_decision' &&
+      /"id":"policy-(assignment|direct-pr)"/u.test(request.system)
+    )
+      return { kind: 'malformed', reason: 'invalid_response', usage: result.usage };
+    return result;
+  };
+  const run = (await h.authorize(h.controller.start(h.config))) as RunRecord;
+  expect(run.state).toBe('gating');
+  const runs = path.join(h.config.executionProfile.stateDir, 'runs');
+  const answer = {
+    decisions: { directPr: 'welcomed' as const },
+    note: 'CONTRIBUTING.md:3 says fork and open a PR',
+  };
+
+  // Not paused yet: refused before anything is journaled.
+  const early = RunStore.open(runs, run.runId);
+  expect(() => changePolicy(early, early.run, answer)).toThrow('edit_not_paused');
+  early.close();
+
+  const observer = RunStore.open(runs, run.runId, { readOnly: true, observe: true });
+  requestControl(observer, { kind: 'pause', reason: 'Record policy reading' }, new Date());
+  observer.close();
+  const paused = (await h.authorize(h.reopen().resume(run.runId))) as RunRecord;
+  expect(paused.state).toBe('paused_user');
+
+  const store = RunStore.open(runs, run.runId);
+  expect(() => changePolicy(store, store.run, { decisions: answer.decisions, note: ' ' })).toThrow(
+    'invalid_policy_decision'
+  );
+  const policy = changePolicy(store, store.run, answer);
+  expect(policy).toMatchObject({ operator: h.config.contributor, decisions: answer.decisions });
+  expect(store.userChanges.at(-1)).toMatchObject({ kind: 'policy', value: policy });
+  store.close();
+  return { h, run, policy };
+}
+
+it('applies a journaled operator answer to an ownership hand-off and proceeds (#1268)', async () => {
+  const { h, run, policy } = await answeredHandoff();
+  const reopened = h.reopen();
+  const resumed = (await h.authorize(reopened.resume(run.runId), reopened)) as RunRecord;
+  expect(resumed.state).toBe('awaiting_contributor');
+  const a = h.artifacts(run.runId);
+  expect(a.get('gate_assessment')).toMatchObject({
+    outcome: 'proceed',
+    assessment: { directPr: 'welcomed', assignment: 'unclear' },
+    operatorPolicy: { ...policy, applied: ['directPr'], stale: false },
+  });
+  expect(a.get<{ policy: PolicyAssessment }>('gate').policy.directPr).toBe('welcomed');
+  a.close();
+}, 60000);
+
+it('retires an operator answer when the policy text changed before the gate re-ran (#1268)', async () => {
+  const { h, run, policy } = await answeredHandoff();
+  const text = 'Fork the repository and open a pull request against main.\n';
+  const sha = createHash('sha1')
+    .update(`blob ${Buffer.byteLength(text)}\0`)
+    .update(text)
+    .digest('hex');
+  h.interceptRead((request) =>
+    request.startsWith('/repos/upstream/fixture/contents/CONTRIBUTING.md?')
+      ? {
+          status: 200,
+          body: {
+            path: 'CONTRIBUTING.md',
+            type: 'file',
+            sha,
+            size: Buffer.byteLength(text),
+            encoding: 'base64',
+            content: Buffer.from(text).toString('base64'),
+          },
+        }
+      : undefined
+  );
+  const reopened = h.reopen();
+  const resumed = (await h.authorize(reopened.resume(run.runId), reopened)) as RunRecord;
+  expect(resumed.state).toBe('gating');
+  const a = h.artifacts(run.runId);
+  expect(a.get('gate_assessment')).toMatchObject({
+    outcome: 'hand_off',
+    reasons: ['operator_policy_stale'],
+    operatorPolicy: { ...policy, applied: [], stale: true },
+  });
+  expect(a.get('stop_notice')).toMatchObject({ reason: 'operator_policy_stale' });
   a.close();
   noShipping();
 }, 60000);

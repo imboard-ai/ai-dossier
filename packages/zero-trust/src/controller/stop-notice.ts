@@ -3,6 +3,7 @@
  * so a later, unrelated stop never displays it. All text is fixed: no untrusted bytes. */
 
 import type { WriteBlockReason } from '../intents';
+import { OPERATOR_POLICY_REASONS } from '../policy/operator';
 import { INTEGRITY_CODES, type IntegrityCode } from '../review/integrity';
 import type { RunRecord } from '../state';
 import type { DriftHandoffReason } from './drift';
@@ -172,6 +173,7 @@ export const GATE_HANDOFF_REASONS = Object.freeze([
   'unknown_input',
   'real_name_required',
   'issue_unreadable',
+  'operator_policy_stale',
 ] as const);
 export type GateHandoffReason = (typeof GATE_HANDOFF_REASONS)[number];
 
@@ -190,10 +192,13 @@ function closedReason(
  * decision codes collapse to `unknown_input`, so no untrusted text reaches status. */
 export function gateHandoffNotice(reasons: readonly string[]): Omit<StopNotice, 'historyLength'> {
   const reason = closedReason(reasons, GATE_HANDOFF_REASONS, 'unknown_input');
+  const answerable =
+    reasons.length > 0 &&
+    reasons.every((r) => (OPERATOR_POLICY_REASONS as readonly string[]).includes(r));
   return {
     state: 'gating',
     reason,
-    nextPermittedAction: `Handed off at the gate (${reason}). No implementation VM or code work started and nothing was published. Policy decision calls may already have run and been charged; inspect policyGate evidence if present, and estimatedSpend in status. Check the upstream issue and contribution policy, then resume explicitly or contribute manually.`,
+    nextPermittedAction: `Handed off at the gate (${reason}). No implementation VM or code work started and nothing was published. Policy decision calls may already have run and been charged; inspect policyGate evidence if present, and estimatedSpend in status. Check the upstream issue and contribution policy, then ${answerable ? 'record your reading of the unclear rules (pause, resume, then resume --policy <dimension=value,...> --policy-note <why>), ' : ''}resume explicitly or contribute manually.`,
   };
 }
 

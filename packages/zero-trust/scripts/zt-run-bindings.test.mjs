@@ -55,6 +55,18 @@ test('resume with missing model rates refuses before OAuth/continuation and reta
     commands.resume(id, { modelProfile: { ...config.modelProfile, rates: [] } }),
     (e) => e.code === 'missing_rate'
   );
+  // A policy answer without its note, or outside the closed grammar, is refused before
+  // any store change (#1268).
+  for (const options of [
+    { policy: 'ai=welcomed' },
+    { policyNote: 'why' },
+    { policy: 'ai=banned', policyNote: 'why' },
+  ])
+    await assert.rejects(commands.resume(id, options), { code: 'invalid_policy_decision' });
+  // Paused away from gating: there is no policy hand-off to answer.
+  await assert.rejects(commands.resume(id, { policy: 'ai=welcomed', policyNote: 'why' }), {
+    code: 'policy_not_at_gate',
+  });
   assert.equal(construct.mock.calls.length, 0);
   const reopened = RunStore.open(h.root, id);
   try {
