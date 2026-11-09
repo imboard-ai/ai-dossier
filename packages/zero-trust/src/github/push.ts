@@ -177,7 +177,7 @@ export function replayPushes(events: readonly unknown[], repositoryId: number): 
 
 /** Outcome of the push plus the server's own answer for the ref (`undefined`: unknown). */
 interface PushOutcome {
-  readonly git: 'pushed' | 'rejected' | 'failed' | 'killed';
+  readonly git: 'pushed' | 'rejected' | 'shallow_refused' | 'failed' | 'killed';
   readonly remote: string | null | undefined;
   readonly stoppedAfterStart?: boolean;
 }
@@ -328,6 +328,8 @@ export class ForkPusher implements WriteAdapter {
       if (observed !== expected) throw diverged(expected, observed);
       throw new MutationVoidedError('push:stopped_remote_absent');
     }
+    if (outcome.git === 'shallow_refused' && outcome.remote === expected)
+      throw new WriteRefusedError('fork_base_missing', `${at.fork.owner}/${at.fork.repo}`);
     // Unknown, or still at the expected value (nothing landed): reconciliation decides.
     throw new ForkPushError('push_uncertain', outcome.git);
   }
@@ -402,7 +404,14 @@ export class ForkPusher implements WriteAdapter {
     const git = new TrustedGit();
     const started = !signal.aborted;
     try {
+      // Candidate packs stop at the gated base (#1273); the fork network holds its history.
+      git.markShallow(candidate.record.baseSha);
       git.run(['index-pack', '--stdin', '--strict'], candidate.pack);
+      try {
+        git.settleShallow(candidate.record.baseSha);
+      } catch {
+        throw new ForkPushError('invalid_candidate');
+      }
       if (git.run(['cat-file', '-t', sha]).toString().trim() !== 'commit')
         throw new ForkPushError('invalid_candidate');
       const { url, config } = this.remote(at);
@@ -503,13 +512,17 @@ function diverged(expected: string | null, observed: string | null): WriteRefuse
 }
 
 /** `--porcelain` flags: `!` rejected (stale lease, protected branch), `=` up to date. */
-function pushOutcome(push: GitResult, ref: string): PushOutcome['git'] {
+/** Exported for tests only: classifies one porcelain push result for `ref`. */
+export function pushOutcome(push: GitResult, ref: string): PushOutcome['git'] {
   if (push.status === null) return 'killed';
   const line = push.stdout
     .toString()
     .split('\n')
     .find((l) => l.split('\t')[1]?.endsWith(`:${ref}`));
-  if (line?.startsWith('!')) return 'rejected';
+  // The candidate stops at the gated base (#1273). A fork whose network lacks that base
+  // refuses it as a shallow update: nothing landed, and retrying cannot change that.
+  if (line?.startsWith('!'))
+    return /shallow update not allowed/u.test(line) ? 'shallow_refused' : 'rejected';
   return push.status === 0 ? 'pushed' : 'failed';
 }
 

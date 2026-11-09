@@ -96,18 +96,35 @@ export function acquireSource(
       git.close();
     }
   };
-  let pack = fetchPack(true);
-  // Only a strict import rejection permits the explicitly authorized full-history retry.
+  const shallow = fetchPack(true);
+  // Strict import with the base as a shallow boundary (#1273): a depth-1 pack of a commit
+  // with parents is accepted, and the probe reports whether history was actually cut.
+  let cut: boolean;
   const probe = createSourceGit();
   try {
     try {
-      importPack(probe, pack);
+      importPack(probe, shallow, base);
     } catch (error) {
-      if (!(error instanceof CanonicalError) || error.reason !== 'unsupported') throw error;
-      pack = fetchPack(false);
+      // A pack that imported without the base reads as git_failed: report it like
+      // baseManifest does, as unavailable source.
+      if (error instanceof CanonicalError && error.reason === 'git_failed')
+        throw new CanonicalError('unavailable');
+      throw error;
     }
+    cut = probe.isShallow();
   } finally {
     probe.close();
+  }
+  let pack = shallow;
+  // Prefer complete history: candidates and pushes then need nothing from the fork. Only
+  // when it exceeds the pack bound does the run keep the history-bounded pack, and the
+  // push then needs the base reachable from a fork ref (`fork_base_missing` otherwise).
+  if (cut) {
+    try {
+      pack = fetchPack(false);
+    } catch (error) {
+      if (!(error instanceof CanonicalError) || error.reason !== 'limit_exceeded') throw error;
+    }
   }
   return Object.freeze({ pack, manifest: baseManifest(pack, base) });
 }

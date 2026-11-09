@@ -2193,9 +2193,22 @@ empty and prompts disabled. This option refuses env, identity and config overrid
 All other callers retain `protocol.allow=never`. Hooks, attributes filters and
 gitmodules are data, never executed. Temporary repositories are removed on all exits.
 
-Production first fetches with `--depth=1`. A root commit's pack imports strictly as
-is; commits with omitted parents fail `index-pack --strict` and trigger one fresh
-fetch without depth. This is a complete-history fallback, not a weaker importer.
+Production first fetches with `--depth=1`. Every import (`importPack`, also used by
+candidate creation, reconstruction and the push repository) declares the gated base a
+shallow boundary (`TrustedGit.markShallow`), so `index-pack --strict` accepts a pack that
+omits the base's parents while still checking every object it does contain: the base
+commit, its tree and blobs, and anything else in the pack must be fully connected.
+`settleShallow` then drops the boundary if every parent arrived as a real commit (a tag
+does not count), so complete history behaves exactly as before. The base SHA is pinned by
+the gate, so its unverified ancestors carry no trust (#1273).
+
+When the depth-1 pack cut history, acquisition still prefers one fresh fetch without depth:
+with complete history, candidates and pushes need nothing from the fork. Only when that
+complete history exceeds the receive bound (`limit_exceeded`) does the run keep the
+history-bounded pack. Its candidate then stops at the base, so the push needs the base
+reachable from a fork ref. A fork that is behind the upstream refuses it as
+`shallow update not allowed`; the push blocks with `fork_base_missing` (nothing landed),
+and the contributor syncs the fork on GitHub before a new run.
 Both paths enforce a kernel receive-file bound using GNU `env` and util-linux
 `prlimit` (required on the trusted Linux controller). Git is forced to retain the
 received pack, never unpack it into loose files; `RLIMIT_FSIZE` inherited by
@@ -2599,7 +2612,8 @@ reason is still journaled. Proven absence after the final attempt is journaled a
 `exhausted`; it cannot enable a retry or repeatedly reconcile on restart.
 `snapshot().blockedReason` on a persisted block preserves the bounded reason
 (`unknown`, `reconciliation_error`, `invalid_evidence`, `unexpected_remote_sha`,
-`retry_exhausted`, `remote_diverged`, `authorization_refused` or `fork_unverified`) without
+`retry_exhausted`, `remote_diverged`, `authorization_refused`, `fork_unverified` or
+`fork_base_missing`) without
 storing provider exception text. A `reconcile` that throws `ReconcileDeferredError`
 (evidence temporarily unreadable: rate limit, network) records nothing and blocks
 nothing; `resume()`/`execute()` rethrow it and a later resume reads again. Only positive
@@ -3716,7 +3730,9 @@ VM and accounting obligation before leaving `blocked_cleanup`.
    another repository after preflight is refused by GitHub. There is no remote, no
    wildcard and no plain force. `ls-remote` then reads the ref back from the git server.
 5. Only a read-back equal to the candidate records `push_verified` and confirms. Another
-   SHA blocks with `remote_diverged`; still the expected value, or unknown, is
+   SHA blocks with `remote_diverged`. A `shallow update not allowed` refusal with the
+   ref still at the expected value blocks with `fork_base_missing` (the fork cannot reach
+   the base; see source acquisition). Otherwise still the expected value, or unknown, is
    `push_uncertain`, which reconciliation settles: candidate → done, expected → one
    retry, anything else → `remote_diverged`.
 

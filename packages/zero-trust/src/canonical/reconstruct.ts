@@ -109,18 +109,21 @@ function inputs(raw: CommitInputs): CommitInputs {
     message,
   });
 }
-/** Strict import shared by source acquisition and candidate reconstruction. */
-export function importPack(git: TrustedGit, pack: Buffer): void {
+/** Strict import shared by source acquisition and candidate reconstruction. The gated
+ * base is the shallow boundary: a depth-1 pack omits its parents by design. */
+export function importPack(git: TrustedGit, pack: Buffer, baseSha: string): void {
   if (!Buffer.isBuffer(pack) || !pack.length || pack.length > MAX_PACK_BYTES)
     throw new CanonicalError('limit_exceeded');
+  git.markShallow(oid(baseSha));
   // Copy once: caller cannot mutate bytes between checks/import.
   const result = git.exec(['index-pack', '--strict', '--stdin'], { input: Buffer.from(pack) });
   if (result.status === null) throw new CanonicalError('unavailable');
   if (result.status !== 0)
     throw new CanonicalError(result.strictImportRejected ? 'unsupported' : 'unavailable');
+  git.settleShallow(baseSha);
 }
 function importBase(git: TrustedGit, pack: Buffer, baseSha: string): void {
-  importPack(git, pack);
+  importPack(git, pack, baseSha);
   if (git.run(['cat-file', '-t', baseSha]).toString().trim() !== 'commit')
     throw new CanonicalError('unsupported');
 }

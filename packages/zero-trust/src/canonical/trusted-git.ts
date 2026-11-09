@@ -81,6 +81,32 @@ export class TrustedGit {
       throw error;
     }
   }
+  /** Declare `sha` a shallow boundary: its parents are intentionally absent, so strict
+   * import, fsck and pack-objects stop at it instead of demanding the full history (#1273).
+   * The source is pinned to this base; ancestors are never part of the contribution. */
+  markShallow(sha: string): void {
+    if (!/^[a-f0-9]{40}$/u.test(sha)) throw new CanonicalError('unsupported');
+    fs.writeFileSync(join(this.directory, 'repo', 'shallow'), `${sha}\n`, { mode: 0o600 });
+  }
+  /** Whether a shallow boundary is in effect (set and not settled away). */
+  isShallow(): boolean {
+    return fs.existsSync(join(this.directory, 'repo', 'shallow'));
+  }
+  /** Drop the boundary again when every parent of `sha` was imported anyway, so complete
+   * history behaves exactly as before #1273 (packs, fsck and pushes are not shallow). */
+  settleShallow(sha: string): void {
+    const shallow = join(this.directory, 'repo', 'shallow');
+    fs.rmSync(shallow, { force: true });
+    const commit = this.run(['cat-file', 'commit', sha]).toString();
+    const parents = [...commit.matchAll(/^parent ([a-f0-9]{40})$/gmu)].map((m) => m[1] as string);
+    // `-t`, not `^{commit}`: a tag object that peels to a commit is not the parent.
+    if (
+      parents.some(
+        (parent) => this.exec(['cat-file', '-t', parent]).stdout.toString().trim() !== 'commit'
+      )
+    )
+      this.markShallow(sha);
+  }
   run(args: readonly string[], input?: Buffer | string, identity: NodeJS.ProcessEnv = {}): Buffer {
     const result = this.exec(args, { input, identity });
     if (result.status !== 0) throw new CanonicalError('git_failed');

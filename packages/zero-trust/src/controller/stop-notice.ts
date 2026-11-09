@@ -259,6 +259,8 @@ const WRITE_BLOCK_STATES: Partial<Record<WriteBlockReason, string>> = Object.fre
   remote_diverged:
     'the fork branch holds a commit no verified push left there, and nothing on it was overwritten',
   fork_unverified: 'the fork no longer resolves to the bound repository, and nothing was pushed',
+  fork_base_missing:
+    'the fork does not hold the upstream base commit, so GitHub refused the history-bounded push and nothing was pushed; sync the fork with upstream on GitHub before a new run',
   authorization_refused:
     'the push authorization was refused before any credential was used, and nothing was pushed',
 });
