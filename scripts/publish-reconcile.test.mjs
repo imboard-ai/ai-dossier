@@ -3,7 +3,13 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { parse } from 'yaml';
 
-import { findPending, inflightRuns, packageDirs, reconcile } from './publish-reconcile.mjs';
+import {
+  DISPATCH_ARGS,
+  findPending,
+  inflightRuns,
+  packageDirs,
+  reconcile,
+} from './publish-reconcile.mjs';
 
 const read = (name) =>
   readFileSync(fileURLToPath(new URL(`../.github/workflows/${name}`, import.meta.url)), 'utf8');
@@ -51,6 +57,10 @@ describe('reconcile', () => {
     const r = await reconcile(opts({ cli: 'publish' }, { dispatch, inflight: () => 0 }));
     expect(r.pending).toEqual(['cli']);
     expect(dispatch).toHaveBeenCalledOnce();
+  });
+
+  it('dispatches the stable channel, not the next default', () => {
+    expect(DISPATCH_ARGS).toEqual(expect.arrayContaining(['-f', 'channel=stable']));
   });
 
   it('does not dispatch while a publish run is queued or running', async () => {

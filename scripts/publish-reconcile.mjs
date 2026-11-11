@@ -15,7 +15,7 @@
 //
 //   nothing to publish            -> no-op
 //   a publish run is queued/live  -> no-op (it will publish; do not double up)
-//   otherwise                     -> dispatch publish-packages.yml on main
+//   otherwise                     -> dispatch publish-packages.yml (channel=stable) on main
 //
 // A collision or undecidable package cannot be fixed by a re-publish, so it
 // does not trigger a dispatch; it does fail this job (exit 1) so it is loud.
@@ -36,6 +36,19 @@ import { pathToFileURL } from 'node:url';
 import { run as runGuard } from './publish-guard.mjs';
 
 export const PUBLISH_WORKFLOW = 'publish-packages.yml';
+
+// The guard checks committed (stable) versions, so the dispatch must publish
+// the stable channel. A bare dispatch defaults to `channel=next`, which never
+// publishes the missing stable version and re-triggers every hour.
+export const DISPATCH_ARGS = [
+  'workflow',
+  'run',
+  PUBLISH_WORKFLOW,
+  '--ref',
+  'main',
+  '-f',
+  'channel=stable',
+];
 
 /** Package dirs the publish workflow guards, in its (dependency) order. */
 export function packageDirs(workflowText) {
@@ -105,7 +118,7 @@ export async function reconcile({
   guard,
   inflight = inflightRuns,
   dispatch = () =>
-    execFileSync('gh', ['workflow', 'run', PUBLISH_WORKFLOW, '--ref', 'main'], {
+    execFileSync('gh', DISPATCH_ARGS, {
       stdio: 'inherit',
     }),
   log = console.log,
