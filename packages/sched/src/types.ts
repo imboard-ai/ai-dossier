@@ -1935,6 +1935,11 @@ export type JournalEventName =
   // an upgrade attempted, and did it work?" from events.jsonl alone.
   | 'engine-auto-upgrade-attempted'
   | 'engine-auto-upgrade-failed'
+  // npm succeeded but the re-exec target (`realpath(argv[1])`) still holds the
+  // old versions — npm installed into a different global prefix. Journaled
+  // once per (installed, latest) pair; the engine keeps running instead of
+  // re-exec looping (each loop re-ran a full GitHub-polling tick every ~11 s).
+  | 'engine-auto-upgrade-ineffective'
   | 'engine-auto-upgrade-deferred'
   | 'engine-auto-upgrade-drained'
   // #565: `sched reprioritize` mutates state.json directly with no other

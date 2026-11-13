@@ -162,6 +162,65 @@ export async function checkCliStaleness(
   return checkPackageStaleness(CLI_PACKAGE_NAME, opts);
 }
 
+/** Read `name`/`version` from a package.json, or null. Never throws. */
+function readPackageJson(file: string): { name?: unknown; version?: unknown } | null {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function validVersion(value: unknown): string | null {
+  return typeof value === 'string' && VERSION_FORMAT.test(value) ? value : null;
+}
+
+/**
+ * The package versions a re-exec of `scriptPath` (normally `process.argv[1]`,
+ * the `ai-dossier` bin the engine was started with) would actually load —
+ * read fresh from disk, never from this process's module cache.
+ *
+ * Auto-upgrade runs `npm i -g` against whatever `npm` is first on PATH, then
+ * re-execs `argv[1]`. When those are different global prefixes (a node
+ * version swap that kept the old script path), the install lands elsewhere
+ * and the re-exec loads the same old version forever — on hcc this cycled
+ * every ~11 s for three weeks and drained the shared GitHub API budget.
+ * Comparing this result against the pre-upgrade versions catches that.
+ *
+ * `null` fields mean "could not resolve" (e.g. running from sources).
+ */
+export function readReexecTargetVersions(scriptPath: string | undefined): {
+  cli: string | null;
+  sched: string | null;
+  packageDir: string | null;
+} {
+  const none = { cli: null, sched: null, packageDir: null };
+  if (!scriptPath) return none;
+  let dir: string;
+  try {
+    dir = path.dirname(fs.realpathSync(scriptPath));
+  } catch {
+    return none;
+  }
+  for (let i = 0; i < 10; i++) {
+    const pkg = readPackageJson(path.join(dir, 'package.json'));
+    if (pkg?.name === CLI_PACKAGE_NAME) {
+      let sched: string | null = null;
+      try {
+        const schedPkg = require.resolve(`${SCHED_PACKAGE_NAME}/package.json`, { paths: [dir] });
+        sched = validVersion(readPackageJson(schedPkg)?.version);
+      } catch {
+        // unresolvable — leave null
+      }
+      return { cli: validVersion(pkg.version), sched, packageDir: dir };
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return none;
+}
+
 /**
  * The engine-stale warning text, shared by `sched status`'s rendered report
  * and `sched start`'s stderr warning (#537) — one wording to keep in sync.
