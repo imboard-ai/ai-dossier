@@ -15,7 +15,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { withBlockedBatch } from '../../../../packages/sched/src/__tests__/helpers/blocked-batch';
 import { graphqlIssueResponse } from '../../../../packages/sched/src/__tests__/helpers/graphql-fixtures';
 import { reexecUpdatedCli, registerSchedCommand, upgradeHasAgents } from '../../commands/sched';
-import { checkCliStaleness, checkEngineStaleness } from '../../engine-version';
+import {
+  checkCliStaleness,
+  checkEngineStaleness,
+  readReexecTargetVersions,
+} from '../../engine-version';
 import { readRunLog } from '../../run-log';
 import { createTestProgram, type ExecStub, execHandles, execReturns } from '../helpers/test-utils';
 
@@ -49,7 +53,12 @@ vi.mock('../../run-log');
 // without this comment as the tripwire).
 vi.mock('../../engine-version', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../engine-version')>();
-  return { ...actual, checkEngineStaleness: vi.fn(), checkCliStaleness: vi.fn() };
+  return {
+    ...actual,
+    checkEngineStaleness: vi.fn(),
+    checkCliStaleness: vi.fn(),
+    readReexecTargetVersions: vi.fn(),
+  };
 });
 
 let home: string;
@@ -131,6 +140,13 @@ beforeEach(() => {
     installed: '0.89.6',
     latest: null,
     stale: false,
+  });
+  // Default: the re-exec target is unresolvable (running from sources), so
+  // the post-install verification is skipped and handoff proceeds.
+  vi.mocked(readReexecTargetVersions).mockReturnValue({
+    cli: null,
+    sched: null,
+    packageDir: null,
   });
 });
 
@@ -765,6 +781,98 @@ describe('ai-dossier sched start (#537: engine-stale detection)', () => {
     expect(
       fs.existsSync(path.join(home, '.dossier', 'sched', 'test-proj', '.sched-engine-lease'))
     ).toBe(false);
+  });
+
+  it('does not re-exec when npm installed into a different prefix, and does not retry that pair', async () => {
+    vi.mocked(checkCliStaleness).mockResolvedValue({
+      installed: '0.93.3',
+      latest: '0.93.4',
+      stale: true,
+    });
+    // npm "succeeded", but the bin the engine re-execs still holds 0.93.3.
+    vi.mocked(readReexecTargetVersions).mockReturnValue({
+      cli: '0.93.3',
+      sched: '0.70.1',
+      packageDir: '/old-prefix/lib/node_modules/@ai-dossier/cli',
+    });
+    const execve = stubProcessExecve();
+    try {
+      vi.mocked(execFileSync).mockClear();
+      await runSched(['sched', 'start', '--once', '--auto-upgrade', '--project', 'test-proj']);
+      await runSched(['sched', 'start', '--once', '--auto-upgrade', '--project', 'test-proj']);
+    } finally {
+      execve.restore();
+    }
+
+    expect(execve.calls).toHaveLength(0);
+    const installs = vi
+      .mocked(execFileSync)
+      .mock.calls.filter(([file, args]) => file === 'npm' && (args as string[])[0] === 'i');
+    expect(installs).toHaveLength(1);
+    const ineffective = journalEvents().filter(
+      (event) => event.event === 'engine-auto-upgrade-ineffective'
+    );
+    expect(ineffective).toHaveLength(1);
+    expect(ineffective[0]).toMatchObject({ installed_version: '0.93.3', latest_version: '0.93.4' });
+    expect(String(ineffective[0].detail)).toContain('/old-prefix/lib/node_modules/@ai-dossier/cli');
+  });
+
+  it('retries after an ineffective upgrade once a newer release appears', async () => {
+    vi.mocked(checkCliStaleness).mockResolvedValue({
+      installed: '0.93.3',
+      latest: '0.93.4',
+      stale: true,
+    });
+    vi.mocked(readReexecTargetVersions).mockReturnValue({
+      cli: '0.93.3',
+      sched: '0.70.1',
+      packageDir: '/old-prefix/lib/node_modules/@ai-dossier/cli',
+    });
+    const execve = stubProcessExecve();
+    try {
+      await runSched(['sched', 'start', '--once', '--auto-upgrade', '--project', 'test-proj']);
+      vi.mocked(checkCliStaleness).mockResolvedValue({
+        installed: '0.93.3',
+        latest: '0.93.5',
+        stale: true,
+      });
+      vi.mocked(readReexecTargetVersions).mockReturnValue({
+        cli: '0.93.5',
+        sched: '0.70.2',
+        packageDir: '/old-prefix/lib/node_modules/@ai-dossier/cli',
+      });
+      vi.mocked(execFileSync).mockClear();
+      await runSched(['sched', 'start', '--once', '--auto-upgrade', '--project', 'test-proj']);
+    } finally {
+      execve.restore();
+    }
+
+    const installs = vi
+      .mocked(execFileSync)
+      .mock.calls.filter(([file, args]) => file === 'npm' && (args as string[])[0] === 'i');
+    expect(installs).toHaveLength(1);
+    expect(execve.calls).toHaveLength(1);
+  });
+
+  it('re-execs when only the scheduler was stale and the target now has the newer sched', async () => {
+    vi.mocked(checkEngineStaleness).mockResolvedValue({
+      installed: '0.70.1',
+      latest: '0.70.2',
+      stale: true,
+    });
+    vi.mocked(readReexecTargetVersions).mockReturnValue({
+      cli: '0.89.6',
+      sched: '0.70.2',
+      packageDir: '/prefix/lib/node_modules/@ai-dossier/cli',
+    });
+    const execve = stubProcessExecve();
+    try {
+      await runSched(['sched', 'start', '--once', '--auto-upgrade', '--project', 'test-proj']);
+    } finally {
+      execve.restore();
+    }
+    expect(execve.calls).toHaveLength(1);
+    expect(journalEvents().some((e) => e.event === 'engine-auto-upgrade-ineffective')).toBe(false);
   });
 
   it('without --auto-upgrade, stale never triggers an upgrade', async () => {

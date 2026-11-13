@@ -134,6 +134,7 @@ import {
   type EngineStalenessCheck,
   formatCliStaleWarning,
   formatEngineStaleWarning,
+  readReexecTargetVersions,
 } from '../engine-version';
 import {
   isIssueNumber,
@@ -175,6 +176,7 @@ import {
 import type { TickWorkerData } from '../sched-tick-worker';
 import { renderTable } from '../table';
 import { batchPrepTokens, currentSessionId, recordBatchPrep } from '../usage/batch-prep';
+import { compareVersions } from '../version';
 import { registerSchedServiceCommands, serviceIo } from './sched-service';
 
 /**
@@ -2609,29 +2611,72 @@ async function checkAndHandleEngineStaleness(
     return false;
   }
 
+  const installedVersion = cli.installed ?? engine.installed ?? undefined;
+  const latestVersion = cli.latest ?? engine.latest ?? undefined;
+  // A previous attempt for this exact pair already proved npm installs
+  // somewhere this engine never loads: retrying would only re-run the same
+  // no-op install every tick. Wait for a new release (or a fixed unit).
+  const lastIneffective = [...events]
+    .reverse()
+    .find((event) => event.event === 'engine-auto-upgrade-ineffective');
+  if (
+    lastIneffective?.installed_version === installedVersion &&
+    lastIneffective?.latest_version === latestVersion
+  ) {
+    return false;
+  }
+
   process.stderr.write('⚠ sched: auto-upgrading (npm i -g @ai-dossier/cli@latest)…\n');
   // Record the attempt before npm can replace this CLI. After a successful
   // install, the old engine performs no more state writes and hands off.
   journal.append({
     event: 'engine-auto-upgrade-attempted',
-    installed_version: cli.installed ?? engine.installed ?? undefined,
-    latest_version: cli.latest ?? engine.latest ?? undefined,
+    installed_version: installedVersion,
+    latest_version: latestVersion,
     detail: `npm i -g @ai-dossier/cli@latest started after a completed tick (${stalePackages.join('; ')})`,
   });
   const output = upgradeExec('npm', ['i', '-g', '@ai-dossier/cli@latest']);
   if (output === null) {
     journal.append({
       event: 'engine-auto-upgrade-failed',
-      installed_version: cli.installed ?? engine.installed ?? undefined,
-      latest_version: cli.latest ?? engine.latest ?? undefined,
+      installed_version: installedVersion,
+      latest_version: latestVersion,
       detail: 'npm i -g @ai-dossier/cli@latest failed — see stderr for the npm error',
     });
     process.stderr.write('⚠ sched: auto-upgrade failed — see above\n');
     return false;
-  } else {
-    process.stderr.write('✓ sched: auto-upgrade completed\n');
-    return true;
   }
+
+  // Verify the re-exec target actually moved before handing off. If npm's
+  // global prefix differs from the one this engine runs from, the re-exec
+  // would load the same old version and loop (install → re-exec → full tick)
+  // every few seconds indefinitely.
+  const target = readReexecTargetVersions(process.argv[1]);
+  const advanced = (now: string | null, before: string | null): boolean =>
+    now !== null && before !== null && compareVersions(now, before) > 0;
+  const verifiable = target.cli !== null || target.sched !== null;
+  const moved =
+    (cli.stale && advanced(target.cli, cli.installed)) ||
+    (engine.stale && advanced(target.sched, engine.installed));
+  if (verifiable && !moved) {
+    const npmPrefix = upgradeExec('npm', ['prefix', '-g']) ?? 'unknown';
+    const detail =
+      `npm i -g succeeded but the engine's own install at ${target.packageDir} still has ` +
+      `@ai-dossier/cli@${target.cli ?? '?'} / @ai-dossier/sched@${target.sched ?? '?'} — ` +
+      `npm installed into prefix ${npmPrefix}, a different global prefix. Not re-execing ` +
+      '(it would loop on the old version). Fix the service so node, npm and ai-dossier ' +
+      'come from the same install (`ai-dossier sched service install`).';
+    journal.append({
+      event: 'engine-auto-upgrade-ineffective',
+      installed_version: installedVersion,
+      latest_version: latestVersion,
+      detail,
+    });
+    process.stderr.write(`⚠ sched: auto-upgrade ineffective — ${detail}\n`);
+    return false;
+  }
+  process.stderr.write('✓ sched: auto-upgrade completed\n');
+  return true;
 }
 
 type ExecveFn = (file: string, args: string[], env: NodeJS.ProcessEnv) => never;
