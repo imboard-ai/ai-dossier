@@ -459,6 +459,7 @@ export {
   type BatchEntry,
   type BatchPhase,
   type BatchStatus,
+  type CapabilityGateContext,
   type CapabilityGateResult,
   type CleanupStatus,
   CONFIG_SCHEMA_VERSION,

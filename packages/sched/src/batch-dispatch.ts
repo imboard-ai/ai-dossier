@@ -216,6 +216,7 @@ import type {
   BatchAgentPhase,
   BatchEntry,
   BatchStatus,
+  CapabilityGateContext,
   CapabilityGateResult,
   CapOutcome,
   EvictionRecord,
@@ -293,8 +294,15 @@ export interface BatchDispatchDeps {
    *   package-manager detection, and a declared-and-`task-failed` capability
    *   still hard-fails the whole batch setup (a repo that owns its warm-up
    *   should never be silently second-guessed by a fallback underneath it).
+   *
+   * `ctx` (#1281) names the batch and its integration branch on the member
+   * gate (live and recheck); batch-setup's warm step passes none.
    */
-  runCapability?: (worktree: string, capabilityId: string) => CapabilityGateResult;
+  runCapability?: (
+    worktree: string,
+    capabilityId: string,
+    ctx?: CapabilityGateContext
+  ) => CapabilityGateResult;
   fsExists?: FsExists;
   /**
    * Home directory for `~/.dossier/runs.jsonl` (#564) — mirrors `EngineDeps.homeDir`.
@@ -676,6 +684,19 @@ const GATE_TIMEOUT_REASON = /^command timed out after \d+ms$/;
 
 function isGateTimeout(gate: { outcome: string; reason?: string | null }): boolean {
   return gate.outcome === 'automation-broken' && GATE_TIMEOUT_REASON.test(gate.reason ?? '');
+}
+
+/**
+ * A capability that RAN and explicitly declined (#1281): `cap run` reports
+ * `capability-unavailable` with the command's own exit code (3), whereas an
+ * undeclared / shadow id is `capability-unavailable` with no exit code —
+ * nothing ran. A decline is the repo saying "this member needs the full
+ * verification, not the focused one", so the member gate skips it and the
+ * batch gate (which verifies the union of members) covers it — the same
+ * route a timeout takes (#681), never a block.
+ */
+function isGateDecline(gate: { outcome: string; exitCode?: number | null }): boolean {
+  return gate.outcome === 'capability-unavailable' && typeof gate.exitCode === 'number';
 }
 
 /**
@@ -2983,11 +3004,13 @@ function continuePastEvictedMember(
  * script that legitimately could not run its suite must not be read as
  * either a pass or a real failure). Only both `ok` falls through.
  *
- * Two carve-outs from that block rail: an UNDECLARED id skips (#625 — not a
- * verdict, a repo that has not opted in), and a TIMEOUT-shaped
+ * Three carve-outs from that block rail: an UNDECLARED id skips (#625 — not a
+ * verdict, a repo that has not opted in), a TIMEOUT-shaped
  * `automation-broken` skips too (#681 — the capability ran and needed more
  * time than it was given; recorded `capability-unavailable`, the parent's
- * expensive stage covers the member).
+ * expensive stage covers the member), and so does a capability that ran and
+ * DECLINED with exit 3 (#1281 — `gate-skipped-declined:<cap>`, same record and
+ * the same coverage by the batch gate).
  *
  * A `task-failed` is itself split in two (#594): its `outputTail` must carry
  * recognizable evidence of a failing test (`hasFailingTestEvidence`) before
@@ -3082,9 +3105,22 @@ function evaluateIncrementalGate(
 ): GateVerdict {
   const runCapability = deps.runCapability;
   if (!runCapability) return { kind: 'pass' };
+  // #1281: tell the capability which batch it gates and the integration
+  // branch the member forked from, so a repo script can scope to the
+  // member's OWN diff (`git merge-base <ref> HEAD`) rather than one that
+  // still includes siblings already landed.
+  // Only when the gate runs in a MEMBER worktree: in the shared batch
+  // worktree (the pre-#677 fallback) HEAD is the integration branch itself,
+  // so that diff would be empty and a scoped script would pass trivially.
+  const gatedBatch = findBatch(deps.store.load(), batchId);
+  const integrationRef = gatedBatch && worktree !== gatedBatch.worktree ? gatedBatch.branch : null;
+  const ctx: CapabilityGateContext = {
+    batchId,
+    ...(integrationRef !== null ? { integrationRef } : {}),
+  };
   const gateResults = ['typecheck.run', 'test.focused'].map((id) => ({
     id,
-    ...runCapability(worktree, id),
+    ...runCapability(worktree, id, ctx),
   }));
   const rawFailure = gateResults.find((r) => r.outcome === 'task-failed');
   // #625: `capability-unavailable` is NOT an inconclusive verdict — it means
@@ -3118,7 +3154,12 @@ function evaluateIncrementalGate(
   const gateInconclusive = gateResults.find(
     (r) => r.outcome === 'automation-broken' && !isGateTimeout(r)
   );
-  const undeclared = gateResults.filter((r) => r.outcome === 'capability-unavailable');
+  // #1281: a capability that ran and DECLINED (exit 3) is not "undeclared" —
+  // it joins the timeout's decline rail below with its own reason slug.
+  const declinedByCapability = gateResults.filter(isGateDecline);
+  const undeclared = gateResults.filter(
+    (r) => r.outcome === 'capability-unavailable' && !isGateDecline(r)
+  );
   for (const skipped of undeclared) {
     // Journalled per member: a gate that silently does not run is its own
     // trap (#594's shape — absence reading as a verdict). Silence must never
@@ -3162,6 +3203,32 @@ function evaluateIncrementalGate(
         // #681 AC3: record the DECLINE, not a machinery failure — the batch
         // outcome for an ungateable member is `capability-unavailable` (skip,
         // parent covers it), never `automation-broken` (block).
+        outcome: 'capability-unavailable',
+        outputTail: declined.outputTail,
+        durationMs: declined.durationMs,
+      },
+      now
+    );
+  }
+  for (const declined of declinedByCapability) {
+    // #1281: distinct slug (`gate-skipped-declined`) — "the capability ran and
+    // said this member needs the full verification" must read differently
+    // from "never declared" (#625) and "needed more time" (#681).
+    writeGateLog(deps, batchId, declined.id, memberIssue, declined.outputTail);
+    journalEvent(deps, 'gate-skipped', unit(batchId), {
+      issue: memberIssue,
+      reason: `gate-skipped-declined:${declined.id}`,
+      detail: withExcerpt(
+        `cap run ${declined.id} declined (exit ${declined.exitCode}) after member review done — the capability cannot reach a verdict for this member; the batch gate (aggregate suite + CI) covers it (#1281)`,
+        gateDetailExcerpt(declined.outputTail, declined.reason)
+      ),
+    });
+    recordMemberGate(
+      deps,
+      batchId,
+      memberIssue,
+      {
+        id: declined.id,
         outcome: 'capability-unavailable',
         outputTail: declined.outputTail,
         durationMs: declined.durationMs,
@@ -3297,7 +3364,8 @@ function completeMemberGate(
  * - a TIMEOUT-shaped `automation-broken` (#681) → the block dissolves: the
  *   gate declines the member (`capability-unavailable`, skip — the parent's
  *   expensive stage covers it) and the member completes via the same rail an
- *   `ok` recheck uses. Returns `outcome: 'skipped'`.
+ *   `ok` recheck uses. Returns `outcome: 'skipped'`. A recheck that comes
+ *   back as the capability's own exit-3 decline (#1281) takes the same route.
  * - `task-failed` with recognizable failing-test evidence (#594,
  *   `hasFailingTestEvidence`) → the member really is broken; evict via the
  *   same rail the live gate uses. `task-failed` with no evidence stays
@@ -3366,7 +3434,12 @@ export function resumeBlockedGate(
     // the pre-#677 behavior for a batch blocked before member worktrees
     // existed (its member's commits were already on the integration branch).
     batch.member_worktree ?? batch.worktree,
-    capabilityId
+    capabilityId,
+    // #1281: no `integrationRef` here — the live gate LANDS the member before
+    // blocking, so on a recheck its fork point may already equal HEAD and a
+    // script scoping to `merge-base(<ref>, HEAD)` would see an empty diff and
+    // pass trivially. Without it the script keeps its own default scope.
+    { batchId }
   );
   const result = emptyResult();
   const excerpt = gateDetailExcerpt(recheck.outputTail, recheck.reason);
@@ -3379,13 +3452,22 @@ export function resumeBlockedGate(
   // recording the decline (`capability-unavailable` — skip, the parent's
   // expensive stage covers it) so the batch outcome never reads as a
   // machinery failure that never existed.
-  if (isGateTimeout(recheck)) {
+  // #1281: a recheck that comes back as the capability's own DECLINE (exit
+  // 3) dissolves the block the same way — re-running a gate that declines
+  // would otherwise decline again on every resume, leaving the batch blocked
+  // for good.
+  const timedOut = isGateTimeout(recheck);
+  if (timedOut || isGateDecline(recheck)) {
     writeGateLog(deps, batchId, capabilityId, memberIssue, recheck.outputTail);
     journalEvent(deps, 'gate-skipped', unit(batchId), {
       issue: memberIssue,
-      reason: `gate-skipped-timeout:${capabilityId}`,
+      reason: timedOut
+        ? `gate-skipped-timeout:${capabilityId}`
+        : `gate-skipped-declined:${capabilityId}`,
       detail: withExcerpt(
-        `sched resume --batch: cap run ${capabilityId} ${recheck.reason ?? 'timed out'} on recheck — gate declines, member stands; the parent's expensive stage (aggregate suite + CI) covers it (#681)`,
+        timedOut
+          ? `sched resume --batch: cap run ${capabilityId} ${recheck.reason ?? 'timed out'} on recheck — gate declines, member stands; the parent's expensive stage (aggregate suite + CI) covers it (#681)`
+          : `sched resume --batch: cap run ${capabilityId} declined (exit ${recheck.exitCode}) on recheck — member stands; the batch gate (aggregate suite + CI) covers it (#1281)`,
         excerpt
       ),
     });

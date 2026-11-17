@@ -12,7 +12,10 @@
  *   automation-broken      exit 2  — assumption probe failed, command missing,
  *                                    abnormal termination, timeout, or an
  *                                    invalid manifest
- *   capability-unavailable exit 3  — id not in the manifest (or lifecycle=shadow)
+ *   capability-unavailable exit 3  — id not in the manifest (or lifecycle=shadow),
+ *                                    or the command itself exited 3: an
+ *                                    explicit decline ("I cannot reach a
+ *                                    verdict here") (#1281)
  *
  * The engine is pure logic (no CLI dependencies) so the scheduler's slot-cycle
  * fast path (#464) can consume it directly later.
@@ -51,6 +54,16 @@ export const CAPABILITY_EXIT_CODES: Record<CapabilityOutcome, number> = {
 const SHELL_EXIT_NOT_EXECUTABLE = 126;
 const SHELL_EXIT_COMMAND_NOT_FOUND = 127;
 const SHELL_SIGNAL_EXIT_BASE = 128;
+
+/**
+ * The exit code a capability's command uses to DECLINE (#1281) — the same
+ * code `cap run` itself reports for `capability-unavailable`, so a repo
+ * script speaks the manifest's four-way contract directly: it ran, decided it
+ * cannot reach a verdict in this context (e.g. the change needs full
+ * verification), and said so. Never reclassified by `min_duration_ms` — a
+ * decline really ran; the floor is for exits that did not.
+ */
+export const CAPABILITY_DECLINE_EXIT_CODE = 3;
 
 /** Fixed cap on any single `<tool> --version` probe so a hung tool cannot hang `cap run`. */
 const PROBE_TIMEOUT_MS = 10_000;
@@ -141,7 +154,8 @@ export interface CapabilityEntry {
    * this many ms is reclassified `automation-broken` instead of `task-failed`
    * — a fast non-zero exit is more likely "the automation didn't really run"
    * (e.g. a filter matched zero projects) than a genuine test failure.
-   * Default 0 (no floor) — opt in per capability.
+   * Default 0 (no floor) — opt in per capability. Never applies to an exit
+   * of {@link CAPABILITY_DECLINE_EXIT_CODE} (#1281).
    */
   minDurationMs?: number;
   /**
@@ -613,7 +627,7 @@ export function runCapability(
   return classified;
 }
 
-/** Map a finished spawn to one of the three executed outcomes (ok / task-failed / automation-broken). */
+/** Map a finished spawn to an outcome — ok / task-failed / automation-broken, or capability-unavailable for an explicit decline (#1281). */
 function classifySpawnResult(
   res: ReturnType<typeof spawnSync>,
   id: string,
@@ -686,6 +700,22 @@ function classifySpawnResult(
       signal: null,
       duration_ms: durationMs,
       reason: null,
+    };
+  }
+  // #1281: exit 3 is the command's own "capability-unavailable" — it ran,
+  // decided it cannot reach a verdict here, and said so. Checked BEFORE the
+  // #583 floor: a decline that has to resolve its scope first takes about as
+  // long as the script's startup, so the floor would turn nearly every
+  // decline into automation-broken (which blocks a batch).
+  if (res.status === CAPABILITY_DECLINE_EXIT_CODE) {
+    return {
+      outcome: 'capability-unavailable',
+      capability: id,
+      command: commandLine,
+      exit_code: res.status,
+      signal: null,
+      duration_ms: durationMs,
+      reason: `command declined: exited ${CAPABILITY_DECLINE_EXIT_CODE} (capability-unavailable) after ${durationMs}ms — it ran and reported it cannot reach a verdict here`,
     };
   }
   // #583 AC2: a non-zero exit that finished faster than the capability's

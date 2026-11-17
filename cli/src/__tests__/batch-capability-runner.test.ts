@@ -116,4 +116,99 @@ describe('createBatchCapabilityRunner (#681)', () => {
 
     expect(result).toMatchObject({ outcome: 'ok', durationMs: null });
   });
+
+  it('#1281: carries the envelope exit_code so a decline (exit 3) is told apart from an undeclared id', () => {
+    vi.mocked(spawnSync).mockReturnValueOnce(
+      spawnResult({
+        status: 3,
+        stdout:
+          '{"cap_envelope":1,"capability":"test.focused","outcome":"capability-unavailable","exit_code":3,"reason":"command declined"}',
+      })
+    );
+    vi.mocked(spawnSync).mockReturnValueOnce(
+      spawnResult({
+        status: 3,
+        stdout:
+          '{"cap_envelope":1,"capability":"test.focused","outcome":"capability-unavailable","exit_code":null}',
+      })
+    );
+    const run = createBatchCapabilityRunner();
+
+    expect(run('/wt', 'test.focused')).toMatchObject({
+      outcome: 'capability-unavailable',
+      exitCode: 3,
+    });
+    expect(run('/wt', 'test.focused')).toMatchObject({
+      outcome: 'capability-unavailable',
+      exitCode: null,
+    });
+  });
+
+  it('#1281: exports DOSSIER_BATCH_ID and DOSSIER_BATCH_INTEGRATION_REF to a member gate', () => {
+    vi.mocked(spawnSync).mockReturnValue(
+      spawnResult({
+        status: 0,
+        stdout: '{"cap_envelope":1,"capability":"test.focused","outcome":"ok","exit_code":0}',
+      })
+    );
+
+    createBatchCapabilityRunner()('/wt', 'test.focused', {
+      batchId: 'b-1',
+      integrationRef: 'batch/b-1-20261117',
+    });
+
+    const env = vi.mocked(spawnSync).mock.calls[0]?.[2]?.env ?? {};
+    expect(env.DOSSIER_BATCH_ID).toBe('b-1');
+    expect(env.DOSSIER_BATCH_INTEGRATION_REF).toBe('batch/b-1-20261117');
+    // Not the aggregate gate's TARGET-branch variable — that scope would
+    // still include landed siblings.
+    expect(env).not.toHaveProperty('DOSSIER_BATCH_BASE');
+  });
+
+  it('#1281: without a ctx (or without an integration ref) no batch variable is invented', () => {
+    vi.mocked(spawnSync).mockReturnValue(
+      spawnResult({
+        status: 0,
+        stdout: '{"cap_envelope":1,"capability":"worktree.prepare","outcome":"ok","exit_code":0}',
+      })
+    );
+    const run = createBatchCapabilityRunner();
+
+    run('/wt', 'worktree.prepare');
+    run('/wt', 'test.focused', { batchId: 'b-2' });
+
+    const noCtxEnv = vi.mocked(spawnSync).mock.calls[0]?.[2]?.env ?? {};
+    expect(noCtxEnv.DOSSIER_BATCH_ID).toBe(process.env.DOSSIER_BATCH_ID);
+    const recheckEnv = vi.mocked(spawnSync).mock.calls[1]?.[2]?.env ?? {};
+    expect(recheckEnv.DOSSIER_BATCH_ID).toBe('b-2');
+    expect(recheckEnv).not.toHaveProperty('DOSSIER_BATCH_INTEGRATION_REF');
+  });
+
+  it('#1281: a ref inherited from the calling shell never leaks into a gate that omits it', () => {
+    vi.mocked(spawnSync).mockReturnValue(
+      spawnResult({
+        status: 0,
+        stdout: '{"cap_envelope":1,"capability":"test.focused","outcome":"ok","exit_code":0}',
+      })
+    );
+    const saved = {
+      ref: process.env.DOSSIER_BATCH_INTEGRATION_REF,
+      base: process.env.DOSSIER_BATCH_BASE,
+    };
+    process.env.DOSSIER_BATCH_INTEGRATION_REF = 'stale-ref';
+    process.env.DOSSIER_BATCH_BASE = 'origin/stale';
+    try {
+      createBatchCapabilityRunner()('/wt', 'test.focused', { batchId: 'b-3' });
+    } finally {
+      if (saved.ref === undefined) delete process.env.DOSSIER_BATCH_INTEGRATION_REF;
+      else process.env.DOSSIER_BATCH_INTEGRATION_REF = saved.ref;
+      if (saved.base === undefined) delete process.env.DOSSIER_BATCH_BASE;
+      else process.env.DOSSIER_BATCH_BASE = saved.base;
+    }
+
+    const env = vi.mocked(spawnSync).mock.calls[0]?.[2]?.env ?? {};
+    expect(env.DOSSIER_BATCH_ID).toBe('b-3');
+    expect(env).not.toHaveProperty('DOSSIER_BATCH_INTEGRATION_REF');
+    expect(env).not.toHaveProperty('DOSSIER_BATCH_BASE');
+  });
 });

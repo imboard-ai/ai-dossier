@@ -251,7 +251,26 @@ function runCapabilitySuite(
   }
   const stdout = spawned.stdout ?? '';
   const fields = run.envelope !== null ? envelopeFields(run.envelope) : null;
-  if (fields?.outcome === 'capability-unavailable') return 'unavailable';
+  if (fields?.outcome === 'capability-unavailable') {
+    // #1281: a non-null exit code means the capability's command RAN and
+    // declined (exit 3) — the repo's own "cannot reach a verdict here", not a
+    // missing entry. Falling through to a lower tier would run a suite the
+    // repo just said it cannot vouch for; report unreadable instead (the batch
+    // blocks with its members preserved), as an exit 3 did before #1281.
+    if (fields.exitCode !== null) {
+      return {
+        source,
+        terminal: true,
+        result: {
+          ok: false,
+          failing: [],
+          readable: false,
+          detail: `${source}: declined (exit ${fields.exitCode}, capability-unavailable)${fields.reason ? ` — ${fields.reason}` : ''} (cwd=${worktree})`,
+        },
+      };
+    }
+    return 'unavailable';
+  }
   const ok = fields?.outcome === 'ok' && spawned.status === 0;
   const readable = isReadableVitestReport(stdout);
   const failing = readable ? relativizeFailing(parseVitestJson(stdout), worktree) : [];
