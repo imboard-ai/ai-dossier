@@ -107,7 +107,9 @@ export type CleanupStatus = 'done' | `failed-${string}`;
  * `ok` = the capability ran and passed; `task-failed` = it ran and the TASK
  * itself failed (trust the result); `automation-broken` = do not trust the
  * machinery (missing tool, timeout, bad manifest); `capability-unavailable` =
- * no manifest / no such id / `lifecycle: shadow` — no fast path here.
+ * no manifest / no such id / `lifecycle: shadow` — no fast path here — or
+ * (#1281) the capability's command ran and explicitly DECLINED (exit 3), told
+ * apart by a non-null {@link CapabilityGateResult.exitCode}.
  */
 export type CapOutcome = 'ok' | 'task-failed' | 'automation-broken' | 'capability-unavailable';
 
@@ -134,6 +136,34 @@ export interface CapabilityGateResult {
    * the raw material for reporting gate savings per change shape (AC4).
    */
   durationMs?: number | null;
+  /**
+   * The `cap run` envelope's `exit_code` (#1281) — the capability COMMAND's
+   * own exit code, `null` when no command ran. Distinguishes a
+   * `capability-unavailable` the command itself declared (it ran, exited 3:
+   * "I cannot reach a verdict here") from one where nothing ran at all (the
+   * id is undeclared or shadow). Absent from runners predating #1281.
+   */
+  exitCode?: number | null;
+}
+
+/**
+ * Which batch a member-gate capability run belongs to (#1281) — handed to the
+ * injected `runCapability` so a repo script can scope a member to its OWN
+ * diff. The CLI runner exports these as `DOSSIER_BATCH_ID` /
+ * `DOSSIER_BATCH_INTEGRATION_REF`.
+ */
+export interface CapabilityGateContext {
+  batchId: string;
+  /**
+   * The batch's local INTEGRATION branch ({@link BatchEntry.branch}) — the
+   * branch every member forks from and lands onto. `git merge-base <ref> HEAD`
+   * in the member worktree is the member's fork point, so the diff from there
+   * is the member's own change, excluding siblings that already landed (unlike
+   * `DOSSIER_BATCH_BASE`, the batch's TARGET branch). Omitted when unknown,
+   * and on a `sched resume --batch` recheck, where the member may already have
+   * landed (its fork point would then equal HEAD — an empty diff).
+   */
+  integrationRef?: string;
 }
 
 // --- F.2/F.8/F.9 batch failure recovery records (#472) ---

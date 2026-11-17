@@ -597,6 +597,48 @@ capabilities:
     expect(envelope.outcome).toBe('task-failed');
   });
 
+  it('maps a command exit 3 to capability-unavailable, keeping the raw exit code (#1281)', async () => {
+    writeManifest(
+      tmpDir,
+      `
+capabilities:
+  declines:
+    command: node -e "process.exit(3)"
+`
+    );
+    await expect(runCap('run', 'declines')).rejects.toThrow('process.exit(3)');
+
+    const calls = vi.mocked(console.log).mock.calls.map((c) => String(c[0]));
+    const envelope = JSON.parse(calls[calls.length - 1]);
+    expect(envelope.outcome).toBe('capability-unavailable');
+    expect(envelope.exit_code).toBe(3);
+    expect(envelope.reason).toContain('declined');
+    expect(mockedAppendCapLog.mock.calls[0][0]).toMatchObject({
+      capability: 'declines',
+      outcome: 'capability-unavailable',
+      exit_code: 3,
+    });
+  });
+
+  it('never lets min_duration_ms reclassify a fast exit-3 decline (#1281)', async () => {
+    writeManifest(
+      tmpDir,
+      `
+capabilities:
+  fast.decline:
+    command: node -e "process.exit(3)"
+    min_duration_ms: 60000
+`
+    );
+    await expect(runCap('run', 'fast.decline')).rejects.toThrow('process.exit(3)');
+
+    const calls = vi.mocked(console.log).mock.calls.map((c) => String(c[0]));
+    const envelope = JSON.parse(calls[calls.length - 1]);
+    expect(envelope.outcome).toBe('capability-unavailable');
+    expect(envelope.exit_code).toBe(3);
+    expect(envelope.reason).not.toContain('min_duration_ms');
+  });
+
   it('rejects a negative min_duration_ms at manifest-parse time', async () => {
     writeManifest(
       tmpDir,

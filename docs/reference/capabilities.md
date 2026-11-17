@@ -51,7 +51,7 @@ capabilities:
 | entry `.assumptions` | list of probes | no | Preconditions checked **before** the command runs |
 | entry `.description` | string | no | What the capability does (shown by `cap list`) |
 | entry `.timeout_ms` | number | no | Per-entry command timeout in ms (default 5 min; a timeout is `automation-broken`) |
-| entry `.min_duration_ms` | number | no | Sanity floor (#583): a non-zero exit that finishes faster than this is reclassified `automation-broken` instead of `task-failed` — "this probably didn't really run", not a genuine failure. Default 0 (no floor) |
+| entry `.min_duration_ms` | number | no | Sanity floor (#583): a non-zero exit that finishes faster than this is reclassified `automation-broken` instead of `task-failed` — "this probably didn't really run", not a genuine failure. Never applies to exit 3, which is a decline (#1281). Default 0 (no floor) |
 | entry `.timeout_prone` | boolean | no | The repo's own admission (#777) that this capability routinely runs past any reasonable `cap run` budget. On `test.full` with no active `gate.batch`, `sched enqueue` refuses to form a batch (see [the batch gate](#the-batch-gate-gatebatch-777)). Default `false` |
 
 Capability ids are dotted lowercase words (`test.focused`, `worktree.prepare`).
@@ -101,7 +101,7 @@ first; machine consumers should prefer the envelope file — see below):
 | `ok` | 0 | Command ran and exited 0 |
 | `task-failed` | 1 | Command ran and legitimately failed (e.g. red tests) — *the operation's* failure, not the automation's |
 | `automation-broken` | 2 | Assumption probe failed · command missing/not executable (shell 126/127) · abnormal termination (signal / exit > 128) · timeout · manifest invalid · a non-zero exit faster than the entry's `min_duration_ms` (#583 — "this probably didn't really run") |
-| `capability-unavailable` | 3 | Id not in the manifest, no manifest at all, or `lifecycle: shadow` |
+| `capability-unavailable` | 3 | Id not in the manifest, no manifest at all, or `lifecycle: shadow` (envelope `exit_code: null`) · **or the command itself exited 3** — an explicit decline: it ran and cannot reach a verdict here, e.g. the change needs full verification (#1281; envelope `exit_code: 3`, never reclassified by `min_duration_ms`) |
 
 The distinction matters to callers: `task-failed` means "trust the result — the task
 itself failed"; `automation-broken` means "do not trust the machinery — fall back to
@@ -239,6 +239,21 @@ member reports review-done. It degrades exactly as the vocabulary above implies 
 | `automation-broken` | the batch BLOCKS — declared, but its machinery could not be trusted (#583/#585) |
 | `automation-broken` whose reason is `command timed out after <N>ms` | **the gate declines the member** — recorded `capability-unavailable` and journalled `gate-skipped-timeout:<id>`; the parent's expensive stage covers it (#681). A timeout is a statement about duration, not about the harness's reliability — and a member touching two workspace roots selects a dependents closure that approaches the whole workspace, so the gate was never "focused" there. The resolved package selection (the capability's own output) is preserved in the per-gate log and `member_gates.output_tail`, with the capability's `duration_ms` beside it |
 | `capability-unavailable` | **the check is skipped** and journalled `gate-skipped:<id>`; the member is judged on whatever else is available (#625) |
+| `capability-unavailable` from a command that **exited 3** (a decline) | **the gate declines the member** — recorded `capability-unavailable` and journalled `gate-skipped-declined:<id>` with the capability's output; the batch gate covers it (#1281). A `sched resume --batch` recheck that declines dissolves the block the same way, so a decline never leaves a batch blocked |
+
+Member-gate commands (live gate and `sched resume --batch` recheck) run with:
+
+| Variable | Value |
+|---|---|
+| `DOSSIER_BATCH_ID` | the batch id |
+| `DOSSIER_BATCH_INTEGRATION_REF` | the batch's local integration branch, which the member forked from. `git merge-base "$DOSSIER_BATCH_INTEGRATION_REF" HEAD` is the member's fork point, so `git diff "$DOSSIER_BATCH_INTEGRATION_REF"...HEAD` is the member's own change, without siblings that already landed. Set on the live gate only — on a recheck the member may already have landed, which would make that diff empty; a script should fall back to its default scope when the variable is unset. Also unset when the gate runs in the shared batch worktree (a batch dispatched before member worktrees existed), where that diff would be empty for the same reason |
+
+Exit 3 is a contract code: a wrapper script must not let a wrapped tool's own exit 3 (pytest's
+"internal error", for one) leak through as its exit status, or the member gate will read it as a
+decline and skip.
+
+`DOSSIER_BATCH_BASE` is not exported to member gates: it is the batch's target branch, so a
+member diff against it would still include landed siblings.
 
 A repo that declares neither id runs batches end to end. Skipping costs *early*
 detection — a bad member's commit may be built on before anyone notices — but not
@@ -262,6 +277,10 @@ each tier preferred to the next:
 | 1 | `cap run test.full` | no active `gate.batch` (or `cap run` reported it `capability-unavailable`) |
 | 2 | `dispatch.suite_command` from sched config | neither capability available |
 | 3 | the repo's detected test runner | nothing above |
+
+A `gate.batch` or `test.full` whose command **declines** (exits 3) does not fall through to a
+lower tier: the batch blocks `suite-unreadable` with the decline as its detail (#1281). The
+repo said it cannot vouch for the union here, so a lower tier's guess must not replace that.
 
 `gate.batch` exists because `test.full` is the wrong gate for a repo whose full suite is
 too slow to finish: a batch should pay **the same gate a normal PR pays, once** — e.g. a

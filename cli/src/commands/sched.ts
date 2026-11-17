@@ -17,6 +17,7 @@ import type {
   AnchorReportItem,
   BatchDispatchDeps,
   BatchEntry,
+  CapabilityGateContext,
   CapabilityGateResult,
   IssueCloseReader,
   OpenAnchorIssue,
@@ -193,18 +194,47 @@ import { registerSchedServiceCommands, serviceIo } from './sched-service';
  *
  * `output_tail` (#583 AC1/AC3) rides on the same envelope; when it is absent
  * the fallback is `spawnCapRun`'s captured stdout+stderr.
+ *
+ * A member-gate `ctx` (#1281) is exported to the capability as
+ * `DOSSIER_BATCH_ID` and `DOSSIER_BATCH_INTEGRATION_REF` (the integration
+ * branch the member forked from — `git merge-base "$DOSSIER_BATCH_INTEGRATION_REF"
+ * HEAD` is the member's own fork point). Not `DOSSIER_BATCH_BASE`: that is
+ * the batch's TARGET branch (the aggregate gate's scope), and a member diff
+ * against it would still include siblings already landed.
  */
+export function batchCapabilityEnv(
+  ctx: CapabilityGateContext | undefined
+): NodeJS.ProcessEnv | undefined {
+  if (ctx === undefined) return undefined;
+  // Drop inherited batch variables first: an operator shell running
+  // `sched resume --batch` must not leak a ref the recheck deliberately omits.
+  const {
+    DOSSIER_BATCH_INTEGRATION_REF: _inheritedRef,
+    DOSSIER_BATCH_BASE: _inheritedBase,
+    ...inherited
+  } = process.env;
+  return {
+    ...inherited,
+    DOSSIER_BATCH_ID: ctx.batchId,
+    ...(ctx.integrationRef !== undefined
+      ? { DOSSIER_BATCH_INTEGRATION_REF: ctx.integrationRef }
+      : {}),
+  };
+}
+
 export function createBatchCapabilityRunner(opts?: {
   /** Overridable so tests can exercise the ETIMEDOUT branch cheaply (mirrors `createBatchSuiteRunner`). */
   timeoutMs?: number;
   /** #1233: track the gate in the sched state's in-flight registry (adopt, never duplicate). */
   inFlightDir?: string;
-}): (worktree: string, capabilityId: string) => CapabilityGateResult {
+}): (worktree: string, capabilityId: string, ctx?: CapabilityGateContext) => CapabilityGateResult {
   const timeoutMs = opts?.timeoutMs ?? BATCH_SUITE_TIMEOUT_MS;
   const inFlightDir = opts?.inFlightDir;
-  return (worktree, capabilityId) => {
+  return (worktree, capabilityId, ctx) => {
+    const env = batchCapabilityEnv(ctx);
     const run = spawnCapRun(capabilityId, worktree, {
       timeoutMs,
+      ...(env !== undefined ? { env } : {}),
       ...(inFlightDir !== undefined ? { inFlightDir } : {}),
     });
     const result = run.spawned;
@@ -255,12 +285,15 @@ export function createBatchCapabilityRunner(opts?: {
     // from a failed assumption probe — since `output_tail` is unset there.
     // `duration_ms` (#681) rides to `member_gates` — the gate's cost per
     // member, the raw material for per-change-shape savings reporting.
+    // `exit_code` (#1281) tells a capability that ran and declined (exit 3)
+    // apart from an undeclared id (`capability-unavailable`, nothing ran).
     // `spawnCapRun` only returns an envelope with a valid outcome.
     return {
       outcome: fields.outcome ?? 'automation-broken',
       outputTail,
       reason: fields.reason,
       durationMs: fields.durationMs,
+      exitCode: fields.exitCode,
     };
   };
 }

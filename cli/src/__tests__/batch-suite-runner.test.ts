@@ -431,7 +431,12 @@ describe('gate.batch capability (#777)', () => {
       ? `  gate.batch:\n    command: scripts/ci-parity.sh\n    lifecycle: ${gateLifecycle}\n    timeout_ms: 1800000\n`
       : '') +
     `  test.full:\n    command: make test\n    lifecycle: active\n${extra}`;
-  const envelope = (id: string, outcome: string, exit = 0, reason?: string): string =>
+  const envelope = (
+    id: string,
+    outcome: string,
+    exit: number | null = 0,
+    reason?: string
+  ): string =>
     JSON.stringify({ capability: id, outcome, exit_code: exit, ...(reason ? { reason } : {}) });
 
   beforeEach(() => {
@@ -502,7 +507,11 @@ describe('gate.batch capability (#777)', () => {
     withManifest(manifest('active', '    timeout_prone: true\n'));
     vi.mocked(spawnSync).mockImplementation((_cmd, args) =>
       (args as string[])[2] === 'gate.batch'
-        ? spawnResult({ status: 3, stdout: envelope('gate.batch', 'capability-unavailable', 3) })
+        ? // `cap run` reports an id it cannot see with no command exit code.
+          spawnResult({
+            status: 3,
+            stdout: envelope('gate.batch', 'capability-unavailable', null),
+          })
         : spawnResult({ status: 0, stdout: envelope('test.full', 'ok') })
     );
 
@@ -514,6 +523,25 @@ describe('gate.batch capability (#777)', () => {
     expect(vi.mocked(spawnSync).mock.calls.map((c) => (c[1] as string[])[2])).toEqual([
       'gate.batch',
     ]);
+  });
+
+  it.each([
+    ['gate.batch', manifest('active')],
+    ['test.full', manifest(null)],
+  ])('#1281: a %s whose command DECLINED (exit 3) is terminal unreadable — no lower tier runs', (id, text) => {
+    withManifest(text);
+    vi.mocked(spawnSync).mockReturnValue(
+      spawnResult({
+        status: 3,
+        stdout: envelope(id, 'capability-unavailable', 3, 'command declined'),
+      })
+    );
+
+    const result = createBatchSuiteRunner(config({ suite_command: 'echo x' }))('/wt', CTX);
+
+    expect(result).toMatchObject({ ok: false, readable: false });
+    expect(result.detail).toContain(`cap run ${id}: declined (exit 3`);
+    expect(vi.mocked(spawnSync).mock.calls.map((c) => (c[1] as string[])[2])).toEqual([id]);
   });
 
   it('is also terminal when gate.batch cannot be invoked at all (no ai-dossier on PATH)', () => {

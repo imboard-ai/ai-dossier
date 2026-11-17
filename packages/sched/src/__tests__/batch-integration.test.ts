@@ -43,6 +43,7 @@ import {
   type BatchDispatchDeps,
   type BatchSuiteContext,
   buildStatusReport,
+  type CapabilityGateContext,
   type CapabilityGateResult,
   createBatch,
   createEmptyState,
@@ -1956,6 +1957,149 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
       .read()
       .filter((e) => e.event === 'gate-skipped' && e.issue === 2151);
     expect(skipped.at(-1)?.reason).toBe('gate-skipped-timeout:test.focused');
+  }, 60_000);
+
+  it('#1281: a fast exit-3 DECLINE skips the member gate — never gate-inconclusive — and the gate sees the integration ref', async () => {
+    // A downstream repo's test.focused declines with exit 3 when the change
+    // needs full verification. `cap run` reports that as capability-unavailable
+    // WITH the command's exit code; the gate must skip (the batch gate covers
+    // the union), not block the batch as `gate-inconclusive:test.focused`.
+    const repo = scratchRepo();
+    const seen: Array<{ id: string; ctx: CapabilityGateContext | undefined }> = [];
+    const capability = (
+      _worktree: string,
+      id: string,
+      ctx?: CapabilityGateContext
+    ): CapabilityGateResult => {
+      seen.push({ id, ctx });
+      return id === 'test.focused'
+        ? {
+            outcome: 'capability-unavailable',
+            exitCode: 3,
+            reason: 'command declined: exited 3 (capability-unavailable) after 12ms',
+            outputTail: 'root lockfile changed — needs full verification',
+            durationMs: 12,
+          }
+        : { outcome: 'ok' };
+    };
+    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1, capability });
+    h.enqueue([{ issue: 2161, mode: 'slot', batch: 'b-decline', anchor: 2160, tier: 'mid' }]);
+
+    h.tick();
+    const pid = batchSlotPid(h, 'b-decline') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick();
+
+    const batch = findBatch(h.state(), 'b-decline');
+    expect(batch?.status).not.toBe('blocked');
+    expect(batch?.blocked_reason).toBeNull();
+    expect(batch?.evictions).toHaveLength(0);
+    expect(batch?.member_gates?.['2161']).toMatchObject({
+      capability: 'test.focused',
+      outcome: 'capability-unavailable',
+      duration_ms: 12,
+    });
+    const events = h.deps.journal.read();
+    expect(events.some((e) => e.event === 'gate-inconclusive' && e.issue === 2161)).toBe(false);
+    const skipped = events.filter((e) => e.event === 'gate-skipped' && e.issue === 2161);
+    expect(skipped).toHaveLength(1);
+    // A distinct slug: not #625's "never declared", not #681's timeout.
+    expect(skipped[0]?.reason).toBe('gate-skipped-declined:test.focused');
+    expect(skipped[0]?.detail).toContain('needs full verification');
+
+    // Both member gates were told which batch they gate and the integration
+    // branch the member forked from — not the batch's target branch.
+    const gateCalls = seen.filter((c) => c.id === 'typecheck.run' || c.id === 'test.focused');
+    expect(gateCalls).toHaveLength(2);
+    for (const call of gateCalls) {
+      expect(call.ctx).toEqual({ batchId: 'b-decline', integrationRef: batch?.branch });
+    }
+    expect(batch?.branch).toMatch(/^batch\//);
+  }, 60_000);
+
+  it('#1281: an undeclared id (capability-unavailable, no exit code) keeps the #625 slug', async () => {
+    const repo = scratchRepo();
+    const capability = (_worktree: string, id: string): CapabilityGateResult =>
+      id === 'test.focused'
+        ? { outcome: 'capability-unavailable', exitCode: null }
+        : { outcome: 'ok' };
+    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1, capability });
+    h.enqueue([{ issue: 2171, mode: 'slot', batch: 'b-undecl', anchor: 2170, tier: 'mid' }]);
+
+    h.tick();
+    const pid = batchSlotPid(h, 'b-undecl') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick();
+
+    const skipped = h.deps.journal
+      .read()
+      .filter((e) => e.event === 'gate-skipped' && e.issue === 2171);
+    expect(skipped.map((e) => e.reason)).toEqual(['gate-skipped:test.focused']);
+  }, 60_000);
+
+  it('#1281: sched resume --batch dissolves a block when the recheck is an exit-3 decline (no integration ref on recheck)', async () => {
+    const repo = scratchRepo();
+    // Blocked by the pre-#1281 classification: a fast exit 3 under
+    // min_duration_ms read as automation-broken.
+    let testFocusedOutcome: CapabilityGateResult = {
+      outcome: 'automation-broken',
+      reason: 'exited 3 after 2968ms — below min_duration_ms=3000ms',
+    };
+    const recheckCtx: Array<CapabilityGateContext | undefined> = [];
+    const capability = (
+      _worktree: string,
+      id: string,
+      ctx?: CapabilityGateContext
+    ): CapabilityGateResult => {
+      if (id !== 'test.focused') return { outcome: 'ok' };
+      recheckCtx.push(ctx);
+      return testFocusedOutcome;
+    };
+    const h = batchHarness(repo, ['--mode=batch'], { maxSlots: 1, capability });
+    h.enqueue([
+      { issue: 2181, mode: 'slot', batch: 'b-resume-decline', anchor: 2180, tier: 'mid' },
+      { issue: 2182, mode: 'slot', batch: 'b-resume-decline', tier: 'mid' },
+    ]);
+
+    h.tick();
+    const pid = batchSlotPid(h, 'b-resume-decline') as number;
+    expect(await waitUntilDead(h.spawnDeps, pid)).toBe(true);
+    h.tick();
+    expect(findBatch(h.state(), 'b-resume-decline')?.blocked_reason).toBe(
+      'gate-inconclusive:test.focused'
+    );
+
+    testFocusedOutcome = {
+      outcome: 'capability-unavailable',
+      exitCode: 3,
+      reason: 'command declined: exited 3 (capability-unavailable) after 2968ms',
+      durationMs: 2968,
+    };
+    const resumed = resumeBlockedGate(
+      batchDispatchDepsFrom(h, capability),
+      h.config,
+      resolveDispatch(h.config),
+      'b-resume-decline',
+      new Date()
+    );
+
+    expect(resumed).toMatchObject({ outcome: 'skipped', capability: 'test.focused' });
+    const batch = findBatch(h.state(), 'b-resume-decline');
+    expect(batch?.blocked_reason).toBeNull();
+    expect(batch?.status).toBe('executing');
+    expect(batch?.executing_member).toBe(2);
+    expect(batch?.member_gates?.['2181']).toMatchObject({
+      capability: 'test.focused',
+      outcome: 'capability-unavailable',
+      duration_ms: 2968,
+    });
+    const skipped = h.deps.journal
+      .read()
+      .filter((e) => e.event === 'gate-skipped' && e.issue === 2181);
+    expect(skipped.at(-1)?.reason).toBe('gate-skipped-declined:test.focused');
+    // The recheck names the batch but NOT the integration ref: the member may
+    // already have landed, so merge-base(<ref>, HEAD) would be an empty diff.
+    expect(recheckCtx.at(-1)).toEqual({ batchId: 'b-resume-decline' });
   }, 60_000);
 
   it('#583 AC4: sched resume --batch re-runs the gate — still inconclusive stays blocked, then a passing recheck completes the member', async () => {
