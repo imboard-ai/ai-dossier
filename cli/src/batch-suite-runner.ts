@@ -64,9 +64,28 @@ export const FULL_SUITE_CAPABILITY = 'test.full';
  * itself to the union of the members' diffs (`git diff $DOSSIER_BATCH_BASE...HEAD`).
  * `cap run` runs its command with the inherited environment, so these reach it.
  */
-function suiteEnv(ctx: BatchSuiteContext | undefined): NodeJS.ProcessEnv | undefined {
-  if (ctx === undefined) return undefined;
-  return { ...process.env, DOSSIER_BATCH_ID: ctx.batchId, DOSSIER_BATCH_BASE: ctx.baseRef };
+function suiteEnv(ctx: BatchSuiteContext | undefined): NodeJS.ProcessEnv {
+  const inherited = withoutBatchEnv();
+  if (ctx === undefined) return inherited;
+  return { ...inherited, DOSSIER_BATCH_ID: ctx.batchId, DOSSIER_BATCH_BASE: ctx.baseRef };
+}
+
+/** Prefix shared by every batch variable the scheduler exports to a capability. */
+export const BATCH_ENV_PREFIX = 'DOSSIER_BATCH_';
+
+/**
+ * `process.env` minus every inherited `DOSSIER_BATCH_*` variable (#1284): a
+ * scheduler capability run sees only the batch variables the scheduler set
+ * for THAT run — never a stale ref (`DOSSIER_BATCH_INTEGRATION_REF`,
+ * `DOSSIER_BATCH_FORK_POINT`, …) leaking in from an operator's or agent's
+ * shell.
+ */
+export function withoutBatchEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!key.startsWith(BATCH_ENV_PREFIX)) env[key] = value;
+  }
+  return env;
 }
 
 /**
@@ -253,7 +272,7 @@ function runCapabilitySuite(
   const fields = run.envelope !== null ? envelopeFields(run.envelope) : null;
   if (fields?.outcome === 'capability-unavailable') {
     // #1281: a non-null exit code means the capability's command RAN and
-    // declined (exit 3) — the repo's own "cannot reach a verdict here", not a
+    // declined (its manifest-declared `decline_exit_code`, #1284) — the repo's own "cannot reach a verdict here", not a
     // missing entry. Falling through to a lower tier would run a suite the
     // repo just said it cannot vouch for; report unreadable instead (the batch
     // blocks with its members preserved), as an exit 3 did before #1281.

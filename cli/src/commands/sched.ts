@@ -122,6 +122,7 @@ import {
   BATCH_SUITE_TIMEOUT_MS,
   batchGateRefusal,
   createBatchSuiteRunner,
+  withoutBatchEnv,
 } from '../batch-suite-runner';
 import { envelopeFields, spawnCapRun } from '../cap-envelope';
 import { gateGapWarning, SKIP_GATE_CHECK_ENV } from '../cap-init';
@@ -210,13 +211,8 @@ import { registerSchedServiceCommands, serviceIo } from './sched-service';
  * (batch setup's `worktree.prepare` warm step) must not see a batch it does
  * not belong to.
  */
-const BATCH_ENV_PREFIX = 'DOSSIER_BATCH_';
-
 export function batchCapabilityEnv(ctx: CapabilityGateContext | undefined): NodeJS.ProcessEnv {
-  const inherited: NodeJS.ProcessEnv = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (!key.startsWith(BATCH_ENV_PREFIX)) inherited[key] = value;
-  }
+  const inherited = withoutBatchEnv();
   if (ctx === undefined) return inherited;
   return {
     ...inherited,
@@ -318,8 +314,8 @@ export function createBatchCapabilityRunner(opts?: {
     // from a failed assumption probe — since `output_tail` is unset there.
     // `duration_ms` (#681) rides to `member_gates` — the gate's cost per
     // member, the raw material for per-change-shape savings reporting.
-    // `exit_code` (#1281) tells a capability that ran and declined (exit 3)
-    // apart from an undeclared id (`capability-unavailable`, nothing ran).
+    // `exit_code` (#1281) tells a capability that ran and declined (its
+    // declared `decline_exit_code`, #1284) apart from an undeclared id (`capability-unavailable`, nothing ran).
     // `spawnCapRun` only returns an envelope with a valid outcome.
     return {
       outcome: fields.outcome ?? 'automation-broken',

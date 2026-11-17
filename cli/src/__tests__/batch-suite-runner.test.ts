@@ -571,6 +571,37 @@ describe('gate.batch capability (#777)', () => {
     expect(env).toHaveProperty('DOSSIER_CAP_ENVELOPE_FILE');
   });
 
+  it('#1284: strips stale DOSSIER_BATCH_* inherited from the calling shell, with or without a context', () => {
+    withManifest(manifest('active'));
+    vi.mocked(spawnSync).mockReturnValue(
+      spawnResult({ status: 0, stdout: envelope('gate.batch', 'ok') })
+    );
+    const keys = [
+      'DOSSIER_BATCH_ID',
+      'DOSSIER_BATCH_BASE',
+      'DOSSIER_BATCH_INTEGRATION_REF',
+      'DOSSIER_BATCH_FORK_POINT',
+    ] as const;
+    const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+    for (const k of keys) process.env[k] = `stale-${k}`;
+    try {
+      createBatchSuiteRunner(config())('/wt');
+      createBatchSuiteRunner(config())('/wt', CTX);
+    } finally {
+      for (const k of keys) {
+        if (saved[k] === undefined) delete process.env[k];
+        else process.env[k] = saved[k];
+      }
+    }
+    const noCtx = vi.mocked(spawnSync).mock.calls[0]?.[2]?.env ?? {};
+    for (const k of keys) expect(noCtx).not.toHaveProperty(k);
+    const withCtx = vi.mocked(spawnSync).mock.calls[1]?.[2]?.env ?? {};
+    expect(withCtx.DOSSIER_BATCH_ID).toBe(CTX.batchId);
+    expect(withCtx.DOSSIER_BATCH_BASE).toBe(CTX.baseRef);
+    expect(withCtx).not.toHaveProperty('DOSSIER_BATCH_INTEGRATION_REF');
+    expect(withCtx).not.toHaveProperty('DOSSIER_BATCH_FORK_POINT');
+  });
+
   // AC: outcomes map identically whichever capability is the gate.
   describe.each([
     ['gate.batch', manifest('active')],

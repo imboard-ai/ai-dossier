@@ -3101,7 +3101,18 @@ export function resolveMemberForkPoint(
 ): string | null {
   // The persisted ref reaches git argv — re-validate its shape (#677 review).
   if (!SAFE_REF_RE.test(integrationRef)) return null;
-  for (const ref of [integrationRef, `origin/${integrationRef}`]) {
+  // Probe which refs exist first: `for-each-ref` exits 0 either way, so the
+  // engine's exec does not log a failure on every pool-clone member gate
+  // (where the local branch is routinely absent). Exact names only — a
+  // pattern also matches refs nested under it.
+  const candidates = [`refs/heads/${integrationRef}`, `refs/remotes/origin/${integrationRef}`];
+  const existing = new Set(
+    (deps.exec('git', ['for-each-ref', '--format=%(refname)', ...candidates], worktree) ?? '')
+      .split('\n')
+      .map((line) => line.trim())
+  );
+  for (const ref of candidates) {
+    if (!existing.has(ref)) continue;
     const sha = deps.exec('git', ['merge-base', ref, 'HEAD'], worktree)?.trim().toLowerCase();
     if (sha !== undefined && FULL_OBJECT_ID_RE.test(sha)) return sha;
   }

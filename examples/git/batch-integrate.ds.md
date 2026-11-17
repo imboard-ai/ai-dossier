@@ -18,8 +18,8 @@ metadata:
   dossier.content_scope: 'self-contained'
   dossier.inputs: '{"optional":[],"required":[{"description":"Batch id","name":"batch","type":"string"},{"description":"Branch every member is based on and lands onto","name":"integration_branch","type":"string"},{"description":"Issue numbers and their member branches","name":"members","type":"array"},{"description":"Absolute path to the parent''s worktree on the integration branch, dependencies installed","name":"worktree","type":"string"}]}'
   dossier.authors: '[{"name":"Yuval Dimnik"}]'
-  dossier.checksum: '{"algorithm":"sha256","hash":"b5443a551a30edc5279370a1668d984dfdadb407f313a3de9ebab80d4ab9b4b2"}'
-  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"R+zSxCBdiPsOgV6T5QMInu04UbGiC7eMf+fdiByrgWnP1aI+4wEF9EPj+Gml72+no7oSaG3VckNxBy//T42LAQ==","signed_at":"2026-11-17T06:06:54.209Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
+  dossier.checksum: '{"algorithm":"sha256","hash":"8822e5d52e3ffbaa17cf63ed52ee5882f2743d114b77a04a288ff75170ba95f8"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"CTy6l0b7MTv+hTz1f3gjFQuhmL9dWQRWqGvbUqhd/jlEUExFkziCu4mwmfdEzlrH3pSwokeMc9+YpNtgILViBQ==","signed_at":"2026-11-17T06:43:25.687Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Batch Integrate
@@ -109,14 +109,14 @@ On imboard, `test.full` is documented as slower than any reasonable `cap run` ti
 3. **Never run a second full gate when nothing changed since the last passing one.** Compare `git rev-parse HEAD^{tree}` with the tree the last passing gate covered (the tree at tail dispatch, which `batch-validate` gated, or a recorded `gate_tree=`). Equal → reuse that verdict (`gate=reused`).
 4. **Run the gate in the FOREGROUND, in this turn.** Where the harness caps one command below the gate's duration, start it once with its pid and log captured (`ai-dossier cap run gate.batch >"$LOG" 2>&1 & echo $! >"$PIDFILE"`), then wait with back-to-back bounded blocking waits (`timeout 540 tail --pid=$(cat "$PIDFILE") -f /dev/null`, tool timeout ≥ 560000 ms) in the same turn. The ban is on ending the turn, not on `&`: never `nohup … &` and end the turn, never a "continuing to poll" closing message.
 
-Then classify the outcome — **four ways, never two.** `cap run` exits 3 for both kinds of `capability-unavailable`; tell them apart by the envelope's `exit_code` (pass `--envelope-file "$ENV"` and read the file, or read the final JSON line of stdout). A non-null `exit_code` is a **decline**: the gate's command ran and said it cannot vouch for this tree, which a capability opts into with `decline_exit_code` in the manifest (ai-dossier#1281, #1284). `exit_code: null` means nothing ran.
+Then classify the outcome — **four outcomes, never two, with two kinds of `capability-unavailable`.** `cap run` exits 3 for both kinds of `capability-unavailable`; tell them apart by the envelope's `exit_code` (pass `--envelope-file "$ENV"` and read the file, or read the final JSON line of stdout). A non-null `exit_code` is a **decline**: the gate's command ran and said it cannot vouch for this tree, which a capability opts into with `decline_exit_code` in the manifest (ai-dossier#1281, #1284). `exit_code: null` means nothing ran.
 
 | Verdict | Meaning | Action |
 |---|---|---|
 | `ok` | verification passed | proceed to review and ship |
 | `task-failed` | a real defect, with evidence the verification earned | repair (below), then evict on budget exhaustion |
 | `automation-broken` | the verification could not stand behind its own answer | **BLOCK. Change nothing. Retry or surface.** |
-| `capability-unavailable`, `exit_code` non-null | the batch gate **declined** this tree | **BLOCK. Change nothing, never ship.** Do not fall back to `test.full` or any lower tier, and do not re-run the same tree: it declines again. Surface it with the gate's output (review-issue aggregate mode: `--status blocked --kv reason=gate-declined`). The scheduler's `batch-validate` blocks the same decline as `suite-unreadable`; the tail must agree with it |
+| `capability-unavailable`, `exit_code` non-null | the batch gate (`gate.batch`, or `test.full` when it is the gate) **declined** this tree | **BLOCK. Change nothing, never ship.** Do not fall back to `test.full` or any lower tier, and do not re-run the same tree: it declines again. Surface it with the gate's output (review-issue aggregate mode: `--status blocked --kv reason=gate-declined`). The scheduler's `batch-validate` blocks the same decline as `suite-unreadable`; the tail must agree with it |
 | `capability-unavailable`, `exit_code: null` | the repo declares no such capability (undeclared id, `lifecycle: shadow`, or no manifest) | `gate.batch` undeclared → run `test.full`; both undeclared → skip and say so; never treat absence as a pass. If the manifest declares an active `gate.batch` and `cap run` still reports it unavailable, BLOCK: that is an install problem (ai-dossier#793), not absence |
 
 **Why a decline blocks.** Example: `batch-validate` passes, the tail rebases onto a lockfile change, and `gate.batch` declines on the new tree. Reading that decline as "unavailable, skip" ships a tree no gate verified.

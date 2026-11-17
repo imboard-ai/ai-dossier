@@ -2086,6 +2086,23 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
 
     const deps = { exec: createExecFn() } as unknown as BatchDispatchDeps;
     expect(resolveMemberForkPoint(deps, clone, 'batch/b-fork')).toBe(integrationTip);
+
+    // A sibling lands on the integration branch AFTER the member forked: the
+    // fork point stays the original commit, not the new tip.
+    fs.writeFileSync(path.join(repo, 'sibling2.txt'), 'later sibling\n');
+    gitAt(['add', '.'], repo);
+    gitAt(['commit', '-m', 'later sibling landed'], repo);
+    gitAt(['push', 'origin', 'batch/b-fork'], repo);
+    gitAt(['fetch', 'origin'], clone);
+    const newTip = gitAt(['rev-parse', 'origin/batch/b-fork'], clone).trim();
+    expect(newTip).not.toBe(integrationTip);
+    expect(resolveMemberForkPoint(deps, clone, 'batch/b-fork')).toBe(integrationTip);
+    // The local-branch case resolves the same way in the original repo.
+    gitAt(['checkout', '-b', 'batch/b-fork-m3', integrationTip], repo);
+    fs.writeFileSync(path.join(repo, 'member3.txt'), 'member three\n');
+    gitAt(['add', '.'], repo);
+    gitAt(['commit', '-m', 'member three'], repo);
+    expect(resolveMemberForkPoint(deps, repo, 'batch/b-fork')).toBe(integrationTip);
     // Neither ref resolves → null (the gate then runs without a fork point).
     expect(resolveMemberForkPoint(deps, clone, 'batch/no-such-branch')).toBeNull();
     // A ref that fails the shape check never reaches git argv.
