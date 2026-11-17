@@ -164,6 +164,15 @@ export interface CapabilityGateContext {
    * landed (its fork point would then equal HEAD — an empty diff).
    */
   integrationRef?: string;
+  /**
+   * #1284: the member's fork-point commit SHA (`git merge-base <integration>
+   * HEAD`, resolved by the scheduler in the member worktree, falling back to
+   * `origin/<integration>`). Unlike {@link integrationRef} it resolves in any
+   * clone — a pool-claimed member worktree may live in a separate clone that
+   * has no local integration branch. Exported as `DOSSIER_BATCH_FORK_POINT`.
+   * Set only alongside `integrationRef`, and omitted when neither ref resolves.
+   */
+  forkPoint?: string;
 }
 
 // --- F.2/F.8/F.9 batch failure recovery records (#472) ---

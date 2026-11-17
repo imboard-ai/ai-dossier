@@ -3083,6 +3083,31 @@ function runIncrementalGate(
   return true;
 }
 
+/** A full object name from `git merge-base` — SHA-1 (40 hex) or SHA-256 (64 hex). */
+const FULL_OBJECT_ID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+/**
+ * The member's fork point off the integration branch (#1284): `git merge-base
+ * <integration> HEAD` in the member worktree, trying the local branch first
+ * and then `origin/<integration>` — a pool-claimed member worktree may be a
+ * separate clone holding only the remote-tracking ref (`claimMemberWorktree`
+ * re-points it at `origin/<branch>`). Null when neither resolves; the gate
+ * then runs with the branch name alone, as before.
+ */
+export function resolveMemberForkPoint(
+  deps: BatchDispatchDeps,
+  worktree: string,
+  integrationRef: string
+): string | null {
+  // The persisted ref reaches git argv — re-validate its shape (#677 review).
+  if (!SAFE_REF_RE.test(integrationRef)) return null;
+  for (const ref of [integrationRef, `origin/${integrationRef}`]) {
+    const sha = deps.exec('git', ['merge-base', ref, 'HEAD'], worktree)?.trim().toLowerCase();
+    if (sha !== undefined && FULL_OBJECT_ID_RE.test(sha)) return sha;
+  }
+  return null;
+}
+
 /** What the incremental gate concluded about one member (#809 split it from its actions). */
 type GateVerdict =
   | { kind: 'pass' }
@@ -3114,9 +3139,15 @@ function evaluateIncrementalGate(
   // so that diff would be empty and a scoped script would pass trivially.
   const gatedBatch = findBatch(deps.store.load(), batchId);
   const integrationRef = gatedBatch && worktree !== gatedBatch.worktree ? gatedBatch.branch : null;
+  // #1284: the branch NAME may not resolve where the gate runs — a
+  // pool-claimed member worktree can live in a separate clone that only has
+  // `origin/<branch>` — so also hand over the fork-point SHA itself.
+  const forkPoint =
+    integrationRef !== null ? resolveMemberForkPoint(deps, worktree, integrationRef) : null;
   const ctx: CapabilityGateContext = {
     batchId,
     ...(integrationRef !== null ? { integrationRef } : {}),
+    ...(forkPoint !== null ? { forkPoint } : {}),
   };
   const gateResults = ['typecheck.run', 'test.focused'].map((id) => ({
     id,
@@ -3398,6 +3429,13 @@ export function resumeBlockedGate(
    * it cannot evidence — so the caller must not have to guess from the detail.
    */
   blockedBy?: 'inconclusive' | 'unevidenced-failure';
+  /**
+   * Why the gate was skipped, when `outcome` is `skipped` (#1284): the
+   * recheck TIMED OUT (#681) or the capability DECLINED (#1281). The two
+   * read differently to an operator, so the caller must not print one for
+   * the other.
+   */
+  skippedBy?: 'timeout' | 'declined';
   detail?: string;
 } {
   const state = deps.store.load();
@@ -3493,7 +3531,12 @@ export function resumeBlockedGate(
       now
     );
     completeMemberGate(deps, config, batchDispatch, batchId, batch, memberIssue, now, result);
-    return { outcome: 'skipped', capability: capabilityId, detail: excerpt };
+    return {
+      outcome: 'skipped',
+      capability: capabilityId,
+      skippedBy: timedOut ? 'timeout' : 'declined',
+      detail: excerpt,
+    };
   }
 
   recordMemberGate(deps, batchId, memberIssue, { id: capabilityId, ...recheck }, now);

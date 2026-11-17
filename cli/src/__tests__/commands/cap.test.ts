@@ -597,13 +597,14 @@ capabilities:
     expect(envelope.outcome).toBe('task-failed');
   });
 
-  it('maps a command exit 3 to capability-unavailable, keeping the raw exit code (#1281)', async () => {
+  it('maps a declared decline_exit_code to capability-unavailable, keeping the raw exit code (#1281, #1284)', async () => {
     writeManifest(
       tmpDir,
       `
 capabilities:
   declines:
     command: node -e "process.exit(3)"
+    decline_exit_code: 3
 `
     );
     await expect(runCap('run', 'declines')).rejects.toThrow('process.exit(3)');
@@ -620,7 +621,7 @@ capabilities:
     });
   });
 
-  it('never lets min_duration_ms reclassify a fast exit-3 decline (#1281)', async () => {
+  it('never lets min_duration_ms reclassify a fast declared decline (#1281)', async () => {
     writeManifest(
       tmpDir,
       `
@@ -628,6 +629,7 @@ capabilities:
   fast.decline:
     command: node -e "process.exit(3)"
     min_duration_ms: 60000
+    decline_exit_code: 3
 `
     );
     await expect(runCap('run', 'fast.decline')).rejects.toThrow('process.exit(3)');
@@ -637,6 +639,88 @@ capabilities:
     expect(envelope.outcome).toBe('capability-unavailable');
     expect(envelope.exit_code).toBe(3);
     expect(envelope.reason).not.toContain('min_duration_ms');
+  });
+
+  it('keeps an exit 3 task-failed when the entry declares no decline_exit_code (#1284)', async () => {
+    writeManifest(
+      tmpDir,
+      `
+capabilities:
+  pytest.internal.error:
+    command: node -e "process.exit(3)"
+`
+    );
+    await expect(runCap('run', 'pytest.internal.error')).rejects.toThrow('process.exit(1)');
+
+    const calls = vi.mocked(console.log).mock.calls.map((c) => String(c[0]));
+    const envelope = JSON.parse(calls[calls.length - 1]);
+    expect(envelope.outcome).toBe('task-failed');
+    expect(envelope.exit_code).toBe(3);
+  });
+
+  it('keeps the min_duration_ms floor for an undeclared exit 3 (#1284 — pre-#1281 classification)', async () => {
+    writeManifest(
+      tmpDir,
+      `
+capabilities:
+  fast.three:
+    command: node -e "process.exit(3)"
+    min_duration_ms: 60000
+`
+    );
+    await expect(runCap('run', 'fast.three')).rejects.toThrow('process.exit(2)');
+
+    const calls = vi.mocked(console.log).mock.calls.map((c) => String(c[0]));
+    const envelope = JSON.parse(calls[calls.length - 1]);
+    expect(envelope.outcome).toBe('automation-broken');
+    expect(envelope.reason).toContain('min_duration_ms=60000ms');
+  });
+
+  it('honours a non-default decline_exit_code and leaves exit 3 ordinary there (#1284)', async () => {
+    writeManifest(
+      tmpDir,
+      `
+capabilities:
+  declines.four:
+    command: node -e "process.exit(Number(process.argv[1]))"
+    decline_exit_code: 4
+`
+    );
+    await expect(runCap('run', 'declines.four', '4')).rejects.toThrow('process.exit(3)');
+    let calls = vi.mocked(console.log).mock.calls.map((c) => String(c[0]));
+    let envelope = JSON.parse(calls[calls.length - 1]);
+    expect(envelope.outcome).toBe('capability-unavailable');
+    expect(envelope.exit_code).toBe(4);
+    expect(envelope.reason).toContain('decline_exit_code');
+
+    vi.mocked(console.log).mockClear();
+    await expect(runCap('run', 'declines.four', '3')).rejects.toThrow('process.exit(1)');
+    calls = vi.mocked(console.log).mock.calls.map((c) => String(c[0]));
+    envelope = JSON.parse(calls[calls.length - 1]);
+    expect(envelope.outcome).toBe('task-failed');
+    expect(envelope.exit_code).toBe(3);
+  });
+
+  it.each([
+    ['1', '1'],
+    ['2', '2'],
+    ['126', '126'],
+    ['a fraction', '3.5'],
+    ['a string', '"3"'],
+  ])('rejects decline_exit_code %s at manifest-parse time (#1284)', async (_label, value) => {
+    writeManifest(
+      tmpDir,
+      `
+capabilities:
+  bad.decline:
+    command: node -e "process.exit(0)"
+    decline_exit_code: ${value}
+`
+    );
+    await expect(runCap('list')).rejects.toThrow('process.exit(1)');
+    expect(vi.mocked(console.error).mock.calls.flat().join('\n')).toContain(
+      'decline_exit_code must be an integer from 3 to 125'
+    );
   });
 
   it('rejects a negative min_duration_ms at manifest-parse time', async () => {

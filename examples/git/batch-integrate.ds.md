@@ -4,10 +4,10 @@ description: 'Merge a batch''s members onto its integration branch, run the batc
 metadata:
   dossier.dossier_schema_version: '1.0.0'
   dossier.title: 'Batch Integrate — Verify N Members Once, Repair What Is Yours, Escalate What Is Not'
-  dossier.version: '1.6.3'
+  dossier.version: '1.7.0'
   dossier.protocol_version: '"1.0"'
   dossier.status: 'Draft'
-  dossier.last_updated: '2026-10-06'
+  dossier.last_updated: '2026-11-17'
   dossier.objective: 'Merge a batch''s members onto its integration branch, run the batch gate (gate.batch when declared) once, repair mechanical failures, escalate semantic ones, never evict on an unreliable signal, run an interaction-only review when every member passed a full-tier review (else the full set plus the risk-floor review), push fixes before ONE foreground gate, refuse to ship unreviewed members, release claims, ship one PR'
   dossier.category: '["development","orchestration"]'
   dossier.tags: '["batch-cycles","integration-branch","parent","verification","handover","conformance","review"]'
@@ -18,8 +18,8 @@ metadata:
   dossier.content_scope: 'self-contained'
   dossier.inputs: '{"optional":[],"required":[{"description":"Batch id","name":"batch","type":"string"},{"description":"Branch every member is based on and lands onto","name":"integration_branch","type":"string"},{"description":"Issue numbers and their member branches","name":"members","type":"array"},{"description":"Absolute path to the parent''s worktree on the integration branch, dependencies installed","name":"worktree","type":"string"}]}'
   dossier.authors: '[{"name":"Yuval Dimnik"}]'
-  dossier.checksum: '{"algorithm":"sha256","hash":"fda5311c6c63c208b1ee806c62777e97219a936e9ffd886485720576bb809f5a"}'
-  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"TqkSIGS3P+tnbd85CZw7PcznuIMDNRiIwMBkXsJRSTD+XpUIxpGTchbnG4EQPE3gunwTZ2b8xxZU98QpvRhdDw==","signed_at":"2026-10-07T11:57:38.588Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
+  dossier.checksum: '{"algorithm":"sha256","hash":"b5443a551a30edc5279370a1668d984dfdadb407f313a3de9ebab80d4ab9b4b2"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"R+zSxCBdiPsOgV6T5QMInu04UbGiC7eMf+fdiByrgWnP1aI+4wEF9EPj+Gml72+no7oSaG3VckNxBy//T42LAQ==","signed_at":"2026-11-17T06:06:54.209Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Batch Integrate
@@ -109,14 +109,17 @@ On imboard, `test.full` is documented as slower than any reasonable `cap run` ti
 3. **Never run a second full gate when nothing changed since the last passing one.** Compare `git rev-parse HEAD^{tree}` with the tree the last passing gate covered (the tree at tail dispatch, which `batch-validate` gated, or a recorded `gate_tree=`). Equal → reuse that verdict (`gate=reused`).
 4. **Run the gate in the FOREGROUND, in this turn.** Where the harness caps one command below the gate's duration, start it once with its pid and log captured (`ai-dossier cap run gate.batch >"$LOG" 2>&1 & echo $! >"$PIDFILE"`), then wait with back-to-back bounded blocking waits (`timeout 540 tail --pid=$(cat "$PIDFILE") -f /dev/null`, tool timeout ≥ 560000 ms) in the same turn. The ban is on ending the turn, not on `&`: never `nohup … &` and end the turn, never a "continuing to poll" closing message.
 
-Then classify the outcome — **four ways, never two:**
+Then classify the outcome — **four ways, never two.** `cap run` exits 3 for both kinds of `capability-unavailable`; tell them apart by the envelope's `exit_code` (pass `--envelope-file "$ENV"` and read the file, or read the final JSON line of stdout). A non-null `exit_code` is a **decline**: the gate's command ran and said it cannot vouch for this tree, which a capability opts into with `decline_exit_code` in the manifest (ai-dossier#1281, #1284). `exit_code: null` means nothing ran.
 
 | Verdict | Meaning | Action |
 |---|---|---|
 | `ok` | verification passed | proceed to review and ship |
 | `task-failed` | a real defect, with evidence the verification earned | repair (below), then evict on budget exhaustion |
 | `automation-broken` | the verification could not stand behind its own answer | **BLOCK. Change nothing. Retry or surface.** |
-| `capability-unavailable` | the repo declares no such verification | skip it and say so; never treat absence as a pass |
+| `capability-unavailable`, `exit_code` non-null | the batch gate **declined** this tree | **BLOCK. Change nothing, never ship.** Do not fall back to `test.full` or any lower tier, and do not re-run the same tree: it declines again. Surface it with the gate's output (review-issue aggregate mode: `--status blocked --kv reason=gate-declined`). The scheduler's `batch-validate` blocks the same decline as `suite-unreadable`; the tail must agree with it |
+| `capability-unavailable`, `exit_code: null` | the repo declares no such capability (undeclared id, `lifecycle: shadow`, or no manifest) | `gate.batch` undeclared → run `test.full`; both undeclared → skip and say so; never treat absence as a pass. If the manifest declares an active `gate.batch` and `cap run` still reports it unavailable, BLOCK: that is an install problem (ai-dossier#793), not absence |
+
+**Why a decline blocks.** Example: `batch-validate` passes, the tail rebases onto a lockfile change, and `gate.batch` declines on the new tree. Reading that decline as "unavailable, skip" ships a tree no gate verified.
 
 **The `automation-broken` branch is the one that saves work, and it is not rare.** Shared infrastructure — a test-database pool, a container registry, a runner — is contended by everything else running against it. A contended resource produces failures that look exactly like member regressions: whole suites red, dozens of failing test names, often in a suite whose subject matter matches a member's change.
 

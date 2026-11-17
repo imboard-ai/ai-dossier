@@ -51,7 +51,8 @@ capabilities:
 | entry `.assumptions` | list of probes | no | Preconditions checked **before** the command runs |
 | entry `.description` | string | no | What the capability does (shown by `cap list`) |
 | entry `.timeout_ms` | number | no | Per-entry command timeout in ms (default 5 min; a timeout is `automation-broken`) |
-| entry `.min_duration_ms` | number | no | Sanity floor (#583): a non-zero exit that finishes faster than this is reclassified `automation-broken` instead of `task-failed` — "this probably didn't really run", not a genuine failure. Never applies to exit 3, which is a decline (#1281). Default 0 (no floor) |
+| entry `.min_duration_ms` | number | no | Sanity floor (#583): a non-zero exit that finishes faster than this is reclassified `automation-broken` instead of `task-failed` — "this probably didn't really run", not a genuine failure. Never applies to the entry's `decline_exit_code`, which is a decline (#1281). Default 0 (no floor) |
+| entry `.decline_exit_code` | integer 3–125 | no | Opt-in (#1284): the exit code with which this capability's command **declines** — "I ran, and cannot reach a verdict here" (e.g. the change needs full verification). That exit becomes `capability-unavailable` with the raw `exit_code` in the envelope, checked before `min_duration_ms`. Conventionally `3`. Unset (the default) → no exit is a decline, so an exit 3 is an ordinary `task-failed` (or `automation-broken` under the floor): pytest, `curl` under `set -e` and others exit 3 for a real failure. 0–2 and 126+ are rejected |
 | entry `.timeout_prone` | boolean | no | The repo's own admission (#777) that this capability routinely runs past any reasonable `cap run` budget. On `test.full` with no active `gate.batch`, `sched enqueue` refuses to form a batch (see [the batch gate](#the-batch-gate-gatebatch-777)). Default `false` |
 
 Capability ids are dotted lowercase words (`test.focused`, `worktree.prepare`).
@@ -101,7 +102,7 @@ first; machine consumers should prefer the envelope file — see below):
 | `ok` | 0 | Command ran and exited 0 |
 | `task-failed` | 1 | Command ran and legitimately failed (e.g. red tests) — *the operation's* failure, not the automation's |
 | `automation-broken` | 2 | Assumption probe failed · command missing/not executable (shell 126/127) · abnormal termination (signal / exit > 128) · timeout · manifest invalid · a non-zero exit faster than the entry's `min_duration_ms` (#583 — "this probably didn't really run") |
-| `capability-unavailable` | 3 | Id not in the manifest, no manifest at all, or `lifecycle: shadow` (envelope `exit_code: null`) · **or the command itself exited 3** — an explicit decline: it ran and cannot reach a verdict here, e.g. the change needs full verification (#1281; envelope `exit_code: 3`, never reclassified by `min_duration_ms`) |
+| `capability-unavailable` | 3 | Id not in the manifest, no manifest at all, or `lifecycle: shadow` (envelope `exit_code: null`) · **or the command exited with the entry's declared `decline_exit_code`** — an explicit decline: it ran and cannot reach a verdict here, e.g. the change needs full verification (#1281, opt-in since #1284; envelope `exit_code` is the command's code, never reclassified by `min_duration_ms`) |
 
 The distinction matters to callers: `task-failed` means "trust the result — the task
 itself failed"; `automation-broken` means "do not trust the machinery — fall back to
@@ -239,21 +240,25 @@ member reports review-done. It degrades exactly as the vocabulary above implies 
 | `automation-broken` | the batch BLOCKS — declared, but its machinery could not be trusted (#583/#585) |
 | `automation-broken` whose reason is `command timed out after <N>ms` | **the gate declines the member** — recorded `capability-unavailable` and journalled `gate-skipped-timeout:<id>`; the parent's expensive stage covers it (#681). A timeout is a statement about duration, not about the harness's reliability — and a member touching two workspace roots selects a dependents closure that approaches the whole workspace, so the gate was never "focused" there. The resolved package selection (the capability's own output) is preserved in the per-gate log and `member_gates.output_tail`, with the capability's `duration_ms` beside it |
 | `capability-unavailable` | **the check is skipped** and journalled `gate-skipped:<id>`; the member is judged on whatever else is available (#625) |
-| `capability-unavailable` from a command that **exited 3** (a decline) | **the gate declines the member** — recorded `capability-unavailable` and journalled `gate-skipped-declined:<id>` with the capability's output; the batch gate covers it (#1281). A `sched resume --batch` recheck that declines dissolves the block the same way, so a decline never leaves a batch blocked |
+| `capability-unavailable` from a command that **exited with its `decline_exit_code`** (a decline; envelope `exit_code` non-null) | **the gate declines the member** — recorded `capability-unavailable` and journalled `gate-skipped-declined:<id>` with the capability's output; the batch gate covers it (#1281). A `sched resume --batch` recheck that declines dissolves the block the same way, so a decline never leaves a batch blocked |
 
 Member-gate commands (live gate and `sched resume --batch` recheck) run with:
 
 | Variable | Value |
 |---|---|
 | `DOSSIER_BATCH_ID` | the batch id |
+| `DOSSIER_BATCH_FORK_POINT` | (#1284) the member's fork-point commit SHA, resolved by the scheduler as `git merge-base <integration branch> HEAD` in the member worktree (falling back to `origin/<integration branch>`). **Prefer it to the branch name:** a SHA resolves in any clone, while a pool-claimed member worktree may live in a separate clone that has no local integration branch. `git diff "$DOSSIER_BATCH_FORK_POINT"...HEAD` is the member's own change. Set only when `DOSSIER_BATCH_INTEGRATION_REF` is, and unset when neither ref resolves |
 | `DOSSIER_BATCH_INTEGRATION_REF` | the batch's local integration branch, which the member forked from. `git merge-base "$DOSSIER_BATCH_INTEGRATION_REF" HEAD` is the member's fork point, so `git diff "$DOSSIER_BATCH_INTEGRATION_REF"...HEAD` is the member's own change, without siblings that already landed. Set on the live gate only — on a recheck the member may already have landed, which would make that diff empty; a script should fall back to its default scope when the variable is unset. Also unset when the gate runs in the shared batch worktree (a batch dispatched before member worktrees existed), where that diff would be empty for the same reason |
 
-Exit 3 is a contract code: a wrapper script must not let a wrapped tool's own exit 3 (pytest's
-"internal error", for one) leak through as its exit status, or the member gate will read it as a
-decline and skip.
+A capability that declares `decline_exit_code` makes that code a contract code: its script must
+not let a wrapped tool's own use of the same code (pytest's exit 3 "internal error", for one) leak
+through as its exit status, or the member gate will read it as a decline and skip. A capability
+that does not declare it never declines — its exit 3 is an ordinary failure.
 
 `DOSSIER_BATCH_BASE` is not exported to member gates: it is the batch's target branch, so a
-member diff against it would still include landed siblings.
+member diff against it would still include landed siblings. Every `DOSSIER_BATCH_*` variable
+inherited from the calling shell is dropped from member-gate and batch-setup capability runs
+(#1284), so a run without a batch context never sees a stale batch.
 
 A repo that declares neither id runs batches end to end. Skipping costs *early*
 detection — a bad member's commit may be built on before anyone notices — but not
@@ -278,7 +283,7 @@ each tier preferred to the next:
 | 2 | `dispatch.suite_command` from sched config | neither capability available |
 | 3 | the repo's detected test runner | nothing above |
 
-A `gate.batch` or `test.full` whose command **declines** (exits 3) does not fall through to a
+A `gate.batch` or `test.full` whose command **declines** (exits with its declared `decline_exit_code`) does not fall through to a
 lower tier: the batch blocks `suite-unreadable` with the decline as its detail (#1281). The
 repo said it cannot vouch for the union here, so a lower tier's guess must not replace that.
 
