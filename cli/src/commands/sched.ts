@@ -122,6 +122,7 @@ import {
   BATCH_SUITE_TIMEOUT_MS,
   batchGateRefusal,
   createBatchSuiteRunner,
+  withoutBatchEnv,
 } from '../batch-suite-runner';
 import { envelopeFields, spawnCapRun } from '../cap-envelope';
 import { gateGapWarning, SKIP_GATE_CHECK_ENV } from '../cap-init';
@@ -196,30 +197,59 @@ import { registerSchedServiceCommands, serviceIo } from './sched-service';
  * the fallback is `spawnCapRun`'s captured stdout+stderr.
  *
  * A member-gate `ctx` (#1281) is exported to the capability as
- * `DOSSIER_BATCH_ID` and `DOSSIER_BATCH_INTEGRATION_REF` (the integration
- * branch the member forked from — `git merge-base "$DOSSIER_BATCH_INTEGRATION_REF"
- * HEAD` is the member's own fork point). Not `DOSSIER_BATCH_BASE`: that is
- * the batch's TARGET branch (the aggregate gate's scope), and a member diff
- * against it would still include siblings already landed.
+ * `DOSSIER_BATCH_ID`, `DOSSIER_BATCH_INTEGRATION_REF` (the integration
+ * branch the member forked from) and `DOSSIER_BATCH_FORK_POINT` (#1284: the
+ * member's fork-point SHA, resolved by the scheduler — it resolves in any
+ * clone, unlike the branch name, which a pool clone may not have). Not
+ * `DOSSIER_BATCH_BASE`: that is the batch's TARGET branch (the aggregate
+ * gate's scope), and a member diff against it would still include siblings
+ * already landed.
+ *
+ * Every inherited `DOSSIER_BATCH_*` variable is dropped first — with or
+ * without a ctx (#1284): an operator shell running `sched resume --batch`
+ * must not leak a ref the recheck deliberately omits, and a context-less run
+ * (batch setup's `worktree.prepare` warm step) must not see a batch it does
+ * not belong to.
  */
-export function batchCapabilityEnv(
-  ctx: CapabilityGateContext | undefined
-): NodeJS.ProcessEnv | undefined {
-  if (ctx === undefined) return undefined;
-  // Drop inherited batch variables first: an operator shell running
-  // `sched resume --batch` must not leak a ref the recheck deliberately omits.
-  const {
-    DOSSIER_BATCH_INTEGRATION_REF: _inheritedRef,
-    DOSSIER_BATCH_BASE: _inheritedBase,
-    ...inherited
-  } = process.env;
+export function batchCapabilityEnv(ctx: CapabilityGateContext | undefined): NodeJS.ProcessEnv {
+  const inherited = withoutBatchEnv();
+  if (ctx === undefined) return inherited;
   return {
     ...inherited,
     DOSSIER_BATCH_ID: ctx.batchId,
     ...(ctx.integrationRef !== undefined
       ? { DOSSIER_BATCH_INTEGRATION_REF: ctx.integrationRef }
       : {}),
+    ...(ctx.forkPoint !== undefined ? { DOSSIER_BATCH_FORK_POINT: ctx.forkPoint } : {}),
   };
+}
+
+/**
+ * The human line `sched resume --batch` prints for a gate recheck. A skip
+ * names its actual cause (#1284): a recheck that DECLINED (#1281) is not one
+ * that timed out (#681), and the operator's reading of the batch differs.
+ */
+export function describeResumeGateResult(
+  batchId: string,
+  result: ReturnType<typeof resumeBlockedGate>
+): string {
+  if (result.outcome === 'still-blocked') {
+    return (
+      (result.blockedBy === 'unevidenced-failure'
+        ? `⏸ Batch ${batchId} still blocked — cap run ${result.capability} reports task-failed but produced no evidence it earned one (#594).`
+        : `⏸ Batch ${batchId} still blocked — cap run ${result.capability} is still inconclusive.`) +
+      (result.detail ? `\n  ${result.detail}` : '')
+    );
+  }
+  if (result.outcome === 'evicted') {
+    return `✗ Batch ${batchId}: cap run ${result.capability} now reports task-failed — member evicted, batch continues.`;
+  }
+  if (result.outcome === 'skipped') {
+    return result.skippedBy === 'declined'
+      ? `⏭ Batch ${batchId}: cap run ${result.capability} declined on recheck (#1281) — gate skipped, member stands, the batch gate covers it, batch continues.`
+      : `⏭ Batch ${batchId}: cap run ${result.capability} timed out on recheck — gate declines (#681), member stands, batch continues.`;
+  }
+  return `✓ Batch ${batchId}: cap run ${result.capability} now reports ok — member completed, batch continues.`;
 }
 
 export function createBatchCapabilityRunner(opts?: {
@@ -231,10 +261,9 @@ export function createBatchCapabilityRunner(opts?: {
   const timeoutMs = opts?.timeoutMs ?? BATCH_SUITE_TIMEOUT_MS;
   const inFlightDir = opts?.inFlightDir;
   return (worktree, capabilityId, ctx) => {
-    const env = batchCapabilityEnv(ctx);
     const run = spawnCapRun(capabilityId, worktree, {
       timeoutMs,
-      ...(env !== undefined ? { env } : {}),
+      env: batchCapabilityEnv(ctx),
       ...(inFlightDir !== undefined ? { inFlightDir } : {}),
     });
     const result = run.spawned;
@@ -285,8 +314,8 @@ export function createBatchCapabilityRunner(opts?: {
     // from a failed assumption probe — since `output_tail` is unset there.
     // `duration_ms` (#681) rides to `member_gates` — the gate's cost per
     // member, the raw material for per-change-shape savings reporting.
-    // `exit_code` (#1281) tells a capability that ran and declined (exit 3)
-    // apart from an undeclared id (`capability-unavailable`, nothing ran).
+    // `exit_code` (#1281) tells a capability that ran and declined (its
+    // declared `decline_exit_code`, #1284) apart from an undeclared id (`capability-unavailable`, nothing ran).
     // `spawnCapRun` only returns an envelope with a valid outcome.
     return {
       outcome: fields.outcome ?? 'automation-broken',
@@ -1747,26 +1776,7 @@ function resumeBatchGate(opts: PauseResumeOptions): void {
       console.log(JSON.stringify({ batch: opts.batch, ...result }));
       return;
     }
-    if (result.outcome === 'still-blocked') {
-      console.log(
-        (result.blockedBy === 'unevidenced-failure'
-          ? `⏸ Batch ${opts.batch} still blocked — cap run ${result.capability} reports task-failed but produced no evidence it earned one (#594).`
-          : `⏸ Batch ${opts.batch} still blocked — cap run ${result.capability} is still inconclusive.`) +
-          (result.detail ? `\n  ${result.detail}` : '')
-      );
-    } else if (result.outcome === 'evicted') {
-      console.log(
-        `✗ Batch ${opts.batch}: cap run ${result.capability} now reports task-failed — member evicted, batch continues.`
-      );
-    } else if (result.outcome === 'skipped') {
-      console.log(
-        `⏭ Batch ${opts.batch}: cap run ${result.capability} timed out on recheck — gate declines (#681), member stands, batch continues.`
-      );
-    } else {
-      console.log(
-        `✓ Batch ${opts.batch}: cap run ${result.capability} now reports ok — member completed, batch continues.`
-      );
-    }
+    console.log(describeResumeGateResult(opts.batch as string, result));
   } catch (err) {
     handleKnownError(err);
   }

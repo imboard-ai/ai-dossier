@@ -4,10 +4,10 @@ description: 'SUPERSEDED by imboard-ai/git/member-cycle. Executed one member iss
 metadata:
   dossier.dossier_schema_version: '1.0.0'
   dossier.title: 'Slot Cycle — SUPERSEDED by member-cycle'
-  dossier.version: '1.1.3'
+  dossier.version: '1.2.0'
   dossier.protocol_version: '"1.0"'
   dossier.status: 'Deprecated'
-  dossier.last_updated: '2026-09-10'
+  dossier.last_updated: '2026-11-17'
   dossier.objective: 'SUPERSEDED by imboard-ai/git/member-cycle. Executed one member issue inside a SHARED batch worktree, members serialised. RFC-0001 §J replaced that with per-member worktrees off an integration branch. Kept for reference only.'
   dossier.category: '["development"]'
   dossier.tags: '["issue","workflow","batch-cycles","slot","runstate","conformance"]'
@@ -19,8 +19,8 @@ metadata:
   dossier.external_references: '[{"description":"GitHub CLI documentation","required":false,"trust_level":"trusted","type":"documentation","url":"https://cli.github.com/"}]'
   dossier.inputs: '{"optional":[],"required":[{"description":"The member issue this slot executes","name":"issue_number","type":"number"},{"description":"Batch id slug the scheduler enqueued this issue under (e.g. b1) — carried on every milestone as batch=<id>","name":"batch","type":"string"},{"description":"Absolute path to the scheduler-provided batch worktree: batch branch checked out, environment warm, prior members'' issue-boundary commits already pushed","name":"worktree","type":"string"}]}'
   dossier.authors: '[{"name":"Yuval Dimnik"}]'
-  dossier.checksum: '{"algorithm":"sha256","hash":"fc0a97532e19d51396d7dd9181d08e41e41d183b3cea0d3e2b3e887844699a5f"}'
-  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"XP/F3403bXYHMtDYuDzC0wpKP3WEKNqwSk92FMTh1t9rPnuVwj7dZ+crVq8gbjHk04MM1M518L43uHT1mYPHBA==","signed_at":"2026-10-07T12:01:56.346Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
+  dossier.checksum: '{"algorithm":"sha256","hash":"36aeb9415aba48e33d7ff4d78e92938e81f29dad5b5f544e80102d72f1219239"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"UveItGB72ClVp+xQ3aE5MLeuFMO9KA/YOrdcv4CdtkACm/lrhMBQLcfFQ4eSKecIpvNSOmtQhtQQgmhqXLixCg==","signed_at":"2026-11-17T06:43:31.782Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Slot Cycle — Per-Issue Execution Unit Inside a Batch
@@ -143,10 +143,10 @@ Read `.slot-plan-<issue_number>.md`: Approach, Predicted Files, Test Scope. Impl
 6. **Focused tests** — fast path first:
 
    ```bash
-   ai-dossier cap run test.focused
+   ENV=$(mktemp) && ai-dossier cap run test.focused --envelope-file "$ENV"
    ```
 
-   Same outcome routing: `task-failed` = trust it, fix the tests/code; `automation-broken`/`capability-unavailable` = fall back to reasoning — detect the framework (vitest/jest/pytest configs or package scripts) and run ONLY the test files covering the changed code (`npx vitest run <test-files>`, `npx jest <patterns>`, `pytest <files>`). No tests exist for the changed code → create focused unit tests (public API, happy path + key edge + error cases, repo's conventions for placement). **Max 2 fix attempts**; still red → post `ai-dossier runstate post --issue <issue_number> --phase implement --status blocked --run "$RUN_ID" --kv reason=test-failures --kv mode=slot --kv batch=<batch>` and hand back (F.1: no commit; the scheduler resets the member and requeues it full-cycle or decision-pending — the cheapest failure, caught before accumulation).
+   Same outcome routing: `task-failed` = trust it, fix the tests/code. A **decline** — `capability-unavailable` whose envelope `exit_code` is non-null (read it from `"$ENV"`; `cap run` exits 3 either way) — means the repo says this change needs MORE than focused verification. Do not substitute a narrower focused run as the verdict, and do not run the full suite yourself: the batch gate verifies the union of members once. As a sanity check only, run the tests you added or edited, so your own new tests are not broken. Record `focused=declined` on the implement milestone and move on; it is not a failure. `automation-broken`, or `capability-unavailable` with `exit_code: null` (not declared) = fall back to reasoning — detect the framework (vitest/jest/pytest configs or package scripts) and run ONLY the test files covering the changed code (`npx vitest run <test-files>`, `npx jest <patterns>`, `pytest <files>`). No tests exist for the changed code → create focused unit tests (public API, happy path + key edge + error cases, repo's conventions for placement). **Max 2 fix attempts**; still red → post `ai-dossier runstate post --issue <issue_number> --phase implement --status blocked --run "$RUN_ID" --kv reason=test-failures --kv mode=slot --kv batch=<batch>` and hand back (F.1: no commit; the scheduler resets the member and requeues it full-cycle or decision-pending — the cheapest failure, caught before accumulation).
 
 **Implement milestone:**
 
@@ -157,6 +157,7 @@ ai-dossier runstate post --issue <issue_number> --phase implement --status done 
   --kv tests_added=<n> \
   --kv tests_run=<n> \
   --kv ci_parity=skipped \
+  --kv focused=ok|fallback|declined \
   --kv mode=slot --kv batch=<batch>
 ```
 
@@ -269,7 +270,7 @@ On a hand-back, the blocked milestone IS the output — state which step posted 
 | `blocked reason=env-cold` on a worktree you believe is warm | A root-level marker check in a nested-workspace repo is a FALSE NEGATIVE, not a cold pool — the dependency marker lives at the workspace root, which is often a subdirectory of the worktree (imboard: `main/node_modules`). Run Step 0 precondition 3's search-the-worktree `find` first; only a search that returns nothing is a genuine scheduler warmup failure. Do not go pool-hunting before that (ai-dossier#676) |
 | Re-dispatch posts `no-classify-record` though the issue WAS classified | Expected after a partial slot run — `runstate last` shows the latest milestone (the slot trail), not classify; precondition 6 accepts any latest milestone carrying `mode=slot` |
 | `blocked reason=unrefinable-plan` | Refinement is exhausted — the scheduler requeues the member as full-cycle, where plan-issue authors a fresh plan |
-| `cap run test.focused` exits 3 (`capability-unavailable`) | Expected when the repo has no `.dossier/automation/` manifest — use the reasoning fallback; it is the designed path, not an error |
+| `cap run test.focused` exits 3 (`capability-unavailable`) | Read the envelope's `exit_code`. `null`: expected when the repo has no `.dossier/automation/` manifest or does not declare the id — use the reasoning fallback; it is the designed path, not an error. Non-null: the capability **declined** — the change needs broader verification than a focused run. Do not narrow it to the covering test files; run only the tests you wrote, record `focused=declined`, and leave the rest to the batch gate |
 | `cap run` exits 2 (`automation-broken`) | Do not trust the machinery — reasoning fallback; note it in the output for the scheduler's telemetry |
 | Dirty worktree at Step 0 | Check the issue's last milestone first: a `blocked reason=push-rejected` hand-back deliberately leaves the member's work staged (expected state, scheduler owns salvage). Only otherwise is it a mid-issue crash — post `blocked reason=dirty-worktree`; NEVER clean or reset it yourself |
 | Push rejected (non-fast-forward) | Another writer touched the batch branch — `git reset --soft $BOUNDARY` (work stays staged; tree reads dirty by design), post `blocked reason=push-rejected`; never force-push a shared batch branch |

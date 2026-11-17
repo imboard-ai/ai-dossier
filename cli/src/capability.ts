@@ -13,9 +13,10 @@
  *                                    abnormal termination, timeout, or an
  *                                    invalid manifest
  *   capability-unavailable exit 3  — id not in the manifest (or lifecycle=shadow),
- *                                    or the command itself exited 3: an
+ *                                    or the command exited with the entry's
+ *                                    declared `decline_exit_code`: an
  *                                    explicit decline ("I cannot reach a
- *                                    verdict here") (#1281)
+ *                                    verdict here") (#1281, opt-in #1284)
  *
  * The engine is pure logic (no CLI dependencies) so the scheduler's slot-cycle
  * fast path (#464) can consume it directly later.
@@ -56,14 +57,28 @@ const SHELL_EXIT_COMMAND_NOT_FOUND = 127;
 const SHELL_SIGNAL_EXIT_BASE = 128;
 
 /**
- * The exit code a capability's command uses to DECLINE (#1281) — the same
- * code `cap run` itself reports for `capability-unavailable`, so a repo
- * script speaks the manifest's four-way contract directly: it ran, decided it
- * cannot reach a verdict in this context (e.g. the change needs full
- * verification), and said so. Never reclassified by `min_duration_ms` — a
- * decline really ran; the floor is for exits that did not.
+ * The conventional exit code a capability's command uses to DECLINE (#1281)
+ * — the same code `cap run` itself reports for `capability-unavailable`, so
+ * a repo script speaks the manifest's four-way contract directly: it ran,
+ * decided it cannot reach a verdict in this context (e.g. the change needs
+ * full verification), and said so.
+ *
+ * OPT-IN per capability (#1284): only an entry that declares
+ * `decline_exit_code` has an exit mapped to a decline. Plenty of tools exit 3
+ * for a real failure (pytest's internal error, `curl` under `set -e`), so an
+ * undeclared entry keeps the ordinary classification — `task-failed`, or
+ * `automation-broken` under its `min_duration_ms` floor.
  */
 export const CAPABILITY_DECLINE_EXIT_CODE = 3;
+
+/**
+ * Accepted range for `decline_exit_code` (#1284). 0 is `ok`, 1 is the generic
+ * failure every tool uses (declaring it would turn every red run into a
+ * skip), 2 is the conventional usage-error code; 126/127 are the shell's
+ * not-executable / not-found and 128+ are signal deaths.
+ */
+const DECLINE_EXIT_CODE_MIN = 3;
+const DECLINE_EXIT_CODE_MAX = 125;
 
 /** Fixed cap on any single `<tool> --version` probe so a hung tool cannot hang `cap run`. */
 const PROBE_TIMEOUT_MS = 10_000;
@@ -154,10 +169,19 @@ export interface CapabilityEntry {
    * this many ms is reclassified `automation-broken` instead of `task-failed`
    * — a fast non-zero exit is more likely "the automation didn't really run"
    * (e.g. a filter matched zero projects) than a genuine test failure.
-   * Default 0 (no floor) — opt in per capability. Never applies to an exit
-   * of {@link CAPABILITY_DECLINE_EXIT_CODE} (#1281).
+   * Default 0 (no floor) — opt in per capability. Never applies to the
+   * entry's declared {@link declineExitCode} (#1281).
    */
   minDurationMs?: number;
+  /**
+   * #1284: the exit code with which this capability's command DECLINES —
+   * "I ran, and cannot reach a verdict here". When the command exits with
+   * it, `cap run` reports `capability-unavailable` with the raw `exit_code`
+   * (checked before the {@link minDurationMs} floor). Unset (the default) →
+   * no exit code is a decline. Conventionally
+   * {@link CAPABILITY_DECLINE_EXIT_CODE}; any integer 3–125 is accepted.
+   */
+  declineExitCode?: number;
   /**
    * The repo's own admission (#777) that this capability routinely runs past
    * any reasonable `cap run` budget — e.g. an unsharded full-repo `test.full`.
@@ -340,6 +364,21 @@ function parseCapabilityEntry(id: string, raw: unknown): CapabilityEntry {
     minDurationMs = entry.min_duration_ms;
   }
 
+  let declineExitCode: number | undefined;
+  if (entry.decline_exit_code !== undefined) {
+    if (
+      typeof entry.decline_exit_code !== 'number' ||
+      !Number.isInteger(entry.decline_exit_code) ||
+      entry.decline_exit_code < DECLINE_EXIT_CODE_MIN ||
+      entry.decline_exit_code > DECLINE_EXIT_CODE_MAX
+    ) {
+      throw new CapManifestError(
+        `capability '${id}': decline_exit_code must be an integer from ${DECLINE_EXIT_CODE_MIN} to ${DECLINE_EXIT_CODE_MAX} (conventionally ${CAPABILITY_DECLINE_EXIT_CODE}), got ${JSON.stringify(entry.decline_exit_code)}`
+      );
+    }
+    declineExitCode = entry.decline_exit_code;
+  }
+
   let timeoutProne: boolean | undefined;
   if (entry.timeout_prone !== undefined) {
     if (typeof entry.timeout_prone !== 'boolean') {
@@ -363,6 +402,7 @@ function parseCapabilityEntry(id: string, raw: unknown): CapabilityEntry {
     description,
     timeoutMs,
     minDurationMs,
+    ...(declineExitCode !== undefined ? { declineExitCode } : {}),
     ...(timeoutProne !== undefined ? { timeoutProne } : {}),
   };
 }
@@ -619,7 +659,8 @@ export function runCapability(
     durationMs,
     cwd,
     timeoutMs,
-    entry.minDurationMs ?? 0
+    entry.minDurationMs ?? 0,
+    entry.declineExitCode
   );
   if (classified.outcome !== 'ok') {
     classified.output_tail = truncateTailBytes(`${res.stdout ?? ''}${res.stderr ?? ''}`, tailBytes);
@@ -627,7 +668,7 @@ export function runCapability(
   return classified;
 }
 
-/** Map a finished spawn to an outcome — ok / task-failed / automation-broken, or capability-unavailable for an explicit decline (#1281). */
+/** Map a finished spawn to an outcome — ok / task-failed / automation-broken, or capability-unavailable for a declared decline (#1281, #1284). */
 function classifySpawnResult(
   res: ReturnType<typeof spawnSync>,
   id: string,
@@ -635,7 +676,8 @@ function classifySpawnResult(
   durationMs: number,
   cwd: string,
   timeoutMs: number,
-  minDurationMs = 0
+  minDurationMs = 0,
+  declineExitCode?: number
 ): CapRunResult {
   if (res.error) {
     const code = (res.error as NodeJS.ErrnoException).code;
@@ -702,12 +744,15 @@ function classifySpawnResult(
       reason: null,
     };
   }
-  // #1281: exit 3 is the command's own "capability-unavailable" — it ran,
-  // decided it cannot reach a verdict here, and said so. Checked BEFORE the
-  // #583 floor: a decline that has to resolve its scope first takes about as
-  // long as the script's startup, so the floor would turn nearly every
-  // decline into automation-broken (which blocks a batch).
-  if (res.status === CAPABILITY_DECLINE_EXIT_CODE) {
+  // #1281: the entry's declared decline code is the command's own
+  // "capability-unavailable" — it ran, decided it cannot reach a verdict
+  // here, and said so. Opt-in only (#1284): an entry without
+  // `decline_exit_code` keeps the ordinary classification below, because
+  // plenty of tools exit 3 for a real failure. Checked BEFORE the #583 floor:
+  // a decline that has to resolve its scope first takes about as long as the
+  // script's startup, so the floor would turn nearly every decline into
+  // automation-broken (which blocks a batch).
+  if (declineExitCode !== undefined && res.status === declineExitCode) {
     return {
       outcome: 'capability-unavailable',
       capability: id,
@@ -715,7 +760,7 @@ function classifySpawnResult(
       exit_code: res.status,
       signal: null,
       duration_ms: durationMs,
-      reason: `command declined: exited ${CAPABILITY_DECLINE_EXIT_CODE} (capability-unavailable) after ${durationMs}ms — it ran and reported it cannot reach a verdict here`,
+      reason: `command declined: exited ${declineExitCode} (the entry's decline_exit_code → capability-unavailable) after ${durationMs}ms — it ran and reported it cannot reach a verdict here`,
     };
   }
   // #583 AC2: a non-zero exit that finished faster than the capability's

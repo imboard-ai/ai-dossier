@@ -1,6 +1,6 @@
 import { type SpawnSyncReturns, spawnSync } from 'node:child_process';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createBatchCapabilityRunner } from '../commands/sched';
+import { createBatchCapabilityRunner, describeResumeGateResult } from '../commands/sched';
 
 vi.mock('node:child_process');
 
@@ -178,7 +178,7 @@ describe('createBatchCapabilityRunner (#681)', () => {
     run('/wt', 'test.focused', { batchId: 'b-2' });
 
     const noCtxEnv = vi.mocked(spawnSync).mock.calls[0]?.[2]?.env ?? {};
-    expect(noCtxEnv.DOSSIER_BATCH_ID).toBe(process.env.DOSSIER_BATCH_ID);
+    expect(noCtxEnv).not.toHaveProperty('DOSSIER_BATCH_ID');
     const recheckEnv = vi.mocked(spawnSync).mock.calls[1]?.[2]?.env ?? {};
     expect(recheckEnv.DOSSIER_BATCH_ID).toBe('b-2');
     expect(recheckEnv).not.toHaveProperty('DOSSIER_BATCH_INTEGRATION_REF');
@@ -210,5 +210,82 @@ describe('createBatchCapabilityRunner (#681)', () => {
     expect(env.DOSSIER_BATCH_ID).toBe('b-3');
     expect(env).not.toHaveProperty('DOSSIER_BATCH_INTEGRATION_REF');
     expect(env).not.toHaveProperty('DOSSIER_BATCH_BASE');
+  });
+  it('#1284: exports DOSSIER_BATCH_FORK_POINT when the scheduler resolved one', () => {
+    vi.mocked(spawnSync).mockReturnValue(
+      spawnResult({
+        status: 0,
+        stdout: '{"cap_envelope":1,"capability":"test.focused","outcome":"ok","exit_code":0}',
+      })
+    );
+    const sha = 'a'.repeat(40);
+    createBatchCapabilityRunner()('/wt', 'test.focused', {
+      batchId: 'b-4',
+      integrationRef: 'batch/b-4',
+      forkPoint: sha,
+    });
+    const env = vi.mocked(spawnSync).mock.calls[0]?.[2]?.env ?? {};
+    expect(env.DOSSIER_BATCH_FORK_POINT).toBe(sha);
+    expect(env.DOSSIER_BATCH_INTEGRATION_REF).toBe('batch/b-4');
+  });
+
+  it('#1284: a context-less run (worktree.prepare) strips every inherited DOSSIER_BATCH_* variable', () => {
+    vi.mocked(spawnSync).mockReturnValue(
+      spawnResult({
+        status: 0,
+        stdout: '{"cap_envelope":1,"capability":"worktree.prepare","outcome":"ok","exit_code":0}',
+      })
+    );
+    const keys = [
+      'DOSSIER_BATCH_ID',
+      'DOSSIER_BATCH_BASE',
+      'DOSSIER_BATCH_INTEGRATION_REF',
+      'DOSSIER_BATCH_FORK_POINT',
+    ] as const;
+    const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+    for (const k of keys) process.env[k] = `stale-${k}`;
+    try {
+      createBatchCapabilityRunner()('/wt', 'worktree.prepare');
+      // A recheck context names the batch but no ref — stale refs must not leak either.
+      createBatchCapabilityRunner()('/wt', 'test.focused', { batchId: 'b-5' });
+    } finally {
+      for (const k of keys) {
+        if (saved[k] === undefined) delete process.env[k];
+        else process.env[k] = saved[k];
+      }
+    }
+    const noCtxEnv = vi.mocked(spawnSync).mock.calls[0]?.[2]?.env ?? {};
+    for (const k of keys) expect(noCtxEnv).not.toHaveProperty(k);
+    // Non-batch variables are still inherited.
+    expect(noCtxEnv.PATH).toBe(process.env.PATH);
+    const recheckEnv = vi.mocked(spawnSync).mock.calls[1]?.[2]?.env ?? {};
+    expect(recheckEnv.DOSSIER_BATCH_ID).toBe('b-5');
+    expect(recheckEnv).not.toHaveProperty('DOSSIER_BATCH_FORK_POINT');
+    expect(recheckEnv).not.toHaveProperty('DOSSIER_BATCH_INTEGRATION_REF');
+    expect(recheckEnv).not.toHaveProperty('DOSSIER_BATCH_BASE');
+  });
+});
+
+describe('describeResumeGateResult (#1284)', () => {
+  it('names a declined recheck as a decline, not a timeout', () => {
+    const line = describeResumeGateResult('b-6', {
+      outcome: 'skipped',
+      capability: 'test.focused',
+      skippedBy: 'declined',
+    });
+    expect(line).toContain('declined on recheck');
+    expect(line).not.toContain('timed out');
+  });
+
+  it('keeps the timeout wording for a timed-out recheck (and when the cause is absent)', () => {
+    for (const skippedBy of ['timeout', undefined] as const) {
+      const line = describeResumeGateResult('b-7', {
+        outcome: 'skipped',
+        capability: 'test.focused',
+        ...(skippedBy !== undefined ? { skippedBy } : {}),
+      });
+      expect(line).toContain('timed out on recheck');
+      expect(line).not.toContain('declined on recheck');
+    }
   });
 });

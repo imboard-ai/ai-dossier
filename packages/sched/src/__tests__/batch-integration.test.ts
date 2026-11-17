@@ -33,6 +33,9 @@ import {
   // `runBatchTick` (a kept batch's it leaves alone, #855).
   reconcileKeptWorktrees,
   reconcileStaleBlockedBatches,
+  // #1284: the fork-point resolver, exercised directly against a separate
+  // clone (the pool-claim shape the live engine cannot reproduce here).
+  resolveMemberForkPoint,
   tailMembersRefusal,
 } from '../batch-dispatch';
 import { batchMemberLogPath } from '../dispatch';
@@ -47,6 +50,7 @@ import {
   type CapabilityGateResult,
   createBatch,
   createEmptyState,
+  createExecFn,
   createSpawnDeps,
   type EngineDeps,
   type EnqueueInput,
@@ -1941,7 +1945,11 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
       'b-resume-timeout',
       new Date()
     );
-    expect(resumed).toMatchObject({ outcome: 'skipped', capability: 'test.focused' });
+    expect(resumed).toMatchObject({
+      outcome: 'skipped',
+      capability: 'test.focused',
+      skippedBy: 'timeout',
+    });
     const batch = findBatch(h.state(), 'b-resume-timeout');
     // The block dissolves: the gate declines, the member's own review stands,
     // and the batch advances exactly as an `ok` recheck would advance it.
@@ -1965,13 +1973,24 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     // WITH the command's exit code; the gate must skip (the batch gate covers
     // the union), not block the batch as `gate-inconclusive:test.focused`.
     const repo = scratchRepo();
-    const seen: Array<{ id: string; ctx: CapabilityGateContext | undefined }> = [];
+    const seen: Array<{
+      id: string;
+      ctx: CapabilityGateContext | undefined;
+      mergeBase: string | null;
+    }> = [];
     const capability = (
-      _worktree: string,
+      worktree: string,
       id: string,
       ctx?: CapabilityGateContext
     ): CapabilityGateResult => {
-      seen.push({ id, ctx });
+      seen.push({
+        id,
+        ctx,
+        // #1284: what the fork point must equal, computed where the gate runs.
+        mergeBase: ctx?.integrationRef
+          ? gitAt(['merge-base', ctx.integrationRef, 'HEAD'], worktree).trim()
+          : null,
+      });
       return id === 'test.focused'
         ? {
             outcome: 'capability-unavailable',
@@ -2012,7 +2031,13 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
     const gateCalls = seen.filter((c) => c.id === 'typecheck.run' || c.id === 'test.focused');
     expect(gateCalls).toHaveLength(2);
     for (const call of gateCalls) {
-      expect(call.ctx).toEqual({ batchId: 'b-decline', integrationRef: batch?.branch });
+      // #1284: plus the member's fork-point SHA, which resolves in any clone.
+      expect(call.mergeBase).toMatch(/^[0-9a-f]{40}$/);
+      expect(call.ctx).toEqual({
+        batchId: 'b-decline',
+        integrationRef: batch?.branch,
+        forkPoint: call.mergeBase,
+      });
     }
     expect(batch?.branch).toMatch(/^batch\//);
   }, 60_000);
@@ -2036,6 +2061,53 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
       .filter((e) => e.event === 'gate-skipped' && e.issue === 2171);
     expect(skipped.map((e) => e.reason)).toEqual(['gate-skipped:test.focused']);
   }, 60_000);
+
+  it('#1284: the fork point resolves in a separate clone that has only origin/<integration>', () => {
+    const repo = scratchRepo();
+    gitAt(['checkout', '-b', 'batch/b-fork'], repo);
+    fs.writeFileSync(path.join(repo, 'sibling.txt'), 'landed sibling\n');
+    gitAt(['add', '.'], repo);
+    gitAt(['commit', '-m', 'sibling landed'], repo);
+    gitAt(['push', '-u', 'origin', 'batch/b-fork'], repo);
+    const integrationTip = gitAt(['rev-parse', 'HEAD'], repo).trim();
+
+    // The pool-claim shape: a SEPARATE clone, member branch re-pointed at
+    // origin/<integration>, no local integration branch.
+    const origin = gitAt(['remote', 'get-url', 'origin'], repo).trim();
+    const clone = path.join(tmpDir('sched-pool-clone-'), 'clone');
+    execFileSync('git', ['clone', '--quiet', origin, clone], { stdio: 'ignore' });
+    gitAt(['config', 'user.email', 'sched@test'], clone);
+    gitAt(['config', 'user.name', 'sched test'], clone);
+    gitAt(['checkout', '-B', 'batch/b-fork-m2', 'origin/batch/b-fork'], clone);
+    fs.writeFileSync(path.join(clone, 'member.txt'), 'member change\n');
+    gitAt(['add', '.'], clone);
+    gitAt(['commit', '-m', 'member change'], clone);
+    expect(() => gitAt(['rev-parse', '--verify', 'refs/heads/batch/b-fork'], clone)).toThrow();
+
+    const deps = { exec: createExecFn() } as unknown as BatchDispatchDeps;
+    expect(resolveMemberForkPoint(deps, clone, 'batch/b-fork')).toBe(integrationTip);
+
+    // A sibling lands on the integration branch AFTER the member forked: the
+    // fork point stays the original commit, not the new tip.
+    fs.writeFileSync(path.join(repo, 'sibling2.txt'), 'later sibling\n');
+    gitAt(['add', '.'], repo);
+    gitAt(['commit', '-m', 'later sibling landed'], repo);
+    gitAt(['push', 'origin', 'batch/b-fork'], repo);
+    gitAt(['fetch', 'origin'], clone);
+    const newTip = gitAt(['rev-parse', 'origin/batch/b-fork'], clone).trim();
+    expect(newTip).not.toBe(integrationTip);
+    expect(resolveMemberForkPoint(deps, clone, 'batch/b-fork')).toBe(integrationTip);
+    // The local-branch case resolves the same way in the original repo.
+    gitAt(['checkout', '-b', 'batch/b-fork-m3', integrationTip], repo);
+    fs.writeFileSync(path.join(repo, 'member3.txt'), 'member three\n');
+    gitAt(['add', '.'], repo);
+    gitAt(['commit', '-m', 'member three'], repo);
+    expect(resolveMemberForkPoint(deps, repo, 'batch/b-fork')).toBe(integrationTip);
+    // Neither ref resolves → null (the gate then runs without a fork point).
+    expect(resolveMemberForkPoint(deps, clone, 'batch/no-such-branch')).toBeNull();
+    // A ref that fails the shape check never reaches git argv.
+    expect(resolveMemberForkPoint(deps, clone, '--upload-pack=x')).toBeNull();
+  });
 
   it('#1281: sched resume --batch dissolves a block when the recheck is an exit-3 decline (no integration ref on recheck)', async () => {
     const repo = scratchRepo();
@@ -2083,7 +2155,12 @@ describe('integration #523: batch dispatch (real git worktree, real spawned fake
       new Date()
     );
 
-    expect(resumed).toMatchObject({ outcome: 'skipped', capability: 'test.focused' });
+    // #1284: the caller can tell a decline from a timeout.
+    expect(resumed).toMatchObject({
+      outcome: 'skipped',
+      capability: 'test.focused',
+      skippedBy: 'declined',
+    });
     const batch = findBatch(h.state(), 'b-resume-decline');
     expect(batch?.blocked_reason).toBeNull();
     expect(batch?.status).toBe('executing');

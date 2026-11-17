@@ -1039,12 +1039,15 @@ failure rails: executing → dissolving (a member self-reports blocked)
   detail names WHICH of the two branches fired). `sched resume --batch <id>` re-runs the
   gate later to resolve the block once the capability is fixed, and applies the same
   evidence bar on the recheck — a still-unevidenced `task-failed` stays blocked rather
-  than evicting on a resume. A capability that ran and DECLINED (exit 3 — envelope
-  `capability-unavailable` with a numeric `exit_code`, `CapabilityGateResult.exitCode`) is
-  skipped instead (`gate-skipped-declined:<cap>`, #1281), live and on a recheck; the batch
-  gate covers that member. The runner is handed a `CapabilityGateContext` (`batchId`,
-  `integrationRef` = the integration branch, live gate only), which the CLI exports as
-  `DOSSIER_BATCH_ID` / `DOSSIER_BATCH_INTEGRATION_REF`.
+  than evicting on a resume. A capability that ran and DECLINED (its manifest-declared
+  `decline_exit_code`, opt-in since #1284 — envelope `capability-unavailable` with a numeric
+  `exit_code`, `CapabilityGateResult.exitCode`) is skipped instead
+  (`gate-skipped-declined:<cap>`, #1281), live and on a recheck; the batch gate covers that
+  member, and `resumeBlockedGate` reports `skippedBy: 'declined'` (vs `'timeout'`). The
+  runner is handed a `CapabilityGateContext` (`batchId`; on the live gate also
+  `integrationRef` = the integration branch and `forkPoint` = the member's merge-base SHA,
+  #1284), which the CLI exports as `DOSSIER_BATCH_ID` / `DOSSIER_BATCH_INTEGRATION_REF` /
+  `DOSSIER_BATCH_FORK_POINT`.
 - **The batch's own slot is claimed FRESH for each live step** (a serial member, the tail
   agent, the report agent, a bounded fix agent) — never held across a wait; parallel
   members hold their own member slots instead. The aggregate
