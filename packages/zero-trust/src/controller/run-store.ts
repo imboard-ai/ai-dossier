@@ -10,6 +10,7 @@ import {
   replacePrivate,
   syncDirectory,
 } from '../durable-fs';
+import { validateOperatorEcosystem } from '../ecosystem/operator';
 import { Journal } from '../journal';
 import { acquirePrivateGuard, StoreLockedError } from '../lock';
 import { validateOperatorPolicy } from '../policy/operator';
@@ -91,7 +92,7 @@ export class RunStoreError extends Error {
   }
 }
 export interface UserChange {
-  readonly kind: 'model' | 'checkpoints' | 'source' | 'policy';
+  readonly kind: 'model' | 'checkpoints' | 'source' | 'policy' | 'ecosystem';
   readonly at: string;
   readonly value: unknown;
   readonly digest: string;
@@ -108,7 +109,7 @@ function restoreUserChange(
     run.state !== 'paused_user' ||
     !isTimestamp(raw.at) ||
     Date.parse(raw.at) < Date.parse(run.updatedAt) ||
-    !['model', 'checkpoints', 'source', 'policy'].includes(String(raw.kind)) ||
+    !['model', 'checkpoints', 'source', 'policy', 'ecosystem'].includes(String(raw.kind)) ||
     raw.digest !==
       hash(Buffer.from(JSON.stringify({ kind: raw.kind, at: raw.at, value: raw.value })))
   )
@@ -132,6 +133,21 @@ function restoreUserChange(
     if (
       JSON.stringify(policy) !== JSON.stringify(raw.value) ||
       policy?.operator !== run.contributor
+    )
+      fail('invalid_store');
+  } else if (raw.kind === 'ecosystem') {
+    // An ecosystem choice answers an acquisition hand-off (#1276), so it is only valid
+    // while the pause interrupted planning, where acquisition runs.
+    if (run.history.at(-1)?.from !== 'planning') fail('invalid_store');
+    let choice: ReturnType<typeof validateOperatorEcosystem> | undefined;
+    try {
+      choice = validateOperatorEcosystem(raw.value);
+    } catch {
+      fail('invalid_store');
+    }
+    if (
+      JSON.stringify(choice) !== JSON.stringify(raw.value) ||
+      choice?.operator !== run.contributor
     )
       fail('invalid_store');
   } else if (!['implementing', 'verifying'].includes(run.history.at(-1)?.from ?? ''))

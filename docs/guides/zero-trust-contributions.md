@@ -124,7 +124,10 @@ cd packages/zero-trust
 
    `<worker-relay-url>` is the guest-side relay address from the `WORKER_RELAY` constant in
    `src/vm/qemu-args.ts`, not the mirror's address. `target` is the mirror for your project's
-   ecosystem as `zt-proxy up` printed it (`npm` or `pypi`, with its port). `target.host` must be
+   ecosystem as `zt-proxy up` printed it (`npm` or `pypi`, with its port). Optionally add
+   `"targetEcosystem": "node"` or `"python"` to declare which mirror `target` is; a repository
+   with both an npm and a Python project at its root requires it (see
+   [Mixed npm + Python repositories](#mixed-npm--python-repositories)). `target.host` must be
    the IPv4 address it printed; host names are refused. The file is at most 16 KiB. Stop the proxy with
    `node scripts/zt-proxy.mjs down --state-dir <proxy-state-dir>`. Details:
     [package-proxy decision record](../features/zero-trust-full-cycle/decisions/package-proxy.md).
@@ -490,6 +493,40 @@ bug, and has the model plan and implement a minimal fix. If you selected the `pl
 pauses with the plan in `artifacts/plan.txt` for your approval before implementing. If the bug
 cannot be reproduced, it hands off before patching.
 
+### Mixed npm + Python repositories
+
+Some repositories hold both a `package.json` and a `pyproject.toml` (or other Python manifest)
+at the root. A run installs and tests **one** of them:
+
+1. If you answered an earlier hand-off with `resume --ecosystem`, that side, for exactly the
+   source it answered.
+2. Otherwise, the side every source path in the issue title and body belongs to. For example, an
+   issue that names only `app/models.py` and `tests/test_api.py` selects Python; one that names
+   only `web/src/index.ts` or `package.json` selects npm. The issue text is only scanned for
+   path-shaped tokens (URLs and library names such as `next.js` do not count); nothing in it
+   is fetched or run.
+3. If the issue names no source paths, or paths on both sides, the run pauses before any VM
+   with `ecosystem_ambiguous`. Choose the side yourself:
+
+   ```bash
+   node scripts/zt-run.mjs resume --root <state-dir>/runs --run <id> --ecosystem python
+   ```
+
+The other side's manifests, lockfiles and tool configuration (for example `.npmrc` when Python
+is selected) are set aside: none of its tools is planned or run. A test script that shells out to
+the other side's tools could still read that configuration, but provisioning reaches only the one
+mirror and tests run with no network. The selected side must still be a supported setup on its
+own, and the run keeps that side for its whole life. A side chosen from the issue paths cannot be
+changed with `--ecosystem`; if it is wrong, cancel the run and start a new one. The pull request's limitations say that only the selected side was installed
+and tested locally, and that upstream CI covers the rest.
+
+The run's one proxy forward must reach the selected side's mirror. Add `"targetEcosystem":
+"python"` (or `"node"`) to the proxy endpoints file, with `target` set to that mirror as
+`zt-proxy up` printed it (`pypi` or `npm`). A mixed-root run with no `targetEcosystem`, or any run
+whose `targetEcosystem` names the other ecosystem, pauses before any VM with
+`proxy_ecosystem_mismatch`; fix the file and resume. Single-ecosystem runs work as before without
+the field.
+
 ### Step 4: independent verification
 
 If you selected the `patch` checkpoint, the run pauses before verification starts, for your
@@ -606,6 +643,8 @@ admitted, and `resume` checks again after you have dealt with it.
 | Stale checkpoint | `user_paused` | The content changed since the checkpoint opened (`checkpoint_stale`). The status shows the reject command only. | `reject` or `cancel` |
 | Review refused the candidate | `user_paused` | Status names the review codes (for example `test_removed`, `existing_tests_failed`). Read `artifacts/candidate.diff`. A plain `resume` repeats the same review. | `edit`, then `resume`; or start a new run |
 | Revision feedback not admitted | `user_paused` (run moves to `paused_user`) | The maintainer feedback was unclear, unrelated to the issue, or tried to change targets or authority. Nothing was implemented and no VM started. The same feedback is never judged again. Reply to the maintainer, or cancel. | After the maintainer posts new feedback (or edits a remark), `resume --revise` judges only that feedback |
+| Mixed npm + Python root, side unclear | `user_paused` (status names `ecosystem_ambiguous`) | The repository root holds both an npm and a Python project, and the issue does not name source paths on only one side. No VM started. Decide which side the fix belongs to; only that side is installed and tested locally, and the pull request says so. See [Mixed npm + Python repositories](#mixed-npm--python-repositories). | `resume --ecosystem python\|node` |
+| Proxy serves the other ecosystem | `user_paused` (status names `proxy_ecosystem_mismatch`) | The endpoints file's `targetEcosystem` names the other ecosystem's mirror, or a mixed-root run's endpoints file does not declare one. No VM started. Point `target` at the selected ecosystem's mirror and set `targetEcosystem` to match. | `resume` |
 | Reauthorization needed | unchanged | The App user token expired or was revoked, and the run printed a new `authorization_url`. | Open it, or run `authorize`, then `resume` |
 
 Artifact paths are relative to the run's directory in the run store (`<state-dir>/runs/<contribution-id>/`).
@@ -864,7 +903,7 @@ Every command needs `--root <stateDir>/runs`. This table summarizes `node script
 | Command | Arguments |
 |---|---|
 | `start` | `--config <file.json>` [`--confirm-author`] [`--author-name <name>`] [`--author-email <email>`] |
-| `resume` | `--run <id>` [`--revise`] [`--reviewers <login,...>`] [`--model-profile <file.json>`] [`--checkpoints plan,patch,verification\|none`] [`--policy <dimension=value,...>` `--policy-note <why>`] |
+| `resume` | `--run <id>` [`--revise`] [`--reviewers <login,...>`] [`--model-profile <file.json>`] [`--checkpoints plan,patch,verification\|none`] [`--policy <dimension=value,...>` `--policy-note <why>`] [`--ecosystem python\|node`] |
 | `edit` | `--run <id>` `--patch <file.diff>` |
 | `pr-edit` | `--run <id>` `--title <text>` `--body-file <file>` |
 | `withdraw` | `--run <id>` `--reason <maintainer_request\|user_instruction>` `--explanation <text>` |

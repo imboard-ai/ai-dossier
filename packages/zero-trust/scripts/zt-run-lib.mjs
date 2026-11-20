@@ -16,7 +16,15 @@ export const COMMANDS = Object.freeze({
   },
   resume: {
     required: ['root', 'run'],
-    optional: ['revise', 'reviewers', 'model-profile', 'checkpoints', 'policy', 'policy-note'],
+    optional: [
+      'revise',
+      'reviewers',
+      'model-profile',
+      'checkpoints',
+      'policy',
+      'policy-note',
+      'ecosystem',
+    ],
   },
   edit: { required: ['root', 'run', 'patch'], optional: [] },
   'pr-edit': { required: ['root', 'run', 'title', 'body-file'], optional: [] },
@@ -38,7 +46,7 @@ export const COMMANDS = Object.freeze({
 const BOOLEAN = new Set(['confirm-author', 'confirm-dead', 'revise', 'json', 'apply']);
 export const USAGE =
   'Usage: zt-run <start|resume|edit|pr-edit|withdraw|cancel-action|status|pause|cancel|approve|reject|authorize|resolve|kill-all|metrics|adoption|sweep|export> --root <dir> [command options]';
-const HELP = `${USAGE}\nstart --config <file.json> [--confirm-author] [--author-name <name>] [--author-email <email>]\nresume --run <id> [--revise] [--reviewers <login,...>] [--model-profile <file.json>] [--checkpoints plan,patch|none] [--policy <ai|assignment|directPr=value,...> --policy-note <why, citing path:line>]\nedit --run <id> --patch <file.diff>\npr-edit --run <id> --title <text> --body-file <file>\nwithdraw --run <id> --reason <${WITHDRAWAL_REASONS.join('|')}> --explanation <text>\ncancel-action --run <id>\nstatus --run <id> [--json]\npause --run <id> --reason <text>\ncancel --run <id> --reason <text>\napprove --run <id> --checkpoint <plan|patch|verification> --digest <sha256>\nreject --run <id> --checkpoint <plan|patch|verification> --digest <sha256> --reason <text>\nauthorize --run <id>\nkill-all --reason <text>\nmetrics [--json]\nadoption --run <id> --note <text>\nsweep [--apply]\nexport --run <id> --out <file>`;
+const HELP = `${USAGE}\nstart --config <file.json> [--confirm-author] [--author-name <name>] [--author-email <email>]\nresume --run <id> [--revise] [--reviewers <login,...>] [--model-profile <file.json>] [--checkpoints plan,patch|none] [--policy <ai|assignment|directPr=value,...> --policy-note <why, citing path:line>] [--ecosystem python|node]\nedit --run <id> --patch <file.diff>\npr-edit --run <id> --title <text> --body-file <file>\nwithdraw --run <id> --reason <${WITHDRAWAL_REASONS.join('|')}> --explanation <text>\ncancel-action --run <id>\nstatus --run <id> [--json]\npause --run <id> --reason <text>\ncancel --run <id> --reason <text>\napprove --run <id> --checkpoint <plan|patch|verification> --digest <sha256>\nreject --run <id> --checkpoint <plan|patch|verification> --digest <sha256> --reason <text>\nauthorize --run <id>\nkill-all --reason <text>\nmetrics [--json]\nadoption --run <id> --note <text>\nsweep [--apply]\nexport --run <id> --out <file>`;
 const ERROR_CODES = new Set([
   'invalid_patch',
   'edit_not_paused',
@@ -49,6 +57,8 @@ const ERROR_CODES = new Set([
   'invalid_user_edit',
   'policy_not_at_gate',
   'invalid_policy_decision',
+  'ecosystem_not_at_handoff',
+  'invalid_ecosystem',
   'invalid_input',
   'invalid_control',
   'nothing_to_pause',
@@ -112,6 +122,7 @@ const ERROR_CODES = new Set([
 const INPUT_CODES = new Set([
   'invalid_input',
   'invalid_policy_decision',
+  'invalid_ecosystem',
   'invalid_config',
   'unknown_key',
   'invalid_issue_url',
@@ -335,6 +346,7 @@ export async function main(argv, { createController, out, err, confirmAuthor } =
             : {}),
           ...(opts.policy !== undefined ? { policy: opts.policy } : {}),
           ...(opts['policy-note'] !== undefined ? { policyNote: opts['policy-note'] } : {}),
+          ...(opts.ecosystem !== undefined ? { ecosystem: opts.ecosystem } : {}),
         });
         break;
       case 'edit':

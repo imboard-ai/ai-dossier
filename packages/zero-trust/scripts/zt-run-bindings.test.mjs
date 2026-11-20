@@ -67,6 +67,12 @@ test('resume with missing model rates refuses before OAuth/continuation and reta
   await assert.rejects(commands.resume(id, { policy: 'ai=welcomed', policyNote: 'why' }), {
     code: 'policy_not_at_gate',
   });
+  // An ecosystem choice outside the closed set, or with no ambiguity hand-off to answer
+  // (paused from implementing here), is refused before any store change (#1276).
+  await assert.rejects(commands.resume(id, { ecosystem: 'ruby' }), { code: 'invalid_ecosystem' });
+  await assert.rejects(commands.resume(id, { ecosystem: 'python' }), {
+    code: 'ecosystem_not_at_handoff',
+  });
   assert.equal(construct.mock.calls.length, 0);
   const reopened = RunStore.open(h.root, id);
   try {

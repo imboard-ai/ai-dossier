@@ -40,3 +40,23 @@ export function preflightProxyCa(file: string | undefined, now: Date): void {
   if (time >= until) throw new ProxyCaError('proxy_ca_expired');
   if (time < from) throw new ProxyCaError('proxy_ca_not_yet_valid');
 }
+
+/** The run's proxy forward reaches ONE mirror (`target`). `targetEcosystem` in the endpoints
+ * file declares which: `node` (Verdaccio) or `python` (proxpi). A declared mirror for the
+ * other ecosystem, or no declaration when a mixed root was narrowed to one side (#1276),
+ * is refused before any VM: provisioning could only fail against the wrong mirror. */
+export class ProxyEcosystemError extends Error {
+  readonly code = 'proxy_ecosystem_mismatch' as const;
+  constructor(readonly selected: 'node' | 'python') {
+    super('proxy_ecosystem_mismatch');
+    this.name = 'ProxyEcosystemError';
+  }
+}
+export function preflightProxyEcosystem(
+  declared: 'node' | 'python' | undefined,
+  selected: 'node' | 'python',
+  mixedRoot: boolean
+): void {
+  if (declared === undefined ? mixedRoot : declared !== selected)
+    throw new ProxyEcosystemError(selected);
+}

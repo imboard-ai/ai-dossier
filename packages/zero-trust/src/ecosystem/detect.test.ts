@@ -6,6 +6,7 @@ import { ReasonCode } from '../state';
 import {
   type Detection,
   detectEcosystem,
+  rootEcosystems,
   type SourceFiles,
   sourceFilesFromManifest,
 } from './detect';
@@ -615,5 +616,59 @@ describe('hostile repository inputs', () => {
 
   it("accepts the fixtures' allowed [tool.uv] keys", () => {
     expect(detectEcosystem(fixtureFiles('uv')).supported).toBe(true);
+  });
+});
+
+describe('mixed npm + Python roots narrowed to one side (#1276)', () => {
+  const mixed = (over: Record<string, string> = {}): SourceFiles =>
+    new Map([...npm(), ...uv(), ...Object.entries(over)]);
+
+  it('lists the sides present at the root', () => {
+    expect(rootEcosystems(npm())).toEqual(['node']);
+    expect(rootEcosystems(uv())).toEqual(['python']);
+    expect(rootEcosystems(mixed())).toEqual(['node', 'python']);
+    expect(rootEcosystems(new Map())).toEqual([]);
+  });
+
+  it('refuses a mixed root without a selected side, exactly as before', () => {
+    expect(reason(detectEcosystem(mixed()))).toEqual(['mixed_ecosystems', undefined]);
+  });
+
+  it('detects only the selected side', () => {
+    expect(detectEcosystem(mixed(), 'python')).toMatchObject({
+      supported: true,
+      ecosystem: 'python',
+      manager: 'uv',
+    });
+    expect(detectEcosystem(mixed(), 'node')).toMatchObject({
+      supported: true,
+      ecosystem: 'node',
+      manager: 'npm',
+    });
+  });
+
+  it("sets aside the other side's managers and tool configuration, never its own", () => {
+    // The npm side is never installed in a Python run: yarn or .npmrc there is irrelevant.
+    const noisyNode = mixed({ 'yarn.lock': '', '.npmrc': 'registry=https://evil.example/' });
+    expect(detectEcosystem(noisyNode, 'python')).toMatchObject({ supported: true, manager: 'uv' });
+    expect(reason(detectEcosystem(noisyNode, 'node'))).toEqual(['unsupported_manager', 'yarn']);
+    const noisyPython = mixed({ 'pip.conf': '[global]\n', 'poetry.lock': '' });
+    expect(detectEcosystem(noisyPython, 'node')).toMatchObject({ supported: true, manager: 'npm' });
+    expect(reason(detectEcosystem(noisyPython, 'python'))).toEqual([
+      'unsupported_manager',
+      'poetry',
+    ]);
+  });
+
+  it('still checks the selected side in full', () => {
+    expect(reason(detectEcosystem(mixed({ 'uv.lock': uvLock(root) }), 'python'))).toEqual([
+      'test_runner_missing',
+      'pytest',
+    ]);
+  });
+
+  it('a side that is not at the root is not detected', () => {
+    expect(reason(detectEcosystem(npm(), 'python'))).toEqual(['no_supported_ecosystem', undefined]);
+    expect(detectEcosystem(npm(), 'node')).toEqual(detectEcosystem(npm()));
   });
 });
