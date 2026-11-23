@@ -4,7 +4,7 @@ description: 'Reclaim leaked worktree-pool slots (closed + merged issues), clear
 metadata:
   dossier.dossier_schema_version: '1.0.0'
   dossier.title: 'Worktree Hygiene — Reclaim Leaked Pool Slots'
-  dossier.version: '1.0.0'
+  dossier.version: '1.0.1'
   dossier.protocol_version: '"1.0"'
   dossier.status: 'Stable'
   dossier.last_updated: '2026-10-09'
@@ -17,8 +17,8 @@ metadata:
   dossier.destructive_operations: '["Returns finished pool worktrees to the pool (worktree-pool return)","Removes the pool''s own corrupted entries (worktree-pool gc)","Kills orphaned processes from removed worktrees older than 24h (worktree-pool reap)","Optionally removes foreign merged-clean worktrees (remove_foreign=true; branches are never deleted)"]'
   dossier.inputs: '{"optional":[{"default":60,"description":"Skip when the last SUCCESSFUL run is younger than this (env MIN_INTERVAL_MINUTES).","name":"min_interval_minutes","type":"number"},{"default":false,"description":"Run even when fresh (env FORCE).","name":"force","type":"boolean"},{"default":false,"description":"Report what would be reclaimed/removed; change nothing and do not stamp (env DRY_RUN).","name":"dry_run","type":"boolean"},{"default":false,"description":"Also remove foreign worktrees classified merged-clean (never deletes branches) (env REMOVE_FOREIGN).","name":"remove_foreign","type":"boolean"}]}'
   dossier.authors: '[{"name":"Yuval Dimnik"}]'
-  dossier.checksum: '{"algorithm":"sha256","hash":"ef74446c896e001d24b0a9d63df547aea7e62924124dd04729826698df29b381"}'
-  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"7HdUXhtuKrFoJGkH8+UE9L/NxebSZ1hdMjc9HCipiP0Xwm4wq7Mea6qzwf4AL8Wu0dSJQycuXkAD8G0VRZ8YBw==","signed_at":"2026-10-09T21:36:24.054Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
+  dossier.checksum: '{"algorithm":"sha256","hash":"1db4f75ce1e7226022737b6ba637c8b1a8fc83a94f6c36b3366b7b5d5448cbc3"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"tIL/wtRHzmAO4NxwBcTvDD3iIXJxiu61sKEhAWf7HdzYRaL10Mad1AzR1vQeTo/M61KhswnBiuT561KrBmSaCg==","signed_at":"2026-11-22T11:01:23.604Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 # Worktree Hygiene — Reclaim Leaked Pool Slots
 
@@ -203,7 +203,7 @@ log done "\"dry_run\":$DRY,\"reclaimed\":$RECLAIMED,\"kept\":$KEPT,\"foreign_can
 exit 0
 WORKTREE_HYGIENE_EOF
 chmod +x "$HYG"
-MIN_INTERVAL_MINUTES=60 FORCE=false DRY_RUN=false REMOVE_FOREIGN=false "$HYG"; rc=$?
+MIN_INTERVAL_MINUTES=${MIN_INTERVAL_MINUTES:-60} FORCE=${FORCE:-false} DRY_RUN=${DRY_RUN:-false} REMOVE_FOREIGN=${REMOVE_FOREIGN:-false} "$HYG"; rc=$?
 rm -f "$HYG"
 echo "worktree-hygiene exit=$rc"
 ```
