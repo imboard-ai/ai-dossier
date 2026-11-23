@@ -4,7 +4,7 @@ description: 'Generate a comprehensive completion report covering what changed, 
 metadata:
   dossier.dossier_schema_version: '1.0.0'
   dossier.title: 'Report Issue — Rich Completion Summary'
-  dossier.version: '1.8.2'
+  dossier.version: '1.9.0'
   dossier.protocol_version: '"1.0"'
   dossier.status: 'Stable'
   dossier.last_updated: '2026-09-29'
@@ -16,8 +16,8 @@ metadata:
   dossier.requires_approval: 'false'
   dossier.inputs: '{"optional":[{"default":"main","description":"The branch the PR was merged into","name":"base_branch","type":"string"},{"default":[],"description":"List of findings fixed in-place during review","name":"review_fixed","type":"array"},{"default":[],"description":"List of review categories with zero findings","name":"review_clean","type":"array"},{"default":"worktree_removed","description":"How the worktree was cleaned up: pool_returned, worktree_removed, or skipped","name":"cleanup_method","type":"string"},{"description":"Runstate run id minted by gate-issue; pass through unchanged","name":"run_id","type":"string"},{"description":"Batch id slug. When set, run the BATCH VARIANT: one batch report on the anchor + one short completion comment per member issue. issue_number is the batch ANCHOR; pr_number is the batch PR. Unset = ordinary per-issue report.","name":"batch_id","type":"string"},{"description":"Batch mode only: comma-separated member issue numbers (e.g. 101,102,104). Falls back to the PR body''s ''Closes #N'' list when omitted.","name":"members","type":"string"}],"required":[{"description":"GitHub issue number","name":"issue_number","type":"number"},{"description":"PR number that was merged","name":"pr_number","type":"number"}]}'
   dossier.authors: '[{"name":"Yuval Dimnik"}]'
-  dossier.checksum: '{"algorithm":"sha256","hash":"6e5c9746394ddc54fc91f804073c0c697a83da65ef90991595e17d0f2f34b12d"}'
-  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"wP8EV2UnDg4Y+rasj78Ll0GApsV385GzAnugSFLvHkbyzktsy/ntXLeiEabPz5daH1r917kneeYe4fbLV54vDw==","signed_at":"2026-10-07T12:01:04.931Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
+  dossier.checksum: '{"algorithm":"sha256","hash":"719efc003a4709248684ce876bbf12001b35364738ca9cfa174c11231a095de7"}'
+  dossier.signature: '{"algorithm":"ed25519","covers":"spec-frontmatter+body","key_id":"imboard-ai","public_key":"m97FPrnq/zKlQArLvJl3bTZCUMWWpp/d0UJ/OfUKZeE=","signature":"0yglyA6yEL9yl94YIMHABSq9vf5JhC5paWPmQJ552YtEeHlgEIswaId2doLOOw/t0YF7l0RqDyX9+N5L+UN5Bg==","signed_at":"2026-11-22T10:55:43.588Z","signed_by":"Yuval Dimnik <yuval.dimnik@gmail.com>"}'
 ---
 
 # Report Issue — Rich Completion Summary
@@ -209,6 +209,12 @@ If a trap index exists (either layout) AND (`ci_fix_attempts` ≥ 1 OR `ci_parit
 - **Neither exists:** skip and note it; `traps_added=0`.
 
 Commit the new file(s), or the appended row, on a tiny follow-up branch and open a PR (`docs(traps): …`), or if the repo allows, include it before merge. With the per-file layout the follow-up PR no longer conflicts with parallel runs writing other trap files.
+
+**Hand the trap PR to the repo's merge mechanism. Never leave it open with nothing to merge it.** A trap PR without a merge trigger sits green and unmerged indefinitely, because no later run owns it. The lesson then never reaches the index that future runs read, and the PRs pile up for the owner to sweep.
+- When the repo has an auto-merge watcher, apply its `auto-merge` label using the same REST-safe call and confirm step `ship-issue` uses.
+- Otherwise, request native auto-merge on the PR.
+- Do this only when the PR's diff touches nothing but trap files. Otherwise leave it unlabelled and say so in the report.
+- Record the result as `trap_pr=<n>` plus `trap_merge=labeled|native|none` on the report milestone. `none` must name why.
 
 ### Step 4c: Extract learnings + delete PLANNING file
 
